@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Rust/Cargo build artifacts
+**/target/
+**/dist/
+
+# Logs and temp files
+*.log
+*.tmp
+
+tmp
+Justfile
