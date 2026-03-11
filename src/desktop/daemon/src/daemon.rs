@@ -1,9 +1,14 @@
 use std::{
     fs,
-    os::unix::net::UnixStream,
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::unix::fs::PermissionsExt,
+    os::unix::net::{UnixListener, UnixStream},
     process::Command as ProcessCommand,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 use desktop_core::{
@@ -14,34 +19,95 @@ use desktop_core::{
 };
 use serde_json::{Value, json};
 
-pub fn start() -> Result<(), AppError> {
-    let socket_path = socket_path();
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
+#[derive(Debug, Clone, Copy)]
+pub struct DaemonConfig {
+    pub idle_timeout: Option<Duration>,
+}
+
+impl DaemonConfig {
+    pub fn resident() -> Self {
+        Self { idle_timeout: None }
     }
 
-    let listener = UnixListener::bind(&socket_path).map_err(|err| {
-        AppError::backend_unavailable(format!("bind {} failed: {err}", socket_path.display()))
-    })?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).map_err(|err| {
-        AppError::backend_unavailable(format!("set socket permissions failed: {err}"))
-    })?;
+    pub fn on_demand() -> Self {
+        Self {
+            idle_timeout: Some(Duration::from_secs(8)),
+        }
+    }
+}
 
+pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
+    let listener = bind_listener()?;
     thread::spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    thread::spawn(|| {
-                        if let Err(err) = handle_client(stream) {
-                            eprintln!("daemon error: {err}");
-                        }
-                    });
-                }
-                Err(err) => eprintln!("daemon accept error: {err}"),
-            }
+        if let Err(err) = accept_loop(listener, config) {
+            eprintln!("daemon loop error: {err}");
         }
     });
+    Ok(())
+}
 
+pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
+    let listener = bind_listener()?;
+    accept_loop(listener, config)
+}
+
+fn bind_listener() -> Result<UnixListener, AppError> {
+    let path = socket_path();
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+
+    let listener = UnixListener::bind(&path).map_err(|err| {
+        AppError::backend_unavailable(format!("bind {} failed: {err}", path.display()))
+    })?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+        AppError::backend_unavailable(format!("set socket permissions failed: {err}"))
+    })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| AppError::backend_unavailable(format!("set nonblocking failed: {err}")))?;
+    Ok(listener)
+}
+
+fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppError> {
+    let mut last_activity = Instant::now();
+    let active_clients = Arc::new(AtomicUsize::new(0));
+
+    loop {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                last_activity = Instant::now();
+                let active_clients = Arc::clone(&active_clients);
+                active_clients.fetch_add(1, Ordering::SeqCst);
+                thread::spawn(move || {
+                    if let Err(err) = handle_client(stream) {
+                        eprintln!("daemon client error: {err}");
+                    }
+                    active_clients.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(timeout) = config.idle_timeout {
+                    if active_clients.load(Ordering::SeqCst) == 0
+                        && last_activity.elapsed() >= timeout
+                    {
+                        break;
+                    }
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return Err(AppError::backend_unavailable(format!(
+                    "accept failed: {err}"
+                )));
+            }
+        }
+    }
+
+    let path = socket_path();
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
     Ok(())
 }
 
@@ -52,7 +118,6 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
         Ok(result) => ResponseEnvelope::success(request.request_id, result),
         Err(err) => ResponseEnvelope::from_error(request.request_id, command_name, err),
     };
-
     write_framed_json(&mut stream, &response)?;
     Ok(())
 }
@@ -218,5 +283,11 @@ mod tests {
             ResponseEnvelope::Error(err) => assert_eq!(err.error.code, ErrorCode::InvalidArgument),
             ResponseEnvelope::Success(_) => panic!("expected error response"),
         }
+    }
+
+    #[test]
+    fn on_demand_config_has_idle_timeout() {
+        let cfg = super::DaemonConfig::on_demand();
+        assert_eq!(cfg.idle_timeout.map(|d| d.as_secs()), Some(8));
     }
 }

@@ -3,6 +3,12 @@ use desktop_core::{
     ipc,
     protocol::{Command, RequestEnvelope, ResponseEnvelope},
 };
+use std::{
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    thread,
+    time::{Duration, Instant},
+};
 
 fn main() {
     match run() {
@@ -18,7 +24,7 @@ fn run() -> Result<i32, AppError> {
     let args: Vec<String> = std::env::args().collect();
     let command = parse_command(&args[1..])?;
     let request = RequestEnvelope::new(next_request_id(), command);
-    let response = ipc::send_request(&request)?;
+    let response = send_request_with_autostart(&request)?;
 
     match response {
         ResponseEnvelope::Success(success) => {
@@ -190,6 +196,139 @@ fn usage() -> &'static str {
   desktopctl wait <ms>"
 }
 
+fn send_request_with_autostart(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
+    send_request_with_hooks(request, ipc::send_request, launch_daemon)
+}
+
+fn send_request_with_hooks<FSend, FLaunch>(
+    request: &RequestEnvelope,
+    mut send: FSend,
+    mut launch: FLaunch,
+) -> Result<ResponseEnvelope, AppError>
+where
+    FSend: FnMut(&RequestEnvelope) -> Result<ResponseEnvelope, AppError>,
+    FLaunch: FnMut() -> Result<(), AppError>,
+{
+    match send(request) {
+        Ok(response) => Ok(response),
+        Err(err) if err.code == ErrorCode::DaemonNotRunning => {
+            launch()?;
+            retry_request(request, &mut send)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn retry_request<FSend>(
+    request: &RequestEnvelope,
+    send: &mut FSend,
+) -> Result<ResponseEnvelope, AppError>
+where
+    FSend: FnMut(&RequestEnvelope) -> Result<ResponseEnvelope, AppError>,
+{
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_error: Option<AppError> = None;
+    while Instant::now() < deadline {
+        match send(request) {
+            Ok(response) => return Ok(response),
+            Err(err)
+                if err.code == ErrorCode::DaemonNotRunning
+                    || err.code == ErrorCode::BackendUnavailable =>
+            {
+                last_error = Some(err);
+                thread::sleep(Duration::from_millis(150));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        AppError::daemon_not_running("daemon did not become ready after auto-start")
+    }))
+}
+
+fn launch_daemon() -> Result<(), AppError> {
+    if let Some(app_path) = discover_daemon_app_path() {
+        let status = ProcessCommand::new("open")
+            .arg("-g")
+            .arg(app_path)
+            .arg("--args")
+            .arg("--on-demand")
+            .status()
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("failed to launch app bundle: {err}"))
+            })?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+
+    if let Some(daemon_bin) = discover_daemon_binary_path() {
+        ProcessCommand::new(daemon_bin)
+            .arg("--on-demand")
+            .spawn()
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("failed to launch daemon binary: {err}"))
+            })?;
+        return Ok(());
+    }
+
+    Err(AppError::daemon_not_running(
+        "unable to auto-start daemon; run `just build` and retry",
+    ))
+}
+
+fn discover_daemon_app_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("DESKTOPCTL_APP_PATH") {
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("dist/DesktopCtl.app");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let sibling = exe_dir.join("DesktopCtl.app");
+    if sibling.exists() {
+        return Some(sibling);
+    }
+
+    let mut cursor: Option<&Path> = Some(exe_dir);
+    while let Some(dir) = cursor {
+        let candidate = dir.join("dist/DesktopCtl.app");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        cursor = dir.parent();
+    }
+
+    None
+}
+
+fn discover_daemon_binary_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("DESKTOPCTL_DAEMON_BIN") {
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let sibling = exe_dir.join("desktopctld");
+    if sibling.exists() {
+        return Some(sibling);
+    }
+    None
+}
+
 fn next_request_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
@@ -210,5 +349,70 @@ fn map_error_code(code: &ErrorCode) -> i32 {
         ErrorCode::AmbiguousTarget => 8,
         ErrorCode::PostconditionFailed => 9,
         ErrorCode::Internal => 10,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_request_with_hooks;
+    use desktop_core::{
+        error::{AppError, ErrorCode},
+        protocol::{Command, RequestEnvelope, ResponseEnvelope},
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn auto_start_invoked_when_daemon_missing() {
+        let request = RequestEnvelope::new("r1".to_string(), Command::Ping);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let launched = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+        let launched_clone = Arc::clone(&launched);
+
+        let result = send_request_with_hooks(
+            &request,
+            move |_| {
+                let n = attempts_clone.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(AppError::daemon_not_running("missing socket"))
+                } else {
+                    Ok(ResponseEnvelope::success_message("r1", "pong"))
+                }
+            },
+            move || {
+                launched_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("request should succeed after launch");
+
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+        match result {
+            ResponseEnvelope::Success(ok) => assert_eq!(ok.result["message"], "pong"),
+            ResponseEnvelope::Error(_) => panic!("expected success response"),
+        }
+    }
+
+    #[test]
+    fn auto_start_not_invoked_for_invalid_argument() {
+        let request = RequestEnvelope::new("r2".to_string(), Command::Ping);
+        let launched = Arc::new(AtomicUsize::new(0));
+        let launched_clone = Arc::clone(&launched);
+
+        let err = send_request_with_hooks(
+            &request,
+            |_| Err(AppError::new(ErrorCode::InvalidArgument, "bad request")),
+            move || {
+                launched_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect_err("invalid argument should be returned directly");
+
+        assert_eq!(launched.load(Ordering::SeqCst), 0);
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 }

@@ -16,6 +16,11 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--on-demand") {
+        return daemon::run_blocking(daemon::DaemonConfig::on_demand());
+    }
+
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use tray_icon::{
@@ -23,7 +28,7 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
         menu::{Menu, MenuEvent, MenuItem},
     };
 
-    daemon::start()?;
+    daemon::start_background(daemon::DaemonConfig::resident())?;
 
     let mtm = MainThreadMarker::new().ok_or_else(|| {
         desktop_core::error::AppError::backend_unavailable("must run on main thread")
