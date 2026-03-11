@@ -127,7 +127,12 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
 fn execute(command: Command) -> Result<Value, AppError> {
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
-        Command::OpenApp { name, args, .. } => {
+        Command::OpenApp {
+            name,
+            args,
+            wait,
+            timeout_ms,
+        } => {
             let mut cmd = ProcessCommand::new("open");
             cmd.arg("-a").arg(&name);
             if !args.is_empty() {
@@ -154,6 +159,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
             if !activate.status.success() {
                 let stderr = String::from_utf8_lossy(&activate.stderr).trim().to_string();
                 return Err(AppError::internal(stderr));
+            }
+
+            if wait {
+                wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
             }
             Ok(json!({}))
         }
@@ -279,11 +288,206 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 AppError::internal(format!("failed to encode token payload: {err}"))
             })?)
         }
+        Command::WaitText {
+            text,
+            timeout_ms,
+            interval_ms,
+        } => wait_for_text(&text, timeout_ms, interval_ms),
+        Command::UiClickText { text, timeout_ms } => click_text_target(&text, timeout_ms),
+        Command::UiClickToken { token } => click_token_target(token),
         _ => Err(AppError::invalid_argument(format!(
             "command {} is not implemented yet",
             command.name()
         ))),
     }
+}
+
+fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
+    permissions::ensure_screen_recording_permission()?;
+    let capture = vision::pipeline::capture_and_update(None)?;
+    let target = select_text_candidate(&capture.snapshot.texts, query)?;
+    perform_click(&target.bounds)?;
+
+    verify_click_postcondition(query, &target.bounds, timeout_ms.min(2_000).max(300))?;
+    Ok(json!({
+        "snapshot_id": capture.snapshot.snapshot_id,
+        "text": target.text,
+        "bounds": target.bounds
+    }))
+}
+
+fn click_token_target(token_id: u32) -> Result<Value, AppError> {
+    let token = vision::pipeline::token(token_id)?
+        .ok_or_else(|| AppError::target_not_found(format!("token {token_id} not found; run `screen tokenize --json` first")))?;
+    perform_click(&token.bounds)?;
+    verify_click_postcondition(&token.text, &token.bounds, 1_200)?;
+    Ok(json!({
+        "token": token_id,
+        "text": token.text,
+        "bounds": token.bounds
+    }))
+}
+
+fn wait_for_text(query: &str, timeout_ms: u64, interval_ms: u64) -> Result<Value, AppError> {
+    permissions::ensure_screen_recording_permission()?;
+    let start = Instant::now();
+    loop {
+        let capture = vision::pipeline::capture_and_update(None)?;
+        if let Ok(candidate) = select_text_candidate(&capture.snapshot.texts, query) {
+            return Ok(json!({
+                "snapshot_id": capture.snapshot.snapshot_id,
+                "timestamp": capture.snapshot.timestamp,
+                "matched_text": candidate.text,
+                "bounds": candidate.bounds
+            }));
+        }
+        if start.elapsed().as_millis() as u64 >= timeout_ms {
+            return Err(
+                AppError::timeout(format!("timed out waiting for text \"{query}\""))
+                    .with_details(json!({ "timeout_ms": timeout_ms })),
+            );
+        }
+        thread::sleep(Duration::from_millis(interval_ms.max(30)));
+    }
+}
+
+fn wait_for_open_app(app_name: &str, timeout_ms: u64) -> Result<(), AppError> {
+    let needle = app_name.to_lowercase();
+    let start = Instant::now();
+    loop {
+        if let Some(frontmost) = frontmost_app_name() {
+            if frontmost.to_lowercase().contains(&needle) {
+                return Ok(());
+            }
+        }
+        if start.elapsed().as_millis() as u64 >= timeout_ms {
+            return Err(AppError::timeout(format!(
+                "timed out waiting for app \"{app_name}\" to become frontmost"
+            )));
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
+fn select_text_candidate(
+    texts: &[desktop_core::protocol::SnapshotText],
+    query: &str,
+) -> Result<desktop_core::protocol::SnapshotText, AppError> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Err(AppError::invalid_argument("empty text selector"));
+    }
+
+    let mut candidates: Vec<(f32, desktop_core::protocol::SnapshotText)> = texts
+        .iter()
+        .filter_map(|t| {
+            let hay = t.text.to_lowercase();
+            if hay.contains(&q) {
+                let exact = if hay == q { 1.0 } else { 0.0 };
+                Some((exact + t.confidence, t.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return Err(AppError::target_not_found(format!(
+            "text target \"{query}\" was not found"
+        )));
+    }
+
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if candidates.len() > 1 && (candidates[0].0 - candidates[1].0).abs() < 0.05 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple matches for text \"{query}\""
+        )));
+    }
+    let best = candidates.remove(0).1;
+    if best.confidence < 0.25 {
+        return Err(AppError::low_confidence(format!(
+            "match confidence too low for \"{query}\""
+        )));
+    }
+    Ok(best)
+}
+
+fn perform_click(bounds: &desktop_core::protocol::Bounds) -> Result<(), AppError> {
+    let backend = new_backend()?;
+    backend.check_accessibility_permission()?;
+    let center_x = (bounds.x + bounds.width / 2.0).max(0.0).round() as u32;
+    let center_y = (bounds.y + bounds.height / 2.0).max(0.0).round() as u32;
+    let point = Point::new(center_x, center_y);
+    backend.move_mouse(point)?;
+    thread::sleep(Duration::from_millis(60));
+    backend.left_click(point)?;
+    Ok(())
+}
+
+fn verify_click_postcondition(
+    query: &str,
+    original_bounds: &desktop_core::protocol::Bounds,
+    timeout_ms: u64,
+) -> Result<(), AppError> {
+    let start = Instant::now();
+    while start.elapsed().as_millis() as u64 <= timeout_ms {
+        let capture = vision::pipeline::capture_and_update(None)?;
+        let still_present = capture.snapshot.texts.iter().any(|text| {
+            text.text.to_lowercase().contains(&query.to_lowercase())
+                && iou(&inflate_bounds(original_bounds, 6.0), &text.bounds) > 0.35
+        });
+        if !still_present {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+    Err(AppError::postcondition_failed(format!(
+        "postcondition failed: \"{query}\" still present at target location after click"
+    )))
+}
+
+fn inflate_bounds(bounds: &desktop_core::protocol::Bounds, pad: f64) -> desktop_core::protocol::Bounds {
+    desktop_core::protocol::Bounds {
+        x: (bounds.x - pad).max(0.0),
+        y: (bounds.y - pad).max(0.0),
+        width: bounds.width + pad * 2.0,
+        height: bounds.height + pad * 2.0,
+    }
+}
+
+fn iou(a: &desktop_core::protocol::Bounds, b: &desktop_core::protocol::Bounds) -> f64 {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+
+    let ix1 = a.x.max(b.x);
+    let iy1 = a.y.max(b.y);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    let iw = (ix2 - ix1).max(0.0);
+    let ih = (iy2 - iy1).max(0.0);
+    let inter = iw * ih;
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let union = (a.width * a.height) + (b.width * b.height) - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+fn frontmost_app_name() -> Option<String> {
+    let script =
+        r#"tell application "System Events" to get name of first process whose frontmost is true"#;
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 #[cfg(test)]
@@ -305,10 +509,8 @@ mod tests {
     fn error_roundtrip_shape() {
         let req = RequestEnvelope::new(
             "r1".to_string(),
-            desktop_core::protocol::Command::WaitText {
-                text: "ready".to_string(),
-                timeout_ms: 100,
-                interval_ms: 50,
+            desktop_core::protocol::Command::ReplayLoad {
+                session_dir: "/tmp/missing".to_string(),
             },
         );
         let response = match execute(req.command.clone()) {

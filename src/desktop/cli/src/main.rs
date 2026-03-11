@@ -55,15 +55,54 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "ping" => Ok(Command::Ping),
         "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
+        "ui" => parse_ui(&args[1..]),
         "pointer" => parse_pointer(&args[1..]),
         "type" => parse_type(&args[1..]),
         "key" => parse_key(&args[1..]),
-        "wait" => {
-            let ms = parse_u64(args.get(1), "ms")?;
-            Ok(Command::Wait { ms })
-        }
+        "wait" => parse_wait(&args[1..]),
         _ => Err(AppError::invalid_argument(usage())),
     }
+}
+
+fn parse_wait(args: &[String]) -> Result<Command, AppError> {
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(usage()));
+    }
+
+    if args[0] == "--text" {
+        let text = args
+            .get(1)
+            .cloned()
+            .ok_or_else(|| AppError::invalid_argument("usage: desktopctl wait --text <text>"))?;
+        let mut timeout_ms = 8_000_u64;
+        let mut interval_ms = 200_u64;
+        let mut i = 2;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--timeout" => {
+                    timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
+                    i += 2;
+                }
+                "--interval" => {
+                    interval_ms = parse_u64(args.get(i + 1), "interval_ms")?;
+                    i += 2;
+                }
+                flag => {
+                    return Err(AppError::invalid_argument(format!(
+                        "unknown flag for wait --text: {flag}"
+                    )));
+                }
+            }
+        }
+        return Ok(Command::WaitText {
+            text,
+            timeout_ms,
+            interval_ms,
+        });
+    }
+
+    let ms = parse_u64(args.first(), "ms")?;
+    Ok(Command::Wait { ms })
 }
 
 fn parse_screen(args: &[String]) -> Result<Command, AppError> {
@@ -115,6 +154,52 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
     }
 }
 
+fn parse_ui(args: &[String]) -> Result<Command, AppError> {
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(usage()));
+    }
+
+    match args[0].as_str() {
+        "click" => {
+            if args.len() < 3 {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --token <n>",
+                ));
+            }
+            match args[1].as_str() {
+                "--text" => {
+                    let text = args[2].clone();
+                    let mut timeout_ms = 2_000_u64;
+                    let mut i = 3;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "--timeout" => {
+                                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
+                                i += 2;
+                            }
+                            flag => {
+                                return Err(AppError::invalid_argument(format!(
+                                    "unknown flag for ui click --text: {flag}"
+                                )));
+                            }
+                        }
+                    }
+                    Ok(Command::UiClickText { text, timeout_ms })
+                }
+                "--token" => {
+                    let token = parse_u32(args.get(2), "token")?;
+                    Ok(Command::UiClickToken { token })
+                }
+                _ => Err(AppError::invalid_argument(
+                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --token <n>",
+                )),
+            }
+        }
+        "read" => Ok(Command::UiRead),
+        _ => Err(AppError::invalid_argument(usage())),
+    }
+}
+
 fn parse_open(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(usage()));
@@ -128,23 +213,53 @@ fn parse_open(args: &[String]) -> Result<Command, AppError> {
         }
     }
 
-    let sep = args.iter().position(|x| x == "--");
-    let (name_parts, trailing): (&[String], &[String]) = match sep {
-        Some(idx) => (&args[..idx], &args[idx + 1..]),
-        None => (args, &[]),
-    };
+    let mut wait = false;
+    let mut timeout_ms: Option<u64> = None;
+    let mut app_name_parts: Vec<String> = Vec::new();
+    let mut trailing: Vec<String> = Vec::new();
+    let mut passthrough = false;
+    let mut i = 0;
+    while i < args.len() {
+        let token = &args[i];
+        if token == "--" {
+            passthrough = true;
+            i += 1;
+            continue;
+        }
 
-    if name_parts.is_empty() {
+        if passthrough {
+            trailing.push(token.clone());
+            i += 1;
+            continue;
+        }
+
+        match token.as_str() {
+            "--wait" => {
+                wait = true;
+                i += 1;
+            }
+            "--timeout" => {
+                timeout_ms = Some(parse_u64(args.get(i + 1), "timeout_ms")?);
+                i += 2;
+            }
+            _ => {
+                app_name_parts.push(token.clone());
+                i += 1;
+            }
+        }
+    }
+
+    if app_name_parts.is_empty() {
         return Err(AppError::invalid_argument(
             "missing app name: desktopctl open <application> [-- <open-args...>]",
         ));
     }
 
     Ok(Command::OpenApp {
-        name: name_parts.join(" "),
-        args: trailing.to_vec(),
-        wait: false,
-        timeout_ms: None,
+        name: app_name_parts.join(" "),
+        args: trailing,
+        wait,
+        timeout_ms,
     })
 }
 
@@ -239,12 +354,15 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
 fn usage() -> &'static str {
     "usage:
   desktopctl ping
-  desktopctl open <application> [-- <open-args...>]
+  desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl open spotlight
   desktopctl open launchpad
   desktopctl screen capture [--out <path>]
   desktopctl screen snapshot [--json]
   desktopctl screen tokenize [--json]
+  desktopctl ui click --text <text> [--timeout <ms>]
+  desktopctl ui click --token <n>
+  desktopctl ui read
   desktopctl pointer move <x> <y>
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
@@ -252,7 +370,8 @@ fn usage() -> &'static str {
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
   desktopctl type \"text\"
   desktopctl key press <key-or-hotkey>
-  desktopctl wait <ms>"
+  desktopctl wait <ms>
+  desktopctl wait --text <text> [--timeout <ms>] [--interval <ms>]"
 }
 
 fn send_request_with_autostart(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
