@@ -2,6 +2,7 @@ use desktop_core::error::AppError;
 use serde_json::json;
 
 const SCREEN_RECORDING_REMEDIATION: &str = "grant Screen Recording for DesktopCtl.app in System Settings -> Privacy & Security -> Screen Recording, then rerun the command";
+const ACCESSIBILITY_REMEDIATION: &str = "grant Accessibility for DesktopCtl.app in System Settings -> Privacy & Security -> Accessibility, then rerun the command";
 
 pub fn accessibility_granted() -> bool {
     unsafe { AXIsProcessTrusted() }
@@ -24,6 +25,10 @@ pub fn ensure_screen_recording_permission() -> Result<(), AppError> {
 
 pub fn screen_recording_remediation() -> &'static str {
     SCREEN_RECORDING_REMEDIATION
+}
+
+pub fn accessibility_remediation() -> &'static str {
+    ACCESSIBILITY_REMEDIATION
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]

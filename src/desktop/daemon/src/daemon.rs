@@ -304,6 +304,23 @@ fn execute(command: Command) -> Result<Value, AppError> {
             Ok(json!({ "written": true }))
         }
         Command::UiRead => ui_read_with_clipboard_restore(),
+        Command::PermissionsCheck => {
+            let payload = desktop_core::protocol::PermissionsPayload {
+                accessibility: desktop_core::protocol::PermissionState {
+                    granted: permissions::accessibility_granted(),
+                    remediation: (!permissions::accessibility_granted())
+                        .then(|| permissions::accessibility_remediation().to_string()),
+                },
+                screen_recording: desktop_core::protocol::PermissionState {
+                    granted: permissions::screen_recording_granted(),
+                    remediation: (!permissions::screen_recording_granted())
+                        .then(|| permissions::screen_recording_remediation().to_string()),
+                },
+            };
+            Ok(serde_json::to_value(payload).map_err(|err| {
+                AppError::internal(format!("failed to encode permissions payload: {err}"))
+            })?)
+        }
         _ => Err(AppError::invalid_argument(format!(
             "command {} is not implemented yet",
             command.name()

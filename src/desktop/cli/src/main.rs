@@ -56,6 +56,7 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
         "ui" => parse_ui(&args[1..]),
+        "permissions" => parse_permissions(&args[1..]),
         "clipboard" => parse_clipboard(&args[1..]),
         "pointer" => parse_pointer(&args[1..]),
         "type" => parse_type(&args[1..]),
@@ -63,6 +64,13 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "wait" => parse_wait(&args[1..]),
         _ => Err(AppError::invalid_argument(usage())),
     }
+}
+
+fn parse_permissions(args: &[String]) -> Result<Command, AppError> {
+    if args.len() == 1 && args[0] == "check" {
+        return Ok(Command::PermissionsCheck);
+    }
+    Err(AppError::invalid_argument(usage()))
 }
 
 fn parse_clipboard(args: &[String]) -> Result<Command, AppError> {
@@ -381,6 +389,7 @@ fn usage() -> &'static str {
   desktopctl ui click --text <text> [--timeout <ms>]
   desktopctl ui click --token <n>
   desktopctl ui read
+  desktopctl permissions check
   desktopctl clipboard read
   desktopctl clipboard write <text>
   desktopctl pointer move <x> <y>
