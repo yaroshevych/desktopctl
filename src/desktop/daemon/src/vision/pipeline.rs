@@ -1,6 +1,9 @@
 use std::{path::PathBuf, process::Command as ProcessCommand};
 
-use desktop_core::{error::AppError, protocol::SnapshotPayload};
+use desktop_core::{
+    error::AppError,
+    protocol::{SnapshotPayload, TokenEntry, TokenizePayload},
+};
 
 use super::{
     capture::capture_screen_png,
@@ -50,6 +53,34 @@ pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, Ap
 
 pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
     with_state(|state| state.latest_snapshot())
+}
+
+pub fn tokenize() -> Result<TokenizePayload, AppError> {
+    let capture = capture_and_update(None)?;
+    let tokens: Vec<TokenEntry> = capture
+        .snapshot
+        .texts
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| TokenEntry {
+            n: (idx + 1) as u32,
+            text: text.text.clone(),
+            bounds: text.bounds.clone(),
+            confidence: text.confidence,
+        })
+        .collect();
+    let snapshot_id = capture.snapshot.snapshot_id;
+    let timestamp = capture.snapshot.timestamp.clone();
+    with_state(|state| state.replace_token_map(tokens.clone()))?;
+    Ok(TokenizePayload {
+        snapshot_id,
+        timestamp,
+        tokens,
+    })
+}
+
+pub fn token(n: u32) -> Result<Option<TokenEntry>, AppError> {
+    with_state(|state| state.token(n))
 }
 
 fn focused_app_name() -> Option<String> {

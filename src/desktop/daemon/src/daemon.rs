@@ -272,6 +272,13 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 })?)
             }
         }
+        Command::ScreenTokenize => {
+            permissions::ensure_screen_recording_permission()?;
+            let payload = vision::pipeline::tokenize()?;
+            Ok(serde_json::to_value(payload).map_err(|err| {
+                AppError::internal(format!("failed to encode token payload: {err}"))
+            })?)
+        }
         _ => Err(AppError::invalid_argument(format!(
             "command {} is not implemented yet",
             command.name()
@@ -298,7 +305,11 @@ mod tests {
     fn error_roundtrip_shape() {
         let req = RequestEnvelope::new(
             "r1".to_string(),
-            desktop_core::protocol::Command::ScreenTokenize,
+            desktop_core::protocol::Command::WaitText {
+                text: "ready".to_string(),
+                timeout_ms: 100,
+                interval_ms: 50,
+            },
         );
         let response = match execute(req.command.clone()) {
             Ok(v) => ResponseEnvelope::success(req.request_id, v),

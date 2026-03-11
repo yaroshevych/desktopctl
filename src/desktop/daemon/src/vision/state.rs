@@ -71,6 +71,10 @@ impl VisionState {
         &self.token_map
     }
 
+    pub fn token(&self, n: u32) -> Option<TokenEntry> {
+        self.token_map.get(&n).cloned()
+    }
+
     pub fn replace_token_map(&mut self, tokens: Vec<TokenEntry>) {
         self.token_map.clear();
         for token in tokens {
@@ -207,5 +211,37 @@ mod tests {
             state.record_capture(base_capture.clone(), thumb.clone(), None, Vec::new(), None);
         let second = state.record_capture(base_capture, thumb, None, Vec::new(), None);
         assert!(first.event_id < second.event_id);
+    }
+
+    #[test]
+    fn token_map_replaced_on_next_tokenization() {
+        let mut state = VisionState::new();
+        state.replace_token_map(vec![desktop_core::protocol::TokenEntry {
+            n: 1,
+            text: "Old".to_string(),
+            bounds: desktop_core::protocol::Bounds {
+                x: 1.0,
+                y: 1.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            confidence: 0.9,
+        }]);
+        assert!(state.token(1).is_some());
+
+        state.replace_token_map(vec![desktop_core::protocol::TokenEntry {
+            n: 1,
+            text: "New".to_string(),
+            bounds: desktop_core::protocol::Bounds {
+                x: 2.0,
+                y: 2.0,
+                width: 12.0,
+                height: 12.0,
+            },
+            confidence: 0.8,
+        }]);
+
+        let token = state.token(1).expect("token should exist");
+        assert_eq!(token.text, "New");
     }
 }
