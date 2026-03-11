@@ -1,3 +1,4 @@
+mod clipboard;
 mod daemon;
 mod permissions;
 mod vision;

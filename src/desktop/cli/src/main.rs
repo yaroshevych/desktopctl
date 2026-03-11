@@ -56,10 +56,28 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
         "ui" => parse_ui(&args[1..]),
+        "clipboard" => parse_clipboard(&args[1..]),
         "pointer" => parse_pointer(&args[1..]),
         "type" => parse_type(&args[1..]),
         "key" => parse_key(&args[1..]),
         "wait" => parse_wait(&args[1..]),
+        _ => Err(AppError::invalid_argument(usage())),
+    }
+}
+
+fn parse_clipboard(args: &[String]) -> Result<Command, AppError> {
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(usage()));
+    }
+    match args[0].as_str() {
+        "read" => Ok(Command::ClipboardRead),
+        "write" => {
+            let text = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| AppError::invalid_argument("usage: desktopctl clipboard write <text>"))?;
+            Ok(Command::ClipboardWrite { text })
+        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -363,6 +381,8 @@ fn usage() -> &'static str {
   desktopctl ui click --text <text> [--timeout <ms>]
   desktopctl ui click --token <n>
   desktopctl ui read
+  desktopctl clipboard read
+  desktopctl clipboard write <text>
   desktopctl pointer move <x> <y>
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>

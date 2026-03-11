@@ -19,7 +19,7 @@ use desktop_core::{
 };
 use serde_json::{Value, json};
 
-use crate::{permissions, vision};
+use crate::{clipboard, permissions, vision};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
@@ -295,6 +295,15 @@ fn execute(command: Command) -> Result<Value, AppError> {
         } => wait_for_text(&text, timeout_ms, interval_ms),
         Command::UiClickText { text, timeout_ms } => click_text_target(&text, timeout_ms),
         Command::UiClickToken { token } => click_token_target(token),
+        Command::ClipboardRead => {
+            let text = clipboard::read_clipboard()?;
+            Ok(json!({ "text": text }))
+        }
+        Command::ClipboardWrite { text } => {
+            clipboard::write_clipboard(&text)?;
+            Ok(json!({ "written": true }))
+        }
+        Command::UiRead => ui_read_with_clipboard_restore(),
         _ => Err(AppError::invalid_argument(format!(
             "command {} is not implemented yet",
             command.name()
@@ -488,6 +497,30 @@ fn frontmost_app_name() -> Option<String> {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value.is_empty() { None } else { Some(value) }
+}
+
+fn ui_read_with_clipboard_restore() -> Result<Value, AppError> {
+    let backend = new_backend()?;
+    backend.check_accessibility_permission()?;
+
+    let clipboard_before = clipboard::read_clipboard().ok();
+    backend.press_hotkey("cmd+a")?;
+    thread::sleep(Duration::from_millis(70));
+    backend.press_hotkey("cmd+c")?;
+    thread::sleep(Duration::from_millis(120));
+    let captured = clipboard::read_clipboard()?;
+
+    let mut restore_ok = true;
+    if let Some(previous) = clipboard_before {
+        if clipboard::write_clipboard(&previous).is_err() {
+            restore_ok = false;
+        }
+    }
+
+    Ok(json!({
+        "text": captured,
+        "clipboard_restored": restore_ok
+    }))
 }
 
 #[cfg(test)]
