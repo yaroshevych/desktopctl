@@ -5,6 +5,7 @@ use desktop_core::{error::AppError, protocol::SnapshotPayload};
 use super::{
     capture::capture_screen_png,
     diff::{diff_region, thumbnail_from_png, upscale_region},
+    ocr::recognize_text_from_image,
     state::with_state,
 };
 
@@ -18,6 +19,7 @@ pub struct CaptureResult {
 pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, AppError> {
     let capture = capture_screen_png(out_path)?;
     let thumb = thumbnail_from_png(&capture.image_path, 96, 54)?;
+    let texts = recognize_text_from_image(&capture.image_path, capture.width, capture.height)?;
     let focused_app = focused_app_name();
     let image_path = capture.image_path.clone();
 
@@ -35,7 +37,7 @@ pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, Ap
                 )
             });
 
-        let update = state.record_capture(capture, thumb, focused_app, Vec::new(), roi);
+        let update = state.record_capture(capture, thumb, focused_app, texts, roi);
         let event_ids = state.event_ids(update.snapshot.snapshot_id);
 
         CaptureResult {
