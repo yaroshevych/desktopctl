@@ -19,6 +19,8 @@ use desktop_core::{
 };
 use serde_json::{Value, json};
 
+use crate::{permissions, vision};
+
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
     pub idle_timeout: Option<Duration>,
@@ -244,6 +246,19 @@ fn execute(command: Command) -> Result<Value, AppError> {
             let backend = new_backend()?;
             backend.sleep_ms(ms);
             Ok(json!({}))
+        }
+        Command::ScreenCapture { out_path } => {
+            permissions::ensure_screen_recording_permission()?;
+            let capture = vision::capture::capture_screen_png(out_path.map(Into::into))?;
+            Ok(json!({
+                "snapshot_id": capture.snapshot_id,
+                "timestamp": capture.timestamp,
+                "path": capture.image_path,
+                "display_id": capture.display_id,
+                "width": capture.width,
+                "height": capture.height,
+                "scale": capture.scale
+            }))
         }
         _ => Err(AppError::invalid_argument(format!(
             "command {} is not implemented yet",

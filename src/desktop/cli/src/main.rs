@@ -30,6 +30,12 @@ fn run() -> Result<i32, AppError> {
         ResponseEnvelope::Success(success) => {
             if let Some(message) = success.result.get("message").and_then(|v| v.as_str()) {
                 println!("{message}");
+            } else if success.result != serde_json::json!({}) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&success.result)
+                        .unwrap_or_else(|_| "{}".to_string())
+                );
             }
             Ok(0)
         }
@@ -48,12 +54,46 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
     match args[0].as_str() {
         "ping" => Ok(Command::Ping),
         "open" => parse_open(&args[1..]),
+        "screen" => parse_screen(&args[1..]),
         "pointer" => parse_pointer(&args[1..]),
         "type" => parse_type(&args[1..]),
         "key" => parse_key(&args[1..]),
         "wait" => {
             let ms = parse_u64(args.get(1), "ms")?;
             Ok(Command::Wait { ms })
+        }
+        _ => Err(AppError::invalid_argument(usage())),
+    }
+}
+
+fn parse_screen(args: &[String]) -> Result<Command, AppError> {
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(usage()));
+    }
+
+    match args[0].as_str() {
+        "capture" => {
+            let mut out_path: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--out" => {
+                        let path = args.get(i + 1).ok_or_else(|| {
+                            AppError::invalid_argument(
+                                "missing value for --out: desktopctl screen capture --out <path>",
+                            )
+                        })?;
+                        out_path = Some(path.clone());
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for screen capture: {flag}"
+                        )));
+                    }
+                }
+            }
+            Ok(Command::ScreenCapture { out_path })
         }
         _ => Err(AppError::invalid_argument(usage())),
     }
@@ -186,6 +226,7 @@ fn usage() -> &'static str {
   desktopctl open <application> [-- <open-args...>]
   desktopctl open spotlight
   desktopctl open launchpad
+  desktopctl screen capture [--out <path>]
   desktopctl pointer move <x> <y>
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>

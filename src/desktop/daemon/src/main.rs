@@ -1,4 +1,6 @@
 mod daemon;
+mod permissions;
+mod vision;
 
 #[cfg(target_os = "macos")]
 fn main() {
