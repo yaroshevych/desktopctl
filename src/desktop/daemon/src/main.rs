@@ -26,7 +26,7 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
     daemon::start()?;
 
     let mtm = MainThreadMarker::new().ok_or_else(|| {
-        desktop_core::error::AppError::AutomationBackend("must run on main thread".to_string())
+        desktop_core::error::AppError::backend_unavailable("must run on main thread")
     })?;
     let ns_app = NSApplication::sharedApplication(mtm);
     let _ = ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -34,7 +34,7 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
     let menu = Menu::new();
     let quit = MenuItem::new("Exit", true, None);
     menu.append(&quit)
-        .map_err(|e| desktop_core::error::AppError::AutomationBackend(e.to_string()))?;
+        .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
 
     let quit_id = quit.id().clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -48,7 +48,7 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
         .with_menu(Box::new(menu))
         .with_icon(default_icon()?)
         .build()
-        .map_err(|e| desktop_core::error::AppError::AutomationBackend(e.to_string()))?;
+        .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
 
     ns_app.run();
     Ok(())
@@ -79,5 +79,5 @@ fn default_icon() -> Result<tray_icon::Icon, desktop_core::error::AppError> {
     }
 
     tray_icon::Icon::from_rgba(rgba, width, height)
-        .map_err(|e| desktop_core::error::AppError::AutomationBackend(e.to_string()))
+        .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))
 }

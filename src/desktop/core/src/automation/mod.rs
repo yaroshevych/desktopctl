@@ -48,6 +48,9 @@ pub fn new_backend() -> Result<Box<dyn Automation>, AppError> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        Err(AppError::UnsupportedPlatform(std::env::consts::OS))
+        Err(AppError::backend_unavailable(format!(
+            "unsupported platform: {}",
+            std::env::consts::OS
+        )))
     }
 }

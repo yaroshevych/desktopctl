@@ -1,38 +1,42 @@
 use desktop_core::{
-    error::AppError,
+    error::{AppError, ErrorCode},
     ipc,
-    protocol::{Command, Request},
+    protocol::{Command, RequestEnvelope, ResponseEnvelope},
 };
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("error: {err}");
-        std::process::exit(1);
+    match run() {
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(map_error_code(&err.code));
+        }
     }
 }
 
-fn run() -> Result<(), AppError> {
+fn run() -> Result<i32, AppError> {
     let args: Vec<String> = std::env::args().collect();
     let command = parse_command(&args[1..])?;
-    let response = ipc::send_request(&Request { command })?;
+    let request = RequestEnvelope::new(next_request_id(), command);
+    let response = ipc::send_request(&request)?;
 
-    if response.ok {
-        if let Some(message) = response.message {
-            println!("{message}");
+    match response {
+        ResponseEnvelope::Success(success) => {
+            if let Some(message) = success.result.get("message").and_then(|v| v.as_str()) {
+                println!("{message}");
+            }
+            Ok(0)
         }
-        Ok(())
-    } else {
-        Err(AppError::Ipc(
-            response
-                .message
-                .unwrap_or_else(|| "unknown daemon error".to_string()),
-        ))
+        ResponseEnvelope::Error(err) => Err(AppError::new(err.error.code, err.error.message)
+            .with_retryable(err.error.retryable)
+            .with_command(err.error.command)
+            .with_debug_ref(err.error.debug_ref)),
     }
 }
 
 fn parse_command(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
-        return Err(AppError::Cli(usage().to_string()));
+        return Err(AppError::invalid_argument(usage()));
     }
 
     match args[0].as_str() {
@@ -45,13 +49,13 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
             let ms = parse_u64(args.get(1), "ms")?;
             Ok(Command::Wait { ms })
         }
-        _ => Err(AppError::Cli(usage().to_string())),
+        _ => Err(AppError::invalid_argument(usage())),
     }
 }
 
 fn parse_open(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
-        return Err(AppError::Cli(usage().to_string()));
+        return Err(AppError::invalid_argument(usage()));
     }
 
     if args.len() == 1 {
@@ -69,20 +73,22 @@ fn parse_open(args: &[String]) -> Result<Command, AppError> {
     };
 
     if name_parts.is_empty() {
-        return Err(AppError::Cli(
-            "missing app name: desktopctl open <application> [-- <open-args...>]".to_string(),
+        return Err(AppError::invalid_argument(
+            "missing app name: desktopctl open <application> [-- <open-args...>]",
         ));
     }
 
     Ok(Command::OpenApp {
         name: name_parts.join(" "),
         args: trailing.to_vec(),
+        wait: false,
+        timeout_ms: None,
     })
 }
 
 fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
-        return Err(AppError::Cli(usage().to_string()));
+        return Err(AppError::invalid_argument(usage()));
     }
 
     match args[0].as_str() {
@@ -124,7 +130,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 hold_ms,
             })
         }
-        _ => Err(AppError::Cli(usage().to_string())),
+        _ => Err(AppError::invalid_argument(usage())),
     }
 }
 
@@ -132,19 +138,19 @@ fn parse_type(args: &[String]) -> Result<Command, AppError> {
     let text = args
         .first()
         .cloned()
-        .ok_or_else(|| AppError::Cli("missing text: desktopctl type \"text\"".to_string()))?;
+        .ok_or_else(|| AppError::invalid_argument("missing text: desktopctl type \"text\""))?;
     Ok(Command::UiType { text })
 }
 
 fn parse_key(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
-        return Err(AppError::Cli(usage().to_string()));
+        return Err(AppError::invalid_argument(usage()));
     }
 
     match args[0].as_str() {
         "press" => {
             let key = args.get(1).cloned().ok_or_else(|| {
-                AppError::Cli("missing key: desktopctl key press enter".to_string())
+                AppError::invalid_argument("missing key: desktopctl key press enter")
             })?;
             if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
                 Ok(Command::KeyEnter)
@@ -152,20 +158,20 @@ fn parse_key(args: &[String]) -> Result<Command, AppError> {
                 Ok(Command::KeyHotkey { hotkey: key })
             }
         }
-        _ => Err(AppError::Cli(usage().to_string())),
+        _ => Err(AppError::invalid_argument(usage())),
     }
 }
 
 fn parse_u32(value: Option<&String>, field: &str) -> Result<u32, AppError> {
-    let raw = value.ok_or_else(|| AppError::Cli(format!("missing {field}")))?;
+    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
     raw.parse::<u32>()
-        .map_err(|_| AppError::Cli(format!("invalid {field}: {raw}")))
+        .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
 }
 
 fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
-    let raw = value.ok_or_else(|| AppError::Cli(format!("missing {field}")))?;
+    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
     raw.parse::<u64>()
-        .map_err(|_| AppError::Cli(format!("invalid {field}: {raw}")))
+        .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
 }
 
 fn usage() -> &'static str {
@@ -182,4 +188,27 @@ fn usage() -> &'static str {
   desktopctl type \"text\"
   desktopctl key press <key-or-hotkey>
   desktopctl wait <ms>"
+}
+
+fn next_request_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("req-{ts}")
+}
+
+fn map_error_code(code: &ErrorCode) -> i32 {
+    match code {
+        ErrorCode::PermissionDenied => 2,
+        ErrorCode::Timeout => 3,
+        ErrorCode::TargetNotFound => 4,
+        ErrorCode::InvalidArgument => 5,
+        ErrorCode::DaemonNotRunning | ErrorCode::BackendUnavailable => 6,
+        ErrorCode::LowConfidence => 7,
+        ErrorCode::AmbiguousTarget => 8,
+        ErrorCode::PostconditionFailed => 9,
+        ErrorCode::Internal => 10,
+    }
 }

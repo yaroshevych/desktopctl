@@ -24,7 +24,9 @@ impl Automation for MacosAutomation {
         if ax_is_process_trusted() {
             Ok(())
         } else {
-            Err(AppError::AccessibilityPermissionMissing)
+            Err(AppError::permission_denied(
+                "accessibility permission required. enable it for DesktopCtl.app in System Settings -> Privacy & Security -> Accessibility",
+            ))
         }
     }
 
@@ -66,9 +68,8 @@ impl Automation for MacosAutomation {
 }
 
 fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppError> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| {
-        AppError::AutomationBackend("failed to create CoreGraphics event source".to_string())
-    })?;
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| AppError::backend_unavailable("failed to create CoreGraphics event source"))?;
 
     let event = CGEvent::new_mouse_event(
         source,
@@ -76,7 +77,7 @@ fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppErro
         to_core_graphics_point(point),
         CGMouseButton::Left,
     )
-    .map_err(|_| AppError::AutomationBackend("failed to create mouse event".to_string()))?;
+    .map_err(|_| AppError::backend_unavailable("failed to create mouse event"))?;
 
     event.post(CGEventTapLocation::HID);
     Ok(())
@@ -96,14 +97,19 @@ fn run_osascript(script: &str) -> Result<(), AppError> {
         .arg("-e")
         .arg(script)
         .output()
-        .map_err(|err| AppError::AutomationCommand(err.to_string()))?;
+        .map_err(|err| {
+            AppError::backend_unavailable(format!("osascript failed to start: {err}"))
+        })?;
 
     if output.status.success() {
         return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(AppError::AutomationCommand(stderr.trim().to_string()))
+    Err(AppError::internal(format!(
+        "osascript command failed: {}",
+        stderr.trim()
+    )))
 }
 
 fn applescript_hotkey(input: &str) -> Result<String, AppError> {
@@ -114,12 +120,14 @@ fn applescript_hotkey(input: &str) -> Result<String, AppError> {
         .filter(|x| !x.is_empty())
         .collect();
     if parts.len() < 2 {
-        return Err(AppError::InvalidHotkey(input.to_string()));
+        return Err(AppError::invalid_argument(format!(
+            "invalid hotkey format: {input}"
+        )));
     }
 
     let key = parts
         .last()
-        .ok_or_else(|| AppError::InvalidHotkey(input.to_string()))?;
+        .ok_or_else(|| AppError::invalid_argument(format!("invalid hotkey format: {input}")))?;
     let modifiers = parts[..parts.len() - 1]
         .iter()
         .map(|p| match *p {
@@ -127,7 +135,9 @@ fn applescript_hotkey(input: &str) -> Result<String, AppError> {
             "shift" => Ok("shift down"),
             "ctrl" | "control" => Ok("control down"),
             "opt" | "option" | "alt" => Ok("option down"),
-            _ => Err(AppError::InvalidHotkey(input.to_string())),
+            _ => Err(AppError::invalid_argument(format!(
+                "invalid hotkey format: {input}"
+            ))),
         })
         .collect::<Result<Vec<&str>, AppError>>()?;
 
@@ -140,7 +150,11 @@ fn applescript_hotkey(input: &str) -> Result<String, AppError> {
         k if k.len() == 1 => {
             format!(r#"tell application "System Events" to keystroke "{k}" using {{{using}}}"#)
         }
-        _ => return Err(AppError::InvalidHotkey(input.to_string())),
+        _ => {
+            return Err(AppError::invalid_argument(format!(
+                "invalid hotkey format: {input}"
+            )));
+        }
     };
 
     Ok(script)
