@@ -249,16 +249,28 @@ fn execute(command: Command) -> Result<Value, AppError> {
         }
         Command::ScreenCapture { out_path } => {
             permissions::ensure_screen_recording_permission()?;
-            let capture = vision::capture::capture_screen_png(out_path.map(Into::into))?;
+            let capture = vision::pipeline::capture_and_update(out_path.map(Into::into))?;
             Ok(json!({
-                "snapshot_id": capture.snapshot_id,
-                "timestamp": capture.timestamp,
+                "snapshot_id": capture.snapshot.snapshot_id,
+                "timestamp": capture.snapshot.timestamp,
                 "path": capture.image_path,
-                "display_id": capture.display_id,
-                "width": capture.width,
-                "height": capture.height,
-                "scale": capture.scale
+                "display": capture.snapshot.display,
+                "focused_app": capture.snapshot.focused_app,
+                "event_ids": capture.event_ids
             }))
+        }
+        Command::ScreenSnapshot => {
+            if let Some(snapshot) = vision::pipeline::latest_snapshot()? {
+                Ok(serde_json::to_value(snapshot).map_err(|err| {
+                    AppError::internal(format!("failed to encode snapshot: {err}"))
+                })?)
+            } else {
+                permissions::ensure_screen_recording_permission()?;
+                let capture = vision::pipeline::capture_and_update(None)?;
+                Ok(serde_json::to_value(capture.snapshot).map_err(|err| {
+                    AppError::internal(format!("failed to encode snapshot: {err}"))
+                })?)
+            }
         }
         _ => Err(AppError::invalid_argument(format!(
             "command {} is not implemented yet",
@@ -286,7 +298,7 @@ mod tests {
     fn error_roundtrip_shape() {
         let req = RequestEnvelope::new(
             "r1".to_string(),
-            desktop_core::protocol::Command::ScreenSnapshot,
+            desktop_core::protocol::Command::ScreenTokenize,
         );
         let response = match execute(req.command.clone()) {
             Ok(v) => ResponseEnvelope::success(req.request_id, v),

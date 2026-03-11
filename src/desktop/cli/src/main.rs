@@ -95,6 +95,14 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             }
             Ok(Command::ScreenCapture { out_path })
         }
+        "snapshot" => {
+            if args.get(1).is_some() && args.get(1).map(String::as_str) != Some("--json") {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl screen snapshot [--json]",
+                ));
+            }
+            Ok(Command::ScreenSnapshot)
+        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -227,6 +235,7 @@ fn usage() -> &'static str {
   desktopctl open spotlight
   desktopctl open launchpad
   desktopctl screen capture [--out <path>]
+  desktopctl screen snapshot [--json]
   desktopctl pointer move <x> <y>
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
