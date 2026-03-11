@@ -58,6 +58,8 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "ui" => parse_ui(&args[1..]),
         "permissions" => parse_permissions(&args[1..]),
         "clipboard" => parse_clipboard(&args[1..]),
+        "debug" => parse_debug(&args[1..]),
+        "replay" => parse_replay(&args[1..]),
         "pointer" => parse_pointer(&args[1..]),
         "type" => parse_type(&args[1..]),
         "key" => parse_key(&args[1..]),
@@ -69,6 +71,22 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
 fn parse_permissions(args: &[String]) -> Result<Command, AppError> {
     if args.len() == 1 && args[0] == "check" {
         return Ok(Command::PermissionsCheck);
+    }
+    Err(AppError::invalid_argument(usage()))
+}
+
+fn parse_debug(args: &[String]) -> Result<Command, AppError> {
+    if args.len() == 1 && args[0] == "snapshot" {
+        return Ok(Command::DebugSnapshot);
+    }
+    Err(AppError::invalid_argument(usage()))
+}
+
+fn parse_replay(args: &[String]) -> Result<Command, AppError> {
+    if args.len() == 2 && args[0] == "load" {
+        return Ok(Command::ReplayLoad {
+            session_dir: args[1].clone(),
+        });
     }
     Err(AppError::invalid_argument(usage()))
 }
@@ -392,6 +410,8 @@ fn usage() -> &'static str {
   desktopctl permissions check
   desktopctl clipboard read
   desktopctl clipboard write <text>
+  desktopctl debug snapshot
+  desktopctl replay load <session_dir>
   desktopctl pointer move <x> <y>
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>

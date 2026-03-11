@@ -19,7 +19,7 @@ use desktop_core::{
 };
 use serde_json::{Value, json};
 
-use crate::{clipboard, permissions, vision};
+use crate::{clipboard, permissions, recording, replay, vision};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
@@ -115,11 +115,16 @@ fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppEr
 
 fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     let request: RequestEnvelope = read_framed_json(&mut stream)?;
-    let command_name = request.command.name().to_string();
-    let response = match execute(request.command) {
-        Ok(result) => ResponseEnvelope::success(request.request_id, result),
-        Err(err) => ResponseEnvelope::from_error(request.request_id, command_name, err),
+    let request_id = request.request_id.clone();
+    let command = request.command.clone();
+    let command_name = command.name().to_string();
+    let response = match execute(command) {
+        Ok(result) => ResponseEnvelope::success(request_id.clone(), result),
+        Err(err) => ResponseEnvelope::from_error(request_id, command_name, err),
     };
+    if let Err(err) = recording::record_command(&request, &response) {
+        eprintln!("recorder write failed: {err}");
+    }
     write_framed_json(&mut stream, &response)?;
     Ok(())
 }
@@ -321,10 +326,11 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 AppError::internal(format!("failed to encode permissions payload: {err}"))
             })?)
         }
-        _ => Err(AppError::invalid_argument(format!(
-            "command {} is not implemented yet",
-            command.name()
-        ))),
+        Command::DebugSnapshot => vision::debug::write_debug_snapshot(),
+        Command::ReplayLoad { session_dir } => {
+            let session_dir = replay::parse_session_dir(&session_dir)?;
+            replay::load_session(&session_dir)
+        }
     }
 }
 

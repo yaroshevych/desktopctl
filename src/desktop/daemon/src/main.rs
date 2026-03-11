@@ -1,6 +1,8 @@
 mod clipboard;
 mod daemon;
 mod permissions;
+mod recording;
+mod replay;
 mod vision;
 
 #[cfg(target_os = "macos")]
