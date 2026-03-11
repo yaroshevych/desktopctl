@@ -1,0 +1,11 @@
+{
+  "snapshot_id": 107,
+  "timestamp": "1710180000007",
+  "display": { "id": 1, "width": 1512, "height": 982, "scale": 2.0 },
+  "focused_app": "Finder",
+  "texts": [
+    { "text": "Finder", "bounds": { "x": 46, "y": 16, "width": 66, "height": 22 }, "confidence": 0.98 },
+    { "text": "Applications", "bounds": { "x": 132, "y": 186, "width": 112, "height": 20 }, "confidence": 0.91 }
+  ]
+}
+

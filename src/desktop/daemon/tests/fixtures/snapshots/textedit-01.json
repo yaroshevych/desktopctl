@@ -1,0 +1,11 @@
+{
+  "snapshot_id": 109,
+  "timestamp": "1710180000009",
+  "display": { "id": 1, "width": 1512, "height": 982, "scale": 2.0 },
+  "focused_app": "TextEdit",
+  "texts": [
+    { "text": "TextEdit", "bounds": { "x": 52, "y": 16, "width": 78, "height": 22 }, "confidence": 0.96 },
+    { "text": "Untitled", "bounds": { "x": 664, "y": 52, "width": 66, "height": 18 }, "confidence": 0.88 }
+  ]
+}
+

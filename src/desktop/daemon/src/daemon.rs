@@ -550,7 +550,7 @@ fn ui_read_with_clipboard_restore() -> Result<Value, AppError> {
 mod tests {
     use desktop_core::{
         error::ErrorCode,
-        protocol::{RequestEnvelope, ResponseEnvelope},
+        protocol::{Bounds, RequestEnvelope, ResponseEnvelope, SnapshotText},
     };
 
     use super::execute;
@@ -585,5 +585,42 @@ mod tests {
     fn on_demand_config_has_idle_timeout() {
         let cfg = super::DaemonConfig::on_demand();
         assert_eq!(cfg.idle_timeout.map(|d| d.as_secs()), Some(8));
+    }
+
+    #[test]
+    fn select_text_candidate_returns_not_found() {
+        let result = super::select_text_candidate(&[], "Send");
+        assert_eq!(result.expect_err("should fail").code, ErrorCode::TargetNotFound);
+    }
+
+    #[test]
+    fn select_text_candidate_returns_ambiguous() {
+        let texts = vec![
+            SnapshotText {
+                text: "Send".to_string(),
+                bounds: Bounds {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 40.0,
+                    height: 16.0,
+                },
+                confidence: 0.8,
+            },
+            SnapshotText {
+                text: "Send".to_string(),
+                bounds: Bounds {
+                    x: 90.0,
+                    y: 10.0,
+                    width: 40.0,
+                    height: 16.0,
+                },
+                confidence: 0.79,
+            },
+        ];
+        let result = super::select_text_candidate(&texts, "Send");
+        assert_eq!(
+            result.expect_err("should fail").code,
+            ErrorCode::AmbiguousTarget
+        );
     }
 }

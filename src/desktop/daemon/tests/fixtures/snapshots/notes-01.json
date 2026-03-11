@@ -1,0 +1,10 @@
+{
+  "snapshot_id": 110,
+  "timestamp": "1710180000010",
+  "display": { "id": 1, "width": 1512, "height": 982, "scale": 2.0 },
+  "focused_app": "Notes",
+  "texts": [
+    { "text": "Notes", "bounds": { "x": 52, "y": 16, "width": 54, "height": 22 }, "confidence": 0.97 },
+    { "text": "New Note", "bounds": { "x": 1110, "y": 840, "width": 86, "height": 18 }, "confidence": 0.9 }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "snapshot_id": 106,
+  "timestamp": "1710180000006",
+  "display": { "id": 1, "width": 1512, "height": 982, "scale": 2.0 },
+  "focused_app": "System Settings",
+  "texts": [
+    { "text": "System Settings", "bounds": { "x": 52, "y": 16, "width": 170, "height": 24 }, "confidence": 0.97 },
+    { "text": "Accessibility", "bounds": { "x": 140, "y": 184, "width": 116, "height": 21 }, "confidence": 0.9 }
+  ]
+}
+
