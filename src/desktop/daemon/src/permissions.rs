@@ -16,13 +16,19 @@ pub fn screen_recording_granted() -> bool {
 
 pub fn ensure_screen_recording_permission() -> Result<(), AppError> {
     if screen_recording_granted() {
-        Ok(())
-    } else {
-        Err(
-            AppError::permission_denied("screen recording permission is required")
-                .with_details(json!({ "remediation": SCREEN_RECORDING_REMEDIATION })),
-        )
+        return Ok(());
     }
+
+    // Trigger macOS permission flow on demand for CLI/on-demand daemon paths.
+    let _ = request_screen_recording_permission_prompt();
+    if screen_recording_granted() {
+        return Ok(());
+    }
+
+    Err(
+        AppError::permission_denied("screen recording permission is required")
+            .with_details(json!({ "remediation": SCREEN_RECORDING_REMEDIATION })),
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default)]
