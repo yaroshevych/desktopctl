@@ -98,10 +98,9 @@ fn parse_clipboard(args: &[String]) -> Result<Command, AppError> {
     match args[0].as_str() {
         "read" => Ok(Command::ClipboardRead),
         "write" => {
-            let text = args
-                .get(1)
-                .cloned()
-                .ok_or_else(|| AppError::invalid_argument("usage: desktopctl clipboard write <text>"))?;
+            let text = args.get(1).cloned().ok_or_else(|| {
+                AppError::invalid_argument("usage: desktopctl clipboard write <text>")
+            })?;
             Ok(Command::ClipboardWrite { text })
         }
         _ => Err(AppError::invalid_argument(usage())),
@@ -476,15 +475,17 @@ where
 
 fn launch_daemon() -> Result<(), AppError> {
     if let Some(app_path) = discover_daemon_app_path() {
-        let status = ProcessCommand::new("open")
-            .arg("-g")
-            .arg(app_path)
-            .arg("--args")
-            .arg("--on-demand")
-            .status()
-            .map_err(|err| {
-                AppError::backend_unavailable(format!("failed to launch app bundle: {err}"))
-            })?;
+        let autostart_mode = std::env::var("DESKTOPCTL_AUTOSTART_MODE")
+            .unwrap_or_else(|_| "resident".to_string());
+        let mut open_cmd = ProcessCommand::new("open");
+        open_cmd.arg("-g").arg(app_path);
+        if autostart_mode.eq_ignore_ascii_case("on-demand") {
+            open_cmd.arg("--args").arg("--on-demand");
+        }
+
+        let status = open_cmd.status().map_err(|err| {
+            AppError::backend_unavailable(format!("failed to launch app bundle: {err}"))
+        })?;
         if status.success() {
             return Ok(());
         }

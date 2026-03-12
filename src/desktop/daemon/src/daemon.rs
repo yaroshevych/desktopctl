@@ -118,9 +118,21 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     let request_id = request.request_id.clone();
     let command = request.command.clone();
     let command_name = command.name().to_string();
-    let response = match execute(command) {
-        Ok(result) => ResponseEnvelope::success(request_id.clone(), result),
-        Err(err) => ResponseEnvelope::from_error(request_id, command_name, err),
+    let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(command)))
+    {
+        Ok(Ok(result)) => ResponseEnvelope::success(request_id.clone(), result),
+        Ok(Err(err)) => ResponseEnvelope::from_error(request_id, command_name, err),
+        Err(payload) => {
+            let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            let err = AppError::internal(format!("daemon panic during command execution: {panic_message}"));
+            ResponseEnvelope::from_error(request_id, command_name, err)
+        }
     };
     if let Err(err) = recording::record_command(&request, &response) {
         eprintln!("recorder write failed: {err}");
@@ -349,8 +361,11 @@ fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
 }
 
 fn click_token_target(token_id: u32) -> Result<Value, AppError> {
-    let token = vision::pipeline::token(token_id)?
-        .ok_or_else(|| AppError::target_not_found(format!("token {token_id} not found; run `screen tokenize --json` first")))?;
+    let token = vision::pipeline::token(token_id)?.ok_or_else(|| {
+        AppError::target_not_found(format!(
+            "token {token_id} not found; run `screen tokenize --json` first"
+        ))
+    })?;
     perform_click(&token.bounds)?;
     verify_click_postcondition(&token.text, &token.bounds, 1_200)?;
     Ok(json!({
@@ -478,7 +493,10 @@ fn verify_click_postcondition(
     )))
 }
 
-fn inflate_bounds(bounds: &desktop_core::protocol::Bounds, pad: f64) -> desktop_core::protocol::Bounds {
+fn inflate_bounds(
+    bounds: &desktop_core::protocol::Bounds,
+    pad: f64,
+) -> desktop_core::protocol::Bounds {
     desktop_core::protocol::Bounds {
         x: (bounds.x - pad).max(0.0),
         y: (bounds.y - pad).max(0.0),
@@ -590,7 +608,10 @@ mod tests {
     #[test]
     fn select_text_candidate_returns_not_found() {
         let result = super::select_text_candidate(&[], "Send");
-        assert_eq!(result.expect_err("should fail").code, ErrorCode::TargetNotFound);
+        assert_eq!(
+            result.expect_err("should fail").code,
+            ErrorCode::TargetNotFound
+        );
     }
 
     #[test]

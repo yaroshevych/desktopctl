@@ -2,6 +2,7 @@ use desktop_core::error::AppError;
 use objc2_foundation::{NSDictionary, NSNumber, NSString};
 use serde_json::json;
 use std::ffi::c_void;
+use std::process::Command as ProcessCommand;
 
 const SCREEN_RECORDING_REMEDIATION: &str = "grant Screen Recording for DesktopCtl.app in System Settings -> Privacy & Security -> Screen Recording, then rerun the command";
 const ACCESSIBILITY_REMEDIATION: &str = "grant Accessibility for DesktopCtl.app in System Settings -> Privacy & Security -> Accessibility, then rerun the command";
@@ -24,6 +25,7 @@ pub fn ensure_screen_recording_permission() -> Result<(), AppError> {
     if screen_recording_granted() {
         return Ok(());
     }
+    let _ = open_screen_recording_settings();
 
     Err(
         AppError::permission_denied("screen recording permission is required")
@@ -45,6 +47,9 @@ pub fn request_startup_permissions() -> StartupPermissionRequests {
     }
     if !screen_recording_granted() {
         requests.screen_recording_requested = request_screen_recording_permission_prompt();
+        if !screen_recording_granted() {
+            let _ = open_screen_recording_settings();
+        }
     }
 
     requests
@@ -69,6 +74,13 @@ fn request_accessibility_permission_prompt() -> bool {
 
 fn request_screen_recording_permission_prompt() -> bool {
     unsafe { CGRequestScreenCaptureAccess() }
+}
+
+fn open_screen_recording_settings() -> bool {
+    let status = ProcessCommand::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .status();
+    matches!(status, Ok(s) if s.success())
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]

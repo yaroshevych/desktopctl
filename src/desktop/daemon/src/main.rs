@@ -33,6 +33,12 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
         menu::{Menu, MenuEvent, MenuItem},
     };
 
+    let mtm = MainThreadMarker::new().ok_or_else(|| {
+        desktop_core::error::AppError::backend_unavailable("must run on main thread")
+    })?;
+    let ns_app = NSApplication::sharedApplication(mtm);
+    let _ = ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
     let permission_requests = permissions::request_startup_permissions();
     if permission_requests.accessibility_requested {
         eprintln!("requested Accessibility permission for DesktopCtl.app");
@@ -42,12 +48,6 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
     }
 
     daemon::start_background(daemon::DaemonConfig::resident())?;
-
-    let mtm = MainThreadMarker::new().ok_or_else(|| {
-        desktop_core::error::AppError::backend_unavailable("must run on main thread")
-    })?;
-    let ns_app = NSApplication::sharedApplication(mtm);
-    let _ = ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let menu = Menu::new();
     let quit = MenuItem::new("Exit", true, None);
