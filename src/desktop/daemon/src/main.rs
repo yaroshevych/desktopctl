@@ -33,6 +33,14 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
         menu::{Menu, MenuEvent, MenuItem},
     };
 
+    let permission_requests = permissions::request_startup_permissions();
+    if permission_requests.accessibility_requested {
+        eprintln!("requested Accessibility permission for DesktopCtl.app");
+    }
+    if permission_requests.screen_recording_requested {
+        eprintln!("requested Screen Recording permission for DesktopCtl.app");
+    }
+
     daemon::start_background(daemon::DaemonConfig::resident())?;
 
     let mtm = MainThreadMarker::new().ok_or_else(|| {
