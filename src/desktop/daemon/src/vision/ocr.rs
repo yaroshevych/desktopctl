@@ -4,7 +4,7 @@ use desktop_core::{
     error::AppError,
     protocol::{Bounds, SnapshotText},
 };
-use objc2::{AnyThread, runtime::AnyObject};
+use objc2::{AnyThread, ClassType, runtime::AnyObject};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{NSArray, NSDictionary, NSURL};
 use objc2_vision::{
@@ -12,28 +12,38 @@ use objc2_vision::{
     VNRequestTextRecognitionLevel,
 };
 
-pub fn recognize_text_from_image(path: &Path, image_width: u32, image_height: u32) -> Result<Vec<SnapshotText>, AppError> {
+use crate::trace;
+
+pub fn recognize_text_from_image(
+    path: &Path,
+    image_width: u32,
+    image_height: u32,
+) -> Result<Vec<SnapshotText>, AppError> {
+    trace::log(format!(
+        "ocr:start path={} size={}x{}",
+        path.display(),
+        image_width,
+        image_height
+    ));
     let url = NSURL::from_file_path(path).ok_or_else(|| {
-        AppError::invalid_argument(format!(
-            "invalid image path for OCR: {}",
-            path.display()
-        ))
+        AppError::invalid_argument(format!("invalid image path for OCR: {}", path.display()))
     })?;
 
-    let options =
-        NSDictionary::<VNImageOption, AnyObject>::from_slices::<VNImageOption>(&[], &[]);
+    let options = NSDictionary::<VNImageOption, AnyObject>::from_slices::<VNImageOption>(&[], &[]);
     let handler = unsafe {
         VNImageRequestHandler::initWithURL_options(VNImageRequestHandler::alloc(), &url, &options)
     };
 
     let request = VNRecognizeTextRequest::new();
     request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
-    request.setUsesLanguageCorrection(true);
-    request.setAutomaticallyDetectsLanguage(true);
 
-    let request_obj: &VNRequest = unsafe { std::mem::transmute::<&VNRecognizeTextRequest, &VNRequest>(&request) };
+    let request_obj: &VNRequest = request.as_super().as_super();
     let requests = NSArray::from_slice(&[request_obj]);
     handler.performRequests_error(&requests).map_err(|err| {
+        trace::log(format!(
+            "ocr:perform_failed {}",
+            err.localizedDescription().to_string()
+        ));
         AppError::backend_unavailable(format!(
             "Vision OCR request failed: {}",
             err.localizedDescription().to_string()
@@ -63,6 +73,7 @@ pub fn recognize_text_from_image(path: &Path, image_width: u32, image_height: u3
         }
     }
 
+    trace::log(format!("ocr:ok texts={}", texts.len()));
     Ok(texts)
 }
 

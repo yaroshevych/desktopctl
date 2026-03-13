@@ -3,6 +3,7 @@ mod daemon;
 mod permissions;
 mod recording;
 mod replay;
+mod trace;
 mod vision;
 
 #[cfg(target_os = "macos")]

@@ -5,6 +5,8 @@ use desktop_core::{
     protocol::{SnapshotPayload, TokenEntry, TokenizePayload},
 };
 
+use crate::trace;
+
 use super::{
     capture::capture_screen_png,
     diff::{diff_region, thumbnail_from_png, upscale_region},
@@ -20,9 +22,18 @@ pub struct CaptureResult {
 }
 
 pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, AppError> {
+    trace::log("pipeline:capture_and_update:start");
     let capture = capture_screen_png(out_path)?;
+    trace::log(format!(
+        "pipeline:capture_and_update:capture_ok path={} size={}x{}",
+        capture.image_path.display(),
+        capture.width,
+        capture.height
+    ));
     let thumb = thumbnail_from_png(&capture.image_path, 96, 54)?;
+    trace::log("pipeline:capture_and_update:thumb_ok");
     let texts = recognize_text_from_image(&capture.image_path, capture.width, capture.height)?;
+    trace::log(format!("pipeline:capture_and_update:ocr_ok texts={}", texts.len()));
     let focused_app = focused_app_name();
     let image_path = capture.image_path.clone();
 
@@ -56,6 +67,7 @@ pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
 }
 
 pub fn tokenize() -> Result<TokenizePayload, AppError> {
+    trace::log("pipeline:tokenize:start");
     let capture = capture_and_update(None)?;
     let tokens: Vec<TokenEntry> = capture
         .snapshot
@@ -72,6 +84,11 @@ pub fn tokenize() -> Result<TokenizePayload, AppError> {
     let snapshot_id = capture.snapshot.snapshot_id;
     let timestamp = capture.snapshot.timestamp.clone();
     with_state(|state| state.replace_token_map(tokens.clone()))?;
+    trace::log(format!(
+        "pipeline:tokenize:ok snapshot_id={} tokens={}",
+        snapshot_id,
+        tokens.len()
+    ));
     Ok(TokenizePayload {
         snapshot_id,
         timestamp,

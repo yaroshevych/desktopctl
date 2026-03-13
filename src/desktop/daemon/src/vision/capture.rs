@@ -17,9 +17,12 @@ use objc2_screen_capture_kit::{
     SCScreenshotConfiguration, SCScreenshotManager, SCScreenshotOutput,
 };
 
+use crate::trace;
+
 use super::types::CapturedFrame;
 
 pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, AppError> {
+    trace::log("capture:screen_png:start");
     let display = CGDisplay::main();
     let bounds = display.bounds();
     let rect = CGRect::new(
@@ -35,6 +38,7 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, Ap
     }
 
     if !screencapturekit_screenshot_api_available() {
+        trace::log("capture:screen_png:fallback=coregraphics");
         capture_with_coregraphics(&display, &target_path)?;
         return Ok(CapturedFrame {
             snapshot_id: now_millis() as u64,
@@ -84,11 +88,13 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, Ap
     match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(())) => {}
         Ok(Err(message)) => {
+            trace::log(format!("capture:screen_png:sck_error {message}"));
             return Err(AppError::backend_unavailable(format!(
                 "screencapturekit screenshot failed: {message}"
             )));
         }
         Err(_) => {
+            trace::log("capture:screen_png:sck_timeout");
             return Err(AppError::timeout(
                 "timed out waiting for ScreenCaptureKit screenshot callback",
             ));
@@ -96,11 +102,13 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, Ap
     }
 
     if !target_path.exists() {
+        trace::log("capture:screen_png:no_file_written");
         return Err(AppError::backend_unavailable(format!(
             "ScreenCaptureKit completed but no file was written at {}",
             target_path.display()
         )));
     }
+    trace::log(format!("capture:screen_png:ok path={}", target_path.display()));
 
     Ok(CapturedFrame {
         snapshot_id: now_millis() as u64,

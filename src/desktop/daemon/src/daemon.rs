@@ -19,7 +19,7 @@ use desktop_core::{
 };
 use serde_json::{Value, json};
 
-use crate::{clipboard, permissions, recording, replay, vision};
+use crate::{clipboard, permissions, recording, replay, trace, vision};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
@@ -68,6 +68,7 @@ fn bind_listener() -> Result<UnixListener, AppError> {
     listener
         .set_nonblocking(true)
         .map_err(|err| AppError::backend_unavailable(format!("set nonblocking failed: {err}")))?;
+    trace::log(format!("listener:bound socket={}", path.display()));
     Ok(listener)
 }
 
@@ -79,11 +80,18 @@ fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppEr
         match listener.accept() {
             Ok((stream, _addr)) => {
                 last_activity = Instant::now();
+                if let Err(err) = stream.set_nonblocking(false) {
+                    eprintln!("failed to set client stream blocking mode: {err}");
+                    trace::log(format!("accept:set_blocking_failed error={err}"));
+                    continue;
+                }
+                trace::log("accept:client_connected");
                 let active_clients = Arc::clone(&active_clients);
                 active_clients.fetch_add(1, Ordering::SeqCst);
                 thread::spawn(move || {
                     if let Err(err) = handle_client(stream) {
                         eprintln!("daemon client error: {err}");
+                        trace::log(format!("client:error {err}"));
                     }
                     active_clients.fetch_sub(1, Ordering::SeqCst);
                 });
@@ -93,6 +101,7 @@ fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppEr
                     if active_clients.load(Ordering::SeqCst) == 0
                         && last_activity.elapsed() >= timeout
                     {
+                        trace::log("listener:idle_timeout_exit");
                         break;
                     }
                 }
@@ -110,6 +119,7 @@ fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppEr
     if path.exists() {
         let _ = fs::remove_file(path);
     }
+    trace::log("listener:closed");
     Ok(())
 }
 
@@ -118,10 +128,20 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     let request_id = request.request_id.clone();
     let command = request.command.clone();
     let command_name = command.name().to_string();
+    trace::log(format!(
+        "client:request_start request_id={} command={}",
+        request_id, command_name
+    ));
     let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(command)))
     {
-        Ok(Ok(result)) => ResponseEnvelope::success(request_id.clone(), result),
-        Ok(Err(err)) => ResponseEnvelope::from_error(request_id, command_name, err),
+        Ok(Ok(result)) => {
+            trace::log("client:execute_ok");
+            ResponseEnvelope::success(request_id.clone(), result)
+        }
+        Ok(Err(err)) => {
+            trace::log(format!("client:execute_err code={:?} msg={}", err.code, err.message));
+            ResponseEnvelope::from_error(request_id, command_name, err)
+        }
         Err(payload) => {
             let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
                 (*msg).to_string()
@@ -130,14 +150,18 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             } else {
                 "non-string panic payload".to_string()
             };
+            trace::log(format!("client:execute_panic {panic_message}"));
             let err = AppError::internal(format!("daemon panic during command execution: {panic_message}"));
             ResponseEnvelope::from_error(request_id, command_name, err)
         }
     };
     if let Err(err) = recording::record_command(&request, &response) {
         eprintln!("recorder write failed: {err}");
+        trace::log(format!("client:record_err {err}"));
     }
+    trace::log("client:write_response_begin");
     write_framed_json(&mut stream, &response)?;
+    trace::log("client:write_response_ok");
     Ok(())
 }
 
@@ -274,8 +298,14 @@ fn execute(command: Command) -> Result<Value, AppError> {
             Ok(json!({}))
         }
         Command::ScreenCapture { out_path } => {
+            trace::log("execute:screen_capture:start");
             permissions::ensure_screen_recording_permission()?;
             let capture = vision::pipeline::capture_and_update(out_path.map(Into::into))?;
+            trace::log(format!(
+                "execute:screen_capture:ok snapshot_id={} event_count={}",
+                capture.snapshot.snapshot_id,
+                capture.event_ids.len()
+            ));
             Ok(json!({
                 "snapshot_id": capture.snapshot.snapshot_id,
                 "timestamp": capture.snapshot.timestamp,
@@ -286,21 +316,31 @@ fn execute(command: Command) -> Result<Value, AppError> {
             }))
         }
         Command::ScreenSnapshot => {
+            trace::log("execute:screen_snapshot:start");
             if let Some(snapshot) = vision::pipeline::latest_snapshot()? {
+                trace::log(format!(
+                    "execute:screen_snapshot:cache_hit snapshot_id={}",
+                    snapshot.snapshot_id
+                ));
                 Ok(serde_json::to_value(snapshot).map_err(|err| {
                     AppError::internal(format!("failed to encode snapshot: {err}"))
                 })?)
             } else {
-                permissions::ensure_screen_recording_permission()?;
-                let capture = vision::pipeline::capture_and_update(None)?;
-                Ok(serde_json::to_value(capture.snapshot).map_err(|err| {
-                    AppError::internal(format!("failed to encode snapshot: {err}"))
-                })?)
+                trace::log("execute:screen_snapshot:cache_miss");
+                Err(AppError::target_not_found(
+                    "no snapshot available; run `desktopctl screen capture` first",
+                ))
             }
         }
         Command::ScreenTokenize => {
+            trace::log("execute:screen_tokenize:start");
             permissions::ensure_screen_recording_permission()?;
             let payload = vision::pipeline::tokenize()?;
+            trace::log(format!(
+                "execute:screen_tokenize:ok snapshot_id={} tokens={}",
+                payload.snapshot_id,
+                payload.tokens.len()
+            ));
             Ok(serde_json::to_value(payload).map_err(|err| {
                 AppError::internal(format!("failed to encode token payload: {err}"))
             })?)
