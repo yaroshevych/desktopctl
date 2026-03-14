@@ -33,7 +33,10 @@ pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, Ap
     let thumb = thumbnail_from_png(&capture.image_path, 96, 54)?;
     trace::log("pipeline:capture_and_update:thumb_ok");
     let texts = recognize_text_from_image(&capture.image_path, capture.width, capture.height)?;
-    trace::log(format!("pipeline:capture_and_update:ocr_ok texts={}", texts.len()));
+    trace::log(format!(
+        "pipeline:capture_and_update:ocr_ok texts={}",
+        texts.len()
+    ));
     let focused_app = focused_app_name();
     let image_path = capture.image_path.clone();
 

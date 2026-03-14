@@ -139,7 +139,10 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             ResponseEnvelope::success(request_id.clone(), result)
         }
         Ok(Err(err)) => {
-            trace::log(format!("client:execute_err code={:?} msg={}", err.code, err.message));
+            trace::log(format!(
+                "client:execute_err code={:?} msg={}",
+                err.code, err.message
+            ));
             ResponseEnvelope::from_error(request_id, command_name, err)
         }
         Err(payload) => {
@@ -151,7 +154,9 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
                 "non-string panic payload".to_string()
             };
             trace::log(format!("client:execute_panic {panic_message}"));
-            let err = AppError::internal(format!("daemon panic during command execution: {panic_message}"));
+            let err = AppError::internal(format!(
+                "daemon panic during command execution: {panic_message}"
+            ));
             ResponseEnvelope::from_error(request_id, command_name, err)
         }
     };
@@ -389,7 +394,22 @@ fn execute(command: Command) -> Result<Value, AppError> {
 fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let capture = vision::pipeline::capture_and_update(None)?;
+    trace::log(format!(
+        "ui_click_text:candidates snapshot_id={} query=\"{}\" texts={}",
+        capture.snapshot.snapshot_id,
+        query,
+        capture.snapshot.texts.len()
+    ));
     let target = select_text_candidate(&capture.snapshot.texts, query)?;
+    trace::log(format!(
+        "ui_click_text:selected text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
+        target.text,
+        target.confidence,
+        target.bounds.x,
+        target.bounds.y,
+        target.bounds.width,
+        target.bounds.height
+    ));
     perform_click(&target.bounds)?;
 
     verify_click_postcondition(query, &target.bounds, timeout_ms.min(2_000).max(300))?;
@@ -406,6 +426,16 @@ fn click_token_target(token_id: u32) -> Result<Value, AppError> {
             "token {token_id} not found; run `screen tokenize --json` first"
         ))
     })?;
+    trace::log(format!(
+        "ui_click_token:selected token={} text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
+        token_id,
+        token.text,
+        token.confidence,
+        token.bounds.x,
+        token.bounds.y,
+        token.bounds.width,
+        token.bounds.height
+    ));
     perform_click(&token.bounds)?;
     verify_click_postcondition(&token.text, &token.bounds, 1_200)?;
     Ok(json!({
@@ -505,6 +535,10 @@ fn perform_click(bounds: &desktop_core::protocol::Bounds) -> Result<(), AppError
     let center_x = (bounds.x + bounds.width / 2.0).max(0.0).round() as u32;
     let center_y = (bounds.y + bounds.height / 2.0).max(0.0).round() as u32;
     let point = Point::new(center_x, center_y);
+    trace::log(format!(
+        "perform_click:point bounds=({}, {}, {}, {}) center=({}, {})",
+        bounds.x, bounds.y, bounds.width, bounds.height, center_x, center_y
+    ));
     backend.move_mouse(point)?;
     thread::sleep(Duration::from_millis(60));
     backend.left_click(point)?;

@@ -24,7 +24,10 @@ pub fn session_dir() -> Result<PathBuf, AppError> {
     Ok(init_session()?.session_dir.clone())
 }
 
-pub fn record_command(request: &RequestEnvelope, response: &ResponseEnvelope) -> Result<(), AppError> {
+pub fn record_command(
+    request: &RequestEnvelope,
+    response: &ResponseEnvelope,
+) -> Result<(), AppError> {
     let recorder = init_session()?;
     let trace = build_trace_event(request, response, &recorder.frames_dir)?;
     let mut file = recorder
@@ -33,8 +36,9 @@ pub fn record_command(request: &RequestEnvelope, response: &ResponseEnvelope) ->
         .map_err(|_| AppError::internal("recorder trace lock poisoned"))?;
     let line = serde_json::to_string(&trace)
         .map_err(|err| AppError::internal(format!("failed to encode trace event: {err}")))?;
-    writeln!(file, "{line}")
-        .map_err(|err| AppError::backend_unavailable(format!("failed to append trace event: {err}")))?;
+    writeln!(file, "{line}").map_err(|err| {
+        AppError::backend_unavailable(format!("failed to append trace event: {err}"))
+    })?;
     Ok(())
 }
 
@@ -119,8 +123,15 @@ fn copy_frame_if_present(path: &str, frames_dir: &Path) -> Result<Option<String>
     if !source.exists() {
         return Ok(None);
     }
-    let extension = source.extension().and_then(|ext| ext.to_str()).unwrap_or("png");
-    let name = format!("frame-{}.{}", now_timestamp_string().replace(':', "-"), extension);
+    let extension = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("png");
+    let name = format!(
+        "frame-{}.{}",
+        now_timestamp_string().replace(':', "-"),
+        extension
+    );
     let destination = frames_dir.join(&name);
     fs::copy(&source, &destination).map_err(|err| {
         AppError::backend_unavailable(format!(

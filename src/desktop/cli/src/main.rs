@@ -458,7 +458,10 @@ where
             retry_request(request, &mut send)
         }
         Err(err) => {
-            trace_log(format!("send:initial_err code={:?} msg={}", err.code, err.message));
+            trace_log(format!(
+                "send:initial_err code={:?} msg={}",
+                err.code, err.message
+            ));
             Err(err)
         }
     }
@@ -509,8 +512,8 @@ where
 
 fn launch_daemon() -> Result<(), AppError> {
     if let Some(app_path) = discover_daemon_app_path() {
-        let autostart_mode = std::env::var("DESKTOPCTL_AUTOSTART_MODE")
-            .unwrap_or_else(|_| "resident".to_string());
+        let autostart_mode =
+            std::env::var("DESKTOPCTL_AUTOSTART_MODE").unwrap_or_else(|_| "resident".to_string());
         trace_log(format!(
             "launch:app_path={} mode={}",
             app_path.display(),

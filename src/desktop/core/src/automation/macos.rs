@@ -84,11 +84,11 @@ fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppErro
 }
 
 fn to_core_graphics_point(point: Point) -> CGPoint {
-    // Config coordinates are interpreted from the top-left of the main screen.
-    // Quartz global coordinates use a bottom-left origin, so we invert Y.
+    // DesktopCtl coordinates are absolute screen coordinates from the top-left
+    // of the main display, which is what CGEvent mouse APIs consume.
     let bounds = CGDisplay::main().bounds();
     let x = bounds.origin.x + point.x as f64;
-    let y = bounds.origin.y + (bounds.size.height - point.y as f64);
+    let y = bounds.origin.y + point.y as f64;
     CGPoint::new(x, y)
 }
 

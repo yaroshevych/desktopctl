@@ -21,10 +21,26 @@ fn snapshot_fixture_corpus_is_present() {
     for file in json_files {
         let raw = fs::read_to_string(&file).expect("read fixture JSON");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON fixture");
-        assert!(value.get("snapshot_id").is_some(), "snapshot_id missing in {}", file.display());
-        assert!(value.get("timestamp").is_some(), "timestamp missing in {}", file.display());
-        assert!(value.get("display").is_some(), "display missing in {}", file.display());
-        assert!(value.get("texts").is_some(), "texts missing in {}", file.display());
+        assert!(
+            value.get("snapshot_id").is_some(),
+            "snapshot_id missing in {}",
+            file.display()
+        );
+        assert!(
+            value.get("timestamp").is_some(),
+            "timestamp missing in {}",
+            file.display()
+        );
+        assert!(
+            value.get("display").is_some(),
+            "display missing in {}",
+            file.display()
+        );
+        assert!(
+            value.get("texts").is_some(),
+            "texts missing in {}",
+            file.display()
+        );
     }
 }
 

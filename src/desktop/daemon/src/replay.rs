@@ -10,7 +10,10 @@ use serde_json::{Value, json};
 pub fn load_session(session_dir: &Path) -> Result<Value, AppError> {
     let trace_path = session_dir.join("trace.jsonl");
     let file = File::open(&trace_path).map_err(|err| {
-        AppError::invalid_argument(format!("failed to open replay trace {}: {err}", trace_path.display()))
+        AppError::invalid_argument(format!(
+            "failed to open replay trace {}: {err}",
+            trace_path.display()
+        ))
     })?;
     let reader = BufReader::new(file);
     let mut events_loaded = 0_u64;
@@ -65,7 +68,10 @@ mod tests {
 
     #[test]
     fn replay_loads_trace_events() {
-        let dir = PathBuf::from(format!("/tmp/desktopctl-replay-test-{}", std::process::id()));
+        let dir = PathBuf::from(format!(
+            "/tmp/desktopctl-replay-test-{}",
+            std::process::id()
+        ));
         if dir.exists() {
             let _ = fs::remove_dir_all(&dir);
         }

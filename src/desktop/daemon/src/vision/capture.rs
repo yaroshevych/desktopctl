@@ -108,7 +108,10 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, Ap
             target_path.display()
         )));
     }
-    trace::log(format!("capture:screen_png:ok path={}", target_path.display()));
+    trace::log(format!(
+        "capture:screen_png:ok path={}",
+        target_path.display()
+    ));
 
     Ok(CapturedFrame {
         snapshot_id: now_millis() as u64,
@@ -182,7 +185,9 @@ fn capture_with_coregraphics(display: &CGDisplay, target_path: &PathBuf) -> Resu
     image
         .save_with_format(target_path, ImageFormat::Png)
         .map_err(|err| {
-            AppError::backend_unavailable(format!("failed to write PNG from CoreGraphics fallback: {err}"))
+            AppError::backend_unavailable(format!(
+                "failed to write PNG from CoreGraphics fallback: {err}"
+            ))
         })?;
     Ok(())
 }

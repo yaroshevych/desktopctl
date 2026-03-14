@@ -11,3 +11,5 @@
 
 tmp
 Justfile
+.claude/settings.local.json
+kb/20260311*

@@ -28,9 +28,9 @@ pub fn write_clipboard(text: &str) -> Result<(), AppError> {
             AppError::backend_unavailable(format!("failed writing to pbcopy stdin: {err}"))
         })?;
     }
-    let status = child
-        .wait()
-        .map_err(|err| AppError::backend_unavailable(format!("failed waiting for pbcopy: {err}")))?;
+    let status = child.wait().map_err(|err| {
+        AppError::backend_unavailable(format!("failed waiting for pbcopy: {err}"))
+    })?;
     if !status.success() {
         return Err(AppError::backend_unavailable("pbcopy failed"));
     }

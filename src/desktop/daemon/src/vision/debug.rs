@@ -18,12 +18,15 @@ pub fn write_debug_snapshot() -> Result<serde_json::Value, AppError> {
         (snapshot, frame_path, tokens)
     })?;
 
-    let snapshot = snapshot.ok_or_else(|| AppError::internal("no snapshot available for debug output"))?;
-    let frame_path = frame_path.ok_or_else(|| AppError::internal("no captured frame available for debug output"))?;
+    let snapshot =
+        snapshot.ok_or_else(|| AppError::internal("no snapshot available for debug output"))?;
+    let frame_path = frame_path
+        .ok_or_else(|| AppError::internal("no captured frame available for debug output"))?;
 
     let base_dir = PathBuf::from("/tmp/desktopctl-debug");
-    fs::create_dir_all(&base_dir)
-        .map_err(|err| AppError::backend_unavailable(format!("failed to create debug dir: {err}")))?;
+    fs::create_dir_all(&base_dir).map_err(|err| {
+        AppError::backend_unavailable(format!("failed to create debug dir: {err}"))
+    })?;
     let png_path = base_dir.join(format!("snapshot-{}.png", snapshot.snapshot_id));
     let json_path = base_dir.join(format!("snapshot-{}.json", snapshot.snapshot_id));
 
@@ -39,8 +42,9 @@ pub fn write_debug_snapshot() -> Result<serde_json::Value, AppError> {
     });
     let encoded = serde_json::to_vec_pretty(&payload)
         .map_err(|err| AppError::internal(format!("failed to encode debug payload: {err}")))?;
-    fs::write(&json_path, encoded)
-        .map_err(|err| AppError::backend_unavailable(format!("failed to write debug json: {err}")))?;
+    fs::write(&json_path, encoded).map_err(|err| {
+        AppError::backend_unavailable(format!("failed to write debug json: {err}"))
+    })?;
 
     Ok(json!({
         "snapshot_id": payload["snapshot"]["snapshot_id"],
