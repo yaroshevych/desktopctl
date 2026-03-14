@@ -402,6 +402,11 @@ fn execute(command: Command) -> Result<Value, AppError> {
             dy,
             timeout_ms,
         } => click_text_offset_target(&text, dx, dy, timeout_ms),
+        Command::UiClickSettingsAdd => click_settings_control("add", None, 800),
+        Command::UiClickSettingsRemove => click_settings_control("remove", None, 800),
+        Command::UiClickSettingsToggle { text, timeout_ms } => {
+            click_settings_control("toggle", Some(&text), timeout_ms)
+        }
         Command::UiClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -627,6 +632,86 @@ fn screen_settings_map() -> Result<Value, AppError> {
         "list_bounds": list_bounds,
         "rows": row_entries,
         "controls": controls
+    }))
+}
+
+fn click_settings_control(
+    control: &str,
+    row_text: Option<&str>,
+    timeout_ms: u64,
+) -> Result<Value, AppError> {
+    permissions::ensure_screen_recording_permission()?;
+    let payload = screen_settings_map()?;
+    let (x, y, details) = match control {
+        "add" => {
+            let click = payload["controls"]["add_click"].clone();
+            let (x, y) = point_from_value(&click).ok_or_else(|| {
+                AppError::target_not_found("settings add (+) button was not found")
+            })?;
+            (x, y, json!({ "control": "add", "click": click }))
+        }
+        "remove" => {
+            let click = payload["controls"]["remove_click"].clone();
+            let (x, y) = point_from_value(&click).ok_or_else(|| {
+                AppError::target_not_found("settings remove (-) button was not found")
+            })?;
+            (x, y, json!({ "control": "remove", "click": click }))
+        }
+        "toggle" => {
+            let needle = row_text
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::invalid_argument("settings toggle requires row text"))?;
+            let rows = payload["rows"]
+                .as_array()
+                .ok_or_else(|| AppError::internal("invalid settings rows payload"))?;
+            let matched = rows.iter().find(|row| {
+                row["text"]
+                    .as_str()
+                    .map(|text| text.to_lowercase().contains(&needle))
+                    .unwrap_or(false)
+            });
+            let row = matched.ok_or_else(|| {
+                AppError::target_not_found(format!(
+                    "settings row \"{}\" was not found",
+                    row_text.unwrap_or_default()
+                ))
+            })?;
+            let click = row["toggle_click"].clone();
+            let (x, y) = point_from_value(&click).ok_or_else(|| {
+                AppError::target_not_found(format!(
+                    "toggle target for row \"{}\" was not found",
+                    row_text.unwrap_or_default()
+                ))
+            })?;
+            (
+                x,
+                y,
+                json!({
+                    "control": "toggle",
+                    "row_text": row["text"],
+                    "click": click,
+                    "toggle_bounds": row["toggle_bounds"]
+                }),
+            )
+        }
+        _ => {
+            return Err(AppError::invalid_argument(format!(
+                "unsupported settings control: {control}"
+            )));
+        }
+    };
+
+    trace::log(format!(
+        "ui_click_settings_control control={} point=({}, {})",
+        control, x, y
+    ));
+    perform_click_at(x, y)?;
+    thread::sleep(Duration::from_millis(timeout_ms.min(500).max(40)));
+    Ok(json!({
+        "snapshot_id": payload["snapshot_id"],
+        "timestamp": payload["timestamp"],
+        "result": details
     }))
 }
 
@@ -1091,6 +1176,13 @@ fn center_point(bounds: &desktop_core::protocol::Bounds) -> serde_json::Value {
         "x": (bounds.x + bounds.width / 2.0).round().max(0.0) as u32,
         "y": (bounds.y + bounds.height / 2.0).round().max(0.0) as u32
     })
+}
+
+fn point_from_value(value: &serde_json::Value) -> Option<(u32, u32)> {
+    Some((
+        value.get("x")?.as_u64()? as u32,
+        value.get("y")?.as_u64()? as u32,
+    ))
 }
 
 fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {

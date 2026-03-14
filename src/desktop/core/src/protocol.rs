@@ -100,6 +100,12 @@ pub enum Command {
         dy: i32,
         timeout_ms: u64,
     },
+    UiClickSettingsAdd,
+    UiClickSettingsRemove,
+    UiClickSettingsToggle {
+        text: String,
+        timeout_ms: u64,
+    },
     UiClickToken {
         token: u32,
     },
@@ -142,6 +148,9 @@ impl Command {
             Command::ScreenSettingsMap => "screen_settings_map",
             Command::UiClickText { .. } => "ui_click_text",
             Command::UiClickTextOffset { .. } => "ui_click_text_offset",
+            Command::UiClickSettingsAdd => "ui_click_settings_add",
+            Command::UiClickSettingsRemove => "ui_click_settings_remove",
+            Command::UiClickSettingsToggle { .. } => "ui_click_settings_toggle",
             Command::UiClickToken { .. } => "ui_click_token",
             Command::UiRead => "ui_read",
             Command::ClipboardRead => "clipboard_read",
