@@ -260,6 +260,14 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             }
             Ok(Command::ScreenLayout)
         }
+        "settings" => {
+            if args.get(1).is_some() && args.get(1).map(String::as_str) != Some("--json") {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl screen settings [--json]",
+                ));
+            }
+            Ok(Command::ScreenSettingsMap)
+        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -518,6 +526,7 @@ fn usage() -> &'static str {
   desktopctl screen tokenize [--json]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen layout [--json]
+  desktopctl screen settings [--json]
   desktopctl ui click --text <text> [--timeout <ms>]
   desktopctl ui click --text-offset <text> --dx <px> --dy <px> [--timeout <ms>]
   desktopctl ui click --token <n>
@@ -864,6 +873,20 @@ mod tests {
                 assert_eq!(dy, 92);
                 assert_eq!(timeout_ms, 1500);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_settings_map() {
+        let args = vec![
+            "screen".to_string(),
+            "settings".to_string(),
+            "--json".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen settings should parse");
+        match command {
+            Command::ScreenSettingsMap => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

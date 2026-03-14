@@ -386,6 +386,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
             permissions::ensure_screen_recording_permission()?;
             screen_layout_summary()
         }
+        Command::ScreenSettingsMap => {
+            permissions::ensure_screen_recording_permission()?;
+            screen_settings_map()
+        }
         Command::WaitText {
             text,
             timeout_ms,
@@ -566,6 +570,63 @@ fn screen_layout_summary() -> Result<Value, AppError> {
         "text_envelope": text_envelope,
         "panels": panels,
         "button_like_texts": button_like
+    }))
+}
+
+fn screen_settings_map() -> Result<Value, AppError> {
+    let capture = vision::pipeline::capture_and_update(None)?;
+    let heading = find_settings_heading(&capture.snapshot.texts);
+    let rows = infer_settings_rows(&capture.snapshot.texts, heading.as_ref());
+    let list_bounds = bounds_from_texts(&rows).map(|b| desktop_core::protocol::Bounds {
+        x: (b.x - 18.0).max(0.0),
+        y: (b.y - 6.0).max(0.0),
+        width: b.width + 56.0,
+        height: b.height + 12.0,
+    });
+
+    let row_height = median_row_height(&rows).unwrap_or(14.0);
+    let controls = list_bounds.as_ref().map(|list| {
+        let control_y = list.y + list.height + row_height.max(10.0);
+        let plus = bounds_from_center(list.x + 12.0, control_y, 14.0, 14.0);
+        let minus = bounds_from_center(list.x + 30.0, control_y, 14.0, 14.0);
+        json!({
+            "add_button_bounds": plus,
+            "remove_button_bounds": minus,
+            "add_click": center_point(&plus),
+            "remove_click": center_point(&minus)
+        })
+    });
+
+    let row_entries = rows
+        .iter()
+        .map(|row| {
+            let toggle = list_bounds.as_ref().map(|list| {
+                bounds_from_center(
+                    list.x + list.width - 18.0,
+                    row.bounds.y + row.bounds.height / 2.0,
+                    28.0,
+                    16.0,
+                )
+            });
+            json!({
+                "text": row.text,
+                "bounds": row.bounds,
+                "confidence": row.confidence,
+                "toggle_bounds": toggle,
+                "toggle_click": toggle.as_ref().map(center_point)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "snapshot_id": capture.snapshot.snapshot_id,
+        "timestamp": capture.snapshot.timestamp,
+        "display": capture.snapshot.display,
+        "focused_app": capture.snapshot.focused_app,
+        "heading": heading,
+        "list_bounds": list_bounds,
+        "rows": row_entries,
+        "controls": controls
     }))
 }
 
@@ -937,6 +998,101 @@ fn infer_panels_from_texts(
     panels
 }
 
+fn find_settings_heading(
+    texts: &[desktop_core::protocol::SnapshotText],
+) -> Option<desktop_core::protocol::SnapshotText> {
+    let keys = [
+        "screen & system audio recording",
+        "screen recording",
+        "accessibility",
+    ];
+    texts
+        .iter()
+        .filter_map(|text| {
+            let lower = text.text.to_lowercase();
+            let matched = keys.iter().any(|key| lower.contains(key));
+            matched.then_some(text.clone())
+        })
+        .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
+}
+
+fn infer_settings_rows(
+    texts: &[desktop_core::protocol::SnapshotText],
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+) -> Vec<desktop_core::protocol::SnapshotText> {
+    let mut rows: Vec<desktop_core::protocol::SnapshotText> = texts
+        .iter()
+        .filter_map(|text| {
+            if !is_probable_settings_row_label(&text.text, text.confidence) {
+                return None;
+            }
+            if let Some(heading) = heading {
+                let min_y = heading.bounds.y + heading.bounds.height + 8.0;
+                let max_y = heading.bounds.y + 360.0;
+                if text.bounds.y < min_y || text.bounds.y > max_y {
+                    return None;
+                }
+                if text.bounds.x + text.bounds.width < heading.bounds.x - 120.0 {
+                    return None;
+                }
+            }
+            Some(text.clone())
+        })
+        .collect();
+    rows.sort_by(|a, b| a.bounds.y.total_cmp(&b.bounds.y));
+    rows
+}
+
+fn is_probable_settings_row_label(text: &str, confidence: f32) -> bool {
+    let value = text.trim();
+    if confidence < 0.35 || value.is_empty() || value.len() > 48 {
+        return false;
+    }
+    if !value.chars().any(|c| c.is_alphanumeric()) {
+        return false;
+    }
+    let lower = value.to_lowercase();
+    let blocked = [
+        "allow the applications",
+        "system audio recording only",
+        "no items",
+        "privacy",
+    ];
+    !blocked.iter().any(|word| lower.contains(word))
+}
+
+fn median_row_height(rows: &[desktop_core::protocol::SnapshotText]) -> Option<f64> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut heights = rows
+        .iter()
+        .map(|row| row.bounds.height)
+        .filter(|h| *h > 0.0)
+        .collect::<Vec<_>>();
+    if heights.is_empty() {
+        return None;
+    }
+    heights.sort_by(|a, b| a.total_cmp(b));
+    Some(heights[heights.len() / 2])
+}
+
+fn bounds_from_center(x: f64, y: f64, width: f64, height: f64) -> desktop_core::protocol::Bounds {
+    desktop_core::protocol::Bounds {
+        x: (x - width / 2.0).max(0.0),
+        y: (y - height / 2.0).max(0.0),
+        width,
+        height,
+    }
+}
+
+fn center_point(bounds: &desktop_core::protocol::Bounds) -> serde_json::Value {
+    json!({
+        "x": (bounds.x + bounds.width / 2.0).round().max(0.0) as u32,
+        "y": (bounds.y + bounds.height / 2.0).round().max(0.0) as u32
+    })
+}
+
 fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {
     let script = r#"tell application "System Events"
 set frontProc to first application process whose frontmost is true
@@ -1209,5 +1365,45 @@ mod tests {
         ];
         let panels = super::infer_panels_from_texts(&texts);
         assert!(panels.len() >= 2);
+    }
+
+    #[test]
+    fn infer_settings_rows_filters_noise() {
+        let heading = SnapshotText {
+            text: "Screen & System Audio Recording".to_string(),
+            bounds: Bounds {
+                x: 560.0,
+                y: 100.0,
+                width: 260.0,
+                height: 20.0,
+            },
+            confidence: 0.9,
+        };
+        let texts = vec![
+            heading.clone(),
+            SnapshotText {
+                text: "DesktopCtl".to_string(),
+                bounds: Bounds {
+                    x: 550.0,
+                    y: 210.0,
+                    width: 90.0,
+                    height: 14.0,
+                },
+                confidence: 0.9,
+            },
+            SnapshotText {
+                text: "Allow the applications below to record".to_string(),
+                bounds: Bounds {
+                    x: 540.0,
+                    y: 140.0,
+                    width: 290.0,
+                    height: 12.0,
+                },
+                confidence: 0.8,
+            },
+        ];
+        let rows = super::infer_settings_rows(&texts, Some(&heading));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "DesktopCtl");
     }
 }

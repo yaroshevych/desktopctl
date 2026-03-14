@@ -89,6 +89,7 @@ pub enum Command {
         all: bool,
     },
     ScreenLayout,
+    ScreenSettingsMap,
     UiClickText {
         text: String,
         timeout_ms: u64,
@@ -138,6 +139,7 @@ impl Command {
             Command::ScreenTokenize => "screen_tokenize",
             Command::ScreenFindText { .. } => "screen_find_text",
             Command::ScreenLayout => "screen_layout",
+            Command::ScreenSettingsMap => "screen_settings_map",
             Command::UiClickText { .. } => "ui_click_text",
             Command::UiClickTextOffset { .. } => "ui_click_text_offset",
             Command::UiClickToken { .. } => "ui_click_token",
