@@ -60,6 +60,7 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
 
     match args[0].as_str() {
         "ping" => Ok(Command::Ping),
+        "app" => parse_app(&args[1..]),
         "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
         "ui" => parse_ui(&args[1..]),
@@ -72,6 +73,30 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "key" => parse_key(&args[1..]),
         "wait" => parse_wait(&args[1..]),
         _ => Err(AppError::invalid_argument(usage())),
+    }
+}
+
+fn parse_app(args: &[String]) -> Result<Command, AppError> {
+    if args.len() < 2 {
+        return Err(AppError::invalid_argument(
+            "usage: desktopctl app hide <application> | desktopctl app show <application>",
+        ));
+    }
+
+    let action = args[0].as_str();
+    let name = args[1..].join(" ").trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::invalid_argument(
+            "missing application name: desktopctl app hide <application>",
+        ));
+    }
+
+    match action {
+        "hide" => Ok(Command::AppHide { name }),
+        "show" => Ok(Command::AppShow { name }),
+        _ => Err(AppError::invalid_argument(
+            "usage: desktopctl app hide <application> | desktopctl app show <application>",
+        )),
     }
 }
 
@@ -404,6 +429,8 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
 fn usage() -> &'static str {
     "usage:
   desktopctl ping
+  desktopctl app hide <application>
+  desktopctl app show <application>
   desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl open spotlight
   desktopctl open launchpad

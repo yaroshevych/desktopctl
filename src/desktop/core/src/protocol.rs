@@ -27,6 +27,12 @@ impl RequestEnvelope {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
     Ping,
+    AppHide {
+        name: String,
+    },
+    AppShow {
+        name: String,
+    },
     OpenApp {
         name: String,
         args: Vec<String>,
@@ -101,6 +107,8 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Ping => "ping",
+            Command::AppHide { .. } => "app_hide",
+            Command::AppShow { .. } => "app_show",
             Command::OpenApp { .. } => "open",
             Command::OpenSpotlight => "open_spotlight",
             Command::OpenLaunchpad => "open_launchpad",

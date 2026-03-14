@@ -1,4 +1,9 @@
-use std::process::Command;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use core_graphics::{
     display::CGDisplay,
@@ -68,18 +73,29 @@ impl Automation for MacosAutomation {
 }
 
 fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppError> {
+    let cg_point = to_core_graphics_point(point);
+    let bounds = CGDisplay::main().bounds();
+    trace_mouse(format!(
+        "mouse_event:post type={:?} logical=({}, {}) cg=({:.2}, {:.2}) display_origin=({:.2}, {:.2}) display_size=({:.2}, {:.2})",
+        event_type,
+        point.x,
+        point.y,
+        cg_point.x,
+        cg_point.y,
+        bounds.origin.x,
+        bounds.origin.y,
+        bounds.size.width,
+        bounds.size.height
+    ));
+
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| AppError::backend_unavailable("failed to create CoreGraphics event source"))?;
 
-    let event = CGEvent::new_mouse_event(
-        source,
-        event_type,
-        to_core_graphics_point(point),
-        CGMouseButton::Left,
-    )
-    .map_err(|_| AppError::backend_unavailable("failed to create mouse event"))?;
+    let event = CGEvent::new_mouse_event(source, event_type, cg_point, CGMouseButton::Left)
+        .map_err(|_| AppError::backend_unavailable("failed to create mouse event"))?;
 
     event.post(CGEventTapLocation::HID);
+    trace_mouse(format!("mouse_event:posted type={:?}", event_type));
     Ok(())
 }
 
@@ -167,4 +183,22 @@ unsafe extern "C" {
 
 fn ax_is_process_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+fn trace_mouse(message: impl AsRef<str>) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let tid = format!("{:?}", std::thread::current().id());
+    let line = format!("{ts} pid={pid} tid={tid} {}\n", message.as_ref());
+
+    let path = std::env::var("DESKTOPCTL_TRACE_PATH")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| "/tmp/desktopctld.trace.log".to_string());
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
 }

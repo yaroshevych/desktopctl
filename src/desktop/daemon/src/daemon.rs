@@ -173,6 +173,18 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
 fn execute(command: Command) -> Result<Value, AppError> {
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
+        Command::AppHide { name } => {
+            trace::log(format!("app_hide:start name={name}"));
+            let state = hide_application(&name)?;
+            trace::log(format!("app_hide:ok name={name} state={state}"));
+            Ok(json!({ "app": name, "state": state }))
+        }
+        Command::AppShow { name } => {
+            trace::log(format!("app_show:start name={name}"));
+            show_application(&name)?;
+            trace::log(format!("app_show:ok name={name}"));
+            Ok(json!({ "app": name, "state": "shown" }))
+        }
         Command::OpenApp {
             name,
             args,
@@ -232,33 +244,41 @@ fn execute(command: Command) -> Result<Value, AppError> {
             Ok(json!({}))
         }
         Command::PointerMove { x, y } => {
+            trace::log(format!("pointer_move:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             backend.move_mouse(Point::new(x, y))?;
+            trace::log(format!("pointer_move:ok x={x} y={y}"));
             Ok(json!({}))
         }
         Command::PointerDown { x, y } => {
+            trace::log(format!("pointer_down:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
             backend.left_down(point)?;
+            trace::log(format!("pointer_down:ok x={x} y={y}"));
             Ok(json!({}))
         }
         Command::PointerUp { x, y } => {
+            trace::log(format!("pointer_up:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
             backend.left_up(point)?;
+            trace::log(format!("pointer_up:ok x={x} y={y}"));
             Ok(json!({}))
         }
         Command::PointerClick { x, y } => {
+            trace::log(format!("pointer_click:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
             backend.left_click(point)?;
+            trace::log(format!("pointer_click:ok x={x} y={y}"));
             Ok(json!({}))
         }
         Command::PointerDrag {
@@ -268,6 +288,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
             y2,
             hold_ms,
         } => {
+            trace::log(format!(
+                "pointer_drag:start from=({}, {}) to=({}, {}) hold_ms={}",
+                x1, y1, x2, y2, hold_ms
+            ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let start = Point::new(x1, y1);
@@ -277,6 +301,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
             backend.sleep_ms(hold_ms.max(30));
             backend.left_drag(end)?;
             backend.left_up(end)?;
+            trace::log(format!(
+                "pointer_drag:ok from=({}, {}) to=({}, {}) hold_ms={}",
+                x1, y1, x2, y2, hold_ms
+            ));
             Ok(json!({}))
         }
         Command::UiType { text } => {
@@ -395,15 +423,18 @@ fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let capture = vision::pipeline::capture_and_update(None)?;
     trace::log(format!(
-        "ui_click_text:candidates snapshot_id={} query=\"{}\" texts={}",
+        "ui_click_text:candidates snapshot_id={} query=\"{}\" texts={} display={}x{} focused_app={}",
         capture.snapshot.snapshot_id,
         query,
-        capture.snapshot.texts.len()
+        capture.snapshot.texts.len(),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+        capture.snapshot.focused_app.as_deref().unwrap_or("<none>")
     ));
     let target = select_text_candidate(&capture.snapshot.texts, query)?;
     trace::log(format!(
         "ui_click_text:selected text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
-        target.text,
+        compact_for_log(&target.text),
         target.confidence,
         target.bounds.x,
         target.bounds.y,
@@ -500,32 +531,87 @@ fn select_text_candidate(
         .filter_map(|t| {
             let hay = t.text.to_lowercase();
             if hay.contains(&q) {
-                let exact = if hay == q { 1.0 } else { 0.0 };
-                Some((exact + t.confidence, t.clone()))
+                text_match_score(&q, &hay, t.confidence).map(|score| (score, t.clone()))
             } else {
                 None
             }
         })
         .collect();
 
+    trace::log(format!(
+        "select_text_candidate:start query=\"{}\" texts={} matches={}",
+        compact_for_log(query),
+        texts.len(),
+        candidates.len()
+    ));
+
     if candidates.is_empty() {
+        trace::log(format!(
+            "select_text_candidate:not_found query=\"{}\"",
+            compact_for_log(query)
+        ));
         return Err(AppError::target_not_found(format!(
             "text target \"{query}\" was not found"
         )));
     }
 
     candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let ranked = candidates
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(idx, (score, text))| {
+            let center_x = text.bounds.x + text.bounds.width / 2.0;
+            let center_y = text.bounds.y + text.bounds.height / 2.0;
+            format!(
+                "#{} score={:.3} conf={:.3} center=({:.1},{:.1}) bounds=({:.1},{:.1},{:.1},{:.1}) text=\"{}\"",
+                idx + 1,
+                score,
+                text.confidence,
+                center_x,
+                center_y,
+                text.bounds.x,
+                text.bounds.y,
+                text.bounds.width,
+                text.bounds.height,
+                compact_for_log(&text.text)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    trace::log(format!("select_text_candidate:ranked {ranked}"));
     if candidates.len() > 1 && (candidates[0].0 - candidates[1].0).abs() < 0.05 {
+        trace::log(format!(
+            "select_text_candidate:ambiguous query=\"{}\" top_delta={:.3}",
+            compact_for_log(query),
+            (candidates[0].0 - candidates[1].0).abs()
+        ));
         return Err(AppError::ambiguous_target(format!(
             "multiple matches for text \"{query}\""
         )));
     }
     let best = candidates.remove(0).1;
     if best.confidence < 0.25 {
+        trace::log(format!(
+            "select_text_candidate:low_confidence query=\"{}\" conf={:.3} text=\"{}\"",
+            compact_for_log(query),
+            best.confidence,
+            compact_for_log(&best.text)
+        ));
         return Err(AppError::low_confidence(format!(
             "match confidence too low for \"{query}\""
         )));
     }
+    trace::log(format!(
+        "select_text_candidate:best query=\"{}\" score_conf={:.3} text=\"{}\" bounds=({:.1},{:.1},{:.1},{:.1})",
+        compact_for_log(query),
+        best.confidence,
+        compact_for_log(&best.text),
+        best.bounds.x,
+        best.bounds.y,
+        best.bounds.width,
+        best.bounds.height
+    ));
     Ok(best)
 }
 
@@ -539,9 +625,16 @@ fn perform_click(bounds: &desktop_core::protocol::Bounds) -> Result<(), AppError
         "perform_click:point bounds=({}, {}, {}, {}) center=({}, {})",
         bounds.x, bounds.y, bounds.width, bounds.height, center_x, center_y
     ));
+    trace::log(format!(
+        "perform_click:move start center=({}, {})",
+        center_x, center_y
+    ));
     backend.move_mouse(point)?;
+    trace::log("perform_click:move ok");
     thread::sleep(Duration::from_millis(60));
+    trace::log("perform_click:left_click start");
     backend.left_click(point)?;
+    trace::log("perform_click:left_click ok");
     Ok(())
 }
 
@@ -599,6 +692,40 @@ fn iou(a: &desktop_core::protocol::Bounds, b: &desktop_core::protocol::Bounds) -
     if union <= 0.0 { 0.0 } else { inter / union }
 }
 
+fn compact_for_log(value: &str) -> String {
+    let mut normalized = value.replace(['\n', '\r', '\t'], " ");
+    normalized = normalized.trim().to_string();
+    if normalized.len() > 72 {
+        normalized.truncate(69);
+        normalized.push_str("...");
+    }
+    normalized
+}
+
+fn text_match_score(query: &str, candidate: &str, confidence: f32) -> Option<f32> {
+    if query.is_empty() || candidate.is_empty() || !candidate.contains(query) {
+        return None;
+    }
+
+    let q_len = query.chars().count().max(1) as f32;
+    let c_len = candidate.chars().count().max(1) as f32;
+    let length_ratio = (q_len / c_len).min(1.0);
+    let exact = if candidate == query { 1.0 } else { 0.0 };
+    let starts = if candidate.starts_with(query) {
+        1.0
+    } else {
+        0.0
+    };
+    let ends = if candidate.ends_with(query) { 1.0 } else { 0.0 };
+
+    // Drop noisy substring matches where the query is a tiny fragment of a long line.
+    if exact < 0.5 && length_ratio < 0.35 {
+        return None;
+    }
+
+    Some(exact * 3.0 + starts * 0.8 + ends * 0.4 + length_ratio * 2.2 + confidence * 0.8)
+}
+
 fn frontmost_app_name() -> Option<String> {
     let script =
         r#"tell application "System Events" to get name of first process whose frontmost is true"#;
@@ -636,6 +763,64 @@ fn ui_read_with_clipboard_restore() -> Result<Value, AppError> {
         "text": captured,
         "clipboard_restored": restore_ok
     }))
+}
+
+fn hide_application(name: &str) -> Result<&'static str, AppError> {
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"tell application "System Events"
+if exists process "{escaped}" then
+    set visible of process "{escaped}" to false
+    return "hidden"
+else
+    return "not_running"
+end if
+end tell"#
+    );
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AppError::internal(format!(
+            "failed to hide application \"{name}\": {stderr}"
+        )));
+    }
+
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if state == "hidden" {
+        Ok("hidden")
+    } else {
+        Ok("not_running")
+    }
+}
+
+fn show_application(name: &str) -> Result<(), AppError> {
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"tell application "System Events"
+if exists process "{escaped}" then
+    set visible of process "{escaped}" to true
+end if
+end tell
+tell application "{escaped}" to activate"#
+    );
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AppError::internal(format!(
+            "failed to show application \"{name}\": {stderr}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
