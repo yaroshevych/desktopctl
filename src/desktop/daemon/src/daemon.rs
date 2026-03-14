@@ -378,12 +378,26 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 AppError::internal(format!("failed to encode token payload: {err}"))
             })?)
         }
+        Command::ScreenFindText { text, all } => {
+            permissions::ensure_screen_recording_permission()?;
+            find_text_targets(&text, all)
+        }
+        Command::ScreenLayout => {
+            permissions::ensure_screen_recording_permission()?;
+            screen_layout_summary()
+        }
         Command::WaitText {
             text,
             timeout_ms,
             interval_ms,
         } => wait_for_text(&text, timeout_ms, interval_ms),
         Command::UiClickText { text, timeout_ms } => click_text_target(&text, timeout_ms),
+        Command::UiClickTextOffset {
+            text,
+            dx,
+            dy,
+            timeout_ms,
+        } => click_text_offset_target(&text, dx, dy, timeout_ms),
         Command::UiClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -448,6 +462,110 @@ fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
         "snapshot_id": capture.snapshot.snapshot_id,
         "text": target.text,
         "bounds": target.bounds
+    }))
+}
+
+fn click_text_offset_target(
+    query: &str,
+    dx: i32,
+    dy: i32,
+    timeout_ms: u64,
+) -> Result<Value, AppError> {
+    permissions::ensure_screen_recording_permission()?;
+    let capture = vision::pipeline::capture_and_update(None)?;
+    let target = select_text_candidate(&capture.snapshot.texts, query)?;
+    let base_x = (target.bounds.x + target.bounds.width / 2.0).round() as i64;
+    let base_y = (target.bounds.y + target.bounds.height / 2.0).round() as i64;
+    let click_x = (base_x + dx as i64).max(0) as u32;
+    let click_y = (base_y + dy as i64).max(0) as u32;
+    trace::log(format!(
+        "ui_click_text_offset:selected query=\"{}\" target=\"{}\" base=({}, {}) offset=({}, {}) click=({}, {})",
+        compact_for_log(query),
+        compact_for_log(&target.text),
+        base_x,
+        base_y,
+        dx,
+        dy,
+        click_x,
+        click_y
+    ));
+    perform_click_at(click_x, click_y)?;
+    // Offset-based clicks are often for unlabeled controls (+/-/toggles), so we don't enforce a strict text-disappears postcondition.
+    thread::sleep(Duration::from_millis(timeout_ms.min(400).max(40)));
+    Ok(json!({
+        "snapshot_id": capture.snapshot.snapshot_id,
+        "anchor_text": target.text,
+        "anchor_bounds": target.bounds,
+        "offset": { "dx": dx, "dy": dy },
+        "click_point": { "x": click_x, "y": click_y }
+    }))
+}
+
+fn find_text_targets(query: &str, all: bool) -> Result<Value, AppError> {
+    let capture = vision::pipeline::capture_and_update(None)?;
+    let ranked = ranked_text_candidates(&capture.snapshot.texts, query)?;
+    if ranked.is_empty() {
+        return Err(AppError::target_not_found(format!(
+            "text target \"{query}\" was not found"
+        )));
+    }
+    let entries: Vec<Value> = ranked
+        .iter()
+        .take(if all { ranked.len() } else { 1 })
+        .map(|(score, candidate)| {
+            json!({
+                "score": score,
+                "text": candidate.text,
+                "confidence": candidate.confidence,
+                "bounds": candidate.bounds
+            })
+        })
+        .collect();
+    Ok(json!({
+        "snapshot_id": capture.snapshot.snapshot_id,
+        "timestamp": capture.snapshot.timestamp,
+        "display": capture.snapshot.display,
+        "focused_app": capture.snapshot.focused_app,
+        "query": query,
+        "matches": entries
+    }))
+}
+
+fn screen_layout_summary() -> Result<Value, AppError> {
+    let capture = vision::pipeline::capture_and_update(None)?;
+    let text_envelope = bounds_from_texts(&capture.snapshot.texts);
+    let panels = infer_panels_from_texts(&capture.snapshot.texts)
+        .into_iter()
+        .map(|(name, bounds, text_count)| {
+            json!({
+                "name": name,
+                "bounds": bounds,
+                "text_count": text_count
+            })
+        })
+        .collect::<Vec<_>>();
+    let button_like = capture
+        .snapshot
+        .texts
+        .iter()
+        .filter(|t| t.confidence >= 0.4 && t.text.len() <= 32)
+        .map(|t| {
+            json!({
+                "text": t.text,
+                "bounds": t.bounds,
+                "confidence": t.confidence
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "snapshot_id": capture.snapshot.snapshot_id,
+        "timestamp": capture.snapshot.timestamp,
+        "display": capture.snapshot.display,
+        "focused_app": capture.snapshot.focused_app,
+        "frontmost_window": frontmost_window_bounds(),
+        "text_envelope": text_envelope,
+        "panels": panels,
+        "button_like_texts": button_like
     }))
 }
 
@@ -521,41 +639,14 @@ fn select_text_candidate(
     texts: &[desktop_core::protocol::SnapshotText],
     query: &str,
 ) -> Result<desktop_core::protocol::SnapshotText, AppError> {
-    let q = query.trim().to_lowercase();
-    if q.is_empty() {
-        return Err(AppError::invalid_argument("empty text selector"));
-    }
-
-    let mut candidates: Vec<(f32, desktop_core::protocol::SnapshotText)> = texts
-        .iter()
-        .filter_map(|t| {
-            let hay = t.text.to_lowercase();
-            if hay.contains(&q) {
-                text_match_score(&q, &hay, t.confidence).map(|score| (score, t.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    trace::log(format!(
-        "select_text_candidate:start query=\"{}\" texts={} matches={}",
-        compact_for_log(query),
-        texts.len(),
-        candidates.len()
-    ));
-
+    let mut candidates = ranked_text_candidates(texts, query)?;
+    trace_ranked_candidates(query, &candidates);
     if candidates.is_empty() {
-        trace::log(format!(
-            "select_text_candidate:not_found query=\"{}\"",
-            compact_for_log(query)
-        ));
         return Err(AppError::target_not_found(format!(
             "text target \"{query}\" was not found"
         )));
     }
 
-    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
     let ranked = candidates
         .iter()
         .take(10)
@@ -615,20 +706,61 @@ fn select_text_candidate(
     Ok(best)
 }
 
+fn ranked_text_candidates(
+    texts: &[desktop_core::protocol::SnapshotText],
+    query: &str,
+) -> Result<Vec<(f32, desktop_core::protocol::SnapshotText)>, AppError> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Err(AppError::invalid_argument("empty text selector"));
+    }
+    let mut candidates: Vec<(f32, desktop_core::protocol::SnapshotText)> = texts
+        .iter()
+        .filter_map(|t| {
+            let hay = t.text.to_lowercase();
+            if hay.contains(&q) {
+                text_match_score(&q, &hay, t.confidence).map(|score| (score, t.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok(candidates)
+}
+
+fn trace_ranked_candidates(
+    query: &str,
+    candidates: &[(f32, desktop_core::protocol::SnapshotText)],
+) {
+    trace::log(format!(
+        "select_text_candidate:start query=\"{}\" matches={}",
+        compact_for_log(query),
+        candidates.len()
+    ));
+    if candidates.is_empty() {
+        trace::log(format!(
+            "select_text_candidate:not_found query=\"{}\"",
+            compact_for_log(query)
+        ));
+    }
+}
+
 fn perform_click(bounds: &desktop_core::protocol::Bounds) -> Result<(), AppError> {
-    let backend = new_backend()?;
-    backend.check_accessibility_permission()?;
     let center_x = (bounds.x + bounds.width / 2.0).max(0.0).round() as u32;
     let center_y = (bounds.y + bounds.height / 2.0).max(0.0).round() as u32;
-    let point = Point::new(center_x, center_y);
     trace::log(format!(
         "perform_click:point bounds=({}, {}, {}, {}) center=({}, {})",
         bounds.x, bounds.y, bounds.width, bounds.height, center_x, center_y
     ));
-    trace::log(format!(
-        "perform_click:move start center=({}, {})",
-        center_x, center_y
-    ));
+    perform_click_at(center_x, center_y)
+}
+
+fn perform_click_at(x: u32, y: u32) -> Result<(), AppError> {
+    let backend = new_backend()?;
+    backend.check_accessibility_permission()?;
+    let point = Point::new(x, y);
+    trace::log(format!("perform_click:move start center=({}, {})", x, y));
     backend.move_mouse(point)?;
     trace::log("perform_click:move ok");
     thread::sleep(Duration::from_millis(60));
@@ -724,6 +856,122 @@ fn text_match_score(query: &str, candidate: &str, confidence: f32) -> Option<f32
     }
 
     Some(exact * 3.0 + starts * 0.8 + ends * 0.4 + length_ratio * 2.2 + confidence * 0.8)
+}
+
+fn bounds_from_texts(
+    texts: &[desktop_core::protocol::SnapshotText],
+) -> Option<desktop_core::protocol::Bounds> {
+    if texts.is_empty() {
+        return None;
+    }
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = 0.0_f64;
+    let mut max_y = 0.0_f64;
+    for text in texts {
+        min_x = min_x.min(text.bounds.x);
+        min_y = min_y.min(text.bounds.y);
+        max_x = max_x.max(text.bounds.x + text.bounds.width);
+        max_y = max_y.max(text.bounds.y + text.bounds.height);
+    }
+    Some(desktop_core::protocol::Bounds {
+        x: min_x.max(0.0),
+        y: min_y.max(0.0),
+        width: (max_x - min_x).max(0.0),
+        height: (max_y - min_y).max(0.0),
+    })
+}
+
+fn infer_panels_from_texts(
+    texts: &[desktop_core::protocol::SnapshotText],
+) -> Vec<(String, desktop_core::protocol::Bounds, usize)> {
+    if texts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut centers: Vec<f64> = texts
+        .iter()
+        .map(|t| t.bounds.x + t.bounds.width / 2.0)
+        .collect();
+    centers.sort_by(|a, b| a.total_cmp(b));
+    let mut best_gap = 0.0_f64;
+    let mut split = None;
+    for pair in centers.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap > best_gap {
+            best_gap = gap;
+            split = Some(pair[0] + gap / 2.0);
+        }
+    }
+
+    if best_gap < 80.0 {
+        return bounds_from_texts(texts)
+            .map(|bounds| vec![("main".to_string(), bounds, texts.len())])
+            .unwrap_or_default();
+    }
+
+    let split_x = split.unwrap_or(centers[centers.len() / 2]);
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for text in texts {
+        let center_x = text.bounds.x + text.bounds.width / 2.0;
+        if center_x < split_x {
+            left.push(text.clone());
+        } else {
+            right.push(text.clone());
+        }
+    }
+
+    let mut panels = Vec::new();
+    if let Some(bounds) = bounds_from_texts(&left) {
+        panels.push(("left".to_string(), bounds, left.len()));
+    }
+    if let Some(bounds) = bounds_from_texts(&right) {
+        panels.push(("right".to_string(), bounds, right.len()));
+    }
+    if panels.is_empty() {
+        if let Some(bounds) = bounds_from_texts(texts) {
+            panels.push(("main".to_string(), bounds, texts.len()));
+        }
+    }
+    panels
+}
+
+fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {
+    let script = r#"tell application "System Events"
+set frontProc to first application process whose frontmost is true
+if (count of windows of frontProc) is 0 then
+    return ""
+end if
+set winPos to position of front window of frontProc
+set winSize to size of front window of frontProc
+return (item 1 of winPos as string) & "," & (item 2 of winPos as string) & "," & (item 1 of winSize as string) & "," & (item 2 of winSize as string)
+end tell"#;
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let parts: Vec<f64> = raw
+        .split(',')
+        .filter_map(|v| v.trim().parse::<f64>().ok())
+        .collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    Some(desktop_core::protocol::Bounds {
+        x: parts[0].max(0.0),
+        y: parts[1].max(0.0),
+        width: parts[2].max(0.0),
+        height: parts[3].max(0.0),
+    })
 }
 
 fn frontmost_app_name() -> Option<String> {
@@ -902,5 +1150,64 @@ mod tests {
             result.expect_err("should fail").code,
             ErrorCode::AmbiguousTarget
         );
+    }
+
+    #[test]
+    fn ranked_text_candidates_filters_long_noise_lines() {
+        let texts = vec![
+            SnapshotText {
+                text: r#"./dist/desktopctl ui click --text "New Document" --timeout 2000"#
+                    .to_string(),
+                bounds: Bounds {
+                    x: 250.0,
+                    y: 40.0,
+                    width: 650.0,
+                    height: 16.0,
+                },
+                confidence: 0.6,
+            },
+            SnapshotText {
+                text: "New Document".to_string(),
+                bounds: Bounds {
+                    x: 500.0,
+                    y: 560.0,
+                    width: 96.0,
+                    height: 18.0,
+                },
+                confidence: 0.5,
+            },
+        ];
+        let ranked =
+            super::ranked_text_candidates(&texts, "New Document").expect("ranked candidates");
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].1.text, "New Document");
+    }
+
+    #[test]
+    fn infer_panels_splits_left_and_right_clusters() {
+        let texts = vec![
+            SnapshotText {
+                text: "Accessibility".to_string(),
+                bounds: Bounds {
+                    x: 340.0,
+                    y: 350.0,
+                    width: 90.0,
+                    height: 14.0,
+                },
+                confidence: 0.9,
+            },
+            SnapshotText {
+                text: "Screen & System Audio Recording".to_string(),
+                bounds: Bounds {
+                    x: 570.0,
+                    y: 100.0,
+                    width: 260.0,
+                    height: 20.0,
+                },
+                confidence: 0.9,
+            },
+        ];
+        let panels = super::infer_panels_from_texts(&texts);
+        assert!(panels.len() >= 2);
     }
 }

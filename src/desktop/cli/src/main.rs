@@ -225,6 +225,41 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             }
             Ok(Command::ScreenTokenize)
         }
+        "find" => {
+            if args.len() < 3 || args[1] != "--text" {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl screen find --text <text> [--all] [--json]",
+                ));
+            }
+            let text = args[2].clone();
+            let mut all = false;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--all" => {
+                        all = true;
+                        i += 1;
+                    }
+                    "--json" => {
+                        i += 1;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for screen find: {flag}"
+                        )));
+                    }
+                }
+            }
+            Ok(Command::ScreenFindText { text, all })
+        }
+        "layout" => {
+            if args.get(1).is_some() && args.get(1).map(String::as_str) != Some("--json") {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl screen layout [--json]",
+                ));
+            }
+            Ok(Command::ScreenLayout)
+        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -238,7 +273,7 @@ fn parse_ui(args: &[String]) -> Result<Command, AppError> {
         "click" => {
             if args.len() < 3 {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --token <n>",
+                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --text-offset <text> --dx <px> --dy <px> [--timeout <ms>] | --token <n>",
                 ));
             }
             match args[1].as_str() {
@@ -261,12 +296,50 @@ fn parse_ui(args: &[String]) -> Result<Command, AppError> {
                     }
                     Ok(Command::UiClickText { text, timeout_ms })
                 }
+                "--text-offset" => {
+                    let text = args[2].clone();
+                    let mut timeout_ms = 2_000_u64;
+                    let mut dx: Option<i32> = None;
+                    let mut dy: Option<i32> = None;
+                    let mut i = 3;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "--dx" => {
+                                dx = Some(parse_i32(args.get(i + 1), "dx")?);
+                                i += 2;
+                            }
+                            "--dy" => {
+                                dy = Some(parse_i32(args.get(i + 1), "dy")?);
+                                i += 2;
+                            }
+                            "--timeout" => {
+                                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
+                                i += 2;
+                            }
+                            flag => {
+                                return Err(AppError::invalid_argument(format!(
+                                    "unknown flag for ui click --text-offset: {flag}"
+                                )));
+                            }
+                        }
+                    }
+                    let dx =
+                        dx.ok_or_else(|| AppError::invalid_argument("missing dx: --dx <px>"))?;
+                    let dy =
+                        dy.ok_or_else(|| AppError::invalid_argument("missing dy: --dy <px>"))?;
+                    Ok(Command::UiClickTextOffset {
+                        text,
+                        dx,
+                        dy,
+                        timeout_ms,
+                    })
+                }
                 "--token" => {
                     let token = parse_u32(args.get(2), "token")?;
                     Ok(Command::UiClickToken { token })
                 }
                 _ => Err(AppError::invalid_argument(
-                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --token <n>",
+                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --text-offset <text> --dx <px> --dy <px> [--timeout <ms>] | --token <n>",
                 )),
             }
         }
@@ -426,6 +499,12 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
         .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
 }
 
+fn parse_i32(value: Option<&String>, field: &str) -> Result<i32, AppError> {
+    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
+    raw.parse::<i32>()
+        .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
+}
+
 fn usage() -> &'static str {
     "usage:
   desktopctl ping
@@ -437,7 +516,10 @@ fn usage() -> &'static str {
   desktopctl screen capture [--out <path>]
   desktopctl screen snapshot [--json]
   desktopctl screen tokenize [--json]
+  desktopctl screen find --text <text> [--all] [--json]
+  desktopctl screen layout [--json]
   desktopctl ui click --text <text> [--timeout <ms>]
+  desktopctl ui click --text-offset <text> --dx <px> --dy <px> [--timeout <ms>]
   desktopctl ui click --token <n>
   desktopctl ui read
   desktopctl permissions check
@@ -673,7 +755,7 @@ fn map_error_code(code: &ErrorCode) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::send_request_with_hooks;
+    use super::{parse_command, send_request_with_hooks};
     use desktop_core::{
         error::{AppError, ErrorCode},
         protocol::{Command, RequestEnvelope, ResponseEnvelope},
@@ -733,5 +815,56 @@ mod tests {
 
         assert_eq!(launched.load(Ordering::SeqCst), 0);
         assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn parses_screen_find_text() {
+        let args = vec![
+            "screen".to_string(),
+            "find".to_string(),
+            "--text".to_string(),
+            "DesktopCtl".to_string(),
+            "--all".to_string(),
+            "--json".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen find should parse");
+        match command {
+            Command::ScreenFindText { text, all } => {
+                assert_eq!(text, "DesktopCtl");
+                assert!(all);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ui_click_text_offset() {
+        let args = vec![
+            "ui".to_string(),
+            "click".to_string(),
+            "--text-offset".to_string(),
+            "DesktopCtl".to_string(),
+            "--dx".to_string(),
+            "-16".to_string(),
+            "--dy".to_string(),
+            "92".to_string(),
+            "--timeout".to_string(),
+            "1500".to_string(),
+        ];
+        let command = parse_command(&args).expect("ui click text-offset should parse");
+        match command {
+            Command::UiClickTextOffset {
+                text,
+                dx,
+                dy,
+                timeout_ms,
+            } => {
+                assert_eq!(text, "DesktopCtl");
+                assert_eq!(dx, -16);
+                assert_eq!(dy, 92);
+                assert_eq!(timeout_ms, 1500);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

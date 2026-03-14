@@ -84,8 +84,19 @@ pub enum Command {
     },
     ScreenSnapshot,
     ScreenTokenize,
+    ScreenFindText {
+        text: String,
+        all: bool,
+    },
+    ScreenLayout,
     UiClickText {
         text: String,
+        timeout_ms: u64,
+    },
+    UiClickTextOffset {
+        text: String,
+        dx: i32,
+        dy: i32,
         timeout_ms: u64,
     },
     UiClickToken {
@@ -125,7 +136,10 @@ impl Command {
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenSnapshot => "screen_snapshot",
             Command::ScreenTokenize => "screen_tokenize",
+            Command::ScreenFindText { .. } => "screen_find_text",
+            Command::ScreenLayout => "screen_layout",
             Command::UiClickText { .. } => "ui_click_text",
+            Command::UiClickTextOffset { .. } => "ui_click_text_offset",
             Command::UiClickToken { .. } => "ui_click_token",
             Command::UiRead => "ui_read",
             Command::ClipboardRead => "clipboard_read",
