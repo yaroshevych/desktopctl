@@ -14,3 +14,4 @@ tmp
 Justfile
 .claude/settings.local.json
 kb/20260311*
+/src/desktop/scripts/dev/__pycache__
