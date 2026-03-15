@@ -106,6 +106,14 @@ pub enum Command {
         text: String,
         timeout_ms: u64,
     },
+    UiSettingsEnsureEnabled {
+        text: String,
+        timeout_ms: u64,
+    },
+    UiSettingsUnlock {
+        password: String,
+        timeout_ms: u64,
+    },
     UiClickToken {
         token: u32,
     },
@@ -151,6 +159,8 @@ impl Command {
             Command::UiClickSettingsAdd => "ui_click_settings_add",
             Command::UiClickSettingsRemove => "ui_click_settings_remove",
             Command::UiClickSettingsToggle { .. } => "ui_click_settings_toggle",
+            Command::UiSettingsEnsureEnabled { .. } => "ui_settings_ensure_enabled",
+            Command::UiSettingsUnlock { .. } => "ui_settings_unlock",
             Command::UiClickToken { .. } => "ui_click_token",
             Command::UiRead => "ui_read",
             Command::ClipboardRead => "clipboard_read",

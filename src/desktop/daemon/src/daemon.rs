@@ -17,6 +17,7 @@ use desktop_core::{
     ipc::{read_framed_json, socket_path, write_framed_json},
     protocol::{Command, RequestEnvelope, ResponseEnvelope},
 };
+use image::RgbaImage;
 use serde_json::{Value, json};
 
 use crate::{clipboard, permissions, recording, replay, trace, vision};
@@ -407,6 +408,13 @@ fn execute(command: Command) -> Result<Value, AppError> {
         Command::UiClickSettingsToggle { text, timeout_ms } => {
             click_settings_control("toggle", Some(&text), timeout_ms)
         }
+        Command::UiSettingsEnsureEnabled { text, timeout_ms } => {
+            settings_ensure_enabled(&text, timeout_ms)
+        }
+        Command::UiSettingsUnlock {
+            password,
+            timeout_ms,
+        } => settings_unlock(&password, timeout_ms),
         Command::UiClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -580,6 +588,7 @@ fn screen_layout_summary() -> Result<Value, AppError> {
 
 fn screen_settings_map() -> Result<Value, AppError> {
     let capture = vision::pipeline::capture_and_update(None)?;
+    let frame_image = load_rgba_image(&capture.image_path);
     let heading = find_settings_heading(&capture.snapshot.texts);
     let rows = infer_settings_rows(&capture.snapshot.texts, heading.as_ref());
     let list_bounds = bounds_from_texts(&rows).map(|b| desktop_core::protocol::Bounds {
@@ -613,12 +622,17 @@ fn screen_settings_map() -> Result<Value, AppError> {
                     16.0,
                 )
             });
+            let toggle_state = toggle
+                .as_ref()
+                .map(|bounds| estimate_toggle_state(frame_image.as_ref(), bounds))
+                .unwrap_or_else(|| "unknown".to_string());
             json!({
                 "text": row.text,
                 "bounds": row.bounds,
                 "confidence": row.confidence,
                 "toggle_bounds": toggle,
-                "toggle_click": toggle.as_ref().map(center_point)
+                "toggle_click": toggle.as_ref().map(center_point),
+                "toggle_state": toggle_state
             })
         })
         .collect::<Vec<_>>();
@@ -713,6 +727,132 @@ fn click_settings_control(
         "timestamp": payload["timestamp"],
         "result": details
     }))
+}
+
+fn settings_ensure_enabled(row_text: &str, timeout_ms: u64) -> Result<Value, AppError> {
+    let before = screen_settings_map()?;
+    let before_row = find_settings_row(&before, row_text)?;
+    let before_state = before_row["toggle_state"].as_str().unwrap_or("unknown");
+    if before_state == "on" {
+        return Ok(json!({
+            "row_text": before_row["text"],
+            "state_before": before_state,
+            "state_after": before_state,
+            "changed": false
+        }));
+    }
+
+    let _ = click_settings_control("toggle", Some(row_text), timeout_ms)?;
+    let after = screen_settings_map()?;
+    let after_row = find_settings_row(&after, row_text)?;
+    let after_state = after_row["toggle_state"].as_str().unwrap_or("unknown");
+    if after_state == "on" {
+        return Ok(json!({
+            "row_text": after_row["text"],
+            "state_before": before_state,
+            "state_after": after_state,
+            "changed": true
+        }));
+    }
+
+    if unlock_prompt_visible()? {
+        return Err(AppError::permission_denied(
+            "settings requires authentication; run `desktopctl ui settings unlock --password <password>` and retry",
+        ));
+    }
+
+    Err(AppError::postcondition_failed(format!(
+        "failed to enable settings row \"{row_text}\" (state remained \"{after_state}\")"
+    )))
+}
+
+fn settings_unlock(password: &str, timeout_ms: u64) -> Result<Value, AppError> {
+    let candidates = ["Use Password...", "Use Password", "Unlock"];
+    for label in candidates {
+        let _ = click_text_once(label, 400);
+    }
+
+    let start = Instant::now();
+    let mut field_clicked = false;
+    while start.elapsed().as_millis() as u64 <= timeout_ms.max(600) {
+        let capture = vision::pipeline::capture_and_update(None)?;
+        if let Ok(password_label) = select_text_candidate(&capture.snapshot.texts, "Password") {
+            let x = (password_label.bounds.x + password_label.bounds.width + 120.0)
+                .max(0.0)
+                .round() as u32;
+            let y = (password_label.bounds.y + password_label.bounds.height / 2.0)
+                .max(0.0)
+                .round() as u32;
+            perform_click_at(x, y)?;
+            field_clicked = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+    if !field_clicked {
+        return Err(AppError::target_not_found(
+            "password field was not found in settings unlock prompt",
+        ));
+    }
+
+    let backend = new_backend()?;
+    backend.check_accessibility_permission()?;
+    backend.type_text(password)?;
+    backend.press_enter()?;
+    thread::sleep(Duration::from_millis(260));
+
+    Ok(json!({
+        "unlocked": true
+    }))
+}
+
+fn click_text_once(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
+    permissions::ensure_screen_recording_permission()?;
+    let start = Instant::now();
+    while start.elapsed().as_millis() as u64 <= timeout_ms.max(250) {
+        let capture = vision::pipeline::capture_and_update(None)?;
+        if let Ok(target) = select_text_candidate(&capture.snapshot.texts, query) {
+            perform_click(&target.bounds)?;
+            return Ok(json!({
+                "snapshot_id": capture.snapshot.snapshot_id,
+                "text": target.text,
+                "bounds": target.bounds
+            }));
+        }
+        thread::sleep(Duration::from_millis(80));
+    }
+    Err(AppError::target_not_found(format!(
+        "text target \"{query}\" was not found"
+    )))
+}
+
+fn find_settings_row<'a>(payload: &'a Value, needle: &str) -> Result<&'a Value, AppError> {
+    let rows = payload["rows"]
+        .as_array()
+        .ok_or_else(|| AppError::internal("invalid settings rows payload"))?;
+    let needle = needle.trim().to_lowercase();
+    rows.iter()
+        .find(|row| {
+            row["text"]
+                .as_str()
+                .map(|text| text.to_lowercase().contains(&needle))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            AppError::target_not_found(format!("settings row \"{needle}\" was not found"))
+        })
+}
+
+fn unlock_prompt_visible() -> Result<bool, AppError> {
+    let capture = vision::pipeline::capture_and_update(None)?;
+    let found = capture.snapshot.texts.iter().any(|text| {
+        let lower = text.text.to_lowercase();
+        lower.contains("password")
+            || lower.contains("unlock")
+            || lower.contains("use password")
+            || lower.contains("touch id")
+    });
+    Ok(found)
 }
 
 fn click_token_target(token_id: u32) -> Result<Value, AppError> {
@@ -1183,6 +1323,65 @@ fn point_from_value(value: &serde_json::Value) -> Option<(u32, u32)> {
         value.get("x")?.as_u64()? as u32,
         value.get("y")?.as_u64()? as u32,
     ))
+}
+
+fn load_rgba_image(path: &std::path::Path) -> Option<RgbaImage> {
+    image::open(path).ok().map(|img| img.to_rgba8())
+}
+
+fn estimate_toggle_state(
+    image: Option<&RgbaImage>,
+    bounds: &desktop_core::protocol::Bounds,
+) -> String {
+    let image = match image {
+        Some(img) => img,
+        None => return "unknown".to_string(),
+    };
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    if width <= 0 || height <= 0 {
+        return "unknown".to_string();
+    }
+
+    let x0 = bounds.x.floor().max(0.0) as i32;
+    let y0 = bounds.y.floor().max(0.0) as i32;
+    let x1 = (bounds.x + bounds.width).ceil().max(0.0) as i32;
+    let y1 = (bounds.y + bounds.height).ceil().max(0.0) as i32;
+    let x0 = x0.clamp(0, width - 1);
+    let y0 = y0.clamp(0, height - 1);
+    let x1 = x1.clamp(x0 + 1, width);
+    let y1 = y1.clamp(y0 + 1, height);
+
+    let mut r_sum = 0f64;
+    let mut g_sum = 0f64;
+    let mut b_sum = 0f64;
+    let mut count = 0f64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let px = image.get_pixel(x as u32, y as u32).0;
+            r_sum += px[0] as f64;
+            g_sum += px[1] as f64;
+            b_sum += px[2] as f64;
+            count += 1.0;
+        }
+    }
+    if count <= 0.0 {
+        return "unknown".to_string();
+    }
+    let r = r_sum / count;
+    let g = g_sum / count;
+    let b = b_sum / count;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let chroma = max - min;
+
+    if chroma < 12.0 {
+        "off".to_string()
+    } else if b > g + 8.0 && b > r + 18.0 && b > 90.0 {
+        "on".to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {

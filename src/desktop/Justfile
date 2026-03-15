@@ -26,3 +26,88 @@ run: build
 
 clean:
   rm -rf {{dist_dir}} {{workspace_dir}}/target
+
+vm-enable-permissions vm_host vm_user vm_window_app="UTM":
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  VM_HOST="{{vm_host}}"
+  VM_USER="{{vm_user}}"
+  VM_WINDOW_APP="{{vm_window_app}}"
+
+  HOST_DCTL="{{cli_path}}"
+  VM_APP_DIR="/Users/${VM_USER}/DesktopCtl/dist"
+  VM_APP_PATH="${VM_APP_DIR}/DesktopCtl.app"
+  VM_CLI_PATH="${VM_APP_DIR}/desktopctl"
+
+  if [[ ! -x "$HOST_DCTL" ]]; then
+    just build
+  fi
+
+  if [[ -z "${VM_OS_PASSWORD:-}" ]]; then
+    read -r -s -p "VM macOS password (for Settings unlock prompts): " VM_OS_PASSWORD
+    echo
+  fi
+
+  echo "[1/7] Build host artifacts"
+  just build
+
+  echo "[2/7] Copy artifacts to VM (${VM_HOST})"
+  ssh "$VM_HOST" "mkdir -p '$VM_APP_DIR'"
+  scp -r "{{app_dir}}" "$VM_HOST:$VM_APP_DIR/"
+  scp "{{cli_path}}" "$VM_HOST:$VM_APP_DIR/"
+  ssh "$VM_HOST" "chmod +x '$VM_CLI_PATH' '$VM_APP_PATH/Contents/MacOS/desktopctld'"
+
+  echo "[3/7] Stop old daemon in VM"
+  ssh "$VM_HOST" "pkill -f desktopctld || true; pkill -f 'DesktopCtl.app' || true"
+
+  echo "[4/7] Focus VM window on host"
+  "$HOST_DCTL" app hide Ghostty || true
+  "$HOST_DCTL" open "$VM_WINDOW_APP" --wait
+
+  add_entry_in_current_pane() {
+    "$HOST_DCTL" ui click --text "DesktopCtl" --timeout 1200 || true
+    "$HOST_DCTL" ui click --settings-remove || true
+    "$HOST_DCTL" wait 220
+
+    "$HOST_DCTL" ui click --settings-add
+    "$HOST_DCTL" wait --text "Open" --timeout 6000
+    "$HOST_DCTL" key press cmd+shift+g
+    "$HOST_DCTL" type "$VM_APP_DIR"
+    "$HOST_DCTL" key press enter
+    "$HOST_DCTL" wait --text "DesktopCtl.app" --timeout 6000
+    "$HOST_DCTL" ui click --text "DesktopCtl.app" --timeout 3000
+    "$HOST_DCTL" ui click --text "Open" --timeout 3000
+    "$HOST_DCTL" wait 380
+  }
+
+  ensure_row_enabled() {
+    local row_text="$1"
+    if "$HOST_DCTL" ui settings enable "$row_text" --timeout 1600; then
+      return 0
+    fi
+    "$HOST_DCTL" ui settings unlock --password "$VM_OS_PASSWORD" --timeout 2800
+    "$HOST_DCTL" ui settings enable "$row_text" --timeout 1600
+  }
+
+  echo "[5/7] Configure Accessibility pane in VM"
+  ssh "$VM_HOST" "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'"
+  "$HOST_DCTL" wait --text "Accessibility" --timeout 14000
+  add_entry_in_current_pane
+  ensure_row_enabled "DesktopCtl"
+
+  echo "[6/7] Configure Screen Recording pane in VM"
+  ssh "$VM_HOST" "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'"
+  "$HOST_DCTL" wait --text "Screen" --timeout 14000
+  add_entry_in_current_pane
+  ensure_row_enabled "DesktopCtl"
+  "$HOST_DCTL" ui click --text "Quit & Reopen" --timeout 2500 || "$HOST_DCTL" ui click --text "Later" --timeout 1500 || true
+
+  echo "[7/7] Verify in VM over SSH"
+  ssh "$VM_HOST" "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' permissions check"
+  ssh "$VM_HOST" "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen capture --out /tmp/dctl-cap.png"
+  ssh "$VM_HOST" "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen snapshot --json"
+  ssh "$VM_HOST" "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen tokenize --json"
+
+  "$HOST_DCTL" app show Ghostty || true
+  echo "Done: VM permissions and basic verification completed."
