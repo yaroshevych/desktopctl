@@ -117,10 +117,17 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
 /// Scan the entire image for the red/yellow/green traffic light triplet.
 /// Returns the center of the red dot.
 fn find_traffic_lights(image: &RgbaImage) -> Option<(i32, i32)> {
+    traffic_light_triplet_candidates(image)
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, x, y)| (x, y))
+}
+
+fn traffic_light_triplet_candidates(image: &RgbaImage) -> Vec<(f64, i32, i32)> {
     let width = image.width() as usize;
     let height = image.height() as usize;
     if width < 80 || height < 30 {
-        return None;
+        return Vec::new();
     }
 
     // Build color classification mask
@@ -207,7 +214,7 @@ fn find_traffic_lights(image: &RgbaImage) -> Option<(i32, i32)> {
     let yellows: Vec<_> = components.iter().filter(|c| c.0 == 2).collect();
     let greens: Vec<_> = components.iter().filter(|c| c.0 == 3).collect();
 
-    let mut best: Option<(f64, i32, i32)> = None; // (score, red_cx, red_cy)
+    let mut candidates: Vec<(f64, i32, i32)> = Vec::new(); // (score, red_cx, red_cy)
 
     for r in &reds {
         for y in &yellows {
@@ -256,16 +263,20 @@ fn find_traffic_lights(image: &RgbaImage) -> Option<(i32, i32)> {
                 let spacing_err = (dx_ry as f64 - 20.0).abs() + (dx_yg as f64 - 20.0).abs();
                 // Lower score is better
                 let score = near_origin + spacing_err - title_bar_score * 30.0;
-
-                match best {
-                    Some((best_score, _, _)) if score >= best_score => {}
-                    _ => best = Some((score, r.1, r.2)),
-                }
+                candidates.push((score, r.1, r.2));
             }
         }
     }
 
-    best.map(|(_, x, y)| (x, y))
+    candidates
+}
+
+#[cfg(test)]
+pub(crate) fn traffic_light_candidates_for_test(image: &RgbaImage) -> Vec<(i32, i32)> {
+    traffic_light_triplet_candidates(image)
+        .into_iter()
+        .map(|(_, x, y)| (x, y))
+        .collect()
 }
 
 fn classify_traffic_light_pixel(r: u8, g: u8, b: u8) -> u8 {
