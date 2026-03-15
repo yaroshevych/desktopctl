@@ -596,27 +596,52 @@ fn screen_layout_summary() -> Result<Value, AppError> {
 fn screen_settings_map() -> Result<Value, AppError> {
     let capture = vision::pipeline::capture_and_update(None)?;
     let frame_image = load_rgba_image(&capture.image_path);
-    let heading = find_settings_heading(&capture.snapshot.texts);
+    let detected_regions = frame_image
+        .as_ref()
+        .map(vision::regions::detect_settings_regions)
+        .unwrap_or_default();
+    let heading = find_settings_heading(
+        &capture.snapshot.texts,
+        detected_regions.content_bounds.as_ref(),
+    );
     let rows = infer_settings_rows(&capture.snapshot.texts, heading.as_ref());
-    let list_bounds = bounds_from_texts(&rows).map(|b| desktop_core::protocol::Bounds {
+    let row_height = median_row_height(&rows).unwrap_or(14.0);
+    let no_items = first_matching_text(&capture.snapshot.texts, "no items");
+    let mut list_bounds = bounds_from_texts(&rows).map(|b| desktop_core::protocol::Bounds {
         x: (b.x - 18.0).max(0.0),
         y: (b.y - 6.0).max(0.0),
         width: b.width + 56.0,
         height: b.height + 12.0,
     });
+    if let (Some(list), Some(content)) = (&list_bounds, &detected_regions.content_bounds) {
+        let list_center_x = list.x + list.width / 2.0;
+        let list_center_y = list.y + list.height / 2.0;
+        let content_x2 = content.x + content.width;
+        let content_y2 = content.y + content.height;
+        let center_inside = list_center_x >= content.x
+            && list_center_x <= content_x2
+            && list_center_y >= content.y
+            && list_center_y <= content_y2;
+        if !center_inside || iou(list, content) < 0.06 {
+            list_bounds = None;
+        }
+    }
+    if list_bounds.is_none() {
+        list_bounds = infer_list_bounds_from_anchors(
+            heading.as_ref(),
+            no_items.as_ref(),
+            detected_regions.content_bounds.as_ref(),
+        );
+    }
+    if list_bounds.is_none() {
+        list_bounds = detected_regions.table_bounds.clone();
+    }
 
-    let row_height = median_row_height(&rows).unwrap_or(14.0);
-    let controls = list_bounds.as_ref().map(|list| {
-        let control_y = list.y + list.height + row_height.max(10.0);
-        let plus = bounds_from_center(list.x + 12.0, control_y, 14.0, 14.0);
-        let minus = bounds_from_center(list.x + 30.0, control_y, 14.0, 14.0);
-        json!({
-            "add_button_bounds": plus,
-            "remove_button_bounds": minus,
-            "add_click": center_point(&plus),
-            "remove_click": center_point(&minus)
-        })
-    });
+    let controls = infer_settings_controls(
+        list_bounds.as_ref(),
+        detected_regions.table_bounds.as_ref(),
+        row_height,
+    );
 
     let row_entries = rows
         .iter()
@@ -651,6 +676,12 @@ fn screen_settings_map() -> Result<Value, AppError> {
         "focused_app": capture.snapshot.focused_app,
         "heading": heading,
         "list_bounds": list_bounds,
+        "regions": {
+            "settings_window": detected_regions.window_bounds,
+            "sidebar": detected_regions.sidebar_bounds,
+            "content": detected_regions.content_bounds,
+            "table": detected_regions.table_bounds
+        },
         "rows": row_entries,
         "controls": controls
     }))
@@ -722,6 +753,77 @@ fn click_settings_control(
             )));
         }
     };
+
+    let display_w = payload["display"]["width"]
+        .as_u64()
+        .map(|v| v as u32)
+        .unwrap_or(u32::MAX);
+    let display_h = payload["display"]["height"]
+        .as_u64()
+        .map(|v| v as u32)
+        .unwrap_or(u32::MAX);
+    if x >= display_w || y >= display_h {
+        return Err(AppError::target_not_found(format!(
+            "settings {control} click target ({x},{y}) is outside display bounds {display_w}x{display_h}"
+        )));
+    }
+    if matches!(control, "add" | "remove") {
+        if payload.get("heading").map(|v| v.is_null()).unwrap_or(true)
+            && payload["regions"]
+                .get("settings_window")
+                .map(|v| v.is_null())
+                .unwrap_or(true)
+        {
+            return Err(AppError::target_not_found(
+                "settings pane is not detected in the current frame",
+            ));
+        }
+        if let Some((wx, wy, ww, wh)) = payload["regions"]
+            .get("settings_window")
+            .and_then(bounds_tuple_from_value)
+        {
+            let inside_window = (x as f64) >= wx
+                && (x as f64) <= wx + ww
+                && (y as f64) >= wy
+                && (y as f64) <= wy + wh;
+            if !inside_window {
+                return Err(AppError::target_not_found(format!(
+                    "settings {control} click target ({x},{y}) is outside detected settings window"
+                )));
+            }
+        }
+        if let Some((tx, ty, tw, th)) = payload["regions"]
+            .get("table")
+            .and_then(bounds_tuple_from_value)
+        {
+            let margin = 26.0;
+            let inside_table_band = (x as f64) >= tx - margin
+                && (x as f64) <= tx + tw + margin
+                && (y as f64) >= ty - margin
+                && (y as f64) <= ty + th + margin;
+            if !inside_table_band {
+                return Err(AppError::target_not_found(format!(
+                    "settings {control} click target ({x},{y}) is outside detected controls band"
+                )));
+            }
+        }
+        if let Some((hx, hy, _hw, hh)) = payload
+            .get("heading")
+            .and_then(|h| h.get("bounds"))
+            .and_then(bounds_tuple_from_value)
+        {
+            let y_f = y as f64;
+            let x_f = x as f64;
+            let y_min = hy - hh.max(14.0);
+            let y_max = hy + 320.0;
+            let x_min = hx - 90.0;
+            if y_f < y_min || y_f > y_max || x_f < x_min {
+                return Err(AppError::target_not_found(format!(
+                    "settings {control} click target ({x},{y}) is outside expected pane near heading"
+                )));
+            }
+        }
+    }
 
     trace::log(format!(
         "ui_click_settings_control control={} point=({}, {})",
@@ -1232,20 +1334,46 @@ fn infer_panels_from_texts(
 
 fn find_settings_heading(
     texts: &[desktop_core::protocol::SnapshotText],
+    content_bounds: Option<&desktop_core::protocol::Bounds>,
 ) -> Option<desktop_core::protocol::SnapshotText> {
     let keys = [
         "screen & system audio recording",
         "screen recording",
         "accessibility",
     ];
-    texts
+    let mut candidates = texts
         .iter()
         .filter_map(|text| {
             let lower = text.text.to_lowercase();
             let matched = keys.iter().any(|key| lower.contains(key));
-            matched.then_some(text.clone())
+            if !matched {
+                return None;
+            }
+            if let Some(content) = content_bounds {
+                let center_x = text.bounds.x + text.bounds.width / 2.0;
+                let center_y = text.bounds.y + text.bounds.height / 2.0;
+                let x2 = content.x + content.width;
+                let y2 = content.y + content.height;
+                let inside = center_x >= content.x
+                    && center_x <= x2
+                    && center_y >= content.y
+                    && center_y <= y2;
+                if !inside || text.bounds.y > content.y + content.height * 0.45 {
+                    return None;
+                }
+            }
+            Some(text.clone())
         })
-        .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        a.bounds
+            .y
+            .total_cmp(&b.bounds.y)
+            .then_with(|| b.bounds.x.total_cmp(&a.bounds.x))
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+            .then_with(|| b.bounds.width.total_cmp(&a.bounds.width))
+    });
+    candidates.into_iter().next()
 }
 
 fn infer_settings_rows(
@@ -1273,6 +1401,108 @@ fn infer_settings_rows(
         .collect();
     rows.sort_by(|a, b| a.bounds.y.total_cmp(&b.bounds.y));
     rows
+}
+
+fn first_matching_text(
+    texts: &[desktop_core::protocol::SnapshotText],
+    needle: &str,
+) -> Option<desktop_core::protocol::SnapshotText> {
+    let needle = needle.trim().to_lowercase();
+    texts
+        .iter()
+        .find(|t| t.text.to_lowercase().contains(&needle))
+        .cloned()
+}
+
+fn infer_list_bounds_from_anchors(
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    no_items: Option<&desktop_core::protocol::SnapshotText>,
+    content_bounds: Option<&desktop_core::protocol::Bounds>,
+) -> Option<desktop_core::protocol::Bounds> {
+    let (mut x0, mut y0, mut x1, mut y1) = match (heading, no_items) {
+        (Some(h), Some(no)) => (
+            (h.bounds.x - 24.0).max(0.0),
+            (h.bounds.y + h.bounds.height + 8.0).max(0.0),
+            no.bounds.x + no.bounds.width + 170.0,
+            no.bounds.y + no.bounds.height + 24.0,
+        ),
+        (Some(h), None) => (
+            (h.bounds.x - 24.0).max(0.0),
+            (h.bounds.y + h.bounds.height + 8.0).max(0.0),
+            h.bounds.x + h.bounds.width + 220.0,
+            h.bounds.y + h.bounds.height + 84.0,
+        ),
+        (None, Some(no)) => (
+            (no.bounds.x - 170.0).max(0.0),
+            (no.bounds.y - 22.0).max(0.0),
+            no.bounds.x + no.bounds.width + 170.0,
+            no.bounds.y + no.bounds.height + 24.0,
+        ),
+        (None, None) => return None,
+    };
+
+    if let Some(content) = content_bounds {
+        let cx2 = content.x + content.width;
+        let cy2 = content.y + content.height;
+        x0 = x0.max(content.x + 4.0);
+        y0 = y0.max(content.y + 20.0);
+        x1 = x1.min(cx2 - 6.0);
+        y1 = y1.min(cy2 - 4.0);
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let width = x1 - x0;
+    let height = y1 - y0;
+    if width < 120.0 || height < 36.0 {
+        return None;
+    }
+
+    Some(desktop_core::protocol::Bounds {
+        x: x0,
+        y: y0,
+        width,
+        height,
+    })
+}
+
+fn infer_settings_controls(
+    list_bounds: Option<&desktop_core::protocol::Bounds>,
+    table_bounds: Option<&desktop_core::protocol::Bounds>,
+    row_height: f64,
+) -> Option<Value> {
+    let mut source = list_bounds.cloned();
+    if let Some(table) = table_bounds {
+        let use_table = match source.as_ref() {
+            None => true,
+            Some(list) => {
+                iou(list, table) < 0.18
+                    || list.height > table.height * 1.8
+                    || list.y > table.y + table.height * 0.9
+            }
+        };
+        if use_table {
+            source = Some(table.clone());
+        }
+    }
+    source.map(|list| {
+        let controls_inside_table = table_bounds
+            .map(|table| iou(&list, table) > 0.18)
+            .unwrap_or(false);
+        let control_y = if controls_inside_table {
+            list.y + list.height - 8.0
+        } else {
+            list.y + list.height + row_height.max(10.0)
+        };
+        let plus = bounds_from_center(list.x + 12.0, control_y, 14.0, 14.0);
+        let minus = bounds_from_center(list.x + 30.0, control_y, 14.0, 14.0);
+        json!({
+            "add_button_bounds": plus,
+            "remove_button_bounds": minus,
+            "add_click": center_point(&plus),
+            "remove_click": center_point(&minus)
+        })
+    })
 }
 
 fn is_probable_settings_row_label(text: &str, confidence: f32) -> bool {
@@ -1329,6 +1559,15 @@ fn point_from_value(value: &serde_json::Value) -> Option<(u32, u32)> {
     Some((
         value.get("x")?.as_u64()? as u32,
         value.get("y")?.as_u64()? as u32,
+    ))
+}
+
+fn bounds_tuple_from_value(value: &serde_json::Value) -> Option<(f64, f64, f64, f64)> {
+    Some((
+        value.get("x")?.as_f64()?,
+        value.get("y")?.as_f64()?,
+        value.get("width")?.as_f64()?,
+        value.get("height")?.as_f64()?,
     ))
 }
 
