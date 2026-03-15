@@ -8,7 +8,7 @@ use image::ImageReader;
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/settings-plus")
+        .join("tests/fixtures/settings-screenshots")
         .join(name)
 }
 
@@ -69,11 +69,11 @@ fn assert_bounds_inside(inner: &Bounds, outer: &Bounds, tol: f64, label: &str) {
 }
 
 #[test]
-fn infers_plus_button_on_vm_accessibility_fixtures() {
+fn infers_plus_button_on_settings_screenshots() {
     let cases = [
-        ("vm-accessibility-empty-right.png", 990.0, 354.0),
-        ("vm-accessibility-empty-center.png", 775.0, 331.0),
-        ("vm-accessibility-empty-left.png", 320.0, 272.0),
+        ("dark-dark-left.png", 324.0, 422.2),
+        ("light-dark-center.png", 631.0, 303.2),
+        ("light-forest-right.png", 998.0, 408.2),
     ];
     let mut failures = Vec::new();
 
@@ -102,22 +102,22 @@ fn infers_plus_button_on_vm_accessibility_fixtures() {
 }
 
 #[test]
-fn detects_window_and_content_regions_on_vm_accessibility_fixtures() {
+fn detects_window_and_content_regions_on_settings_screenshots() {
     let cases = [
         (
-            "vm-accessibility-empty-right.png",
-            (741.0, 214.0, 716.0, 639.0),
-            (959.0, 268.3, 498.0, 584.7),
+            "dark-dark-left.png",
+            (69.0, 231.0, 733.0, 625.0),
+            (294.0, 284.1, 508.0, 571.9),
         ),
         (
-            "vm-accessibility-empty-center.png",
-            (524.0, 193.0, 718.0, 635.0),
-            (744.0, 247.0, 498.0, 581.0),
+            "light-dark-center.png",
+            (382.0, 112.0, 715.0, 625.0),
+            (601.0, 165.1, 496.0, 571.9),
         ),
         (
-            "vm-accessibility-empty-left.png",
-            (0.0, 49.7, 787.0, 721.3),
-            (72.0, 100.0, 715.0, 671.0),
+            "light-forest-right.png",
+            (751.0, 217.0, 715.0, 625.0),
+            (968.0, 270.1, 498.0, 571.9),
         ),
     ];
 
@@ -143,11 +143,11 @@ fn detects_window_and_content_regions_on_vm_accessibility_fixtures() {
 }
 
 #[test]
-fn detects_regions_on_dark_vm_fixtures() {
+fn detects_regions_on_dark_settings_screenshots() {
     let cases = [
-        "vm-dark-dark-left.png",
-        "vm-dark-dark-right.png",
-        "vm-dark-forest-center.png",
+        "dark-dark-left.png",
+        "dark-dark-right.png",
+        "dark-forest-center.png",
     ];
 
     for name in cases {

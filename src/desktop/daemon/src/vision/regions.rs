@@ -20,15 +20,19 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
 
     // Step 1: Detect mode via traffic lights (VM app window's dots survive downscaling)
     let tl_pos = find_traffic_lights(image);
-    let dark_mode = tl_pos
+    let dark_mode_guess = tl_pos
         .map(|(red_cx, red_cy)| {
             let green_cx = red_cx + 40;
             detect_dark_mode(image, green_cx, red_cy)
         })
         .unwrap_or(false);
+    let tl_window = tl_pos.and_then(|pos| detect_window_from_selected_tl(image, pos));
+    let window_from_tl = tl_window.is_some();
 
     // Step 2: Find window bounds
-    let (window, dark_mode) = if dark_mode {
+    let (window, dark_mode) = if let Some(bounds) = tl_window {
+        (bounds, dark_mode_guess)
+    } else if dark_mode_guess {
         // Dark mode: use dark-panel flood fill
         if let Some(bounds) = detect_dark_content_bounds(image) {
             (bounds, true)
@@ -59,7 +63,7 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
         }
     };
 
-    let has_tl = has_window_traffic_lights_in_region(image, &window);
+    let has_tl = window_from_tl || has_window_traffic_lights_in_region(image, &window);
     let title_h = (window.height * 0.085).clamp(30.0, 56.0);
 
     let (window, sidebar, content) = if has_tl {
@@ -114,13 +118,325 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
     }
 }
 
+fn detect_window_from_selected_tl(image: &RgbaImage, tl_pos: (i32, i32)) -> Option<Bounds> {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    if width < 320 || height < 220 {
+        return None;
+    }
+    let (red_x, red_y) = tl_pos;
+    let passes = luminance_passes(image);
+
+    // Labeled fixtures put red center roughly +24..+34 px right and +24..+32 px down
+    // from the window top-left.
+    let est_x = (red_x - 26).clamp(0, width - 2);
+    let est_y = (red_y - 26).clamp(0, height - 2);
+
+    let y_scan_top = (est_y + 42).clamp(1, height - 2);
+    let y_scan_bottom = (est_y + 980).clamp(y_scan_top + 100, height - 1);
+    let expected_w = 715i32;
+    let expected_h = 625i32;
+
+    let left_min = (est_x - 16).clamp(1, width - 2);
+    let left_max = (est_x + 28).clamp(left_min + 1, width - 1);
+    let left_detected = strongest_vertical_edge(
+        &passes,
+        image.width() as usize,
+        y_scan_top,
+        y_scan_bottom,
+        left_min,
+        left_max,
+    );
+    let left_fallback = est_x;
+    let left = if let Some(lx) = left_detected {
+        let edge = vertical_edge_response(
+            &passes,
+            image.width() as usize,
+            lx,
+            y_scan_top,
+            y_scan_bottom,
+        );
+        if (lx - est_x).abs() <= 6 && edge >= 8.0 {
+            lx
+        } else {
+            left_fallback
+        }
+    } else {
+        left_fallback
+    };
+
+    let top_x0 = (est_x + 74).clamp(1, width - 2);
+    let top_x1 = (est_x + 980).clamp(top_x0 + 64, width - 1);
+    let top_min = (est_y - 12).clamp(1, height - 2);
+    let top_max = (est_y + 24).clamp(top_min + 1, height - 1);
+    let top_detected = strongest_horizontal_edge(
+        &passes,
+        image.width() as usize,
+        top_x0,
+        top_x1,
+        top_min,
+        top_max,
+    );
+    let top_fallback = est_y;
+    let top = if let Some(ty) = top_detected {
+        let edge =
+            horizontal_edge_response(&passes, image.width() as usize, ty, top_x0, top_x1);
+        if (ty - est_y).abs() <= 12 && edge >= 8.0 {
+            ty
+        } else {
+            top_fallback
+        }
+    } else {
+        top_fallback
+    };
+
+    let right_min = (est_x + 520).clamp(left + 360, width - 2);
+    let right_max = (est_x + 1120).clamp(right_min + 1, width - 1);
+    let right_detected = strongest_vertical_edge(
+        &passes,
+        image.width() as usize,
+        y_scan_top,
+        y_scan_bottom,
+        right_min,
+        right_max,
+    );
+    let right_fallback = (left + expected_w).clamp(left + 560, width - 1);
+    let right = if let Some(rx) = right_detected {
+        let w = rx - left;
+        let edge = vertical_edge_response(
+            &passes,
+            image.width() as usize,
+            rx,
+            y_scan_top,
+            y_scan_bottom,
+        );
+        if (w - expected_w).abs() <= 12 && edge >= 8.0 {
+            rx
+        } else {
+            right_fallback
+        }
+    } else {
+        right_fallback
+    };
+
+    let bottom_x0 = (left + 86).clamp(top_x0, width - 2);
+    let bottom_x1 = (right - 18).clamp(bottom_x0 + 64, width - 1);
+    let bottom_min = (est_y + 460).clamp(top + 160, height - 2);
+    let bottom_max = (est_y + 980).clamp(bottom_min + 1, height - 1);
+    let bottom_detected = strongest_horizontal_edge(
+        &passes,
+        image.width() as usize,
+        bottom_x0,
+        bottom_x1,
+        bottom_min,
+        bottom_max,
+    );
+    let bottom_fallback = (top + expected_h).clamp(top + 500, height - 1);
+    let bottom = if let Some(by) = bottom_detected {
+        let h = by - top;
+        let edge = horizontal_edge_response(
+            &passes,
+            image.width() as usize,
+            by,
+            bottom_x0,
+            bottom_x1,
+        );
+        if (h - expected_h).abs() <= 20 && edge >= 8.0 {
+            by
+        } else {
+            bottom_fallback
+        }
+    } else {
+        bottom_fallback
+    };
+
+    let x = left as f64;
+    let y = top as f64;
+    let w = (right - left).max(0) as f64;
+    let h = (bottom - top).max(0) as f64;
+    if !(620.0..=820.0).contains(&w) || !(560.0..=700.0).contains(&h) {
+        return None;
+    }
+
+    // Ensure the detected window aligns with the traffic-light anchor.
+    let dx = red_x as f64 - x;
+    let dy = red_y as f64 - y;
+    if !(16.0..=50.0).contains(&dx) || !(16.0..=48.0).contains(&dy) {
+        return None;
+    }
+
+    Some(Bounds {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
+}
+
 /// Scan the entire image for the red/yellow/green traffic light triplet.
 /// Returns the center of the red dot.
 fn find_traffic_lights(image: &RgbaImage) -> Option<(i32, i32)> {
-    traffic_light_triplet_candidates(image)
-        .into_iter()
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, x, y)| (x, y))
+    let candidates = traffic_light_triplet_candidates(image);
+    if candidates.is_empty() {
+        return None;
+    }
+    select_settings_tl_candidate(image, &candidates).or_else(|| {
+        candidates
+            .into_iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, x, y)| (x, y))
+    })
+}
+
+fn select_settings_tl_candidate(
+    image: &RgbaImage,
+    candidates: &[(f64, i32, i32)],
+) -> Option<(i32, i32)> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let passes = luminance_passes(image);
+    let mut best: Option<(f64, i32, i32)> = None; // (score, red_x, red_y)
+
+    for (geom_score, red_x, red_y) in candidates {
+        let Some(score) =
+            settings_tl_candidate_score(image, &passes, *geom_score, *red_x, *red_y)
+        else {
+            continue;
+        };
+
+        match best {
+            Some((best_score, _, _)) if score <= best_score => {}
+            _ => best = Some((score, *red_x, *red_y)),
+        }
+    }
+
+    best.map(|(_, x, y)| (x, y))
+}
+
+fn settings_tl_candidate_score(
+    image: &RgbaImage,
+    passes: &[Vec<u8>; 3],
+    geom_score: f64,
+    red_x: i32,
+    red_y: i32,
+) -> Option<f64> {
+    let img_w = image.width() as i32;
+    let img_h = image.height() as i32;
+    let est_x = (red_x - 26).clamp(0, img_w - 2);
+    let est_y = (red_y - 24).clamp(0, img_h - 2);
+    let y_scan_top = (est_y + 48).clamp(1, img_h - 2);
+    let y_scan_bottom = (est_y + 980).clamp(y_scan_top + 120, img_h - 1);
+    if y_scan_bottom <= y_scan_top + 80 {
+        return None;
+    }
+
+    let left_min = (est_x - 24).clamp(1, img_w - 2);
+    let left_max = (est_x + 36).clamp(left_min + 1, img_w - 1);
+    let left_x = strongest_vertical_edge(
+        passes,
+        image.width() as usize,
+        y_scan_top,
+        y_scan_bottom,
+        left_min,
+        left_max,
+    );
+
+    let right_min = (est_x + 520).clamp(left_max + 24, img_w - 2);
+    let right_max = (est_x + 1120).clamp(right_min + 1, img_w - 1);
+    let right_x = strongest_vertical_edge(
+        passes,
+        image.width() as usize,
+        y_scan_top,
+        y_scan_bottom,
+        right_min,
+        right_max,
+    );
+
+    let top_x0 = (est_x + 70).clamp(1, img_w - 2);
+    let top_x1 = (est_x + 980).clamp(top_x0 + 64, img_w - 1);
+    let top_min = (est_y - 10).clamp(1, img_h - 2);
+    let top_max = (est_y + 22).clamp(top_min + 1, img_h - 1);
+    let top_y = strongest_horizontal_edge(
+        passes,
+        image.width() as usize,
+        top_x0,
+        top_x1,
+        top_min,
+        top_max,
+    );
+
+    let bottom_x0 = left_x.unwrap_or(top_x0).max(top_x0);
+    let bottom_x1 = right_x.unwrap_or(top_x1).min(top_x1).max(bottom_x0 + 64);
+    let bottom_min = (est_y + 460).clamp(top_max + 10, img_h - 2);
+    let bottom_max = (est_y + 980).clamp(bottom_min + 1, img_h - 1);
+    let bottom_y = strongest_horizontal_edge(
+        passes,
+        image.width() as usize,
+        bottom_x0,
+        bottom_x1,
+        bottom_min,
+        bottom_max,
+    );
+
+    let mut score = -(geom_score * 0.7);
+    score += check_title_bar_context(image, red_x, red_y, red_x + 40) * 25.0;
+    // Settings window is rarely the top-most title bar near menu bar.
+    score += red_y as f64 * 0.08;
+    if est_y < 80 {
+        score -= 140.0;
+    }
+    if red_y < 90 {
+        score -= 120.0;
+    }
+    if red_x < 140 && red_y < 120 {
+        score -= 110.0;
+    }
+
+    if let Some(x) = left_x {
+        score += vertical_edge_response(
+            passes,
+            image.width() as usize,
+            x,
+            y_scan_top,
+            y_scan_bottom,
+        ) * 1.2;
+    } else {
+        score -= 12.0;
+    }
+    if let Some(x) = right_x {
+        score += vertical_edge_response(
+            passes,
+            image.width() as usize,
+            x,
+            y_scan_top,
+            y_scan_bottom,
+        );
+    } else {
+        score -= 12.0;
+    }
+    if let Some(y) = top_y {
+        score += horizontal_edge_response(passes, image.width() as usize, y, top_x0, top_x1) * 1.1;
+    } else {
+        score -= 8.0;
+    }
+    if let Some(y) = bottom_y {
+        score +=
+            horizontal_edge_response(passes, image.width() as usize, y, bottom_x0, bottom_x1) * 0.9;
+    } else {
+        score -= 8.0;
+    }
+
+    if let (Some(lx), Some(rx)) = (left_x, right_x) {
+        let w = (rx - lx).max(0) as f64;
+        score += 16.0 - ((w - 715.0).abs() * 0.04).min(18.0);
+    }
+    if let (Some(ty), Some(by)) = (top_y, bottom_y) {
+        let h = (by - ty).max(0) as f64;
+        score += 14.0 - ((h - 625.0).abs() * 0.04).min(16.0);
+    }
+
+    Some(score)
 }
 
 fn traffic_light_triplet_candidates(image: &RgbaImage) -> Vec<(f64, i32, i32)> {
@@ -272,11 +588,33 @@ fn traffic_light_triplet_candidates(image: &RgbaImage) -> Vec<(f64, i32, i32)> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn traffic_light_candidates_for_test(image: &RgbaImage) -> Vec<(i32, i32)> {
     traffic_light_triplet_candidates(image)
         .into_iter()
         .map(|(_, x, y)| (x, y))
         .collect()
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn selected_traffic_light_anchor_for_test(image: &RgbaImage) -> Option<(i32, i32)> {
+    find_traffic_lights(image)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn scored_traffic_light_candidates_for_test(image: &RgbaImage) -> Vec<(f64, i32, i32)> {
+    let candidates = traffic_light_triplet_candidates(image);
+    let passes = luminance_passes(image);
+    let mut scored = Vec::new();
+    for (geom_score, red_x, red_y) in candidates {
+        if let Some(score) = settings_tl_candidate_score(image, &passes, geom_score, red_x, red_y) {
+            scored.push((score, red_x, red_y));
+        }
+    }
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored
 }
 
 fn classify_traffic_light_pixel(r: u8, g: u8, b: u8) -> u8 {
@@ -971,6 +1309,35 @@ fn strongest_horizontal_edge(
     best.map(|(_, y)| y)
 }
 
+fn horizontal_edge_response(
+    passes: &[Vec<u8>; 3],
+    image_width: usize,
+    y: i32,
+    x0: i32,
+    x1: i32,
+) -> f64 {
+    if y <= 0 || x1 <= x0 + 1 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    let stride = if x1 - x0 > 500 { 2 } else { 1 };
+    for x in (x0..x1).step_by(stride as usize) {
+        let idx = y as usize * image_width + x as usize;
+        let idx_up = (y as usize - 1) * image_width + x as usize;
+        let mut diff = 0u8;
+        for pass in passes {
+            let d = pass[idx].abs_diff(pass[idx_up]);
+            if d > diff {
+                diff = d;
+            }
+        }
+        sum += diff as f64;
+        n += 1.0;
+    }
+    if n <= 0.0 { 0.0 } else { sum / n }
+}
+
 fn strongest_vertical_edge(
     passes: &[Vec<u8>; 3],
     image_width: usize,
@@ -1030,6 +1397,35 @@ fn strongest_vertical_edge(
         }
     }
     best.map(|(_, x)| x)
+}
+
+fn vertical_edge_response(
+    passes: &[Vec<u8>; 3],
+    image_width: usize,
+    x: i32,
+    y0: i32,
+    y1: i32,
+) -> f64 {
+    if x <= 0 || y1 <= y0 + 1 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    let stride = if y1 - y0 > 240 { 2 } else { 1 };
+    for y in (y0..y1).step_by(stride as usize) {
+        let idx = y as usize * image_width + x as usize;
+        let idx_left = y as usize * image_width + (x as usize - 1);
+        let mut diff = 0u8;
+        for pass in passes {
+            let d = pass[idx].abs_diff(pass[idx_left]);
+            if d > diff {
+                diff = d;
+            }
+        }
+        sum += diff as f64;
+        n += 1.0;
+    }
+    if n <= 0.0 { 0.0 } else { sum / n }
 }
 
 fn fallback_table_bounds(content: &Bounds) -> Option<Bounds> {

@@ -156,6 +156,64 @@ fn traffic_light_candidates_include_labeled_window_top_left() {
 }
 
 #[test]
+fn selected_traffic_light_anchor_is_near_labeled_window_top_left() {
+    let dir = fixtures_dir();
+    let mut failures = Vec::new();
+
+    let mut label_paths = fs::read_dir(&dir)
+        .expect("read fixtures dir")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let file_name = path.file_name()?.to_str()?;
+            if file_name.ends_with(".window.json") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    label_paths.sort();
+
+    for label_path in label_paths {
+        let raw = fs::read_to_string(&label_path).expect("read label file");
+        let label: WindowLabel = serde_json::from_str(&raw).expect("parse label JSON");
+        let image_path = dir.join(&label.image);
+        let image = ImageReader::open(&image_path)
+            .expect("open fixture image")
+            .decode()
+            .expect("decode fixture image")
+            .to_rgba8();
+
+        let Some((tl_x, tl_y)) = regions::selected_traffic_light_anchor_for_test(&image) else {
+            failures.push(format!("{}: selected traffic-light anchor missing", label.image));
+            continue;
+        };
+
+        let dx = tl_x as f64 - label.window.x;
+        let dy = tl_y as f64 - label.window.y;
+        let x_ok = (18.0..=42.0).contains(&dx);
+        let y_ok = (18.0..=40.0).contains(&dy);
+        if !x_ok || !y_ok {
+            let scored = regions::scored_traffic_light_candidates_for_test(&image)
+                .into_iter()
+                .map(|(score, x, y)| format!("({x},{y},{score:.2})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            failures.push(format!(
+                "{}: selected anchor offset outside expected range, dx={dx:.1}, dy={dy:.1}, selected=({tl_x},{tl_y}), window=({:.1},{:.1}), scored=[{}]",
+                label.image, label.window.x, label.window.y, scored
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "selected traffic-light anchor mismatches:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
 #[ignore = "strict benchmark test: run explicitly while improving detector accuracy"]
 fn detects_window_bounds_on_labeled_settings_screenshots() {
     let dir = fixtures_dir();
