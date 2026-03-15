@@ -27,13 +27,34 @@ run: build
 clean:
   rm -rf {{dist_dir}} {{workspace_dir}}/target
 
-vm-enable-permissions vm_host vm_user vm_window_app="UTM":
+vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   #!/usr/bin/env bash
   set -euo pipefail
 
-  VM_HOST="{{vm_host}}"
-  VM_USER="{{vm_user}}"
-  VM_WINDOW_APP="{{vm_window_app}}"
+  ENV_FILE="{{workspace_dir}}/.env"
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+  fi
+
+  VM_HOST_INPUT="{{vm_host}}"
+  VM_USER_INPUT="{{vm_user}}"
+  VM_WINDOW_APP_INPUT="{{vm_window_app}}"
+
+  VM_HOST="${VM_HOST_INPUT:-${VM_HOST:-}}"
+  VM_USER="${VM_USER_INPUT:-${VM_USER:-}}"
+  VM_WINDOW_APP="${VM_WINDOW_APP_INPUT:-${VM_WINDOW_APP:-UTM}}"
+
+  if [[ -z "$VM_HOST" ]]; then
+    echo "Missing VM host. Set VM_HOST in src/desktop/.env or pass it to just vm-enable-permissions <vm_host> <vm_user>."
+    exit 1
+  fi
+  if [[ -z "$VM_USER" ]]; then
+    echo "Missing VM user. Set VM_USER in src/desktop/.env or pass it to just vm-enable-permissions <vm_host> <vm_user>."
+    exit 1
+  fi
 
   HOST_DCTL="{{cli_path}}"
   VM_APP_DIR="/Users/${VM_USER}/DesktopCtl/dist"
