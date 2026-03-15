@@ -130,46 +130,55 @@ vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
 
   normalize_host_workspace "$VM_WINDOW_APP"
 
-  add_entry_in_current_pane() {
+  run_host_dctl() {
     normalize_host_workspace "$VM_WINDOW_APP"
-    "$HOST_DCTL" ui click --text "DesktopCtl" --timeout 1200 || true
-    "$HOST_DCTL" ui click --settings-remove || true
-    "$HOST_DCTL" wait 220
+    "$HOST_DCTL" "$@"
+  }
 
-    "$HOST_DCTL" ui click --settings-add \
-      || "$HOST_DCTL" ui click --text-offset "No Items" --dx -182 --dy 20 --timeout 1800 \
-      || "$HOST_DCTL" ui click --text-offset "Allow the applications" --dx -170 --dy 46 --timeout 1800
-    "$HOST_DCTL" wait --text "Open" --timeout 6000
-    "$HOST_DCTL" key press cmd+shift+g
-    "$HOST_DCTL" type "$VM_APP_DIR"
-    "$HOST_DCTL" key press enter
-    "$HOST_DCTL" wait --text "DesktopCtl.app" --timeout 6000
-    "$HOST_DCTL" ui click --text "DesktopCtl.app" --timeout 3000
-    "$HOST_DCTL" ui click --text "Open" --timeout 3000
-    "$HOST_DCTL" wait 380
+  run_host_dctl_soft() {
+    normalize_host_workspace "$VM_WINDOW_APP"
+    "$HOST_DCTL" "$@" || true
+  }
+
+  add_entry_in_current_pane() {
+    run_host_dctl_soft ui click --text "DesktopCtl" --timeout 1200
+    run_host_dctl_soft ui click --settings-remove
+    run_host_dctl wait 220
+
+    run_host_dctl ui click --settings-add \
+      || run_host_dctl ui click --text-offset "No Items" --dx -182 --dy 20 --timeout 1800 \
+      || run_host_dctl ui click --text-offset "Allow the applications" --dx -170 --dy 46 --timeout 1800
+    run_host_dctl wait --text "Open" --timeout 6000
+    run_host_dctl key press cmd+shift+g
+    run_host_dctl type "$VM_APP_DIR"
+    run_host_dctl key press enter
+    run_host_dctl wait --text "DesktopCtl.app" --timeout 6000
+    run_host_dctl ui click --text "DesktopCtl.app" --timeout 3000
+    run_host_dctl ui click --text "Open" --timeout 3000
+    run_host_dctl wait 380
   }
 
   ensure_row_enabled() {
     local row_text="$1"
-    if "$HOST_DCTL" ui settings enable "$row_text" --timeout 1600; then
+    if run_host_dctl ui settings enable "$row_text" --timeout 1600; then
       return 0
     fi
-    "$HOST_DCTL" ui settings unlock --password "$VM_OS_PASSWORD" --timeout 2800
-    "$HOST_DCTL" ui settings enable "$row_text" --timeout 1600
+    run_host_dctl ui settings unlock --password "$VM_OS_PASSWORD" --timeout 2800
+    run_host_dctl ui settings enable "$row_text" --timeout 1600
   }
 
   echo "[5/7] Configure Accessibility pane in VM"
   ssh "$VM_HOST" "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'"
-  "$HOST_DCTL" wait --text "Accessibility" --timeout 14000
+  run_host_dctl wait --text "Allow the applications below to control your computer." --timeout 14000
   add_entry_in_current_pane
   ensure_row_enabled "DesktopCtl"
 
   echo "[6/7] Configure Screen Recording pane in VM"
   ssh "$VM_HOST" "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'"
-  "$HOST_DCTL" wait --text "Screen" --timeout 14000
+  run_host_dctl wait --text "Allow the applications below to record the contents of your screen and system audio." --timeout 14000
   add_entry_in_current_pane
   ensure_row_enabled "DesktopCtl"
-  "$HOST_DCTL" ui click --text "Quit & Reopen" --timeout 2500 || "$HOST_DCTL" ui click --text "Later" --timeout 1500 || true
+  run_host_dctl ui click --text "Quit & Reopen" --timeout 2500 || run_host_dctl_soft ui click --text "Later" --timeout 1500
 
   echo "[7/7] Verify in VM over SSH"
   ssh "$VM_HOST" "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' permissions check"
