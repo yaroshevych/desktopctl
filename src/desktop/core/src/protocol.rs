@@ -84,6 +84,8 @@ pub enum Command {
     },
     ScreenCapture {
         out_path: Option<String>,
+        #[serde(default)]
+        overlay: bool,
     },
     ScreenSnapshot,
     ScreenTokenize,

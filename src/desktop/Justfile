@@ -25,7 +25,15 @@ run: build
   open {{app_dir}}
 
 clean:
-  rm -rf {{dist_dir}} {{workspace_dir}}/target
+  pkill -f desktopctld || true
+  rm -f /tmp/desktopctl.sock
+  rm -f /private/tmp/desktopctld.trace.log /private/tmp/desktopctl.cli.trace.log
+  rm -rf /private/tmp/desktopctl-captures/*
+  rm -rf {{dist_dir}}
+
+clean-all:
+  just clean
+  rm -rf {{workspace_dir}}/target
 
 vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   #!/usr/bin/env bash

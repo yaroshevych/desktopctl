@@ -2,6 +2,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
+    path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{
         Arc,
@@ -17,7 +18,7 @@ use desktop_core::{
     ipc::{read_framed_json, socket_path, write_framed_json},
     protocol::{Command, RequestEnvelope, ResponseEnvelope},
 };
-use image::RgbaImage;
+use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 
 use crate::{clipboard, permissions, recording, replay, trace, vision};
@@ -338,10 +339,16 @@ fn execute(command: Command) -> Result<Value, AppError> {
             backend.sleep_ms(ms);
             Ok(json!({}))
         }
-        Command::ScreenCapture { out_path } => {
+        Command::ScreenCapture { out_path, overlay } => {
             trace::log("execute:screen_capture:start");
             permissions::ensure_screen_recording_permission()?;
             let capture = vision::pipeline::capture_and_update(out_path.map(Into::into))?;
+            let overlay_path = if overlay {
+                let path = write_capture_overlay(&capture)?;
+                Some(path.display().to_string())
+            } else {
+                None
+            };
             trace::log(format!(
                 "execute:screen_capture:ok snapshot_id={} event_count={}",
                 capture.snapshot.snapshot_id,
@@ -351,6 +358,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 "snapshot_id": capture.snapshot.snapshot_id,
                 "timestamp": capture.snapshot.timestamp,
                 "path": capture.image_path,
+                "overlay_path": overlay_path,
                 "display": capture.snapshot.display,
                 "focused_app": capture.snapshot.focused_app,
                 "event_ids": capture.event_ids
@@ -596,24 +604,39 @@ fn screen_layout_summary() -> Result<Value, AppError> {
 fn screen_settings_map() -> Result<Value, AppError> {
     let capture = vision::pipeline::capture_and_update(None)?;
     let frame_image = load_rgba_image(&capture.image_path);
-    let detected_regions = frame_image
+    let detected_regions_raw = frame_image
         .as_ref()
         .map(vision::regions::detect_settings_regions)
         .unwrap_or_default();
+    let detected_regions = scale_regions_to_display(
+        &detected_regions_raw,
+        frame_image.as_ref().map(|img| img.width()),
+        frame_image.as_ref().map(|img| img.height()),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+    );
+    let inferred_window_bounds = infer_window_bounds_from_content(
+        detected_regions.content_bounds.as_ref(),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+    )
+    .or_else(|| detected_regions.window_bounds.clone());
     let heading = find_settings_heading(
         &capture.snapshot.texts,
         detected_regions.content_bounds.as_ref(),
-    );
+    )
+    .or_else(|| find_settings_heading(&capture.snapshot.texts, None));
+    let instruction = find_settings_instruction(&capture.snapshot.texts, heading.as_ref());
     let rows = infer_settings_rows(&capture.snapshot.texts, heading.as_ref());
     let row_height = median_row_height(&rows).unwrap_or(14.0);
     let no_items = first_matching_text(&capture.snapshot.texts, "no items");
-    let mut list_bounds = bounds_from_texts(&rows).map(|b| desktop_core::protocol::Bounds {
+    let mut rows_bounds = bounds_from_texts(&rows).map(|b| desktop_core::protocol::Bounds {
         x: (b.x - 18.0).max(0.0),
         y: (b.y - 6.0).max(0.0),
         width: b.width + 56.0,
         height: b.height + 12.0,
     });
-    if let (Some(list), Some(content)) = (&list_bounds, &detected_regions.content_bounds) {
+    if let (Some(list), Some(content)) = (&rows_bounds, &detected_regions.content_bounds) {
         let list_center_x = list.x + list.width / 2.0;
         let list_center_y = list.y + list.height / 2.0;
         let content_x2 = content.x + content.width;
@@ -623,9 +646,14 @@ fn screen_settings_map() -> Result<Value, AppError> {
             && list_center_y >= content.y
             && list_center_y <= content_y2;
         if !center_inside || iou(list, content) < 0.06 {
-            list_bounds = None;
+            rows_bounds = None;
         }
     }
+    if is_sidebar_like_rows(rows_bounds.as_ref(), heading.as_ref(), no_items.as_ref()) {
+        rows_bounds = None;
+    }
+
+    let mut list_bounds = rows_bounds;
     if list_bounds.is_none() {
         list_bounds = infer_list_bounds_from_anchors(
             heading.as_ref(),
@@ -637,11 +665,41 @@ fn screen_settings_map() -> Result<Value, AppError> {
         list_bounds = detected_regions.table_bounds.clone();
     }
 
-    let controls = infer_settings_controls(
+    let controls = infer_settings_controls_for_settings_pane(
+        &capture.snapshot.texts,
+        heading.as_ref(),
+        no_items.as_ref(),
+        instruction.as_ref(),
         list_bounds.as_ref(),
-        detected_regions.table_bounds.as_ref(),
+        detected_regions.content_bounds.as_ref(),
         row_height,
     );
+    trace::log(format!(
+        "screen_settings_map snapshot_id={} image={}x{} display={}x{} heading={} instruction={} no_items={} rows={} list={} regions.window={} regions.content={} regions.table={} controls={}",
+        capture.snapshot.snapshot_id,
+        frame_image
+            .as_ref()
+            .map(|img| img.width().to_string())
+            .unwrap_or_else(|| "0".to_string()),
+        frame_image
+            .as_ref()
+            .map(|img| img.height().to_string())
+            .unwrap_or_else(|| "0".to_string()),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+        fmt_bounds_opt(heading.as_ref().map(|h| &h.bounds)),
+        fmt_bounds_opt(instruction.as_ref().map(|t| &t.bounds)),
+        fmt_bounds_opt(no_items.as_ref().map(|t| &t.bounds)),
+        rows.len(),
+        fmt_bounds_opt(list_bounds.as_ref()),
+        fmt_bounds_opt(inferred_window_bounds.as_ref()),
+        fmt_bounds_opt(detected_regions.content_bounds.as_ref()),
+        fmt_bounds_opt(detected_regions.table_bounds.as_ref()),
+        controls
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
 
     let row_entries = rows
         .iter()
@@ -656,7 +714,14 @@ fn screen_settings_map() -> Result<Value, AppError> {
             });
             let toggle_state = toggle
                 .as_ref()
-                .map(|bounds| estimate_toggle_state(frame_image.as_ref(), bounds))
+                .map(|bounds| {
+                    estimate_toggle_state(
+                        frame_image.as_ref(),
+                        bounds,
+                        capture.snapshot.display.width,
+                        capture.snapshot.display.height,
+                    )
+                })
                 .unwrap_or_else(|| "unknown".to_string());
             json!({
                 "text": row.text,
@@ -675,9 +740,11 @@ fn screen_settings_map() -> Result<Value, AppError> {
         "display": capture.snapshot.display,
         "focused_app": capture.snapshot.focused_app,
         "heading": heading,
+        "instruction": instruction,
+        "no_items": no_items,
         "list_bounds": list_bounds,
         "regions": {
-            "settings_window": detected_regions.window_bounds,
+            "settings_window": inferred_window_bounds,
             "sidebar": detected_regions.sidebar_bounds,
             "content": detected_regions.content_bounds,
             "table": detected_regions.table_bounds
@@ -685,6 +752,340 @@ fn screen_settings_map() -> Result<Value, AppError> {
         "rows": row_entries,
         "controls": controls
     }))
+}
+
+fn is_sidebar_like_rows(
+    rows_bounds: Option<&desktop_core::protocol::Bounds>,
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    no_items: Option<&desktop_core::protocol::SnapshotText>,
+) -> bool {
+    let Some(rows) = rows_bounds else {
+        return false;
+    };
+    if rows.height >= 240.0 {
+        return true;
+    }
+    if let Some(no_items) = no_items {
+        if rows.y > no_items.bounds.y + 56.0 {
+            return true;
+        }
+        if rows.x + rows.width < no_items.bounds.x + 20.0 {
+            return true;
+        }
+    }
+    if let Some(heading) = heading {
+        if rows.y > heading.bounds.y + 190.0 {
+            return true;
+        }
+        if rows.x + rows.width < heading.bounds.x - 8.0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn fmt_bounds_opt(bounds: Option<&desktop_core::protocol::Bounds>) -> String {
+    match bounds {
+        Some(b) => format!("({:.1},{:.1},{:.1},{:.1})", b.x, b.y, b.width, b.height),
+        None => "null".to_string(),
+    }
+}
+
+fn scale_regions_to_display(
+    regions: &vision::regions::SettingsRegions,
+    image_width: Option<u32>,
+    image_height: Option<u32>,
+    display_width: u32,
+    display_height: u32,
+) -> vision::regions::SettingsRegions {
+    let Some(img_w) = image_width else {
+        return regions.clone();
+    };
+    let Some(img_h) = image_height else {
+        return regions.clone();
+    };
+    if img_w == 0 || img_h == 0 || display_width == 0 || display_height == 0 {
+        return regions.clone();
+    }
+    let sx = display_width as f64 / img_w as f64;
+    let sy = display_height as f64 / img_h as f64;
+    if (sx - 1.0).abs() < 0.0001 && (sy - 1.0).abs() < 0.0001 {
+        return regions.clone();
+    }
+
+    let scale = |b: &desktop_core::protocol::Bounds| desktop_core::protocol::Bounds {
+        x: (b.x * sx).max(0.0),
+        y: (b.y * sy).max(0.0),
+        width: (b.width * sx).max(0.0),
+        height: (b.height * sy).max(0.0),
+    };
+
+    vision::regions::SettingsRegions {
+        window_bounds: regions.window_bounds.as_ref().map(scale),
+        sidebar_bounds: regions.sidebar_bounds.as_ref().map(scale),
+        content_bounds: regions.content_bounds.as_ref().map(scale),
+        table_bounds: regions.table_bounds.as_ref().map(scale),
+    }
+}
+
+fn infer_window_bounds_from_content(
+    content: Option<&desktop_core::protocol::Bounds>,
+    display_width: u32,
+    display_height: u32,
+) -> Option<desktop_core::protocol::Bounds> {
+    let content = content?;
+    if content.width <= 0.0 || content.height <= 0.0 {
+        return None;
+    }
+    let sidebar_w = (content.width * 0.31).clamp(150.0, 340.0);
+    let title_h = (content.height * 0.085).clamp(30.0, 56.0);
+    let x0 = (content.x - sidebar_w).max(0.0);
+    let y0 = (content.y - title_h).max(0.0);
+    let x1 = (content.x + content.width).min(display_width as f64);
+    let y1 = (content.y + content.height).min(display_height as f64);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(desktop_core::protocol::Bounds {
+        x: x0,
+        y: y0,
+        width: (x1 - x0).max(0.0),
+        height: (y1 - y0).max(0.0),
+    })
+}
+
+fn infer_settings_controls_for_settings_pane(
+    texts: &[desktop_core::protocol::SnapshotText],
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    no_items: Option<&desktop_core::protocol::SnapshotText>,
+    instruction: Option<&desktop_core::protocol::SnapshotText>,
+    list_bounds: Option<&desktop_core::protocol::Bounds>,
+    content_bounds: Option<&desktop_core::protocol::Bounds>,
+    row_height: f64,
+) -> Option<Value> {
+    if let Some(controls) =
+        infer_settings_controls_from_ocr_symbols(texts, heading, no_items, content_bounds)
+    {
+        return Some(controls);
+    }
+    if let Some(controls) = infer_settings_controls_from_anchor(heading, no_items) {
+        return Some(controls);
+    }
+    if let Some(controls) =
+        infer_settings_controls_from_list_bounds(list_bounds, heading, row_height)
+    {
+        return Some(controls);
+    }
+    infer_settings_controls_from_instruction_anchor(instruction, heading, content_bounds)
+}
+
+fn infer_settings_controls_from_ocr_symbols(
+    texts: &[desktop_core::protocol::SnapshotText],
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    no_items: Option<&desktop_core::protocol::SnapshotText>,
+    content_bounds: Option<&desktop_core::protocol::Bounds>,
+) -> Option<Value> {
+    let heading = heading?;
+    let y_min = heading.bounds.y + heading.bounds.height + 8.0;
+    let y_max = heading.bounds.y + 360.0;
+    let mut x_min = heading.bounds.x - 100.0;
+    let mut x_max = heading.bounds.x + 320.0;
+    if let Some(content) = content_bounds {
+        x_min = x_min.max(content.x - 8.0);
+        x_max = x_max.min(content.x + content.width * 0.55);
+    }
+    if let Some(no_items) = no_items {
+        // In this pane, +/- controls sit to the left of "No Items".
+        x_max = x_max.min(no_items.bounds.x - 8.0);
+    }
+    if x_max <= x_min {
+        return None;
+    }
+
+    let mut pluses = Vec::new();
+    let mut minuses = Vec::new();
+    for text in texts {
+        let Some(symbol) = normalize_control_symbol(&text.text) else {
+            continue;
+        };
+        let cx = text.bounds.x + text.bounds.width / 2.0;
+        let cy = text.bounds.y + text.bounds.height / 2.0;
+        if cx < x_min || cx > x_max || cy < y_min || cy > y_max {
+            continue;
+        }
+        if let Some(content) = content_bounds {
+            let cx2 = content.x + content.width;
+            let cy2 = content.y + content.height;
+            if cx < content.x || cx > cx2 || cy < content.y || cy > cy2 {
+                continue;
+            }
+        }
+        match symbol {
+            '+' => pluses.push(text.clone()),
+            '-' => minuses.push(text.clone()),
+            _ => {}
+        }
+    }
+
+    let mut best: Option<(
+        desktop_core::protocol::SnapshotText,
+        desktop_core::protocol::SnapshotText,
+        f64,
+    )> = None;
+    for plus in &pluses {
+        let plus_cx = plus.bounds.x + plus.bounds.width / 2.0;
+        let plus_cy = plus.bounds.y + plus.bounds.height / 2.0;
+        for minus in &minuses {
+            let minus_cx = minus.bounds.x + minus.bounds.width / 2.0;
+            let minus_cy = minus.bounds.y + minus.bounds.height / 2.0;
+            let dx = minus_cx - plus_cx;
+            let dy = (minus_cy - plus_cy).abs();
+            if !(8.0..=36.0).contains(&dx) || dy > 12.0 {
+                continue;
+            }
+            let score = (dx - 18.0).abs() + dy * 2.0;
+            if best.as_ref().map(|(_, _, s)| score < *s).unwrap_or(true) {
+                best = Some((plus.clone(), minus.clone(), score));
+            }
+        }
+    }
+    let (plus, minus, _) = best?;
+    let plus_center_x = plus.bounds.x + plus.bounds.width / 2.0;
+    let plus_center_y = plus.bounds.y + plus.bounds.height / 2.0;
+    let minus_center_x = minus.bounds.x + minus.bounds.width / 2.0;
+    let footer = desktop_core::protocol::Bounds {
+        x: (plus_center_x - 18.0).max(0.0),
+        y: (plus_center_y - 12.0).max(0.0),
+        width: (minus_center_x - plus_center_x + 36.0).max(36.0),
+        height: 24.0,
+    };
+    Some(json!({
+        "source": "ocr_symbols",
+        "add_button_bounds": plus.bounds,
+        "remove_button_bounds": minus.bounds,
+        "add_click": center_point(&plus.bounds),
+        "remove_click": center_point(&minus.bounds),
+        "footer_bounds": footer
+    }))
+}
+
+fn normalize_control_symbol(text: &str) -> Option<char> {
+    let value = text.trim();
+    if value == "+" {
+        return Some('+');
+    }
+    if matches!(value, "-" | "−" | "–" | "—") {
+        return Some('-');
+    }
+    None
+}
+
+fn infer_settings_controls_from_anchor(
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    no_items: Option<&desktop_core::protocol::SnapshotText>,
+) -> Option<Value> {
+    let no_items = no_items?;
+    if let Some(heading) = heading {
+        // Keep anchor + heading in the same pane band.
+        if no_items.bounds.x + no_items.bounds.width < heading.bounds.x + 20.0 {
+            return None;
+        }
+        if no_items.bounds.y < heading.bounds.y + heading.bounds.height + 12.0 {
+            return None;
+        }
+        if no_items.bounds.y > heading.bounds.y + 260.0 {
+            return None;
+        }
+    }
+    let center_x = no_items.bounds.x + no_items.bounds.width / 2.0;
+    let center_y = no_items.bounds.y + no_items.bounds.height / 2.0;
+    let add_x = center_x - 182.0;
+    let remove_x = center_x - 164.0;
+    let controls_y = center_y + 20.0;
+    let plus = bounds_from_center(add_x, controls_y, 14.0, 14.0);
+    let minus = bounds_from_center(remove_x, controls_y, 14.0, 14.0);
+    let footer = desktop_core::protocol::Bounds {
+        x: (add_x - 14.0).max(0.0),
+        y: (controls_y - 12.0).max(0.0),
+        width: 48.0,
+        height: 24.0,
+    };
+    Some(json!({
+        "source": "no_items_anchor",
+        "add_button_bounds": plus,
+        "remove_button_bounds": minus,
+        "add_click": center_point(&plus),
+        "remove_click": center_point(&minus),
+        "footer_bounds": footer
+    }))
+}
+
+fn infer_settings_controls_from_instruction_anchor(
+    instruction: Option<&desktop_core::protocol::SnapshotText>,
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    content_bounds: Option<&desktop_core::protocol::Bounds>,
+) -> Option<Value> {
+    let instruction = instruction?;
+    if let Some(heading) = heading {
+        if instruction.bounds.y < heading.bounds.y + heading.bounds.height + 4.0 {
+            return None;
+        }
+        if instruction.bounds.y > heading.bounds.y + 200.0 {
+            return None;
+        }
+    }
+    let mut add_x = instruction.bounds.x + 4.0;
+    let mut remove_x = add_x + 18.0;
+    let controls_y = instruction.bounds.y + instruction.bounds.height + 44.0;
+    if let Some(content) = content_bounds {
+        add_x = add_x.max(content.x + 8.0);
+        remove_x = remove_x.max(add_x + 16.0);
+    }
+    let plus = bounds_from_center(add_x, controls_y, 14.0, 14.0);
+    let minus = bounds_from_center(remove_x, controls_y, 14.0, 14.0);
+    let footer = desktop_core::protocol::Bounds {
+        x: (plus.x - 8.0).max(0.0),
+        y: (plus.y - 6.0).max(0.0),
+        width: 52.0,
+        height: 24.0,
+    };
+    Some(json!({
+        "source": "instruction_anchor",
+        "add_button_bounds": plus,
+        "remove_button_bounds": minus,
+        "add_click": center_point(&plus),
+        "remove_click": center_point(&minus),
+        "footer_bounds": footer
+    }))
+}
+
+fn settings_click_from_no_items_anchor(control: &str, payload: &Value) -> Option<(u32, u32)> {
+    let (nx, ny, nw, nh) = bounds_tuple_from_value(&payload["no_items"]["bounds"])?;
+    if let Some((hx, hy, hw, hh)) = payload
+        .get("heading")
+        .and_then(|v| v.get("bounds"))
+        .and_then(bounds_tuple_from_value)
+    {
+        if nx + nw < hx + 20.0 {
+            return None;
+        }
+        if ny < hy + hh + 12.0 || ny > hy + 260.0 {
+            return None;
+        }
+        if hx + hw < nx - 340.0 {
+            return None;
+        }
+    }
+    let center_x = nx + nw / 2.0;
+    let center_y = ny + nh / 2.0;
+    let dx = match control {
+        "add" => -182.0,
+        "remove" => -164.0,
+        _ => return None,
+    };
+    let x = (center_x + dx).round().max(0.0) as u32;
+    let y = (center_y + 20.0).round().max(0.0) as u32;
+    Some((x, y))
 }
 
 fn click_settings_control(
@@ -696,18 +1097,42 @@ fn click_settings_control(
     let payload = screen_settings_map()?;
     let (x, y, details) = match control {
         "add" => {
-            let click = payload["controls"]["add_click"].clone();
-            let (x, y) = point_from_value(&click).ok_or_else(|| {
-                AppError::target_not_found("settings add (+) button was not found")
-            })?;
-            (x, y, json!({ "control": "add", "click": click }))
+            if let Some((x, y)) = settings_click_from_no_items_anchor("add", &payload) {
+                (
+                    x,
+                    y,
+                    json!({
+                        "control": "add",
+                        "click": { "x": x, "y": y },
+                        "derived_from": "no_items_anchor"
+                    }),
+                )
+            } else {
+                let click = payload["controls"]["add_click"].clone();
+                let (x, y) = point_from_value(&click).ok_or_else(|| {
+                    AppError::target_not_found("settings add (+) button was not found")
+                })?;
+                (x, y, json!({ "control": "add", "click": click }))
+            }
         }
         "remove" => {
-            let click = payload["controls"]["remove_click"].clone();
-            let (x, y) = point_from_value(&click).ok_or_else(|| {
-                AppError::target_not_found("settings remove (-) button was not found")
-            })?;
-            (x, y, json!({ "control": "remove", "click": click }))
+            if let Some((x, y)) = settings_click_from_no_items_anchor("remove", &payload) {
+                (
+                    x,
+                    y,
+                    json!({
+                        "control": "remove",
+                        "click": { "x": x, "y": y },
+                        "derived_from": "no_items_anchor"
+                    }),
+                )
+            } else {
+                let click = payload["controls"]["remove_click"].clone();
+                let (x, y) = point_from_value(&click).ok_or_else(|| {
+                    AppError::target_not_found("settings remove (-) button was not found")
+                })?;
+                (x, y, json!({ "control": "remove", "click": click }))
+            }
         }
         "toggle" => {
             let needle = row_text
@@ -768,6 +1193,18 @@ fn click_settings_control(
         )));
     }
     if matches!(control, "add" | "remove") {
+        if let Some((nx, ny, _nw, _nh)) = bounds_tuple_from_value(&payload["no_items"]["bounds"]) {
+            let xf = x as f64;
+            let yf = y as f64;
+            let x_ok = xf >= (nx - 520.0) && xf <= (nx - 20.0);
+            let y_ok = yf >= (ny - 90.0) && yf <= (ny + 90.0);
+            if !x_ok || !y_ok {
+                return Err(AppError::target_not_found(format!(
+                    "rejected unsafe settings {control} click ({x},{y}); anchor mismatch with No Items at ({:.1},{:.1})",
+                    nx, ny
+                )));
+            }
+        }
         if payload.get("heading").map(|v| v.is_null()).unwrap_or(true)
             && payload["regions"]
                 .get("settings_window")
@@ -792,8 +1229,8 @@ fn click_settings_control(
                 )));
             }
         }
-        if let Some((tx, ty, tw, th)) = payload["regions"]
-            .get("table")
+        if let Some((tx, ty, tw, th)) = payload["controls"]
+            .get("footer_bounds")
             .and_then(bounds_tuple_from_value)
         {
             let margin = 26.0;
@@ -803,7 +1240,7 @@ fn click_settings_control(
                 && (y as f64) <= ty + th + margin;
             if !inside_table_band {
                 return Err(AppError::target_not_found(format!(
-                    "settings {control} click target ({x},{y}) is outside detected controls band"
+                    "settings {control} click target ({x},{y}) is outside inferred controls band"
                 )));
             }
         }
@@ -1414,6 +1851,36 @@ fn first_matching_text(
         .cloned()
 }
 
+fn find_settings_instruction(
+    texts: &[desktop_core::protocol::SnapshotText],
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+) -> Option<desktop_core::protocol::SnapshotText> {
+    let mut candidates: Vec<_> = texts
+        .iter()
+        .filter(|text| {
+            let lower = text.text.to_lowercase();
+            lower.contains("allow the applications below")
+                || lower.contains("allow applications below")
+                || lower.contains("system audio recording only")
+        })
+        .cloned()
+        .collect();
+    if let Some(heading) = heading {
+        candidates.retain(|text| {
+            text.bounds.y >= heading.bounds.y + heading.bounds.height
+                && text.bounds.y <= heading.bounds.y + 180.0
+                && text.bounds.x + text.bounds.width >= heading.bounds.x - 20.0
+        });
+    }
+    candidates.sort_by(|a, b| {
+        a.bounds
+            .y
+            .total_cmp(&b.bounds.y)
+            .then_with(|| a.bounds.x.total_cmp(&b.bounds.x))
+    });
+    candidates.into_iter().next()
+}
+
 fn infer_list_bounds_from_anchors(
     heading: Option<&desktop_core::protocol::SnapshotText>,
     no_items: Option<&desktop_core::protocol::SnapshotText>,
@@ -1466,43 +1933,37 @@ fn infer_list_bounds_from_anchors(
     })
 }
 
-fn infer_settings_controls(
+fn infer_settings_controls_from_list_bounds(
     list_bounds: Option<&desktop_core::protocol::Bounds>,
-    table_bounds: Option<&desktop_core::protocol::Bounds>,
+    heading: Option<&desktop_core::protocol::SnapshotText>,
     row_height: f64,
 ) -> Option<Value> {
-    let mut source = list_bounds.cloned();
-    if let Some(table) = table_bounds {
-        let use_table = match source.as_ref() {
-            None => true,
-            Some(list) => {
-                iou(list, table) < 0.18
-                    || list.height > table.height * 1.8
-                    || list.y > table.y + table.height * 0.9
-            }
-        };
-        if use_table {
-            source = Some(table.clone());
+    let list = list_bounds?;
+    if let Some(heading) = heading {
+        if list.x + list.width < heading.bounds.x - 32.0 {
+            return None;
+        }
+        if list.y > heading.bounds.y + 320.0 {
+            return None;
         }
     }
-    source.map(|list| {
-        let controls_inside_table = table_bounds
-            .map(|table| iou(&list, table) > 0.18)
-            .unwrap_or(false);
-        let control_y = if controls_inside_table {
-            list.y + list.height - 8.0
-        } else {
-            list.y + list.height + row_height.max(10.0)
-        };
-        let plus = bounds_from_center(list.x + 12.0, control_y, 14.0, 14.0);
-        let minus = bounds_from_center(list.x + 30.0, control_y, 14.0, 14.0);
-        json!({
-            "add_button_bounds": plus,
-            "remove_button_bounds": minus,
-            "add_click": center_point(&plus),
-            "remove_click": center_point(&minus)
-        })
-    })
+    let control_y = list.y + list.height + row_height.max(10.0).min(24.0);
+    let plus = bounds_from_center(list.x + 12.0, control_y, 14.0, 14.0);
+    let minus = bounds_from_center(list.x + 30.0, control_y, 14.0, 14.0);
+    let footer = desktop_core::protocol::Bounds {
+        x: (plus.x - 8.0).max(0.0),
+        y: (plus.y - 6.0).max(0.0),
+        width: 52.0,
+        height: 24.0,
+    };
+    Some(json!({
+        "source": "list_bounds",
+        "add_button_bounds": plus,
+        "remove_button_bounds": minus,
+        "add_click": center_point(&plus),
+        "remove_click": center_point(&minus),
+        "footer_bounds": footer
+    }))
 }
 
 fn is_probable_settings_row_label(text: &str, confidence: f32) -> bool {
@@ -1578,25 +2039,28 @@ fn load_rgba_image(path: &std::path::Path) -> Option<RgbaImage> {
 fn estimate_toggle_state(
     image: Option<&RgbaImage>,
     bounds: &desktop_core::protocol::Bounds,
+    display_width: u32,
+    display_height: u32,
 ) -> String {
     let image = match image {
         Some(img) => img,
         None => return "unknown".to_string(),
     };
-    let width = image.width() as i32;
-    let height = image.height() as i32;
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 || display_width == 0 || display_height == 0 {
+        return "unknown".to_string();
+    }
+    let (x0, y0, x1, y1) =
+        match logical_bounds_to_image_rect(bounds, width, height, display_width, display_height) {
+            Some(rect) => rect,
+            None => return "unknown".to_string(),
+        };
+    let width = width as i32;
+    let height = height as i32;
     if width <= 0 || height <= 0 {
         return "unknown".to_string();
     }
-
-    let x0 = bounds.x.floor().max(0.0) as i32;
-    let y0 = bounds.y.floor().max(0.0) as i32;
-    let x1 = (bounds.x + bounds.width).ceil().max(0.0) as i32;
-    let y1 = (bounds.y + bounds.height).ceil().max(0.0) as i32;
-    let x0 = x0.clamp(0, width - 1);
-    let y0 = y0.clamp(0, height - 1);
-    let x1 = x1.clamp(x0 + 1, width);
-    let y1 = y1.clamp(y0 + 1, height);
 
     let mut r_sum = 0f64;
     let mut g_sum = 0f64;
@@ -1628,6 +2092,378 @@ fn estimate_toggle_state(
     } else {
         "unknown".to_string()
     }
+}
+
+fn logical_bounds_to_image_rect(
+    bounds: &desktop_core::protocol::Bounds,
+    image_width: u32,
+    image_height: u32,
+    display_width: u32,
+    display_height: u32,
+) -> Option<(i32, i32, i32, i32)> {
+    if image_width == 0 || image_height == 0 || display_width == 0 || display_height == 0 {
+        return None;
+    }
+    let sx = image_width as f64 / display_width as f64;
+    let sy = image_height as f64 / display_height as f64;
+    let x0 = (bounds.x * sx).floor().max(0.0) as i32;
+    let y0 = (bounds.y * sy).floor().max(0.0) as i32;
+    let x1 = ((bounds.x + bounds.width) * sx).ceil().max(0.0) as i32;
+    let y1 = ((bounds.y + bounds.height) * sy).ceil().max(0.0) as i32;
+    let max_x = image_width as i32;
+    let max_y = image_height as i32;
+    if max_x <= 0 || max_y <= 0 {
+        return None;
+    }
+    let x0 = x0.clamp(0, max_x - 1);
+    let y0 = y0.clamp(0, max_y - 1);
+    let x1 = x1.clamp(x0 + 1, max_x);
+    let y1 = y1.clamp(y0 + 1, max_y);
+    Some((x0, y0, x1, y1))
+}
+
+fn write_capture_overlay(capture: &vision::pipeline::CaptureResult) -> Result<PathBuf, AppError> {
+    let mut image = load_rgba_image(&capture.image_path).ok_or_else(|| {
+        AppError::backend_unavailable(format!(
+            "failed to load capture image for overlay: {}",
+            capture.image_path.display()
+        ))
+    })?;
+    let image_width = image.width();
+    let image_height = image.height();
+    if image_width == 0 || image_height == 0 {
+        return Err(AppError::backend_unavailable(
+            "cannot render overlay for empty capture image",
+        ));
+    }
+
+    for text in &capture.snapshot.texts {
+        if text.confidence < 0.45 || text.text.len() > 96 {
+            continue;
+        }
+        draw_logical_bounds_on_image(
+            &mut image,
+            &text.bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([72, 196, 222, 255]),
+            1,
+        );
+    }
+
+    let image_regions = vision::regions::detect_settings_regions(&image);
+    let regions_display = scale_regions_to_display(
+        &image_regions,
+        Some(image_width),
+        Some(image_height),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+    );
+    let heading = find_settings_heading(
+        &capture.snapshot.texts,
+        regions_display.content_bounds.as_ref(),
+    )
+    .or_else(|| find_settings_heading(&capture.snapshot.texts, None));
+    let instruction = find_settings_instruction(&capture.snapshot.texts, heading.as_ref());
+    let no_items = first_matching_text(&capture.snapshot.texts, "no items");
+    let inferred_window_bounds = infer_window_bounds_from_content(
+        regions_display.content_bounds.as_ref(),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+    )
+    .or_else(|| regions_display.window_bounds.clone());
+    if let Some(bounds) = inferred_window_bounds.as_ref() {
+        draw_logical_bounds_on_image(
+            &mut image,
+            bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([245, 179, 34, 255]),
+            2,
+        );
+    }
+    if let Some(bounds) = regions_display.content_bounds.as_ref() {
+        draw_logical_bounds_on_image(
+            &mut image,
+            bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([45, 199, 124, 255]),
+            2,
+        );
+    }
+
+    if let Some(heading) = heading.as_ref() {
+        draw_logical_bounds_on_image(
+            &mut image,
+            &heading.bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([255, 211, 42, 255]),
+            2,
+        );
+    }
+    if let Some(no_items) = no_items.as_ref() {
+        draw_logical_bounds_on_image(
+            &mut image,
+            &no_items.bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([94, 145, 252, 255]),
+            2,
+        );
+    }
+    if let Some(instruction) = instruction.as_ref() {
+        draw_logical_bounds_on_image(
+            &mut image,
+            &instruction.bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([255, 161, 76, 255]),
+            2,
+        );
+    }
+
+    let list_bounds = infer_list_bounds_from_anchors(
+        heading.as_ref(),
+        no_items.as_ref(),
+        regions_display.content_bounds.as_ref(),
+    );
+    if let Some(bounds) = list_bounds.as_ref() {
+        draw_logical_bounds_on_image(
+            &mut image,
+            bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([225, 132, 255, 255]),
+            2,
+        );
+    }
+
+    if let Some(controls) = infer_settings_controls_for_settings_pane(
+        &capture.snapshot.texts,
+        heading.as_ref(),
+        no_items.as_ref(),
+        instruction.as_ref(),
+        list_bounds.as_ref(),
+        regions_display.content_bounds.as_ref(),
+        14.0,
+    ) {
+        if let Some(add_bounds) = controls
+            .get("add_button_bounds")
+            .and_then(bounds_tuple_from_value)
+        {
+            draw_logical_bounds_on_image(
+                &mut image,
+                &desktop_core::protocol::Bounds {
+                    x: add_bounds.0,
+                    y: add_bounds.1,
+                    width: add_bounds.2,
+                    height: add_bounds.3,
+                },
+                capture.snapshot.display.width,
+                capture.snapshot.display.height,
+                Rgba([90, 255, 90, 255]),
+                2,
+            );
+        }
+        if let Some(remove_bounds) = controls
+            .get("remove_button_bounds")
+            .and_then(bounds_tuple_from_value)
+        {
+            draw_logical_bounds_on_image(
+                &mut image,
+                &desktop_core::protocol::Bounds {
+                    x: remove_bounds.0,
+                    y: remove_bounds.1,
+                    width: remove_bounds.2,
+                    height: remove_bounds.3,
+                },
+                capture.snapshot.display.width,
+                capture.snapshot.display.height,
+                Rgba([255, 96, 96, 255]),
+                2,
+            );
+        }
+        if let Some(footer) = controls
+            .get("footer_bounds")
+            .and_then(bounds_tuple_from_value)
+        {
+            draw_logical_bounds_on_image(
+                &mut image,
+                &desktop_core::protocol::Bounds {
+                    x: footer.0,
+                    y: footer.1,
+                    width: footer.2,
+                    height: footer.3,
+                },
+                capture.snapshot.display.width,
+                capture.snapshot.display.height,
+                Rgba([255, 111, 97, 255]),
+                2,
+            );
+        }
+        if let Some((x, y)) = controls.get("add_click").and_then(point_from_value) {
+            draw_logical_point_on_image(
+                &mut image,
+                x,
+                y,
+                capture.snapshot.display.width,
+                capture.snapshot.display.height,
+                Rgba([90, 255, 90, 255]),
+            );
+        }
+        if let Some((x, y)) = controls.get("remove_click").and_then(point_from_value) {
+            draw_logical_point_on_image(
+                &mut image,
+                x,
+                y,
+                capture.snapshot.display.width,
+                capture.snapshot.display.height,
+                Rgba([255, 96, 96, 255]),
+            );
+        }
+    }
+
+    let overlay_path = overlay_path_for_capture(&capture.image_path);
+    image
+        .save_with_format(&overlay_path, ImageFormat::Png)
+        .map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to write overlay image {}: {err}",
+                overlay_path.display()
+            ))
+        })?;
+    trace::log(format!(
+        "screen_capture_overlay:ok snapshot_id={} path={}",
+        capture.snapshot.snapshot_id,
+        overlay_path.display()
+    ));
+    Ok(overlay_path)
+}
+
+fn overlay_path_for_capture(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "capture".to_string());
+    let mut name = format!("{stem}.overlay");
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        if !ext.is_empty() {
+            name.push('.');
+            name.push_str(ext);
+        }
+    } else {
+        name.push_str(".png");
+    }
+    match path.parent() {
+        Some(parent) => parent.join(name),
+        None => PathBuf::from(name),
+    }
+}
+
+fn draw_logical_bounds_on_image(
+    image: &mut RgbaImage,
+    bounds: &desktop_core::protocol::Bounds,
+    display_width: u32,
+    display_height: u32,
+    color: Rgba<u8>,
+    thickness: u32,
+) {
+    if let Some((x0, y0, x1, y1)) = logical_bounds_to_image_rect(
+        bounds,
+        image.width(),
+        image.height(),
+        display_width,
+        display_height,
+    ) {
+        let x1 = (x1 - 1).max(x0) as u32;
+        let y1 = (y1 - 1).max(y0) as u32;
+        draw_rect_outline(image, x0 as u32, y0 as u32, x1, y1, color, thickness);
+    }
+}
+
+fn draw_rect_outline(
+    image: &mut RgbaImage,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    color: Rgba<u8>,
+    thickness: u32,
+) {
+    if x1 < x0 || y1 < y0 {
+        return;
+    }
+    let thickness = thickness.max(1);
+    for offset in 0..thickness {
+        let top = y0.saturating_add(offset).min(y1);
+        let bottom = y1.saturating_sub(offset).max(y0);
+        for x in x0..=x1 {
+            image.put_pixel(x, top, color);
+            image.put_pixel(x, bottom, color);
+        }
+        let left = x0.saturating_add(offset).min(x1);
+        let right = x1.saturating_sub(offset).max(x0);
+        for y in y0..=y1 {
+            image.put_pixel(left, y, color);
+            image.put_pixel(right, y, color);
+        }
+    }
+}
+
+fn draw_logical_point_on_image(
+    image: &mut RgbaImage,
+    x: u32,
+    y: u32,
+    display_width: u32,
+    display_height: u32,
+    color: Rgba<u8>,
+) {
+    let Some((ix, iy)) = logical_point_to_image_point(
+        x,
+        y,
+        image.width(),
+        image.height(),
+        display_width,
+        display_height,
+    ) else {
+        return;
+    };
+    let radius = 6_i32;
+    for dx in -radius..=radius {
+        let px = ix as i32 + dx;
+        if px >= 0 && px < image.width() as i32 {
+            image.put_pixel(px as u32, iy, color);
+        }
+    }
+    for dy in -radius..=radius {
+        let py = iy as i32 + dy;
+        if py >= 0 && py < image.height() as i32 {
+            image.put_pixel(ix, py as u32, color);
+        }
+    }
+}
+
+fn logical_point_to_image_point(
+    x: u32,
+    y: u32,
+    image_width: u32,
+    image_height: u32,
+    display_width: u32,
+    display_height: u32,
+) -> Option<(u32, u32)> {
+    if image_width == 0 || image_height == 0 || display_width == 0 || display_height == 0 {
+        return None;
+    }
+    let sx = image_width as f64 / display_width as f64;
+    let sy = image_height as f64 / display_height as f64;
+    let ix = ((x as f64) * sx).round() as i64;
+    let iy = ((y as f64) * sy).round() as i64;
+    let ix = ix.clamp(0, image_width.saturating_sub(1) as i64) as u32;
+    let iy = iy.clamp(0, image_height.saturating_sub(1) as i64) as u32;
+    Some((ix, iy))
 }
 
 fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {
@@ -1807,6 +2643,8 @@ mod tests {
         error::ErrorCode,
         protocol::{Bounds, RequestEnvelope, ResponseEnvelope, SnapshotText},
     };
+    use image::{Rgba, RgbaImage};
+    use serde_json::json;
 
     use super::execute;
 
@@ -1979,5 +2817,357 @@ mod tests {
         let rows = super::infer_settings_rows(&texts, Some(&heading));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "DesktopCtl");
+    }
+
+    #[test]
+    fn sidebar_like_rows_are_rejected() {
+        let rows = Bounds {
+            x: 56.0,
+            y: 242.0,
+            width: 168.0,
+            height: 372.0,
+        };
+        let heading = SnapshotText {
+            text: "Accessibility".to_string(),
+            bounds: Bounds {
+                x: 302.0,
+                y: 132.0,
+                width: 108.0,
+                height: 20.0,
+            },
+            confidence: 0.9,
+        };
+        let no_items = SnapshotText {
+            text: "No Items".to_string(),
+            bounds: Bounds {
+                x: 410.0,
+                y: 194.0,
+                width: 58.0,
+                height: 15.0,
+            },
+            confidence: 0.9,
+        };
+        assert!(super::is_sidebar_like_rows(
+            Some(&rows),
+            Some(&heading),
+            Some(&no_items)
+        ));
+    }
+
+    #[test]
+    fn table_rows_are_not_rejected() {
+        let rows = Bounds {
+            x: 286.0,
+            y: 188.0,
+            width: 340.0,
+            height: 46.0,
+        };
+        let heading = SnapshotText {
+            text: "Accessibility".to_string(),
+            bounds: Bounds {
+                x: 302.0,
+                y: 132.0,
+                width: 108.0,
+                height: 20.0,
+            },
+            confidence: 0.9,
+        };
+        let no_items = SnapshotText {
+            text: "No Items".to_string(),
+            bounds: Bounds {
+                x: 410.0,
+                y: 194.0,
+                width: 58.0,
+                height: 15.0,
+            },
+            confidence: 0.9,
+        };
+        assert!(!super::is_sidebar_like_rows(
+            Some(&rows),
+            Some(&heading),
+            Some(&no_items)
+        ));
+    }
+
+    #[test]
+    fn scales_region_bounds_from_retina_image_to_logical_display() {
+        let regions = crate::vision::regions::SettingsRegions {
+            window_bounds: Some(Bounds {
+                x: 0.0,
+                y: 300.0,
+                width: 2000.0,
+                height: 1200.0,
+            }),
+            sidebar_bounds: None,
+            content_bounds: Some(Bounds {
+                x: 300.0,
+                y: 420.0,
+                width: 1600.0,
+                height: 950.0,
+            }),
+            table_bounds: Some(Bounds {
+                x: 500.0,
+                y: 640.0,
+                width: 1200.0,
+                height: 88.0,
+            }),
+        };
+
+        let scaled = super::scale_regions_to_display(&regions, Some(2940), Some(1912), 1470, 956);
+        let table = scaled.table_bounds.expect("table bounds");
+        assert!((table.x - 250.0).abs() < 0.001);
+        assert!((table.y - 320.0).abs() < 0.001);
+        assert!((table.width - 600.0).abs() < 0.001);
+        assert!((table.height - 44.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn keeps_region_bounds_when_image_and_display_match() {
+        let regions = crate::vision::regions::SettingsRegions {
+            window_bounds: None,
+            sidebar_bounds: None,
+            content_bounds: None,
+            table_bounds: Some(Bounds {
+                x: 240.0,
+                y: 220.0,
+                width: 700.0,
+                height: 44.0,
+            }),
+        };
+        let scaled = super::scale_regions_to_display(&regions, Some(1470), Some(956), 1470, 956);
+        let table = scaled.table_bounds.expect("table");
+        assert!((table.x - 240.0).abs() < 0.001);
+        assert!((table.y - 220.0).abs() < 0.001);
+        assert!((table.width - 700.0).abs() < 0.001);
+        assert!((table.height - 44.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn infers_window_bounds_from_content_geometry() {
+        let window = super::infer_window_bounds_from_content(
+            Some(&Bounds {
+                x: 246.0,
+                y: 176.0,
+                width: 382.0,
+                height: 438.0,
+            }),
+            1470,
+            956,
+        )
+        .expect("window bounds");
+        assert!((window.x - 96.0).abs() < 0.5);
+        assert!((window.y - 138.77).abs() < 0.5);
+        assert!((window.width - 532.0).abs() < 0.5);
+        assert!((window.height - 475.23).abs() < 0.5);
+    }
+
+    #[test]
+    fn logical_bounds_map_to_retina_image_rect() {
+        let rect = super::logical_bounds_to_image_rect(
+            &Bounds {
+                x: 100.0,
+                y: 50.0,
+                width: 24.0,
+                height: 10.0,
+            },
+            2940,
+            1912,
+            1470,
+            956,
+        )
+        .expect("mapped rect");
+        assert_eq!(rect, (200, 100, 248, 120));
+    }
+
+    #[test]
+    fn logical_point_maps_to_retina_pixels() {
+        let mapped = super::logical_point_to_image_point(355, 268, 2940, 1912, 1470, 956)
+            .expect("point should map");
+        assert_eq!(mapped, (710, 536));
+    }
+
+    #[test]
+    fn overlay_path_uses_overlay_suffix() {
+        let path = std::path::Path::new("/tmp/capture.png");
+        let overlay = super::overlay_path_for_capture(path);
+        assert_eq!(
+            overlay,
+            std::path::PathBuf::from("/tmp/capture.overlay.png")
+        );
+    }
+
+    #[test]
+    fn toggle_state_sampling_respects_retina_mapping() {
+        let mut img = RgbaImage::from_pixel(2940, 1912, Rgba([160, 160, 160, 255]));
+        for y in 100..120 {
+            for x in 200..248 {
+                img.put_pixel(x, y, Rgba([40, 110, 220, 255]));
+            }
+        }
+        let state = super::estimate_toggle_state(
+            Some(&img),
+            &Bounds {
+                x: 100.0,
+                y: 50.0,
+                width: 24.0,
+                height: 10.0,
+            },
+            1470,
+            956,
+        );
+        assert_eq!(state, "on");
+    }
+
+    #[test]
+    fn derives_settings_add_click_from_no_items_anchor() {
+        let payload = json!({
+            "no_items": {
+                "bounds": {
+                    "x": 508.5,
+                    "y": 241.05,
+                    "width": 57.72,
+                    "height": 12.97
+                }
+            }
+        });
+        let (x, y) = super::settings_click_from_no_items_anchor("add", &payload)
+            .expect("add click from anchor");
+        assert_eq!((x, y), (355, 268));
+    }
+
+    #[test]
+    fn derives_settings_remove_click_from_no_items_anchor() {
+        let payload = json!({
+            "no_items": {
+                "bounds": {
+                    "x": 508.5,
+                    "y": 241.05,
+                    "width": 57.72,
+                    "height": 12.97
+                }
+            }
+        });
+        let (x, y) = super::settings_click_from_no_items_anchor("remove", &payload)
+            .expect("remove click from anchor");
+        assert_eq!((x, y), (373, 268));
+    }
+
+    #[test]
+    fn finds_settings_instruction_under_heading() {
+        let heading = SnapshotText {
+            text: "Accessibility".to_string(),
+            bounds: Bounds {
+                x: 300.0,
+                y: 134.0,
+                width: 112.0,
+                height: 19.0,
+            },
+            confidence: 0.9,
+        };
+        let texts = vec![
+            heading.clone(),
+            SnapshotText {
+                text: "Allow the applications below to control your computer.".to_string(),
+                bounds: Bounds {
+                    x: 255.0,
+                    y: 166.0,
+                    width: 268.0,
+                    height: 14.0,
+                },
+                confidence: 0.9,
+            },
+        ];
+        let instruction = super::find_settings_instruction(&texts, Some(&heading))
+            .expect("instruction should be found");
+        assert!(instruction.text.to_lowercase().contains("allow"));
+        assert!(instruction.bounds.y > heading.bounds.y);
+    }
+
+    #[test]
+    fn infers_controls_from_ocr_symbols_pair() {
+        let heading = SnapshotText {
+            text: "Accessibility".to_string(),
+            bounds: Bounds {
+                x: 299.0,
+                y: 136.0,
+                width: 112.0,
+                height: 18.0,
+            },
+            confidence: 0.9,
+        };
+        let no_items = SnapshotText {
+            text: "No Items".to_string(),
+            bounds: Bounds {
+                x: 409.0,
+                y: 198.0,
+                width: 58.0,
+                height: 14.0,
+            },
+            confidence: 0.9,
+        };
+        let plus = SnapshotText {
+            text: "+".to_string(),
+            bounds: Bounds {
+                x: 252.0,
+                y: 214.0,
+                width: 8.0,
+                height: 8.0,
+            },
+            confidence: 0.9,
+        };
+        let minus = SnapshotText {
+            text: "-".to_string(),
+            bounds: Bounds {
+                x: 270.0,
+                y: 214.0,
+                width: 8.0,
+                height: 8.0,
+            },
+            confidence: 0.9,
+        };
+        let controls = super::infer_settings_controls_for_settings_pane(
+            &[heading.clone(), no_items.clone(), plus, minus],
+            Some(&heading),
+            Some(&no_items),
+            None,
+            None,
+            Some(&Bounds {
+                x: 234.0,
+                y: 150.0,
+                width: 398.0,
+                height: 470.0,
+            }),
+            14.0,
+        )
+        .expect("controls should be inferred");
+        assert_eq!(controls["source"], "ocr_symbols");
+        let (x, y) = super::point_from_value(&controls["add_click"]).expect("add click");
+        assert_eq!((x, y), (256, 218));
+    }
+
+    #[test]
+    fn list_bounds_controls_include_footer() {
+        let heading = SnapshotText {
+            text: "Accessibility".to_string(),
+            bounds: Bounds {
+                x: 300.0,
+                y: 134.0,
+                width: 112.0,
+                height: 18.0,
+            },
+            confidence: 0.9,
+        };
+        let controls = super::infer_settings_controls_from_list_bounds(
+            Some(&Bounds {
+                x: 246.0,
+                y: 188.0,
+                width: 360.0,
+                height: 42.0,
+            }),
+            Some(&heading),
+            14.0,
+        )
+        .expect("controls");
+        assert!(controls["footer_bounds"].is_object());
     }
 }

@@ -6,7 +6,7 @@ use std::{
 
 use desktop_core::{
     error::AppError,
-    protocol::{Bounds, SnapshotDisplay, SnapshotPayload, TokenEntry, now_millis},
+    protocol::{Bounds, SnapshotDisplay, SnapshotPayload, TokenEntry},
 };
 
 use super::{diff::GrayThumbnail, types::CapturedFrame};
@@ -18,9 +18,6 @@ const MAX_FRAMES: usize = 64;
 pub struct VisionEvent {
     pub event_id: u64,
     pub snapshot_id: u64,
-    pub timestamp: String,
-    pub kind: String,
-    pub roi: Option<Bounds>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +85,7 @@ impl VisionState {
         thumbnail: GrayThumbnail,
         focused_app: Option<String>,
         texts: Vec<desktop_core::protocol::SnapshotText>,
-        roi: Option<Bounds>,
+        _roi: Option<Bounds>,
     ) -> CaptureUpdate {
         let snapshot_id = self.next_snapshot_id;
         self.next_snapshot_id += 1;
@@ -119,13 +116,6 @@ impl VisionState {
         self.events.push_back(VisionEvent {
             event_id,
             snapshot_id,
-            timestamp: now_millis().to_string(),
-            kind: if roi.is_some() {
-                "frame_changed".to_string()
-            } else {
-                "frame_captured".to_string()
-            },
-            roi,
         });
         while self.events.len() > MAX_EVENTS {
             self.events.pop_front();

@@ -55,6 +55,10 @@ pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, Ap
             });
 
         let update = state.record_capture(capture, thumb, focused_app, texts, roi);
+        trace::log(format!(
+            "pipeline:capture_and_update:recorded snapshot_id={} event_id={}",
+            update.snapshot.snapshot_id, update.event_id
+        ));
         let event_ids = state.event_ids(update.snapshot.snapshot_id);
 
         CaptureResult {

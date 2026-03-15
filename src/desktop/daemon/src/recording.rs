@@ -13,16 +13,11 @@ use desktop_core::{
 use serde_json::{Value, json};
 
 pub struct RecorderSession {
-    pub session_dir: PathBuf,
     frames_dir: PathBuf,
     trace_file: Mutex<File>,
 }
 
 static RECORDER: OnceLock<RecorderSession> = OnceLock::new();
-
-pub fn session_dir() -> Result<PathBuf, AppError> {
-    Ok(init_session()?.session_dir.clone())
-}
 
 pub fn record_command(
     request: &RequestEnvelope,
@@ -69,7 +64,6 @@ fn init_session() -> Result<&'static RecorderSession, AppError> {
                 AppError::backend_unavailable(format!("failed to open recorder trace file: {err}"))
             })?;
         RecorderSession {
-            session_dir,
             frames_dir,
             trace_file: Mutex::new(trace_file),
         }
@@ -152,7 +146,7 @@ fn now_timestamp_string() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{record_command, session_dir};
+    use super::record_command;
     use desktop_core::protocol::{Command, RequestEnvelope, ResponseEnvelope};
     use serde_json::json;
     use std::{fs, path::PathBuf};
@@ -169,7 +163,16 @@ mod tests {
         let request = RequestEnvelope::new("t1".to_string(), Command::Ping);
         let response = ResponseEnvelope::success("t1", json!({ "message": "pong" }));
         record_command(&request, &response).expect("record trace");
-        let session = session_dir().expect("session dir");
+        let mut sessions = fs::read_dir(&base)
+            .expect("read base dir")
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        sessions.sort();
+        let session = sessions
+            .last()
+            .cloned()
+            .expect("recording session directory should exist");
         assert!(session.join("trace.jsonl").exists());
         assert!(session.join("frames").exists());
     }
