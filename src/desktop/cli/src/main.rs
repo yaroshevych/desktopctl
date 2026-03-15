@@ -79,7 +79,7 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
 fn parse_app(args: &[String]) -> Result<Command, AppError> {
     if args.len() < 2 {
         return Err(AppError::invalid_argument(
-            "usage: desktopctl app hide <application> | desktopctl app show <application>",
+            "usage: desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
         ));
     }
 
@@ -94,8 +94,9 @@ fn parse_app(args: &[String]) -> Result<Command, AppError> {
     match action {
         "hide" => Ok(Command::AppHide { name }),
         "show" => Ok(Command::AppShow { name }),
+        "isolate" => Ok(Command::AppIsolate { name }),
         _ => Err(AppError::invalid_argument(
-            "usage: desktopctl app hide <application> | desktopctl app show <application>",
+            "usage: desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
         )),
     }
 }
@@ -628,6 +629,7 @@ fn usage() -> &'static str {
   desktopctl ping
   desktopctl app hide <application>
   desktopctl app show <application>
+  desktopctl app isolate <application>
   desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl open spotlight
   desktopctl open launchpad
@@ -988,6 +990,16 @@ mod tests {
                 assert_eq!(dy, 92);
                 assert_eq!(timeout_ms, 1500);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_app_isolate() {
+        let args = vec!["app".to_string(), "isolate".to_string(), "UTM".to_string()];
+        let command = parse_command(&args).expect("app isolate should parse");
+        match command {
+            Command::AppIsolate { name } => assert_eq!(name, "UTM"),
             other => panic!("unexpected command: {other:?}"),
         }
     }

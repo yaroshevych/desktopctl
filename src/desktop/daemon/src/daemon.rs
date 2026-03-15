@@ -186,6 +186,13 @@ fn execute(command: Command) -> Result<Value, AppError> {
             trace::log(format!("app_show:ok name={name}"));
             Ok(json!({ "app": name, "state": "shown" }))
         }
+        Command::AppIsolate { name } => {
+            trace::log(format!("app_isolate:start name={name}"));
+            let hidden = isolate_application(&name)?;
+            let _ = wait_for_open_app(&name, 6_000);
+            trace::log(format!("app_isolate:ok name={name} hidden={hidden}"));
+            Ok(json!({ "app": name, "state": "isolated", "hidden_apps": hidden }))
+        }
         Command::OpenApp {
             name,
             args,
@@ -1516,6 +1523,43 @@ tell application "{escaped}" to activate"#
         )));
     }
     Ok(())
+}
+
+fn isolate_application(name: &str) -> Result<u32, AppError> {
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"tell application "System Events"
+set targetName to "{escaped}"
+set hiddenCount to 0
+repeat with p in (application processes whose background only is false)
+    set pname to (name of p) as text
+    if pname is not targetName then
+        try
+            if visible of p then
+                set visible of p to false
+                set hiddenCount to hiddenCount + 1
+            end if
+        end try
+    end if
+end repeat
+return hiddenCount as string
+end tell
+tell application "{escaped}" to activate"#
+    );
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AppError::internal(format!(
+            "failed to isolate application \"{name}\": {stderr}"
+        )));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(value.parse::<u32>().unwrap_or(0))
 }
 
 #[cfg(test)]

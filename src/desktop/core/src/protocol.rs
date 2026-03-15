@@ -33,6 +33,9 @@ pub enum Command {
     AppShow {
         name: String,
     },
+    AppIsolate {
+        name: String,
+    },
     OpenApp {
         name: String,
         args: Vec<String>,
@@ -135,6 +138,7 @@ impl Command {
             Command::Ping => "ping",
             Command::AppHide { .. } => "app_hide",
             Command::AppShow { .. } => "app_show",
+            Command::AppIsolate { .. } => "app_isolate",
             Command::OpenApp { .. } => "open",
             Command::OpenSpotlight => "open_spotlight",
             Command::OpenLaunchpad => "open_launchpad",
