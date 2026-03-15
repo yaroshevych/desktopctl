@@ -46,6 +46,7 @@ vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   VM_HOST="${VM_HOST_INPUT:-${VM_HOST:-}}"
   VM_USER="${VM_USER_INPUT:-${VM_USER:-}}"
   VM_WINDOW_APP="${VM_WINDOW_APP_INPUT:-${VM_WINDOW_APP:-UTM}}"
+  HOST_RETURN_APP="${HOST_RETURN_APP:-}"
 
   if [[ -z "$VM_HOST" ]]; then
     echo "Missing VM host. Set VM_HOST in src/desktop/.env or pass it to just vm-enable-permissions <vm_host> <vm_user>."
@@ -60,6 +61,10 @@ vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   VM_APP_DIR="/Users/${VM_USER}/DesktopCtl/dist"
   VM_APP_PATH="${VM_APP_DIR}/DesktopCtl.app"
   VM_CLI_PATH="${VM_APP_DIR}/desktopctl"
+
+  if [[ -z "$HOST_RETURN_APP" ]]; then
+    HOST_RETURN_APP="$(/usr/bin/osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || true)"
+  fi
 
   if [[ ! -x "$HOST_DCTL" ]]; then
     just build
@@ -83,7 +88,9 @@ vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   ssh "$VM_HOST" "pkill -f desktopctld || true; pkill -f 'DesktopCtl.app' || true"
 
   echo "[4/7] Focus VM window on host"
-  "$HOST_DCTL" app hide Ghostty || true
+  if [[ -n "$HOST_RETURN_APP" && "$HOST_RETURN_APP" != "$VM_WINDOW_APP" ]]; then
+    "$HOST_DCTL" app hide "$HOST_RETURN_APP" || true
+  fi
   "$HOST_DCTL" open "$VM_WINDOW_APP" --wait
 
   normalize_host_workspace() {
@@ -170,5 +177,7 @@ vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   ssh "$VM_HOST" "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen snapshot --json"
   ssh "$VM_HOST" "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen tokenize --json"
 
-  "$HOST_DCTL" app show Ghostty || true
+  if [[ -n "$HOST_RETURN_APP" && "$HOST_RETURN_APP" != "$VM_WINDOW_APP" ]]; then
+    "$HOST_DCTL" app show "$HOST_RETURN_APP" || true
+  fi
   echo "Done: VM permissions and basic verification completed."
