@@ -86,12 +86,52 @@ vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   "$HOST_DCTL" app hide Ghostty || true
   "$HOST_DCTL" open "$VM_WINDOW_APP" --wait
 
+  normalize_host_workspace() {
+    local target_app="$1"
+    /usr/bin/osascript \
+      -e 'on run argv' \
+      -e 'set targetName to item 1 of argv' \
+      -e 'tell application "System Events"' \
+      -e 'repeat with p in (application processes whose background only is false)' \
+      -e 'set pname to (name of p) as text' \
+      -e 'if pname is not targetName then' \
+      -e 'try' \
+      -e 'set visible of p to false' \
+      -e 'end try' \
+      -e 'end if' \
+      -e 'end repeat' \
+      -e 'end tell' \
+      -e 'tell application targetName to activate' \
+      -e 'delay 0.25' \
+      -e 'tell application "Finder" to set screenBounds to bounds of window of desktop' \
+      -e 'set screenW to (item 3 of screenBounds) - (item 1 of screenBounds)' \
+      -e 'set screenH to (item 4 of screenBounds) - (item 2 of screenBounds)' \
+      -e 'tell application "System Events"' \
+      -e 'tell process targetName' \
+      -e 'set frontmost to true' \
+      -e 'if (count of windows) > 0 then' \
+      -e 'try' \
+      -e 'set position of front window to {12, 38}' \
+      -e 'set size of front window to {screenW - 24, screenH - 90}' \
+      -e 'end try' \
+      -e 'end if' \
+      -e 'end tell' \
+      -e 'end tell' \
+      -e 'end run' \
+      "$target_app"
+  }
+
+  normalize_host_workspace "$VM_WINDOW_APP"
+
   add_entry_in_current_pane() {
+    normalize_host_workspace "$VM_WINDOW_APP"
     "$HOST_DCTL" ui click --text "DesktopCtl" --timeout 1200 || true
     "$HOST_DCTL" ui click --settings-remove || true
     "$HOST_DCTL" wait 220
 
-    "$HOST_DCTL" ui click --settings-add
+    "$HOST_DCTL" ui click --settings-add \
+      || "$HOST_DCTL" ui click --text-offset "No Items" --dx -182 --dy 20 --timeout 1800 \
+      || "$HOST_DCTL" ui click --text-offset "Allow the applications" --dx -170 --dy 46 --timeout 1800
     "$HOST_DCTL" wait --text "Open" --timeout 6000
     "$HOST_DCTL" key press cmd+shift+g
     "$HOST_DCTL" type "$VM_APP_DIR"
