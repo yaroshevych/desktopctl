@@ -1,0 +1,10 @@
+{
+  "image": "light-neon_grass.png",
+  "window": {
+    "x": 554,
+    "y": 239,
+    "width": 717,
+    "height": 626
+  },
+  "occluded": false
+}

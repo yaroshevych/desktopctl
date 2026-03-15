@@ -1,0 +1,10 @@
+{
+  "image": "light-light-left.png",
+  "window": {
+    "x": 79,
+    "y": 231,
+    "width": 711,
+    "height": 625
+  },
+  "occluded": false
+}

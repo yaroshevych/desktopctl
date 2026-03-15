@@ -1,0 +1,10 @@
+{
+  "image": "dark-neon_grass.png",
+  "window": {
+    "x": 552,
+    "y": 236,
+    "width": 714,
+    "height": 626
+  },
+  "occluded": false
+}

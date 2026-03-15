@@ -1,0 +1,10 @@
+{
+  "image": "light-forest-right.png",
+  "window": {
+    "x": 752,
+    "y": 219,
+    "width": 716,
+    "height": 625
+  },
+  "occluded": false
+}

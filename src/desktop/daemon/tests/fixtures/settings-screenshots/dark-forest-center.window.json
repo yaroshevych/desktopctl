@@ -1,0 +1,10 @@
+{
+  "image": "dark-forest-center.png",
+  "window": {
+    "x": 784,
+    "y": 107,
+    "width": 728,
+    "height": 635
+  },
+  "occluded": false
+}

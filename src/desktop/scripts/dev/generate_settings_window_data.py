@@ -521,6 +521,8 @@ def detect_window_bounds_with_grounding(
             continue
         if touches_many_edges(candidate, image_w, image_h):
             continue
+        if traffic_lights and not contains_any_traffic_light(candidate, traffic_lights):
+            continue
 
         refined = refine_bounds_near_candidate(
             image,
@@ -528,18 +530,44 @@ def detect_window_bounds_with_grounding(
             min_width=min_width,
             min_height=min_height,
             max_border_gap=max_border_gap,
-        ) or candidate
+        )
+        if refined is not None:
+            refined_iou = intersection_over_union(refined, candidate)
+            refined_area = bounds_area(refined)
+            candidate_area = bounds_area(candidate)
+            if (
+                refined_iou >= 0.5
+                and refined_area <= candidate_area * 1.12
+                and not (touches_many_edges(refined, image_w, image_h) and not touches_many_edges(candidate, image_w, image_h))
+            ):
+                candidate = refined
 
         candidate_score = float(score)
-        if contains_any_traffic_light(refined, traffic_lights):
+        area_ratio = bounds_area(candidate) / float(image_w * image_h)
+        if area_ratio > 0.72:
+            continue
+        if contains_any_traffic_light(candidate, traffic_lights):
             candidate_score += 1.5
-        candidate_score += bounds_area(refined) / float(image_w * image_h)
+        candidate_score += min(area_ratio, 0.45)
+        candidate_score -= area_ratio * 1.6
         if "window" in str(label):
             candidate_score += 0.5
 
         if candidate_score > best_score:
             best_score = candidate_score
-            best_bounds = refined
+            best_bounds = candidate
+
+    if best_bounds is not None:
+        aggressive = False
+        if traffic_lights:
+            tl_x, tl_y = traffic_lights[0]
+            aggressive = (tl_y - best_bounds.y) > 40 or (tl_x - best_bounds.x) > 45
+        best_bounds = snap_bounds_to_visible_edges(
+            image,
+            best_bounds,
+            aggressive=aggressive,
+            traffic_lights=traffic_lights,
+        )
 
     return best_bounds
 
@@ -657,9 +685,222 @@ def touches_many_edges(bounds: Bounds, image_w: int, image_h: int) -> bool:
 
 def contains_any_traffic_light(bounds: Bounds, traffic_lights: list[tuple[int, int]]) -> bool:
     for tl_x, tl_y in traffic_lights:
-        if bounds.x <= tl_x <= bounds.x2 and bounds.y <= tl_y <= bounds.y + min(64, bounds.height // 6):
+        if bounds.x <= tl_x <= bounds.x2 and bounds.y <= tl_y <= bounds.y + min(120, bounds.height // 4):
             return True
     return False
+
+
+def snap_bounds_to_visible_edges(
+    image: np.ndarray,
+    bounds: Bounds,
+    *,
+    aggressive: bool,
+    traffic_lights: list[tuple[int, int]],
+) -> Bounds:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    grad_x = np.abs(np.diff(gray.astype(np.int16), axis=1))
+    grad_y = np.abs(np.diff(gray.astype(np.int16), axis=0))
+    image_h, image_w = gray.shape
+
+    left = bounds.x
+    right = bounds.x2
+    top = bounds.y
+    bottom = bounds.y2
+
+    if aggressive:
+        snapped_left = snap_vertical_edge(
+            grad_x,
+            y0=top + 20,
+            y1=bottom - 20,
+            search_start=max(1, bounds.x - 40),
+            search_end=min(image_w - 2, bounds.x + 90),
+        )
+        if snapped_left is not None:
+            left = snapped_left
+
+        snapped_right = snap_vertical_edge(
+            grad_x,
+            y0=top + 20,
+            y1=bottom - 20,
+            search_start=max(1, bounds.x2 - 220),
+            search_end=min(image_w - 2, bounds.x2 + 30),
+        )
+        if snapped_right is not None and snapped_right > left + 320:
+            right = snapped_right
+
+        snapped_top = snap_horizontal_edge(
+            grad_y,
+            x0=left + 20,
+            x1=right - 20,
+            search_start=max(1, bounds.y - 30),
+            search_end=min(image_h - 2, bounds.y + 80),
+        )
+        if snapped_top is not None:
+            top = snapped_top
+    else:
+        candidate_left = snap_vertical_edge(
+            grad_x,
+            y0=top + 20,
+            y1=bottom - 20,
+            search_start=max(1, bounds.x - 24),
+            search_end=min(image_w - 2, bounds.x + 12),
+        )
+        if candidate_left is not None and candidate_left < left:
+            left = candidate_left
+        if traffic_lights:
+            tl_x, _ = traffic_lights[0]
+            if left < tl_x - 40:
+                left = max(left, tl_x - 28)
+
+    snapped_bottom = snap_horizontal_edge(
+        grad_y,
+        x0=left + 20,
+        x1=right - 20,
+        search_start=max(1, bottom - (140 if aggressive else 80)),
+        search_end=min(image_h - 2, bottom + 20),
+    )
+    if snapped_bottom is not None and snapped_bottom > top + 240:
+        bottom = snapped_bottom
+
+    if aggressive and traffic_lights:
+        tl_x, tl_y = traffic_lights[0]
+        target_top = max(0, tl_y - 28)
+        if top < tl_y - 40:
+            snapped_from_tl = snap_horizontal_edge(
+                grad_y,
+                x0=left + 20,
+                x1=right - 20,
+                search_start=max(1, target_top - 16),
+                search_end=min(image_h - 2, target_top + 16),
+            )
+            top = snapped_from_tl if snapped_from_tl is not None else target_top
+
+        target_left = max(0, tl_x - 28)
+        if left < tl_x - 45:
+            snapped_from_tl = snap_vertical_edge(
+                grad_x,
+                y0=top + 20,
+                y1=bottom - 20,
+                search_start=max(1, target_left - 20),
+                search_end=min(image_w - 2, target_left + 20),
+            )
+            left = snapped_from_tl if snapped_from_tl is not None else target_left
+    else:
+        inner_left = snap_vertical_edge(
+            grad_x,
+            y0=top + 20,
+            y1=bottom - 20,
+            search_start=max(1, left + 8),
+            search_end=min(image_w - 2, left + 28),
+        )
+        if inner_left is not None:
+            current_left = snap_vertical_edge(
+                grad_x,
+                y0=top + 20,
+                y1=bottom - 20,
+                search_start=max(1, left - 2),
+                search_end=min(image_w - 2, left + 2),
+            )
+            if current_left is not None:
+                current_score = edge_strength_vertical(grad_x, current_left, top + 20, bottom - 20)
+                inner_score = edge_strength_vertical(grad_x, inner_left, top + 20, bottom - 20)
+                if inner_score > current_score * 1.6:
+                    left = inner_left
+
+    left = max(0, min(left, image_w - 2))
+    top = max(0, min(top, image_h - 2))
+    right = max(left + 1, min(right, image_w - 1))
+    bottom = max(top + 1, min(bottom, image_h - 1))
+
+    if not aggressive:
+        if traffic_lights and (bottom - top) > 636:
+            bottom = min(bottom, top + 625)
+        inner_bottom = snap_horizontal_edge(
+            grad_y,
+            x0=left + 20,
+            x1=right - 20,
+            search_start=max(1, bottom - 28),
+            search_end=min(image_h - 2, bottom - 8),
+        )
+        current_bottom = snap_horizontal_edge(
+            grad_y,
+            x0=left + 20,
+            x1=right - 20,
+            search_start=max(1, bottom - 2),
+            search_end=min(image_h - 2, bottom + 2),
+        )
+        if inner_bottom is not None and current_bottom is not None:
+            current_score = edge_strength_horizontal(grad_y, current_bottom, left + 20, right - 20)
+            inner_score = edge_strength_horizontal(grad_y, inner_bottom, left + 20, right - 20)
+            if inner_score > current_score * 1.25:
+                bottom = inner_bottom
+                bottom = max(top + 1, min(bottom, image_h - 1))
+
+    return Bounds(x=left, y=top, width=right - left, height=bottom - top)
+
+
+def snap_vertical_edge(
+    grad_x: np.ndarray,
+    *,
+    y0: int,
+    y1: int,
+    search_start: int,
+    search_end: int,
+) -> int | None:
+    y0 = max(0, min(y0, grad_x.shape[0] - 1))
+    y1 = max(y0 + 1, min(y1, grad_x.shape[0]))
+    if search_end <= search_start or y1 <= y0:
+        return None
+    best_score = -1.0
+    best_x: int | None = None
+    for x in range(search_start, search_end + 1):
+        x0 = max(0, x - 1)
+        x1 = min(grad_x.shape[1], x + 2)
+        score = float(np.mean(grad_x[y0:y1, x0:x1]))
+        if score > best_score:
+            best_score = score
+            best_x = x
+    return best_x
+
+
+def snap_horizontal_edge(
+    grad_y: np.ndarray,
+    *,
+    x0: int,
+    x1: int,
+    search_start: int,
+    search_end: int,
+) -> int | None:
+    x0 = max(0, min(x0, grad_y.shape[1] - 1))
+    x1 = max(x0 + 1, min(x1, grad_y.shape[1]))
+    if search_end <= search_start or x1 <= x0:
+        return None
+    best_score = -1.0
+    best_y: int | None = None
+    for y in range(search_start, search_end + 1):
+        y0 = max(0, y - 1)
+        y1 = min(grad_y.shape[0], y + 2)
+        score = float(np.mean(grad_y[y0:y1, x0:x1]))
+        if score > best_score:
+            best_score = score
+            best_y = y
+    return best_y
+
+
+def edge_strength_vertical(grad_x: np.ndarray, x: int, y0: int, y1: int) -> float:
+    y0 = max(0, min(y0, grad_x.shape[0] - 1))
+    y1 = max(y0 + 1, min(y1, grad_x.shape[0]))
+    x0 = max(0, x - 1)
+    x1 = min(grad_x.shape[1], x + 2)
+    return float(np.mean(grad_x[y0:y1, x0:x1]))
+
+
+def edge_strength_horizontal(grad_y: np.ndarray, y: int, x0: int, x1: int) -> float:
+    x0 = max(0, min(x0, grad_y.shape[1] - 1))
+    x1 = max(x0 + 1, min(x1, grad_y.shape[1]))
+    y0 = max(0, y - 1)
+    y1 = min(grad_y.shape[0], y + 2)
+    return float(np.mean(grad_y[y0:y1, x0:x1]))
 
 
 def intersection_over_union(a: Bounds, b: Bounds) -> float:
