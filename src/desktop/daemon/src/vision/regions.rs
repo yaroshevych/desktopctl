@@ -12,20 +12,62 @@ pub struct SettingsRegions {
 }
 
 pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
-    let Some(neutral_bounds) = detect_neutral_content_bounds(image) else {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    if width < 320 || height < 200 {
         return SettingsRegions::default();
+    }
+
+    // Step 1: Detect mode via traffic lights (VM app window's dots survive downscaling)
+    let tl_pos = find_traffic_lights(image);
+    let dark_mode = tl_pos
+        .map(|(red_cx, red_cy)| {
+            let green_cx = red_cx + 40;
+            detect_dark_mode(image, green_cx, red_cy)
+        })
+        .unwrap_or(false);
+
+    // Step 2: Find window bounds
+    let (window, dark_mode) = if dark_mode {
+        // Dark mode: use dark-panel flood fill
+        if let Some(bounds) = detect_dark_content_bounds(image) {
+            (bounds, true)
+        } else if let Some((window, sidebar, content)) =
+            detect_via_column_variance(image, tl_pos)
+        {
+            // Flood fill failed (dark bg blends with dark window) — use column variance
+            // transition to find sidebar/content divider directly.
+            let add_pair = detect_add_button_pair(image, &content, true);
+            let table = find_table(image, &content, add_pair);
+            return SettingsRegions {
+                window_bounds: Some(window),
+                sidebar_bounds: Some(sidebar),
+                content_bounds: Some(content),
+                table_bounds: table,
+            };
+        } else if let Some(bounds) = detect_neutral_content_bounds(image) {
+            (bounds, false)
+        } else {
+            return SettingsRegions::default();
+        }
+    } else {
+        // Light mode: use neutral-panel flood fill
+        if let Some(bounds) = detect_neutral_content_bounds(image) {
+            (bounds, false)
+        } else {
+            return SettingsRegions::default();
+        }
     };
 
-    let full_window_detected = has_window_traffic_lights(image, &neutral_bounds);
+    let has_tl = has_window_traffic_lights_in_region(image, &window);
+    let title_h = (window.height * 0.085).clamp(30.0, 56.0);
 
-    let (window, sidebar, content) = if full_window_detected {
-        let window = neutral_bounds.clone();
-        let title_h = (window.height * 0.085).clamp(30.0, 56.0);
-        let sidebar_w = (window.width * 0.24).clamp(148.0, 235.0);
+    let (window, sidebar, content) = if has_tl {
+        // Flood fill captured the full window (including sidebar)
         let mut content = Bounds {
-            x: (window.x + sidebar_w).max(0.0),
+            x: (window.x + (window.width * 0.24).clamp(148.0, 235.0)).max(0.0),
             y: (window.y + title_h).max(0.0),
-            width: (window.width - sidebar_w).max(0.0),
+            width: (window.width - (window.width * 0.24).clamp(148.0, 235.0)).max(0.0),
             height: (window.height - title_h).max(0.0),
         };
         let mut sidebar = Bounds {
@@ -34,19 +76,18 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
             width: (content.x - window.x).max(0.0),
             height: content.height.max(0.0),
         };
-        if let Some((refined_sidebar, refined_content)) =
-            refine_sidebar_content_split(image, &window, title_h)
-        {
-            sidebar = refined_sidebar;
-            content = refined_content;
+        if let Some((s, c)) = refine_sidebar_content_split(image, &window, title_h) {
+            sidebar = s;
+            content = c;
         }
         (window, sidebar, content)
     } else {
-        let content = neutral_bounds.clone();
-        let title_h = (content.height * 0.075).clamp(30.0, 56.0);
+        // Flood fill captured just the content area (sidebar was different shade)
+        let content = window.clone();
+        let content_title_h = (content.height * 0.075).clamp(30.0, 56.0);
         let sidebar_w = (content.width * 0.30).clamp(160.0, 330.0);
         let window_x = (content.x - sidebar_w).max(0.0);
-        let window_y = (content.y - title_h).max(0.0);
+        let window_y = (content.y - content_title_h).max(0.0);
         let window = Bounds {
             x: window_x,
             y: window_y,
@@ -62,8 +103,263 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
         (window, sidebar, content)
     };
 
-    let add_pair = detect_add_button_pair(image, &content);
-    let table = detect_table_bounds_from_borders(image, &content, add_pair)
+    let add_pair = detect_add_button_pair(image, &content, dark_mode);
+    let table = find_table(image, &content, add_pair);
+
+    SettingsRegions {
+        window_bounds: Some(window),
+        sidebar_bounds: Some(sidebar),
+        content_bounds: Some(content),
+        table_bounds: table,
+    }
+}
+
+/// Scan the entire image for the red/yellow/green traffic light triplet.
+/// Returns the center of the red dot.
+fn find_traffic_lights(image: &RgbaImage) -> Option<(i32, i32)> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    if width < 80 || height < 30 {
+        return None;
+    }
+
+    // Build color classification mask
+    // 0 = none, 1 = red, 2 = yellow, 3 = green
+    let mut color_map = vec![0u8; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let [r, g, b, _] = image.get_pixel(x as u32, y as u32).0;
+            color_map[y * width + x] = classify_traffic_light_pixel(r, g, b);
+        }
+    }
+
+    // Find connected components for each color
+    let mut visited = vec![false; width * height];
+    let mut components: Vec<(u8, i32, i32, usize)> = Vec::new(); // (color, cx, cy, size)
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            let color = color_map[idx];
+            if color == 0 || visited[idx] {
+                continue;
+            }
+
+            // BFS flood fill for this color
+            let mut queue = VecDeque::from([(x, y)]);
+            visited[idx] = true;
+            let mut sum_x = 0i64;
+            let mut sum_y = 0i64;
+            let mut count = 0usize;
+            let mut min_x = x;
+            let mut max_x = x;
+            let mut min_y = y;
+            let mut max_y = y;
+
+            while let Some((cx, cy)) = queue.pop_front() {
+                sum_x += cx as i64;
+                sum_y += cy as i64;
+                count += 1;
+                min_x = min_x.min(cx);
+                max_x = max_x.max(cx);
+                min_y = min_y.min(cy);
+                max_y = max_y.max(cy);
+
+                for (dx, dy) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+                    let nx = cx as i32 + dx;
+                    let ny = cy as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                        continue;
+                    }
+                    let ni = ny as usize * width + nx as usize;
+                    if !visited[ni] && color_map[ni] == color {
+                        visited[ni] = true;
+                        queue.push_back((nx as usize, ny as usize));
+                    }
+                }
+            }
+
+            // Traffic light dots at 1x are ~10-14px diameter, area ~80-160px
+            let comp_w = max_x - min_x + 1;
+            let comp_h = max_y - min_y + 1;
+            if count < 20 || count > 400 || comp_w > 24 || comp_h > 24 || comp_w < 4 || comp_h < 4
+            {
+                continue;
+            }
+            // Roughly circular: aspect ratio and fill
+            let aspect = comp_w as f64 / comp_h as f64;
+            if !(0.5..=2.0).contains(&aspect) {
+                continue;
+            }
+            let fill = count as f64 / (comp_w * comp_h) as f64;
+            if fill < 0.45 {
+                continue;
+            }
+
+            let cx = (sum_x as f64 / count as f64).round() as i32;
+            let cy = (sum_y as f64 / count as f64).round() as i32;
+            components.push((color, cx, cy, count));
+        }
+    }
+
+    // Match triplets: red → yellow → green, left-to-right, horizontally aligned
+    let reds: Vec<_> = components.iter().filter(|c| c.0 == 1).collect();
+    let yellows: Vec<_> = components.iter().filter(|c| c.0 == 2).collect();
+    let greens: Vec<_> = components.iter().filter(|c| c.0 == 3).collect();
+
+    let mut best: Option<(f64, i32, i32)> = None; // (score, red_cx, red_cy)
+
+    for r in &reds {
+        for y in &yellows {
+            let dy_ry = (r.2 - y.2).abs();
+            if dy_ry > 4 {
+                continue;
+            }
+            let dx_ry = y.1 - r.1;
+            if !(8..=30).contains(&dx_ry) {
+                continue;
+            }
+
+            for g in &greens {
+                let dy_rg = (r.2 - g.2).abs();
+                if dy_rg > 4 {
+                    continue;
+                }
+                let dx_rg = g.1 - r.1;
+                if !(20..=56).contains(&dx_rg) {
+                    continue;
+                }
+                let dx_yg = g.1 - y.1;
+                if !(8..=30).contains(&dx_yg) {
+                    continue;
+                }
+
+                // Check size similarity: all three dots should be similar size
+                let sizes = [r.3, y.3, g.3];
+                let max_size = *sizes.iter().max().unwrap();
+                let min_size = *sizes.iter().min().unwrap();
+                if max_size > min_size * 4 {
+                    continue;
+                }
+
+                // Context check: the area around the triplet should look like a
+                // title bar (neutral gray pixels), not a colorful sidebar
+                let title_bar_score =
+                    check_title_bar_context(image, r.1, r.2, g.1);
+                // Reject if title bar context is poor (< 50% neutral)
+                if title_bar_score < 0.5 {
+                    continue;
+                }
+
+                // Prefer triplets NOT in the very top-left of image (host traffic lights)
+                let near_origin = if r.1 < 30 && r.2 < 30 { 1000.0 } else { 0.0 };
+                let spacing_err = (dx_ry as f64 - 20.0).abs() + (dx_yg as f64 - 20.0).abs();
+                // Lower score is better
+                let score = near_origin + spacing_err - title_bar_score * 30.0;
+
+                match best {
+                    Some((best_score, _, _)) if score >= best_score => {}
+                    _ => best = Some((score, r.1, r.2)),
+                }
+            }
+        }
+    }
+
+    best.map(|(_, x, y)| (x, y))
+}
+
+fn classify_traffic_light_pixel(r: u8, g: u8, b: u8) -> u8 {
+    // Red dot: high red, low green and blue
+    if r > 190 && g < 130 && b < 130 {
+        return 1;
+    }
+    // Yellow dot: high red and green, low blue
+    if r > 180 && g > 145 && b < 130 {
+        return 2;
+    }
+    // Green dot: high green, lower red and blue
+    if g > 155 && r < 145 && b < 135 {
+        return 3;
+    }
+    0
+}
+
+/// Check if the area around a traffic light triplet looks like a window title bar.
+/// Returns a score 0.0-1.0 where 1.0 means high confidence it's a real title bar.
+fn check_title_bar_context(image: &RgbaImage, red_cx: i32, red_cy: i32, green_cx: i32) -> f64 {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    let mut neutral_count = 0;
+    let mut total = 0;
+
+    // Sample pixels to the right of the green dot (should be title bar)
+    for dx in (20..160).step_by(8) {
+        let x = (green_cx + dx).clamp(0, width - 1);
+        let y = red_cy.clamp(0, height - 1);
+        let [r, g, b, _] = image.get_pixel(x as u32, y as u32).0;
+        let max = r.max(g).max(b) as i16;
+        let min = r.min(g).min(b) as i16;
+        let chroma = max - min;
+        // Title bar is neutral (low chroma, any luma — works for both light and dark mode)
+        if chroma <= 35 {
+            neutral_count += 1;
+        }
+        total += 1;
+    }
+
+    // Also sample pixels above and below the dots (should be title bar too)
+    for dy in [-8, 8] {
+        let y = (red_cy + dy).clamp(0, height - 1);
+        for dx in [0, 10, 20] {
+            let x = (red_cx + dx).clamp(0, width - 1);
+            let [r, g, b, _] = image.get_pixel(x as u32, y as u32).0;
+            let max = r.max(g).max(b) as i16;
+            let min = r.min(g).min(b) as i16;
+            let chroma = max - min;
+            if chroma <= 35 {
+                neutral_count += 1;
+            }
+            total += 1;
+        }
+    }
+
+    if total == 0 {
+        return 0.0;
+    }
+    neutral_count as f64 / total as f64
+}
+
+/// Sample title bar pixels to detect dark mode.
+/// Returns true if dark mode.
+fn detect_dark_mode(image: &RgbaImage, green_cx: i32, dot_cy: i32) -> bool {
+    let width = image.width() as i32;
+    let mut total_luma = 0u64;
+    let mut count = 0u32;
+
+    // Sample 20 pixels in the title bar, to the right of the green dot
+    for dx in (20..220).step_by(10) {
+        let x = (green_cx + dx).min(width - 1).max(0);
+        let y = dot_cy.max(0).min(image.height() as i32 - 1);
+        let [r, g, b, _] = image.get_pixel(x as u32, y as u32).0;
+        total_luma += (r as u64 + g as u64 + b as u64) / 3;
+        count += 1;
+    }
+
+    if count == 0 {
+        return false;
+    }
+    let avg_luma = total_luma / count as u64;
+    avg_luma <= 150
+}
+
+// ── Table detection ────────────────────────────────────────────────────────
+
+fn find_table(
+    image: &RgbaImage,
+    content: &Bounds,
+    add_pair: Option<(f64, f64)>,
+) -> Option<Bounds> {
+    detect_table_bounds_from_borders(image, content, add_pair)
         .or_else(|| {
             add_pair.map(|(add_x, add_y)| {
                 let height = 44.0;
@@ -78,15 +374,10 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
                 }
             })
         })
-        .or_else(|| fallback_table_bounds(&content));
-
-    SettingsRegions {
-        window_bounds: Some(window),
-        sidebar_bounds: Some(sidebar),
-        content_bounds: Some(content),
-        table_bounds: table,
-    }
+        .or_else(|| fallback_table_bounds(content))
 }
+
+// ── Existing helpers (kept with improvements) ──────────────────────────────
 
 fn refine_sidebar_content_split(
     image: &RgbaImage,
@@ -152,6 +443,17 @@ fn refine_sidebar_content_split(
 }
 
 fn detect_neutral_content_bounds(image: &RgbaImage) -> Option<Bounds> {
+    flood_fill_content_bounds(image, is_neutral_panel_pixel)
+}
+
+fn detect_dark_content_bounds(image: &RgbaImage) -> Option<Bounds> {
+    flood_fill_content_bounds(image, is_dark_panel_pixel)
+}
+
+fn flood_fill_content_bounds(
+    image: &RgbaImage,
+    classify: fn(u8, u8, u8) -> bool,
+) -> Option<Bounds> {
     let width = image.width() as usize;
     let height = image.height() as usize;
     if width < 320 || height < 200 {
@@ -167,7 +469,7 @@ fn detect_neutral_content_bounds(image: &RgbaImage) -> Option<Bounds> {
         for gx in 0..grid_w {
             let x = (gx * stride).min(width - 1);
             let px = image.get_pixel(x as u32, y as u32).0;
-            if is_neutral_panel_pixel(px[0], px[1], px[2]) {
+            if classify(px[0], px[1], px[2]) {
                 mask[gy * grid_w + gx] = true;
             }
         }
@@ -175,8 +477,8 @@ fn detect_neutral_content_bounds(image: &RgbaImage) -> Option<Bounds> {
 
     let mut visited = vec![false; grid_w * grid_h];
     let mut best: Option<(f64, Bounds)> = None;
-    let min_box_w = ((grid_w as f64) * 0.16).ceil() as usize;
-    let min_box_h = ((grid_h as f64) * 0.22).ceil() as usize;
+    let min_box_w = ((grid_w as f64) * 0.12).ceil() as usize;
+    let min_box_h = ((grid_h as f64) * 0.18).ceil() as usize;
     let img_center_x = width as f64 / 2.0;
     let img_center_y = height as f64 / 2.0;
 
@@ -298,7 +600,7 @@ struct SymbolComponent {
     horizontal_near_center: usize,
 }
 
-fn has_window_traffic_lights(image: &RgbaImage, bounds: &Bounds) -> bool {
+fn has_window_traffic_lights_in_region(image: &RgbaImage, bounds: &Bounds) -> bool {
     let width = image.width() as i32;
     let height = image.height() as i32;
     let x0 = bounds.x.floor().max(0.0) as i32;
@@ -331,7 +633,11 @@ fn has_window_traffic_lights(image: &RgbaImage, bounds: &Bounds) -> bool {
     red >= 6 && yellow >= 6 && green >= 6
 }
 
-fn detect_add_button_pair(image: &RgbaImage, content: &Bounds) -> Option<(f64, f64)> {
+fn detect_add_button_pair(
+    image: &RgbaImage,
+    content: &Bounds,
+    dark_mode: bool,
+) -> Option<(f64, f64)> {
     let width = image.width() as i32;
     let height = image.height() as i32;
     let x0 = (content.x + 4.0).floor().max(0.0) as i32;
@@ -352,7 +658,7 @@ fn detect_add_button_pair(image: &RgbaImage, content: &Bounds) -> Option<(f64, f
             let px = image
                 .get_pixel((x0 as usize + rx) as u32, (y0 as usize + ry) as u32)
                 .0;
-            if is_symbol_pixel(px[0], px[1], px[2]) {
+            if is_symbol_pixel(px[0], px[1], px[2], dark_mode) {
                 mask[ry * roi_w + rx] = true;
             }
         }
@@ -474,7 +780,11 @@ fn detect_add_button_pair(image: &RgbaImage, content: &Bounds) -> Option<(f64, f
             if !(8.0..=34.0).contains(&dx) || dy > 4.0 {
                 continue;
             }
-            let bg_penalty = local_background_penalty(image, plus.center_x, plus.center_y);
+            let bg_penalty = if dark_mode {
+                0.0 // skip bg penalty in dark mode — it's calibrated for light
+            } else {
+                local_background_penalty(image, plus.center_x, plus.center_y)
+            };
             let score = (dx - 24.0).abs()
                 + (dy * 2.0)
                 + ((plus.center_y - expected_y).abs() * 0.06)
@@ -516,8 +826,9 @@ fn detect_table_bounds_from_borders(
     let anchor_y = add_pair
         .map(|(_, y)| y.round() as i32)
         .unwrap_or((y0 + y1) / 2);
-    let bottom_min = (anchor_y + 2).clamp(y0 + 24, y1 - 2);
-    let bottom_max = (anchor_y + 20).clamp(bottom_min + 1, y1 - 1);
+    // Widened bottom border search range (was +2..+20, now -4..+28)
+    let bottom_min = (anchor_y - 4).clamp(y0 + 24, y1 - 2);
+    let bottom_max = (anchor_y + 28).clamp(bottom_min + 1, y1 - 1);
     let y_bottom = strongest_horizontal_edge(&passes, img_w, x0, x1, bottom_min, bottom_max)?;
 
     let top_min = (y0 + 6).min(y_bottom - 10);
@@ -527,9 +838,10 @@ fn detect_table_bounds_from_borders(
         return None;
     }
 
+    // Widened left border search range for add_pair (was -24..+10, now -20..-6)
     let (left_min, left_max) = if let Some((add_x, _)) = add_pair {
-        let min = (add_x.round() as i32 - 24).clamp(x0, x1 - 2);
-        let max = (add_x.round() as i32 + 10).clamp(min + 1, x1 - 1);
+        let min = (add_x.round() as i32 - 20).clamp(x0, x1 - 2);
+        let max = (add_x.round() as i32 - 6).clamp(min + 1, x1 - 1);
         (min, max)
     } else {
         let max = (x0 as f64 + (x1 - x0) as f64 * 0.35).round() as i32;
@@ -596,10 +908,13 @@ fn strongest_horizontal_edge(
     if y1 <= y0 + 1 || x1 <= x0 + 1 {
         return None;
     }
+    let total_pixels = ((x1 - x0) as f64).max(1.0);
     let mut best: Option<(f64, i32)> = None;
     for y in y0.max(1)..=y1 {
         let mut score = 0.0;
         let mut samples = 0.0;
+        let mut longest_run = 0i32;
+        let mut current_run = 0i32;
         let stride = if x1 - x0 > 500 { 2 } else { 1 };
         for x in (x0..x1).step_by(stride as usize) {
             let idx = y as usize * image_width + x as usize;
@@ -614,15 +929,32 @@ fn strongest_horizontal_edge(
             if diff >= 8 {
                 score += diff as f64;
                 samples += 1.0;
+                current_run += 1;
+                if current_run > longest_run {
+                    longest_run = current_run;
+                }
+            } else {
+                current_run = 0;
             }
         }
         if samples < 24.0 {
             continue;
         }
+        let coverage = samples / total_pixels;
+        if coverage < 0.25 {
+            continue;
+        }
+        // Require longest contiguous run >= 35% of scan range
+        let run_ratio = longest_run as f64 / total_pixels;
+        if run_ratio < 0.35 {
+            continue;
+        }
         let avg = score / samples;
+        // Score = coverage^0.5 * avg_gradient
+        let edge_score = coverage.sqrt() * avg;
         match best {
-            Some((best_score, _)) if avg <= best_score => {}
-            _ => best = Some((avg, y)),
+            Some((best_score, _)) if edge_score <= best_score => {}
+            _ => best = Some((edge_score, y)),
         }
     }
     best.map(|(_, y)| y)
@@ -639,10 +971,13 @@ fn strongest_vertical_edge(
     if x1 <= x0 + 1 || y1 <= y0 + 1 {
         return None;
     }
+    let total_pixels = ((y1 - y0) as f64).max(1.0);
     let mut best: Option<(f64, i32)> = None;
     for x in x0.max(1)..=x1 {
         let mut score = 0.0;
         let mut samples = 0.0;
+        let mut longest_run = 0i32;
+        let mut current_run = 0i32;
         let stride = if y1 - y0 > 180 { 2 } else { 1 };
         for y in (y0..y1).step_by(stride as usize) {
             let idx = y as usize * image_width + x as usize;
@@ -657,15 +992,30 @@ fn strongest_vertical_edge(
             if diff >= 8 {
                 score += diff as f64;
                 samples += 1.0;
+                current_run += 1;
+                if current_run > longest_run {
+                    longest_run = current_run;
+                }
+            } else {
+                current_run = 0;
             }
         }
         if samples < 14.0 {
             continue;
         }
+        let coverage = samples / total_pixels;
+        if coverage < 0.25 {
+            continue;
+        }
+        let run_ratio = longest_run as f64 / total_pixels;
+        if run_ratio < 0.35 {
+            continue;
+        }
         let avg = score / samples;
+        let edge_score = coverage.sqrt() * avg;
         match best {
-            Some((best_score, _)) if avg <= best_score => {}
-            _ => best = Some((avg, x)),
+            Some((best_score, _)) if edge_score <= best_score => {}
+            _ => best = Some((edge_score, x)),
         }
     }
     best.map(|(_, x)| x)
@@ -691,12 +1041,209 @@ fn is_neutral_panel_pixel(r: u8, g: u8, b: u8) -> bool {
     chroma <= 30 && (112..=246).contains(&luma)
 }
 
-fn is_symbol_pixel(r: u8, g: u8, b: u8) -> bool {
+fn is_dark_panel_pixel(r: u8, g: u8, b: u8) -> bool {
     let max = r.max(g).max(b) as i16;
     let min = r.min(g).min(b) as i16;
     let chroma = max - min;
     let luma = (r as u16 + g as u16 + b as u16) / 3;
-    (70..=200).contains(&luma) && chroma <= 30
+    // Tighter chroma than light mode to separate from nature backgrounds
+    chroma <= 22 && (28..=85).contains(&luma)
+}
+
+fn is_symbol_pixel(r: u8, g: u8, b: u8, dark_mode: bool) -> bool {
+    let max = r.max(g).max(b) as i16;
+    let min = r.min(g).min(b) as i16;
+    let chroma = max - min;
+    let luma = (r as u16 + g as u16 + b as u16) / 3;
+    if dark_mode {
+        // In dark mode, +/- symbols are lighter gray on dark background
+        (120..=220).contains(&luma) && chroma <= 30
+    } else {
+        (70..=200).contains(&luma) && chroma <= 30
+    }
+}
+
+/// Fallback for dark mode when flood fill fails (e.g., dark background blends with
+/// dark window). Uses the column-variance transition — the sidebar has uniform dark
+/// pixels (std < ~12) while the content area has list items that spike variance.
+/// Anchors the search on the traffic-light position.
+fn detect_via_column_variance(
+    image: &RgbaImage,
+    tl_pos: Option<(i32, i32)>,
+) -> Option<(Bounds, Bounds, Bounds)> {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    let (tl_x, tl_y) = tl_pos?;
+
+    // Estimate window top-left from traffic light anchor.
+    // Traffic lights sit ~20px from window left edge, ~18px from top.
+    let window_x = (tl_x - 22).max(0) as f64;
+    let window_y = (tl_y - 20).max(0) as f64;
+    let title_h = 44.0f64;
+
+    let y_top = (window_y + title_h + 4.0) as i32;
+    let y_bottom = ((height as f64) * 0.72) as i32;
+
+    // Search for the sidebar/content divider between traffic-light-right and 75% of width.
+    let x_start = (tl_x + 80).clamp(0, width - 2) as usize;
+    let x_end = ((width as f64 * 0.75) as i32).clamp(x_start as i32 + 40, width - 1) as usize;
+    if x_end <= x_start || y_bottom <= y_top + 40 {
+        return None;
+    }
+
+    // Compute per-column luma std over the content band.
+    let col_stds: Vec<f64> = (x_start..=x_end)
+        .map(|x| col_luma_std(image, x as i32, y_top, y_bottom))
+        .collect();
+
+    // Find the rightmost "uniform" column (std < LOW_THR) such that the next
+    // LOOKAHEAD columns have an average std > HIGH_THR.  This marks the last
+    // column of the sidebar before the content area starts.
+    const LOW_THR: f64 = 15.0;
+    const HIGH_THR: f64 = 28.0;
+    const LOOKAHEAD: usize = 40;
+
+    // Walk through runs of uniform columns.  For each run, check if the high-variance
+    // content immediately after it qualifies (lookahead avg > HIGH_THR).  Pick the run
+    // with the largest width; prefer rightmost on ties.  This avoids picking small
+    // isolated low-variance patches in forest backgrounds.
+    const MIN_BLOCK_WIDTH: usize = 20;
+    let mut best: Option<(usize, usize)> = None; // (block_width, run_end_idx)
+    let n = col_stds.len();
+    let mut i = 0;
+    while i < n.saturating_sub(LOOKAHEAD) {
+        if col_stds[i] >= LOW_THR {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < n && col_stds[i] < LOW_THR {
+            i += 1;
+        }
+        let run_end = i - 1;
+        let block_width = run_end - run_start + 1;
+        if block_width < MIN_BLOCK_WIDTH {
+            continue;
+        }
+        // Check lookahead from just after the run.
+        let look_start = run_end + 1;
+        let look_end = (look_start + LOOKAHEAD).min(n);
+        if look_end <= look_start + 1 {
+            continue;
+        }
+        let ahead_avg: f64 = col_stds[look_start..look_end].iter().sum::<f64>()
+            / (look_end - look_start) as f64;
+        if ahead_avg > HIGH_THR {
+            match best {
+                Some((bw, _)) if block_width < bw => {}
+                _ => best = Some((block_width, run_end)),
+            }
+        }
+    }
+    let divider_idx = best?.1;
+    let divider_x = (x_start + divider_idx) as i32;
+
+    // Validate 1: content to the right must be genuinely non-uniform (list items create variance).
+    let right_std = col_luma_std(image, divider_x + 10, y_top, y_bottom);
+    if right_std < 20.0 {
+        return None;
+    }
+
+    // Validate 2: the region around the divider must be DARK on both sides.
+    // Light-mode images have content_mean > 100; dark forest blending produces < 100.
+    let sidebar_mean = col_luma_mean(image, (window_x as i32).max(0), divider_x, y_top, y_bottom);
+    let content_mean = col_luma_mean(image, divider_x + 2, divider_x + 60, y_top, y_bottom);
+    if sidebar_mean >= 80.0 || content_mean >= 100.0 {
+        return None;
+    }
+
+    let content_x = (divider_x + 1) as f64;
+    let content_y = window_y + title_h;
+    // Content runs to near the right edge of the image (conservative — add-button
+    // detection is robust to excess width).
+    let content_w = (width as f64 - content_x - 10.0).max(200.0);
+    let content_h = (height as f64 * 0.82 - content_y).max(200.0);
+
+    let sidebar_w = (content_x - window_x).clamp(100.0, 400.0);
+    let window = Bounds {
+        x: window_x,
+        y: window_y,
+        width: (content_x + content_w - window_x).max(400.0),
+        height: (content_h + title_h).max(300.0),
+    };
+    let sidebar = Bounds {
+        x: window_x,
+        y: content_y,
+        width: sidebar_w,
+        height: content_h,
+    };
+    let content = Bounds {
+        x: content_x,
+        y: content_y,
+        width: content_w,
+        height: content_h,
+    };
+    Some((window, sidebar, content))
+}
+
+/// Average luma for a horizontal band of columns x ∈ [x_start, x_end) over y ∈ [y_top, y_bottom).
+fn col_luma_mean(image: &RgbaImage, x_start: i32, x_end: i32, y_top: i32, y_bottom: i32) -> f64 {
+    let img_w = image.width() as i32;
+    let img_h = image.height() as i32;
+    let x0 = x_start.clamp(0, img_w - 1);
+    let x1 = x_end.clamp(x0, img_w);
+    let y0 = y_top.clamp(0, img_h - 1);
+    let y1 = y_bottom.clamp(y0, img_h);
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    let x_stride = ((x1 - x0) / 10).max(1) as usize;
+    let y_stride = ((y1 - y0) / 10).max(1) as usize;
+    let mut x = x0;
+    while x < x1 {
+        let mut y = y0;
+        while y < y1 {
+            let [r, g, b, _] = image.get_pixel(x as u32, y as u32).0;
+            sum += (r as u64 * 30 + g as u64 * 59 + b as u64 * 11) / 100;
+            n += 1;
+            y += y_stride as i32;
+        }
+        x += x_stride as i32;
+    }
+    if n == 0 { 128.0 } else { sum as f64 / n as f64 }
+}
+
+/// Luma standard deviation for a single column over y ∈ [y_top, y_bottom).
+fn col_luma_std(image: &RgbaImage, x: i32, y_top: i32, y_bottom: i32) -> f64 {
+    let img_w = image.width() as i32;
+    let img_h = image.height() as i32;
+    let x = x.clamp(0, img_w - 1) as u32;
+    let y0 = y_top.clamp(0, img_h - 1);
+    let y1 = y_bottom.clamp(y0, img_h);
+    if y1 <= y0 {
+        return 0.0;
+    }
+    // Stride 3 for speed — we only need a relative measure.
+    let mut sum = 0u64;
+    let mut sum_sq = 0u64;
+    let mut n = 0u64;
+    let mut y = y0;
+    while y < y1 {
+        let [r, g, b, _] = image.get_pixel(x, y as u32).0;
+        let luma = (r as u64 * 30 + g as u64 * 59 + b as u64 * 11) / 100;
+        sum += luma;
+        sum_sq += luma * luma;
+        n += 1;
+        y += 3;
+    }
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = sum as f64 / n as f64;
+    let var = (sum_sq as f64 / n as f64) - mean * mean;
+    var.max(0.0).sqrt()
 }
 
 fn local_background_penalty(image: &RgbaImage, x: f64, y: f64) -> f64 {
