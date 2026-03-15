@@ -22,18 +22,24 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
         let window = neutral_bounds.clone();
         let title_h = (window.height * 0.085).clamp(30.0, 56.0);
         let sidebar_w = (window.width * 0.24).clamp(148.0, 235.0);
-        let content = Bounds {
+        let mut content = Bounds {
             x: (window.x + sidebar_w).max(0.0),
             y: (window.y + title_h).max(0.0),
             width: (window.width - sidebar_w).max(0.0),
             height: (window.height - title_h).max(0.0),
         };
-        let sidebar = Bounds {
+        let mut sidebar = Bounds {
             x: window.x,
             y: content.y,
             width: (content.x - window.x).max(0.0),
             height: content.height.max(0.0),
         };
+        if let Some((refined_sidebar, refined_content)) =
+            refine_sidebar_content_split(image, &window, title_h)
+        {
+            sidebar = refined_sidebar;
+            content = refined_content;
+        }
         (window, sidebar, content)
     } else {
         let content = neutral_bounds.clone();
@@ -80,6 +86,69 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
         content_bounds: Some(content),
         table_bounds: table,
     }
+}
+
+fn refine_sidebar_content_split(
+    image: &RgbaImage,
+    window: &Bounds,
+    title_h: f64,
+) -> Option<(Bounds, Bounds)> {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let y_top = (window.y + title_h + 6.0).floor().clamp(0.0, height as f64 - 2.0) as i32;
+    let y_bottom = (window.y + window.height - 8.0)
+        .ceil()
+        .clamp(y_top as f64 + 2.0, height as f64 - 1.0) as i32;
+    let x_min = (window.x + window.width * 0.17)
+        .floor()
+        .clamp(1.0, width as f64 - 2.0) as i32;
+    let x_max = (window.x + window.width * 0.42)
+        .ceil()
+        .clamp(x_min as f64 + 1.0, width as f64 - 1.0) as i32;
+    if x_max - x_min < 24 || y_bottom - y_top < 40 {
+        return None;
+    }
+
+    let passes = luminance_passes(image);
+    let divider_x = strongest_vertical_edge(
+        &passes,
+        image.width() as usize,
+        y_top,
+        y_bottom,
+        x_min,
+        x_max,
+    )?;
+    let divider_x = divider_x as f64;
+    let min_divider = window.x + 120.0;
+    let max_divider = window.x + window.width - 160.0;
+    if divider_x < min_divider || divider_x > max_divider {
+        return None;
+    }
+
+    let content_x = (divider_x + 1.0).max(0.0);
+    let content_y = (window.y + title_h).max(0.0);
+    let content_w = (window.x + window.width - content_x).max(0.0);
+    let content_h = (window.y + window.height - content_y).max(0.0);
+    if content_w < 220.0 || content_h < 180.0 {
+        return None;
+    }
+
+    let content = Bounds {
+        x: content_x,
+        y: content_y,
+        width: content_w,
+        height: content_h,
+    };
+    let sidebar = Bounds {
+        x: window.x,
+        y: content.y,
+        width: (content.x - window.x).max(0.0),
+        height: content.height,
+    };
+    Some((sidebar, content))
 }
 
 fn detect_neutral_content_bounds(image: &RgbaImage) -> Option<Bounds> {

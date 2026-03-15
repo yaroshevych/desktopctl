@@ -80,12 +80,12 @@ fn detects_window_and_content_regions_on_vm_accessibility_fixtures() {
         (
             "vm-accessibility-empty-right.png",
             (741.0, 214.0, 716.0, 639.0),
-            (912.8, 268.3, 544.2, 584.7),
+            (959.0, 268.3, 498.0, 584.7),
         ),
         (
             "vm-accessibility-empty-center.png",
             (524.0, 193.0, 718.0, 635.0),
-            (696.3, 247.0, 545.7, 581.0),
+            (650.0, 247.0, 592.0, 581.0),
         ),
         (
             "vm-accessibility-empty-left.png",
