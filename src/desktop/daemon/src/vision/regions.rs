@@ -617,6 +617,34 @@ pub(crate) fn scored_traffic_light_candidates_for_test(image: &RgbaImage) -> Vec
     scored
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn infer_add_remove_controls_for_test(
+    image: &RgbaImage,
+) -> Option<((f64, f64), (f64, f64))> {
+    let detected = detect_settings_regions(image);
+    let content = detected.content_bounds.as_ref()?;
+
+    let dark_mode_guess = find_traffic_lights(image)
+        .map(|(red_cx, red_cy)| {
+            let green_cx = red_cx + 40;
+            detect_dark_mode(image, green_cx, red_cy)
+        })
+        .unwrap_or(false);
+
+    let add = detect_add_button_pair(image, content, dark_mode_guess)
+        .or_else(|| detect_add_button_pair(image, content, !dark_mode_guess))
+        .or_else(|| {
+            detected
+                .table_bounds
+                .as_ref()
+                .map(|table| (table.x + 12.0, table.y + table.height - 8.0))
+        })?;
+
+    let remove = (add.0 + 24.0, add.1);
+    Some((add, remove))
+}
+
 fn classify_traffic_light_pixel(r: u8, g: u8, b: u8) -> u8 {
     // Red dot: high red, low green and blue
     if r > 190 && g < 130 && b < 130 {
@@ -991,8 +1019,10 @@ fn detect_add_button_pair(
     let height = image.height() as i32;
     let x0 = (content.x + 4.0).floor().max(0.0) as i32;
     let x1 = (content.x + content.width * 0.48).ceil().min(width as f64) as i32;
-    let y0 = (content.y + content.height * 0.14).floor().max(0.0) as i32;
-    let y1 = (content.y + content.height * 0.46)
+    // +/- controls live high in the pane, under the instruction row.
+    // Searching too low misses the real controls and causes poor fallback boxes.
+    let y0 = (content.y + content.height * 0.05).floor().max(0.0) as i32;
+    let y1 = (content.y + content.height * 0.34)
         .ceil()
         .min(height as f64) as i32;
     if x1 - x0 < 40 || y1 - y0 < 60 {
@@ -1182,8 +1212,15 @@ fn detect_table_bounds_from_borders(
 
     let top_min = (y0 + 6).min(y_bottom - 10);
     let top_max = (y_bottom - 24).clamp(top_min + 1, y_bottom - 1);
-    let y_top = strongest_horizontal_edge(&passes, img_w, x0, x1, top_min, top_max)?;
-    if y_bottom - y_top < 24 || y_bottom - y_top > 116 {
+    let mut y_top = strongest_horizontal_edge(&passes, img_w, x0, x1, top_min, top_max)?;
+    let mut table_h = y_bottom - y_top;
+    if table_h < 36 {
+        // Edge scoring in dark mode can lock onto the controls strip only (~24px).
+        // Normalize to a typical "No Items + controls" band.
+        y_top = (y_bottom - 44).max(y0 + 6);
+        table_h = y_bottom - y_top;
+    }
+    if table_h < 24 || table_h > 116 {
         return None;
     }
 

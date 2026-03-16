@@ -15,6 +15,10 @@ struct WindowLabel {
     image: String,
     window: LabeledBounds,
     #[serde(default)]
+    add_button: Option<LabeledPoint>,
+    #[serde(default)]
+    remove_button: Option<LabeledPoint>,
+    #[serde(default)]
     occluded: bool,
 }
 
@@ -24,6 +28,12 @@ struct LabeledBounds {
     y: f64,
     width: f64,
     height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabeledPoint {
+    x: f64,
+    y: f64,
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -71,6 +81,23 @@ fn assert_bounds_close(
     None
 }
 
+fn assert_point_close(
+    actual: (f64, f64),
+    expected: &LabeledPoint,
+    tol: f64,
+    label: &str,
+) -> Option<String> {
+    let dx = (actual.0 - expected.x).abs();
+    let dy = (actual.1 - expected.y).abs();
+    if dx > tol || dy > tol {
+        return Some(format!(
+            "{label}: expected=({:.1},{:.1}) actual=({:.1},{:.1}) deltas=({dx:.1},{dy:.1}) tol={tol:.1}",
+            expected.x, expected.y, actual.0, actual.1
+        ));
+    }
+    None
+}
+
 #[test]
 fn settings_screenshot_label_files_match_png_fixtures() {
     let dir = fixtures_dir();
@@ -85,6 +112,43 @@ fn settings_screenshot_label_files_match_png_fixtures() {
         png_stems, label_stems,
         "png/label mismatch in {}",
         dir.display()
+    );
+}
+
+#[test]
+fn settings_screenshot_labels_include_add_and_remove_buttons() {
+    let dir = fixtures_dir();
+    let mut failures = Vec::new();
+
+    let mut label_paths = fs::read_dir(&dir)
+        .expect("read fixtures dir")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let file_name = path.file_name()?.to_str()?;
+            if file_name.ends_with(".window.json") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    label_paths.sort();
+
+    for label_path in label_paths {
+        let raw = fs::read_to_string(&label_path).expect("read label file");
+        let label: WindowLabel = serde_json::from_str(&raw).expect("parse label JSON");
+        if label.add_button.is_none() {
+            failures.push(format!("{}: missing add_button", label.image));
+        }
+        if label.remove_button.is_none() {
+            failures.push(format!("{}: missing remove_button", label.image));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "missing control labels:\n{}",
+        failures.join("\n")
     );
 }
 
@@ -260,6 +324,71 @@ fn detects_window_bounds_on_labeled_settings_screenshots() {
     assert!(
         failures.is_empty(),
         "settings-screenshot window mismatches:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "strict benchmark test: run explicitly while improving detector accuracy"]
+fn detects_add_and_remove_buttons_on_labeled_settings_screenshots() {
+    let dir = fixtures_dir();
+    let mut failures = Vec::new();
+
+    let mut label_paths = fs::read_dir(&dir)
+        .expect("read fixtures dir")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let file_name = path.file_name()?.to_str()?;
+            if file_name.ends_with(".window.json") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    label_paths.sort();
+
+    for label_path in label_paths {
+        let raw = fs::read_to_string(&label_path).expect("read label file");
+        let label: WindowLabel = serde_json::from_str(&raw).expect("parse label JSON");
+        let Some(expected_add) = label.add_button.as_ref() else {
+            continue;
+        };
+        let Some(expected_remove) = label.remove_button.as_ref() else {
+            continue;
+        };
+
+        let image_path = dir.join(&label.image);
+        let image = ImageReader::open(&image_path)
+            .expect("open fixture image")
+            .decode()
+            .expect("decode fixture image")
+            .to_rgba8();
+        let Some((actual_add, actual_remove)) = regions::infer_add_remove_controls_for_test(&image)
+        else {
+            failures.push(format!(
+                "{}: expected add/remove labels, detector returned no control inference",
+                label.image
+            ));
+            continue;
+        };
+
+        let tol_add = if label.occluded { 28.0 } else { 18.0 };
+        if let Some(msg) = assert_point_close(actual_add, expected_add, tol_add, &label.image) {
+            failures.push(format!("add {msg}"));
+        }
+
+        let tol_remove = if label.occluded { 30.0 } else { 20.0 };
+        if let Some(msg) =
+            assert_point_close(actual_remove, expected_remove, tol_remove, &label.image)
+        {
+            failures.push(format!("remove {msg}"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "settings-screenshot add/remove mismatches:\n{}",
         failures.join("\n")
     );
 }
