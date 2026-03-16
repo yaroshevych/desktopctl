@@ -270,12 +270,24 @@ pub(super) fn infer_settings_controls_for_settings_pane(
     if let Some(controls) = infer_settings_controls_from_anchor(heading, no_items) {
         return Some(controls);
     }
+    // In VM panes with populated rows, list bounds inferred from row labels can be
+    // horizontally biased to the right. Instruction anchor tends to align better
+    // with the +/- controls row in those cases.
+    if let Some(controls) = infer_settings_controls_from_instruction_anchor(
+        instruction,
+        heading,
+        content_bounds,
+        list_bounds,
+        row_height,
+    ) {
+        return Some(controls);
+    }
     if let Some(controls) =
         infer_settings_controls_from_list_bounds(list_bounds, heading, row_height)
     {
         return Some(controls);
     }
-    infer_settings_controls_from_instruction_anchor(instruction, heading, content_bounds)
+    None
 }
 
 fn infer_settings_controls_from_ocr_symbols(
@@ -421,6 +433,8 @@ fn infer_settings_controls_from_instruction_anchor(
     instruction: Option<&desktop_core::protocol::SnapshotText>,
     heading: Option<&desktop_core::protocol::SnapshotText>,
     content_bounds: Option<&desktop_core::protocol::Bounds>,
+    list_bounds: Option<&desktop_core::protocol::Bounds>,
+    row_height: f64,
 ) -> Option<Value> {
     let instruction = instruction?;
     if let Some(heading) = heading {
@@ -433,10 +447,23 @@ fn infer_settings_controls_from_instruction_anchor(
     }
     let mut add_x = instruction.bounds.x + 4.0;
     let mut remove_x = add_x + 18.0;
-    let controls_y = instruction.bounds.y + instruction.bounds.height + 44.0;
+    let instruction_bottom = instruction.bounds.y + instruction.bounds.height;
+    let mut controls_y = instruction_bottom + 44.0;
+    let mut y_source = "instruction_offset";
+    if let Some(list) = list_bounds {
+        let list_controls_y = list.y + list.height + row_height.clamp(10.0, 24.0);
+        let delta = list_controls_y - instruction_bottom;
+        // Keep instruction-derived X (more stable) but use list-derived Y when the
+        // inferred footer row is plausibly below the instruction line.
+        if (24.0..=120.0).contains(&delta) {
+            controls_y = list_controls_y;
+            y_source = "list_bounds";
+        }
+    }
     if let Some(content) = content_bounds {
         add_x = add_x.max(content.x + 8.0);
         remove_x = remove_x.max(add_x + 16.0);
+        controls_y = controls_y.clamp(content.y + 18.0, content.y + content.height - 8.0);
     }
     let plus = bounds_from_center(add_x, controls_y, 14.0, 14.0);
     let minus = bounds_from_center(remove_x, controls_y, 14.0, 14.0);
@@ -448,6 +475,7 @@ fn infer_settings_controls_from_instruction_anchor(
     };
     Some(json!({
         "source": "instruction_anchor",
+        "y_source": y_source,
         "add_button_bounds": plus,
         "remove_button_bounds": minus,
         "add_click": center_point(&plus),
@@ -629,6 +657,7 @@ pub(super) fn click_settings_control(
                 )));
             }
         }
+        let mut validated_by_controls_band = false;
         if let Some((tx, ty, tw, th)) = payload["controls"]
             .get("footer_bounds")
             .and_then(bounds_tuple_from_value)
@@ -643,21 +672,26 @@ pub(super) fn click_settings_control(
                     "settings {control} click target ({x},{y}) is outside inferred controls band"
                 )));
             }
+            validated_by_controls_band = true;
         }
-        if let Some((hx, hy, _hw, hh)) = payload
-            .get("heading")
-            .and_then(|h| h.get("bounds"))
-            .and_then(bounds_tuple_from_value)
-        {
-            let y_f = y as f64;
-            let x_f = x as f64;
-            let y_min = hy - hh.max(14.0);
-            let y_max = hy + 320.0;
-            let x_min = hx - 90.0;
-            if y_f < y_min || y_f > y_max || x_f < x_min {
-                return Err(AppError::target_not_found(format!(
-                    "settings {control} click target ({x},{y}) is outside expected pane near heading"
-                )));
+        // Heading guard is a fallback safety net. If we already validated click
+        // against an inferred controls footer band, do not reject by heading x-range.
+        if !validated_by_controls_band {
+            if let Some((hx, hy, _hw, hh)) = payload
+                .get("heading")
+                .and_then(|h| h.get("bounds"))
+                .and_then(bounds_tuple_from_value)
+            {
+                let y_f = y as f64;
+                let x_f = x as f64;
+                let y_min = hy - hh.max(14.0);
+                let y_max = hy + 320.0;
+                let x_min = hx - 90.0;
+                if y_f < y_min || y_f > y_max || x_f < x_min {
+                    return Err(AppError::target_not_found(format!(
+                        "settings {control} click target ({x},{y}) is outside expected pane near heading"
+                    )));
+                }
             }
         }
     }
@@ -1152,4 +1186,110 @@ pub(super) fn logical_bounds_to_image_rect(
     let x1 = x1.clamp(x0 + 1, max_x);
     let y1 = y1.clamp(y0 + 1, max_y);
     Some((x0, y0, x1, y1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desktop_core::protocol::{Bounds, SnapshotText};
+
+    fn text(text: &str, bounds: Bounds) -> SnapshotText {
+        SnapshotText {
+            text: text.to_string(),
+            bounds,
+            confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn instruction_anchor_uses_list_y_when_available() {
+        let heading = text(
+            "Screen Recording",
+            Bounds {
+                x: 1021.3,
+                y: 202.7,
+                width: 94.0,
+                height: 19.2,
+            },
+        );
+        let instruction = text(
+            "Allow the applications below",
+            Bounds {
+                x: 965.8,
+                y: 247.5,
+                width: 329.0,
+                height: 15.0,
+            },
+        );
+        let content = Bounds {
+            x: 720.0,
+            y: 184.0,
+            width: 715.0,
+            height: 625.0,
+        };
+        let list = Bounds {
+            x: 997.3,
+            y: 229.9,
+            width: 338.0,
+            height: 76.0,
+        };
+
+        let controls = infer_settings_controls_from_instruction_anchor(
+            Some(&instruction),
+            Some(&heading),
+            Some(&content),
+            Some(&list),
+            14.0,
+        )
+        .expect("controls should be inferred");
+
+        assert_eq!(controls["source"], "instruction_anchor");
+        assert_eq!(controls["y_source"], "list_bounds");
+
+        let add = point_from_value(&controls["add_click"]).expect("add click");
+        assert_eq!(add, (970, 320));
+    }
+
+    #[test]
+    fn instruction_anchor_falls_back_to_instruction_offset_without_list() {
+        let heading = text(
+            "Screen Recording",
+            Bounds {
+                x: 1021.3,
+                y: 202.7,
+                width: 94.0,
+                height: 19.2,
+            },
+        );
+        let instruction = text(
+            "Allow the applications below",
+            Bounds {
+                x: 965.8,
+                y: 247.5,
+                width: 329.0,
+                height: 15.0,
+            },
+        );
+        let content = Bounds {
+            x: 720.0,
+            y: 184.0,
+            width: 715.0,
+            height: 625.0,
+        };
+
+        let controls = infer_settings_controls_from_instruction_anchor(
+            Some(&instruction),
+            Some(&heading),
+            Some(&content),
+            None,
+            14.0,
+        )
+        .expect("controls should be inferred");
+
+        assert_eq!(controls["source"], "instruction_anchor");
+        assert_eq!(controls["y_source"], "instruction_offset");
+
+        let add = point_from_value(&controls["add_click"]).expect("add click");
+        assert_eq!(add, (970, 307));
+    }
 }
