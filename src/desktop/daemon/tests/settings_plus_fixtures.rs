@@ -176,6 +176,9 @@ fn detects_regions_on_dark_settings_screenshots() {
         assert!(window.width >= 600.0, "window width too small for {name}");
         assert!(window.height >= 500.0, "window height too small for {name}");
         assert!(content.width >= 450.0, "content width too small for {name}");
-        assert!(content.height >= 500.0, "content height too small for {name}");
+        assert!(
+            content.height >= 500.0,
+            "content height too small for {name}"
+        );
     }
 }

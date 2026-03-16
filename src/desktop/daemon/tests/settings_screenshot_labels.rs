@@ -47,7 +47,10 @@ fn fixture_stems_with_ext(dir: &Path, ext: &str) -> BTreeSet<String> {
         if !path.is_file() {
             continue;
         }
-        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
         if file_name.ends_with(ext) {
             names.insert(file_name.trim_end_matches(ext).to_string());
         }
@@ -109,7 +112,8 @@ fn settings_screenshot_label_files_match_png_fixtures() {
         dir.display()
     );
     assert_eq!(
-        png_stems, label_stems,
+        png_stems,
+        label_stems,
         "png/label mismatch in {}",
         dir.display()
     );
@@ -249,7 +253,10 @@ fn selected_traffic_light_anchor_is_near_labeled_window_top_left() {
             .to_rgba8();
 
         let Some((tl_x, tl_y)) = regions::selected_traffic_light_anchor_for_test(&image) else {
-            failures.push(format!("{}: selected traffic-light anchor missing", label.image));
+            failures.push(format!(
+                "{}: selected traffic-light anchor missing",
+                label.image
+            ));
             continue;
         };
 

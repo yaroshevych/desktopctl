@@ -36,9 +36,7 @@ pub fn detect_settings_regions(image: &RgbaImage) -> SettingsRegions {
         // Dark mode: use dark-panel flood fill
         if let Some(bounds) = detect_dark_content_bounds(image) {
             (bounds, true)
-        } else if let Some((window, sidebar, content)) =
-            detect_via_column_variance(image, tl_pos)
-        {
+        } else if let Some((window, sidebar, content)) = detect_via_column_variance(image, tl_pos) {
             // Flood fill failed (dark bg blends with dark window) — use column variance
             // transition to find sidebar/content divider directly.
             let add_pair = detect_add_button_pair(image, &content, true);
@@ -179,8 +177,7 @@ fn detect_window_from_selected_tl(image: &RgbaImage, tl_pos: (i32, i32)) -> Opti
     );
     let top_fallback = est_y;
     let top = if let Some(ty) = top_detected {
-        let edge =
-            horizontal_edge_response(&passes, image.width() as usize, ty, top_x0, top_x1);
+        let edge = horizontal_edge_response(&passes, image.width() as usize, ty, top_x0, top_x1);
         if (ty - est_y).abs() <= 12 && edge >= 8.0 {
             ty
         } else {
@@ -234,13 +231,8 @@ fn detect_window_from_selected_tl(image: &RgbaImage, tl_pos: (i32, i32)) -> Opti
     let bottom_fallback = (top + expected_h).clamp(top + 500, height - 1);
     let bottom = if let Some(by) = bottom_detected {
         let h = by - top;
-        let edge = horizontal_edge_response(
-            &passes,
-            image.width() as usize,
-            by,
-            bottom_x0,
-            bottom_x1,
-        );
+        let edge =
+            horizontal_edge_response(&passes, image.width() as usize, by, bottom_x0, bottom_x1);
         if (h - expected_h).abs() <= 20 && edge >= 8.0 {
             by
         } else {
@@ -299,8 +291,7 @@ fn select_settings_tl_candidate(
     let mut best: Option<(f64, i32, i32)> = None; // (score, red_x, red_y)
 
     for (geom_score, red_x, red_y) in candidates {
-        let Some(score) =
-            settings_tl_candidate_score(image, &passes, *geom_score, *red_x, *red_y)
+        let Some(score) = settings_tl_candidate_score(image, &passes, *geom_score, *red_x, *red_y)
         else {
             continue;
         };
@@ -394,24 +385,15 @@ fn settings_tl_candidate_score(
     }
 
     if let Some(x) = left_x {
-        score += vertical_edge_response(
-            passes,
-            image.width() as usize,
-            x,
-            y_scan_top,
-            y_scan_bottom,
-        ) * 1.2;
+        score +=
+            vertical_edge_response(passes, image.width() as usize, x, y_scan_top, y_scan_bottom)
+                * 1.2;
     } else {
         score -= 12.0;
     }
     if let Some(x) = right_x {
-        score += vertical_edge_response(
-            passes,
-            image.width() as usize,
-            x,
-            y_scan_top,
-            y_scan_bottom,
-        );
+        score +=
+            vertical_edge_response(passes, image.width() as usize, x, y_scan_top, y_scan_bottom);
     } else {
         score -= 12.0;
     }
@@ -505,8 +487,7 @@ fn traffic_light_triplet_candidates(image: &RgbaImage) -> Vec<(f64, i32, i32)> {
             // Traffic light dots at 1x are ~10-14px diameter, area ~80-160px
             let comp_w = max_x - min_x + 1;
             let comp_h = max_y - min_y + 1;
-            if count < 20 || count > 400 || comp_w > 24 || comp_h > 24 || comp_w < 4 || comp_h < 4
-            {
+            if count < 20 || count > 400 || comp_w > 24 || comp_h > 24 || comp_w < 4 || comp_h < 4 {
                 continue;
             }
             // Roughly circular: aspect ratio and fill
@@ -567,8 +548,7 @@ fn traffic_light_triplet_candidates(image: &RgbaImage) -> Vec<(f64, i32, i32)> {
 
                 // Context check: the area around the triplet should look like a
                 // title bar (neutral gray pixels), not a colorful sidebar
-                let title_bar_score =
-                    check_title_bar_context(image, r.1, r.2, g.1);
+                let title_bar_score = check_title_bar_context(image, r.1, r.2, g.1);
                 // Reject if title bar context is poor (< 50% neutral)
                 if title_bar_score < 0.5 {
                     continue;
@@ -731,11 +711,7 @@ fn detect_dark_mode(image: &RgbaImage, green_cx: i32, dot_cy: i32) -> bool {
 
 // ── Table detection ────────────────────────────────────────────────────────
 
-fn find_table(
-    image: &RgbaImage,
-    content: &Bounds,
-    add_pair: Option<(f64, f64)>,
-) -> Option<Bounds> {
+fn find_table(image: &RgbaImage, content: &Bounds, add_pair: Option<(f64, f64)>) -> Option<Bounds> {
     detect_table_bounds_from_borders(image, content, add_pair)
         .or_else(|| {
             add_pair.map(|(add_x, add_y)| {
@@ -766,7 +742,9 @@ fn refine_sidebar_content_split(
     if width <= 0 || height <= 0 {
         return None;
     }
-    let y_top = (window.y + title_h + 6.0).floor().clamp(0.0, height as f64 - 2.0) as i32;
+    let y_top = (window.y + title_h + 6.0)
+        .floor()
+        .clamp(0.0, height as f64 - 2.0) as i32;
     let y_bottom = (window.y + window.height - 8.0)
         .ceil()
         .clamp(y_top as f64 + 2.0, height as f64 - 1.0) as i32;
@@ -1575,8 +1553,8 @@ fn detect_via_column_variance(
         if look_end <= look_start + 1 {
             continue;
         }
-        let ahead_avg: f64 = col_stds[look_start..look_end].iter().sum::<f64>()
-            / (look_end - look_start) as f64;
+        let ahead_avg: f64 =
+            col_stds[look_start..look_end].iter().sum::<f64>() / (look_end - look_start) as f64;
         if ahead_avg > HIGH_THR {
             match best {
                 Some((bw, _)) if block_width < bw => {}

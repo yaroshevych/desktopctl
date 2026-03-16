@@ -16,7 +16,9 @@ use desktop_core::{
     automation::{Point, new_backend},
     error::AppError,
     ipc::{read_framed_json, socket_path, write_framed_json},
-    protocol::{Command, RequestEnvelope, ResponseEnvelope},
+    protocol::{
+        Command, RequestEnvelope, ResponseEnvelope, SnapshotDisplay, SnapshotPayload, now_millis,
+    },
 };
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
@@ -368,21 +370,61 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 "event_ids": capture.event_ids
             }))
         }
-        Command::ScreenSnapshot => {
+        Command::ScreenSnapshot { screenshot_path } => {
             trace::log("execute:screen_snapshot:start");
-            if let Some(snapshot) = vision::pipeline::latest_snapshot()? {
+            if let Some(path) = screenshot_path {
+                let path = PathBuf::from(path);
+                if !path.exists() {
+                    return Err(AppError::invalid_argument(format!(
+                        "screenshot file does not exist: {}",
+                        path.display()
+                    )));
+                }
+                let image = image::open(&path).map_err(|err| {
+                    AppError::invalid_argument(format!(
+                        "failed to open screenshot {}: {err}",
+                        path.display()
+                    ))
+                })?;
+                let width = image.width();
+                let height = image.height();
+                let texts = vision::ocr::recognize_text_from_image(&path, width, height)?;
+                let snapshot = SnapshotPayload {
+                    snapshot_id: now_millis() as u64,
+                    timestamp: now_millis().to_string(),
+                    display: SnapshotDisplay {
+                        id: 1,
+                        width,
+                        height,
+                        scale: 1.0,
+                    },
+                    focused_app: None,
+                    texts,
+                };
                 trace::log(format!(
-                    "execute:screen_snapshot:cache_hit snapshot_id={}",
-                    snapshot.snapshot_id
+                    "execute:screen_snapshot:from_screenshot path={} snapshot_id={} texts={}",
+                    path.display(),
+                    snapshot.snapshot_id,
+                    snapshot.texts.len()
                 ));
                 Ok(serde_json::to_value(snapshot).map_err(|err| {
                     AppError::internal(format!("failed to encode snapshot: {err}"))
                 })?)
             } else {
-                trace::log("execute:screen_snapshot:cache_miss");
-                Err(AppError::target_not_found(
-                    "no snapshot available; run `desktopctl screen capture` first",
-                ))
+                if let Some(snapshot) = vision::pipeline::latest_snapshot()? {
+                    trace::log(format!(
+                        "execute:screen_snapshot:cache_hit snapshot_id={}",
+                        snapshot.snapshot_id
+                    ));
+                    Ok(serde_json::to_value(snapshot).map_err(|err| {
+                        AppError::internal(format!("failed to encode snapshot: {err}"))
+                    })?)
+                } else {
+                    trace::log("execute:screen_snapshot:cache_miss");
+                    Err(AppError::target_not_found(
+                        "no snapshot available; run `desktopctl screen capture` first",
+                    ))
+                }
             }
         }
         Command::ScreenTokenize => {
@@ -750,6 +792,7 @@ fn ranked_text_candidates(
     if q.is_empty() {
         return Err(AppError::invalid_argument("empty text selector"));
     }
+    let q_confusable = normalize_confusable_text(query.trim());
     let mut candidates: Vec<(f32, desktop_core::protocol::SnapshotText)> = texts
         .iter()
         .filter_map(|t| {
@@ -757,7 +800,13 @@ fn ranked_text_candidates(
             if hay.contains(&q) {
                 text_match_score(&q, &hay, t.confidence).map(|score| (score, t.clone()))
             } else {
-                None
+                let hay_confusable = normalize_confusable_text(&t.text);
+                if hay_confusable.contains(&q_confusable) {
+                    confusable_text_match_score(&q_confusable, &hay_confusable, t.confidence)
+                        .map(|score| (score, t.clone()))
+                } else {
+                    None
+                }
             }
         })
         .collect();
@@ -815,7 +864,7 @@ fn verify_click_postcondition(
     while start.elapsed().as_millis() as u64 <= timeout_ms {
         let capture = vision::pipeline::capture_and_update(None)?;
         let still_present = capture.snapshot.texts.iter().any(|text| {
-            text.text.to_lowercase().contains(&query.to_lowercase())
+            text_matches_query(&text.text, query)
                 && iou(&inflate_bounds(original_bounds, 6.0), &text.bounds) > 0.35
         });
         if !still_present {
@@ -870,6 +919,32 @@ fn compact_for_log(value: &str) -> String {
     normalized
 }
 
+fn text_matches_query(candidate: &str, query: &str) -> bool {
+    let q = query.trim();
+    if q.is_empty() {
+        return false;
+    }
+    if candidate.to_lowercase().contains(&q.to_lowercase()) {
+        return true;
+    }
+    let q_confusable = normalize_confusable_text(q);
+    let candidate_confusable = normalize_confusable_text(candidate);
+    !q_confusable.is_empty() && candidate_confusable.contains(&q_confusable)
+}
+
+fn normalize_confusable_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| {
+            let canonical = match ch {
+                'I' | 'l' | '1' | '|' | '!' => 'l',
+                _ => ch,
+            };
+            canonical.to_lowercase()
+        })
+        .collect()
+}
+
 fn text_match_score(query: &str, candidate: &str, confidence: f32) -> Option<f32> {
     if query.is_empty() || candidate.is_empty() || !candidate.contains(query) {
         return None;
@@ -892,6 +967,14 @@ fn text_match_score(query: &str, candidate: &str, confidence: f32) -> Option<f32
     }
 
     Some(exact * 3.0 + starts * 0.8 + ends * 0.4 + length_ratio * 2.2 + confidence * 0.8)
+}
+
+fn confusable_text_match_score(query: &str, candidate: &str, confidence: f32) -> Option<f32> {
+    let q_len = query.chars().count();
+    if q_len < 4 {
+        return None;
+    }
+    text_match_score(query, candidate, confidence).map(|score| score * 0.88)
 }
 
 fn bounds_from_texts(
@@ -1603,6 +1686,53 @@ mod tests {
     }
 
     #[test]
+    fn ranked_text_candidates_match_confusable_characters() {
+        let texts = vec![SnapshotText {
+            text: "DesktopCtI".to_string(),
+            bounds: Bounds {
+                x: 500.0,
+                y: 560.0,
+                width: 96.0,
+                height: 18.0,
+            },
+            confidence: 0.86,
+        }];
+        let ranked = super::ranked_text_candidates(&texts, "DesktopCtl")
+            .expect("ranked confusable candidates");
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].1.text, "DesktopCtI");
+    }
+
+    #[test]
+    fn select_text_candidate_prefers_exact_over_confusable_match() {
+        let texts = vec![
+            SnapshotText {
+                text: "DesktopCtI".to_string(),
+                bounds: Bounds {
+                    x: 500.0,
+                    y: 560.0,
+                    width: 96.0,
+                    height: 18.0,
+                },
+                confidence: 0.9,
+            },
+            SnapshotText {
+                text: "DesktopCtl".to_string(),
+                bounds: Bounds {
+                    x: 500.0,
+                    y: 590.0,
+                    width: 96.0,
+                    height: 18.0,
+                },
+                confidence: 0.9,
+            },
+        ];
+        let selected =
+            super::select_text_candidate(&texts, "DesktopCtl").expect("select exact match");
+        assert_eq!(selected.text, "DesktopCtl");
+    }
+
+    #[test]
     fn infer_panels_splits_left_and_right_clusters() {
         let texts = vec![
             SnapshotText {
@@ -1904,6 +2034,31 @@ mod tests {
     }
 
     #[test]
+    fn derives_settings_add_click_from_instruction_x_anchor() {
+        let payload = json!({
+            "instruction": {
+                "bounds": {
+                    "x": 302.0,
+                    "y": 166.0,
+                    "width": 268.0,
+                    "height": 14.0
+                }
+            },
+            "no_items": {
+                "bounds": {
+                    "x": 508.5,
+                    "y": 241.05,
+                    "width": 97.72,
+                    "height": 12.97
+                }
+            }
+        });
+        let (x, y) = super::settings_click_from_no_items_anchor("add", &payload)
+            .expect("add click from instruction anchor");
+        assert_eq!((x, y), (306, 268));
+    }
+
+    #[test]
     fn finds_settings_instruction_under_heading() {
         let heading = SnapshotText {
             text: "Accessibility".to_string(),
@@ -1994,6 +2149,68 @@ mod tests {
         assert_eq!(controls["source"], "ocr_symbols");
         let (x, y) = super::point_from_value(&controls["add_click"]).expect("add click");
         assert_eq!((x, y), (256, 218));
+    }
+
+    #[test]
+    fn infers_controls_from_compound_ocr_symbol_token_with_instruction_anchor() {
+        let heading = SnapshotText {
+            text: "Accessibility".to_string(),
+            bounds: Bounds {
+                x: 1198.0,
+                y: 134.0,
+                width: 112.0,
+                height: 18.0,
+            },
+            confidence: 0.9,
+        };
+        let instruction = SnapshotText {
+            text: "Allow the applications below to control your computer.".to_string(),
+            bounds: Bounds {
+                x: 1204.0,
+                y: 164.0,
+                width: 352.0,
+                height: 15.0,
+            },
+            confidence: 0.8,
+        };
+        let no_items = SnapshotText {
+            text: "No Items".to_string(),
+            bounds: Bounds {
+                x: 1403.0,
+                y: 242.0,
+                width: 64.0,
+                height: 14.0,
+            },
+            confidence: 0.8,
+        };
+        let combined = SnapshotText {
+            text: "+ -".to_string(),
+            bounds: Bounds {
+                x: 1247.79,
+                y: 240.0,
+                width: 76.92,
+                height: 30.11,
+            },
+            confidence: 0.5,
+        };
+        let controls = super::infer_settings_controls_for_settings_pane(
+            &[heading.clone(), instruction.clone(), no_items.clone(), combined],
+            Some(&heading),
+            Some(&no_items),
+            Some(&instruction),
+            None,
+            Some(&Bounds {
+                x: 1180.0,
+                y: 124.0,
+                width: 500.0,
+                height: 760.0,
+            }),
+            14.0,
+        )
+        .expect("controls should be inferred");
+        assert_eq!(controls["source"], "ocr_symbols");
+        let (x, _y) = super::point_from_value(&controls["add_click"]).expect("add click");
+        assert_eq!(x, 1208);
     }
 
     #[test]

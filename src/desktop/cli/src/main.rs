@@ -216,12 +216,30 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             Ok(Command::ScreenCapture { out_path, overlay })
         }
         "snapshot" => {
-            if args.get(1).is_some() && args.get(1).map(String::as_str) != Some("--json") {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl screen snapshot [--json]",
-                ));
+            let mut screenshot_path: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--json" => {
+                        i += 1;
+                    }
+                    "--screenshot" => {
+                        let path = args.get(i + 1).ok_or_else(|| {
+                            AppError::invalid_argument(
+                                "missing value for --screenshot: desktopctl screen snapshot [--json] [--screenshot <path>]",
+                            )
+                        })?;
+                        screenshot_path = Some(path.clone());
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for screen snapshot: {flag}"
+                        )));
+                    }
+                }
             }
-            Ok(Command::ScreenSnapshot)
+            Ok(Command::ScreenSnapshot { screenshot_path })
         }
         "tokenize" => {
             if args.get(1).is_some() && args.get(1).map(String::as_str) != Some("--json") {
@@ -639,7 +657,7 @@ fn usage() -> &'static str {
   desktopctl open spotlight
   desktopctl open launchpad
   desktopctl screen capture [--out <path>] [--overlay]
-  desktopctl screen snapshot [--json]
+  desktopctl screen snapshot [--json] [--screenshot <path>]
   desktopctl screen tokenize [--json]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen layout [--json]
@@ -1038,6 +1056,36 @@ mod tests {
         let command = parse_command(&args).expect("screen settings should parse");
         match command {
             Command::ScreenSettingsMap => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_snapshot_with_optional_screenshot() {
+        let base = parse_command(&["screen", "snapshot", "--json"].map(str::to_string))
+            .expect("screen snapshot should parse");
+        match base {
+            Command::ScreenSnapshot { screenshot_path } => {
+                assert_eq!(screenshot_path, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let with_file = parse_command(
+            &[
+                "screen",
+                "snapshot",
+                "--json",
+                "--screenshot",
+                "/tmp/open-dialog.png",
+            ]
+            .map(str::to_string),
+        )
+        .expect("screen snapshot with screenshot should parse");
+        match with_file {
+            Command::ScreenSnapshot { screenshot_path } => {
+                assert_eq!(screenshot_path.as_deref(), Some("/tmp/open-dialog.png"));
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

@@ -263,7 +263,7 @@ pub(super) fn infer_settings_controls_for_settings_pane(
     row_height: f64,
 ) -> Option<Value> {
     if let Some(controls) =
-        infer_settings_controls_from_ocr_symbols(texts, heading, no_items, content_bounds)
+        infer_settings_controls_from_ocr_symbols(texts, heading, no_items, instruction, content_bounds)
     {
         return Some(controls);
     }
@@ -294,6 +294,7 @@ fn infer_settings_controls_from_ocr_symbols(
     texts: &[desktop_core::protocol::SnapshotText],
     heading: Option<&desktop_core::protocol::SnapshotText>,
     no_items: Option<&desktop_core::protocol::SnapshotText>,
+    instruction: Option<&desktop_core::protocol::SnapshotText>,
     content_bounds: Option<&desktop_core::protocol::Bounds>,
 ) -> Option<Value> {
     let heading = heading?;
@@ -315,6 +316,53 @@ fn infer_settings_controls_from_ocr_symbols(
     let mut pluses = Vec::new();
     let mut minuses = Vec::new();
     for text in texts {
+        if let Some((plus_bounds, minus_bounds)) =
+            split_compound_control_token_bounds(&text.text, &text.bounds)
+        {
+            let mut plus_bounds = plus_bounds;
+            let mut minus_bounds = minus_bounds;
+            if let Some(instruction) = instruction {
+                let anchored_plus_cx = instruction.bounds.x + 4.0;
+                let token_plus_cx = plus_bounds.x + plus_bounds.width / 2.0;
+                if (anchored_plus_cx - token_plus_cx).abs() <= 72.0 {
+                    let cy = plus_bounds.y + plus_bounds.height / 2.0;
+                    plus_bounds = bounds_from_center(anchored_plus_cx, cy, 14.0, 14.0);
+                    minus_bounds = bounds_from_center(anchored_plus_cx + 18.0, cy, 14.0, 14.0);
+                }
+            }
+
+            let plus_cx = plus_bounds.x + plus_bounds.width / 2.0;
+            let plus_cy = plus_bounds.y + plus_bounds.height / 2.0;
+            let minus_cx = minus_bounds.x + minus_bounds.width / 2.0;
+            let minus_cy = minus_bounds.y + minus_bounds.height / 2.0;
+            let in_scope = |cx: f64, cy: f64| -> bool {
+                if cx < x_min || cx > x_max || cy < y_min || cy > y_max {
+                    return false;
+                }
+                if let Some(content) = content_bounds {
+                    let cx2 = content.x + content.width;
+                    let cy2 = content.y + content.height;
+                    if cx < content.x || cx > cx2 || cy < content.y || cy > cy2 {
+                        return false;
+                    }
+                }
+                true
+            };
+            if in_scope(plus_cx, plus_cy) && in_scope(minus_cx, minus_cy) {
+                pluses.push(desktop_core::protocol::SnapshotText {
+                    text: "+".to_string(),
+                    bounds: plus_bounds,
+                    confidence: text.confidence,
+                });
+                minuses.push(desktop_core::protocol::SnapshotText {
+                    text: "-".to_string(),
+                    bounds: minus_bounds,
+                    confidence: text.confidence,
+                });
+                continue;
+            }
+        }
+
         let Some(symbol) = normalize_control_symbol(&text.text) else {
             continue;
         };
@@ -388,6 +436,31 @@ fn normalize_control_symbol(text: &str) -> Option<char> {
         return Some('-');
     }
     None
+}
+
+fn split_compound_control_token_bounds(
+    text: &str,
+    bounds: &desktop_core::protocol::Bounds,
+) -> Option<(desktop_core::protocol::Bounds, desktop_core::protocol::Bounds)> {
+    let value = text.trim();
+    let has_plus = value.contains('+');
+    let has_minus = value.chars().any(|ch| matches!(ch, '-' | '−' | '–' | '—'));
+    if !has_plus || !has_minus || bounds.width < 24.0 || bounds.height < 8.0 {
+        return None;
+    }
+
+    let cy = bounds.y + bounds.height / 2.0;
+    let min_x = bounds.x + 6.0;
+    let max_x = bounds.x + bounds.width - 6.0;
+    if max_x - min_x < 18.0 {
+        return None;
+    }
+
+    let plus_cx = (bounds.x + 10.0).clamp(min_x, max_x - 18.0);
+    let minus_cx = (plus_cx + 18.0).clamp(plus_cx + 10.0, max_x);
+    let plus = bounds_from_center(plus_cx, cy, 14.0, 14.0);
+    let minus = bounds_from_center(minus_cx, cy, 14.0, 14.0);
+    Some((plus, minus))
 }
 
 fn infer_settings_controls_from_anchor(
@@ -504,16 +577,33 @@ pub(super) fn settings_click_from_no_items_anchor(
             return None;
         }
     }
-    let center_x = nx + nw / 2.0;
+    // Prefer instruction-line X anchor when available:
+    // "+" is aligned under the first letter in "Allow the applications below...".
+    let instruction_anchor_x = payload
+        .get("instruction")
+        .and_then(|v| v.get("bounds"))
+        .and_then(bounds_tuple_from_value)
+        .and_then(|(ix, iy, iw, ih)| {
+            let instruction_bottom = iy + ih;
+            let plausible = instruction_bottom < ny
+                && (ny - instruction_bottom) <= 220.0
+                && ix + iw >= nx - 120.0;
+            if plausible { Some(ix + 4.0) } else { None }
+        });
+
+    // Fallback to left-edge "No Items" anchor. OCR width for this label can vary
+    // a lot and shifts center-based clicks, so avoid using its center.
+    let no_items_anchor_x = nx;
     let center_y = ny + nh / 2.0;
-    let dx = match control {
-        "add" => -182.0,
-        "remove" => -164.0,
+    let x = match control {
+        "add" => instruction_anchor_x.unwrap_or(no_items_anchor_x - 153.5),
+        "remove" => instruction_anchor_x
+            .map(|x| x + 18.0)
+            .unwrap_or(no_items_anchor_x - 135.5),
         _ => return None,
     };
-    let x = (center_x + dx).round().max(0.0) as u32;
     let y = (center_y + 20.0).round().max(0.0) as u32;
-    Some((x, y))
+    Some((x.round().max(0.0) as u32, y))
 }
 
 pub(super) fn click_settings_control(
