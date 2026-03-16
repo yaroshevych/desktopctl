@@ -1,10 +1,24 @@
 {
   "image": "dark-dark-center.png",
   "window": {
-    "x": 692,
+    "x": 691,
     "y": 145,
-    "width": 718,
-    "height": 629
+    "width": 719,
+    "height": 623
+  },
+  "list": {
+    "x": 927,
+    "y": 212,
+    "width": 478,
+    "height": 68
+  },
+  "add_button": {
+    "x": 940,
+    "y": 270
+  },
+  "remove_button": {
+    "x": 964,
+    "y": 269
   },
   "occluded": false
 }

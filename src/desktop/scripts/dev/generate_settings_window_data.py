@@ -7,6 +7,7 @@ Expected output JSON shape:
   "window": { "x": 791, "y": 114, "width": 718, "height": 628 },
   "list": { "x": 943, "y": 295, "width": 552, "height": 44 },
   "add_button": { "x": 946, "y": 331 },
+  "remove_button": { "x": 964, "y": 331 },
   "occluded": false
 }
 
@@ -482,43 +483,61 @@ def detect_bounds_from_traffic_lights(
     return best_bounds
 
 
-def detect_list_and_add_button(
+def detect_list_and_controls(
     image: np.ndarray,
     window: Bounds,
-) -> tuple[Bounds | None, Point | None]:
+) -> tuple[Bounds | None, Point | None, Point | None]:
     image_h, image_w = image.shape[:2]
     if window.width <= 0 or window.height <= 0:
-        return None, None
+        return None, None, None
 
     content = infer_content_bounds(window, image_w=image_w, image_h=image_h)
     if content.width < 80 or content.height < 80:
-        return None, None
+        return None, None, None
 
     dark_mode = infer_dark_mode(image, window)
-    add_seed = detect_add_button_pair(image, content, dark_mode)
-    if add_seed is None:
-        add_seed = detect_add_button_pair(image, content, not dark_mode)
+    controls_seed = detect_add_remove_button_pair(image, content, dark_mode)
+    if controls_seed is None:
+        controls_seed = detect_add_remove_button_pair(image, content, not dark_mode)
+    add_seed = controls_seed[0] if controls_seed is not None else None
+    remove_seed = controls_seed[1] if controls_seed is not None else None
 
     list_bounds = detect_list_bounds_from_borders(image, content, add_seed)
     if list_bounds is None:
-        list_bounds = fallback_list_bounds(content, image_w=image_w, image_h=image_h)
+        list_bounds = fallback_list_bounds(
+            content,
+            add_seed=add_seed,
+            image_w=image_w,
+            image_h=image_h,
+        )
     if list_bounds is None:
         if add_seed is None:
-            return None, None
+            return None, None, None
         px = max(0, min(int(round(add_seed[0])), image_w - 1))
         py = max(0, min(int(round(add_seed[1])), image_h - 1))
-        return None, Point(x=px, y=py)
+        minus_x = max(0, min(int(round((remove_seed or (add_seed[0] + 18.0, add_seed[1]))[0])), image_w - 1))
+        minus_y = max(0, min(int(round((remove_seed or (add_seed[0] + 18.0, add_seed[1]))[1])), image_h - 1))
+        return None, Point(x=px, y=py), Point(x=minus_x, y=minus_y)
 
-    add_x = int(round(list_bounds.x + 12.0))
-    add_y = int(round(list_bounds.y + list_bounds.height - 8.0))
     if add_seed is not None:
-        if abs(add_seed[0] - add_x) <= 16.0 and abs(add_seed[1] - add_y) <= 16.0:
-            add_x = int(round(add_seed[0]))
-            add_y = int(round(add_seed[1]))
+        add_x = int(round(add_seed[0]))
+        add_y = int(round(add_seed[1]))
+    else:
+        add_x = int(round(list_bounds.x + 12.0))
+        add_y = int(round(list_bounds.y + list_bounds.height - 8.0))
+
+    if remove_seed is not None:
+        remove_x = int(round(remove_seed[0]))
+        remove_y = int(round(remove_seed[1]))
+    else:
+        remove_x = add_x + 18
+        remove_y = add_y
 
     add_x = max(0, min(add_x, image_w - 1))
     add_y = max(0, min(add_y, image_h - 1))
-    return list_bounds, Point(x=add_x, y=add_y)
+    remove_x = max(0, min(remove_x, image_w - 1))
+    remove_y = max(0, min(remove_y, image_h - 1))
+    return list_bounds, Point(x=add_x, y=add_y), Point(x=remove_x, y=remove_y)
 
 
 def infer_content_bounds(window: Bounds, *, image_w: int, image_h: int) -> Bounds:
@@ -561,11 +580,11 @@ def infer_dark_mode(image: np.ndarray, window: Bounds) -> bool:
     return luma <= 150.0
 
 
-def detect_add_button_pair(
+def detect_add_remove_button_pair(
     image: np.ndarray,
     content: Bounds,
     dark_mode: bool,
-) -> tuple[float, float] | None:
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
     image_h, image_w = image.shape[:2]
     x0 = int(max(0.0, np.floor(content.x + 4.0)))
     x1 = int(min(float(image_w), np.ceil(content.x + content.width * 0.48)))
@@ -634,7 +653,7 @@ def detect_add_button_pair(
     ]
 
     expected_y = y0 + (y1 - y0) * 0.52
-    best: tuple[float, float, float] | None = None
+    best: tuple[float, float, float, float, float] | None = None
     for plus in plus_candidates:
         for minus in minus_candidates:
             plus_x = float(plus["center_x"])
@@ -655,11 +674,11 @@ def detect_add_button_pair(
                 + (bg_penalty * 1.4)
             )
             if best is None or score < best[0]:
-                best = (score, plus_x, plus_y)
+                best = (score, plus_x, plus_y, minus_x, minus_y)
 
     if best is None:
         return None
-    return best[1], best[2]
+    return (best[1], best[2]), (best[3], best[4])
 
 
 def detect_list_bounds_from_borders(
@@ -674,7 +693,7 @@ def detect_list_bounds_from_borders(
     x0 = int(max(0.0, np.floor(content.x + 4.0)))
     x1 = int(min(float(image_w), np.ceil(content.x + content.width - 4.0)))
     y0 = int(max(0.0, np.floor(content.y + 6.0)))
-    y1 = int(min(float(image_h), np.ceil(content.y + content.height * 0.62)))
+    y1 = int(min(float(image_h), np.ceil(content.y + content.height * 0.90)))
     if x1 - x0 < 180 or y1 - y0 < 48:
         return None
 
@@ -683,8 +702,8 @@ def detect_list_bounds_from_borders(
     grad_y = np.abs(np.diff(gray.astype(np.int16), axis=0))
 
     anchor_y = int(round(add_seed[1])) if add_seed is not None else (y0 + y1) // 2
-    bottom_min = max(y0 + 24, min(anchor_y - 4, y1 - 2))
-    bottom_max = max(bottom_min + 1, min(anchor_y + 28, y1 - 1))
+    bottom_min = max(y0 + 24, min(anchor_y - 42, y1 - 2))
+    bottom_max = max(bottom_min + 1, min(anchor_y + 20, y1 - 1))
     y_bottom = snap_horizontal_edge(
         grad_y,
         x0=x0,
@@ -694,9 +713,14 @@ def detect_list_bounds_from_borders(
     )
     if y_bottom is None:
         return None
+    if add_seed is not None:
+        min_panel_bottom = int(round(add_seed[1] + 8.0))
+        max_panel_bottom = min(y1 - 1, image_h - 1)
+        if min_panel_bottom <= max_panel_bottom and y_bottom < min_panel_bottom:
+            y_bottom = min_panel_bottom
 
-    top_min = min(y0 + 6, y_bottom - 10)
-    top_max = max(top_min + 1, min(y_bottom - 24, y_bottom - 1))
+    top_min = y0 + 6
+    top_max = max(top_min + 1, min(y_bottom - 20, y_bottom - 1))
     y_top = snap_horizontal_edge(
         grad_y,
         x0=x0,
@@ -707,16 +731,17 @@ def detect_list_bounds_from_borders(
     if y_top is None:
         return None
 
-    table_h = y_bottom - y_top
-    if table_h < 36:
-        y_top = max(y0 + 6, y_bottom - 44)
-        table_h = y_bottom - y_top
-    if table_h < 24 or table_h > 116:
+    list_h = y_bottom - y_top
+    max_h = int(round(content.height * 0.78))
+    if list_h < 36:
+        y_top = max(y0 + 6, y_bottom - 56)
+        list_h = y_bottom - y_top
+    if list_h < 32 or list_h > max_h:
         return None
 
     if add_seed is not None:
-        left_min = max(x0, min(int(round(add_seed[0])) - 20, x1 - 2))
-        left_max = max(left_min + 1, min(int(round(add_seed[0])) - 6, x1 - 1))
+        left_min = max(x0, min(int(round(add_seed[0])) - 30, x1 - 2))
+        left_max = max(left_min + 1, min(int(round(add_seed[0])) + 4, x1 - 1))
     else:
         left_min = x0
         left_max = max(left_min + 1, min(int(round(x0 + (x1 - x0) * 0.35)), x1 - 1))
@@ -730,7 +755,7 @@ def detect_list_bounds_from_borders(
     if x_left is None:
         return None
 
-    right_min = int(round(x0 + (x1 - x0) * 0.58))
+    right_min = int(round(x0 + (x1 - x0) * 0.45))
     right_min = max(x_left + 24, min(right_min, x1 - 2))
     right_max = max(right_min + 1, x1 - 1)
     x_right = snap_vertical_edge(
@@ -747,8 +772,10 @@ def detect_list_bounds_from_borders(
 
     if add_seed is not None:
         expected_x = x_left + 12.0
-        expected_y = y_bottom - 8.0
-        if abs(expected_x - add_seed[0]) > 18.0 or abs(expected_y - add_seed[1]) > 18.0:
+        dx_ok = abs(expected_x - add_seed[0]) <= 26.0
+        dy_inline_ok = abs((y_bottom - 8.0) - add_seed[1]) <= 24.0
+        dy_footer_ok = 6.0 <= (add_seed[1] - y_bottom) <= 38.0
+        if not dx_ok or not (dy_inline_ok or dy_footer_ok):
             return None
 
     return Bounds(
@@ -759,13 +786,33 @@ def detect_list_bounds_from_borders(
     )
 
 
-def fallback_list_bounds(content: Bounds, *, image_w: int, image_h: int) -> Bounds | None:
+def fallback_list_bounds(
+    content: Bounds,
+    *,
+    add_seed: tuple[float, float] | None,
+    image_w: int,
+    image_h: int,
+) -> Bounds | None:
     if content.width <= 0 or content.height <= 0:
         return None
-    x = max(0, min(int(round(content.x + 18.0)), image_w - 2))
-    y = max(0, min(int(round(content.y + 66.0)), image_h - 2))
-    w = int(round(max(140.0, content.width - 30.0)))
-    h = int(round(max(56.0, min(92.0, content.height * 0.14))))
+
+    if add_seed is not None:
+        add_x, add_y = add_seed
+        x = max(0, min(int(round(add_x - 12.0)), image_w - 2))
+        bottom = int(round(add_y + 12.0))
+        bottom = max(int(round(content.y + 56.0)), min(bottom, int(round(content.y + content.height - 8.0))))
+        y = int(round(content.y + max(24.0, min(118.0, content.height * 0.18))))
+        y = max(0, min(y, image_h - 2))
+        if bottom - y < 44:
+            y = max(0, min(bottom - 56, image_h - 2))
+        w = int(round(max(140.0, (content.x + content.width - 6.0) - x)))
+        h = int(round(max(44.0, bottom - y)))
+    else:
+        x = max(0, min(int(round(content.x + 18.0)), image_w - 2))
+        y = max(0, min(int(round(content.y + 66.0)), image_h - 2))
+        w = int(round(max(140.0, content.width - 30.0)))
+        h = int(round(max(56.0, min(92.0, content.height * 0.14))))
+
     x2 = max(x + 1, min(image_w, x + w))
     y2 = max(y + 1, min(image_h, y + h))
     return Bounds(x=x, y=y, width=x2 - x, height=y2 - y)
@@ -1259,6 +1306,7 @@ def write_json(
     bounds: Bounds,
     list_bounds: Bounds | None,
     add_button: Point | None,
+    remove_button: Point | None,
     overwrite: bool,
 ) -> Path | None:
     output_path = output_path_for(output_dir, image_path, ".window.json")
@@ -1270,6 +1318,7 @@ def write_json(
         "window": bounds.as_json(),
         "list": list_bounds.as_json() if list_bounds is not None else None,
         "add_button": add_button.as_json() if add_button is not None else None,
+        "remove_button": remove_button.as_json() if remove_button is not None else None,
         "occluded": False,
     }
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -1283,6 +1332,7 @@ def write_overlay(
     bounds: Bounds,
     list_bounds: Bounds | None,
     add_button: Point | None,
+    remove_button: Point | None,
 ) -> Path:
     overlay = image.copy()
     cv2.rectangle(
@@ -1306,6 +1356,16 @@ def write_overlay(
             (add_button.x, add_button.y),
             (90, 255, 90),
             markerType=cv2.MARKER_CROSS,
+            markerSize=16,
+            thickness=2,
+            line_type=cv2.LINE_AA,
+        )
+    if remove_button is not None:
+        cv2.drawMarker(
+            overlay,
+            (remove_button.x, remove_button.y),
+            (245, 120, 120),
+            markerType=cv2.MARKER_TILTED_CROSS,
             markerSize=16,
             thickness=2,
             line_type=cv2.LINE_AA,
@@ -1367,11 +1427,13 @@ def process_image(
         "window": bounds.as_json(),
         "list": None,
         "add_button": None,
+        "remove_button": None,
         "occluded": False,
     }
-    list_bounds, add_button = detect_list_and_add_button(image, bounds)
+    list_bounds, add_button, remove_button = detect_list_and_controls(image, bounds)
     payload["list"] = list_bounds.as_json() if list_bounds is not None else None
     payload["add_button"] = add_button.as_json() if add_button is not None else None
+    payload["remove_button"] = remove_button.as_json() if remove_button is not None else None
 
     output_dir = resolve_output_dir(args, path)
     written = write_json(
@@ -1380,10 +1442,19 @@ def process_image(
         bounds,
         list_bounds,
         add_button,
+        remove_button,
         overwrite=args.overwrite,
     )
     if args.write_overlays:
-        write_overlay(output_dir, path, image, bounds, list_bounds, add_button)
+        write_overlay(
+            output_dir,
+            path,
+            image,
+            bounds,
+            list_bounds,
+            add_button,
+            remove_button,
+        )
     if args.write_crops:
         write_crop(output_dir, path, image, bounds)
     if args.write_sips_crops:

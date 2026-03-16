@@ -1,10 +1,24 @@
 {
   "image": "dark-dark-far-left.png",
   "window": {
-    "x": 78,
+    "x": 77,
     "y": 127,
-    "width": 717,
-    "height": 627
+    "width": 718,
+    "height": 622
+  },
+  "list": {
+    "x": 313,
+    "y": 194,
+    "width": 477,
+    "height": 68
+  },
+  "add_button": {
+    "x": 324,
+    "y": 252
+  },
+  "remove_button": {
+    "x": 350,
+    "y": 252
   },
   "occluded": false
 }

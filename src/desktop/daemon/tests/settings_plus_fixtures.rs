@@ -71,9 +71,9 @@ fn assert_bounds_inside(inner: &Bounds, outer: &Bounds, tol: f64, label: &str) {
 #[test]
 fn infers_plus_button_on_settings_screenshots() {
     let cases = [
-        ("dark-dark-left.png", 324.0, 422.2),
-        ("light-dark-center.png", 631.0, 303.2),
-        ("light-forest-right.png", 998.0, 408.2),
+        ("dark-dark-left.png", 326.0, 362.0),
+        ("light-dark-center.png", 632.0, 242.0),
+        ("light-forest-right.png", 999.0, 347.0),
     ];
     let mut failures = Vec::new();
 

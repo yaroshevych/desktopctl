@@ -1,10 +1,24 @@
 {
   "image": "light-light-center.png",
   "window": {
-    "x": 386,
+    "x": 383,
     "y": 114,
-    "width": 715,
-    "height": 627
+    "width": 718,
+    "height": 622
+  },
+  "list": {
+    "x": 631,
+    "y": 180,
+    "width": 198,
+    "height": 66
+  },
+  "add_button": {
+    "x": 632,
+    "y": 238
+  },
+  "remove_button": {
+    "x": 656,
+    "y": 238
   },
   "occluded": false
 }

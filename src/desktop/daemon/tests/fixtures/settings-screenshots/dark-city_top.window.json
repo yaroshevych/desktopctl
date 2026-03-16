@@ -1,10 +1,24 @@
 {
   "image": "dark-city_top.png",
   "window": {
-    "x": 339,
+    "x": 338,
     "y": 215,
-    "width": 717,
-    "height": 627
+    "width": 718,
+    "height": 622
+  },
+  "list": {
+    "x": 573,
+    "y": 282,
+    "width": 478,
+    "height": 68
+  },
+  "add_button": {
+    "x": 586,
+    "y": 340
+  },
+  "remove_button": {
+    "x": 610,
+    "y": 340
   },
   "occluded": false
 }

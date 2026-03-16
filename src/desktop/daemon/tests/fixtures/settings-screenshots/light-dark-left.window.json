@@ -1,10 +1,24 @@
 {
   "image": "light-dark-left.png",
   "window": {
-    "x": 68,
+    "x": 66,
     "y": 237,
-    "width": 715,
-    "height": 625
+    "width": 717,
+    "height": 621
+  },
+  "list": {
+    "x": 313,
+    "y": 303,
+    "width": 198,
+    "height": 65
+  },
+  "add_button": {
+    "x": 314,
+    "y": 360
+  },
+  "remove_button": {
+    "x": 339,
+    "y": 360
   },
   "occluded": false
 }

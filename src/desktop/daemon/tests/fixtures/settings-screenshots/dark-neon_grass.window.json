@@ -6,5 +6,19 @@
     "width": 714,
     "height": 626
   },
+  "list": {
+    "x": 788,
+    "y": 306,
+    "width": 210,
+    "height": 68
+  },
+  "add_button": {
+    "x": 800,
+    "y": 364
+  },
+  "remove_button": {
+    "x": 826,
+    "y": 364
+  },
   "occluded": false
 }

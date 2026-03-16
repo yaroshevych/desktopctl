@@ -1,10 +1,24 @@
 {
   "image": "dark-dark-right.png",
   "window": {
-    "x": 782,
+    "x": 780,
     "y": 221,
-    "width": 717,
-    "height": 627
+    "width": 719,
+    "height": 622
+  },
+  "list": {
+    "x": 1016,
+    "y": 288,
+    "width": 478,
+    "height": 68
+  },
+  "add_button": {
+    "x": 1028,
+    "y": 346
+  },
+  "remove_button": {
+    "x": 1053,
+    "y": 346
   },
   "occluded": false
 }
