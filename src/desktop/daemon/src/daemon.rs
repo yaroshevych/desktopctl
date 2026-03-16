@@ -1099,6 +1099,11 @@ fn write_capture_overlay(capture: &vision::pipeline::CaptureResult) -> Result<Pa
     )
     .or_else(|| find_settings_heading(&capture.snapshot.texts, None));
     let instruction = find_settings_instruction(&capture.snapshot.texts, heading.as_ref());
+    let section_break = find_settings_section_break(
+        &capture.snapshot.texts,
+        heading.as_ref(),
+        instruction.as_ref(),
+    );
     let no_items = first_matching_text(&capture.snapshot.texts, "no items");
     let inferred_window_bounds = infer_window_bounds_from_content(
         regions_display.content_bounds.as_ref(),
@@ -1157,6 +1162,16 @@ fn write_capture_overlay(capture: &vision::pipeline::CaptureResult) -> Result<Pa
             2,
         );
     }
+    if let Some(section_break) = section_break.as_ref() {
+        draw_logical_bounds_on_image(
+            &mut image,
+            &section_break.bounds,
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+            Rgba([255, 106, 106, 255]),
+            2,
+        );
+    }
 
     let list_bounds = infer_list_bounds_from_anchors(
         heading.as_ref(),
@@ -1179,6 +1194,7 @@ fn write_capture_overlay(capture: &vision::pipeline::CaptureResult) -> Result<Pa
         heading.as_ref(),
         no_items.as_ref(),
         instruction.as_ref(),
+        section_break.as_ref(),
         list_bounds.as_ref(),
         regions_display.content_bounds.as_ref(),
         14.0,
@@ -2181,6 +2197,7 @@ mod tests {
             Some(&no_items),
             None,
             None,
+            None,
             Some(&Bounds {
                 x: 234.0,
                 y: 150.0,
@@ -2247,6 +2264,7 @@ mod tests {
             Some(&heading),
             Some(&no_items),
             Some(&instruction),
+            None,
             None,
             Some(&Bounds {
                 x: 1180.0,

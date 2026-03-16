@@ -26,6 +26,11 @@ pub(super) fn screen_settings_map() -> Result<Value, AppError> {
     )
     .or_else(|| find_settings_heading(&capture.snapshot.texts, None));
     let instruction = find_settings_instruction(&capture.snapshot.texts, heading.as_ref());
+    let section_break = find_settings_section_break(
+        &capture.snapshot.texts,
+        heading.as_ref(),
+        instruction.as_ref(),
+    );
     let rows = infer_settings_rows(&capture.snapshot.texts, heading.as_ref());
     let row_height = median_row_height(&rows).unwrap_or(14.0);
     let no_items = find_settings_no_items(
@@ -74,12 +79,13 @@ pub(super) fn screen_settings_map() -> Result<Value, AppError> {
         heading.as_ref(),
         no_items.as_ref(),
         instruction.as_ref(),
+        section_break.as_ref(),
         list_bounds.as_ref(),
         detected_regions.content_bounds.as_ref(),
         row_height,
     );
     trace::log(format!(
-        "screen_settings_map snapshot_id={} image={}x{} display={}x{} heading={} instruction={} no_items={} rows={} list={} regions.window={} regions.content={} regions.table={} controls={}",
+        "screen_settings_map snapshot_id={} image={}x{} display={}x{} heading={} instruction={} section_break={} no_items={} rows={} list={} regions.window={} regions.content={} regions.table={} controls={}",
         capture.snapshot.snapshot_id,
         frame_image
             .as_ref()
@@ -93,6 +99,7 @@ pub(super) fn screen_settings_map() -> Result<Value, AppError> {
         capture.snapshot.display.height,
         fmt_bounds_opt(heading.as_ref().map(|h| &h.bounds)),
         fmt_bounds_opt(instruction.as_ref().map(|t| &t.bounds)),
+        fmt_bounds_opt(section_break.as_ref().map(|t| &t.bounds)),
         fmt_bounds_opt(no_items.as_ref().map(|t| &t.bounds)),
         rows.len(),
         fmt_bounds_opt(list_bounds.as_ref()),
@@ -145,6 +152,7 @@ pub(super) fn screen_settings_map() -> Result<Value, AppError> {
         "focused_app": capture.snapshot.focused_app,
         "heading": heading,
         "instruction": instruction,
+        "section_break": section_break,
         "no_items": no_items,
         "list_bounds": list_bounds,
         "regions": {
@@ -263,6 +271,7 @@ pub(super) fn infer_settings_controls_for_settings_pane(
     heading: Option<&desktop_core::protocol::SnapshotText>,
     no_items: Option<&desktop_core::protocol::SnapshotText>,
     instruction: Option<&desktop_core::protocol::SnapshotText>,
+    section_break: Option<&desktop_core::protocol::SnapshotText>,
     list_bounds: Option<&desktop_core::protocol::Bounds>,
     content_bounds: Option<&desktop_core::protocol::Bounds>,
     row_height: f64,
@@ -274,6 +283,7 @@ pub(super) fn infer_settings_controls_for_settings_pane(
         heading,
         no_items,
         instruction,
+        section_break,
         content_bounds,
     ) {
         return Some(controls);
@@ -282,6 +292,7 @@ pub(super) fn infer_settings_controls_for_settings_pane(
         instruction,
         heading,
         no_items,
+        section_break,
         content_bounds,
         list_bounds,
         row_height,
@@ -304,6 +315,7 @@ fn infer_settings_controls_from_ocr_symbols(
     heading: Option<&desktop_core::protocol::SnapshotText>,
     no_items: Option<&desktop_core::protocol::SnapshotText>,
     instruction: Option<&desktop_core::protocol::SnapshotText>,
+    section_break: Option<&desktop_core::protocol::SnapshotText>,
     content_bounds: Option<&desktop_core::protocol::Bounds>,
 ) -> Option<Value> {
     let heading = heading?;
@@ -317,6 +329,9 @@ fn infer_settings_controls_from_ocr_symbols(
         // Screen Recording panes may render two list sections; keep the control
         // search window close to the active instruction block (top section).
         y_max = y_max.min(instr_bottom + 210.0);
+    }
+    if let Some(section_break) = section_break {
+        y_max = y_max.min(section_break.bounds.y - 8.0);
     }
     if let Some(content) = content_bounds {
         x_min = x_min.max(content.x - 8.0);
@@ -525,11 +540,13 @@ fn infer_settings_controls_from_instruction_anchor(
     instruction: Option<&desktop_core::protocol::SnapshotText>,
     heading: Option<&desktop_core::protocol::SnapshotText>,
     no_items: Option<&desktop_core::protocol::SnapshotText>,
+    section_break: Option<&desktop_core::protocol::SnapshotText>,
     content_bounds: Option<&desktop_core::protocol::Bounds>,
     list_bounds: Option<&desktop_core::protocol::Bounds>,
     row_height: f64,
 ) -> Option<Value> {
     const CONTROLS_Y_BIAS_PX: f64 = 10.0;
+    const SECTION_BREAK_CONTROLS_OFFSET_PX: f64 = 20.0;
     let instruction = instruction?;
     if let Some(heading) = heading {
         if instruction.bounds.y < heading.bounds.y + heading.bounds.height + 4.0 {
@@ -560,6 +577,13 @@ fn infer_settings_controls_from_instruction_anchor(
         y_source = "no_items";
     } else {
         controls_y += CONTROLS_Y_BIAS_PX;
+    }
+    if let Some(section_break) = section_break {
+        // Screen & System Audio Recording has two stacked sections. Anchor controls
+        // directly to the top section by placing the click row above the
+        // "System Audio Recording Only" separator.
+        controls_y = section_break.bounds.y - SECTION_BREAK_CONTROLS_OFFSET_PX;
+        y_source = "section_break";
     }
     if let Some(content) = content_bounds {
         add_x = add_x.max(content.x + 8.0);
@@ -678,6 +702,20 @@ pub(super) fn settings_click_from_instruction_anchor(
             },
             confidence: 1.0,
         });
+    let section_break = payload
+        .get("section_break")
+        .and_then(|v| v.get("bounds"))
+        .and_then(bounds_tuple_from_value)
+        .map(|(x, y, w, h)| desktop_core::protocol::SnapshotText {
+            text: String::new(),
+            bounds: desktop_core::protocol::Bounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            confidence: 1.0,
+        });
     let list_bounds = payload
         .get("list_bounds")
         .and_then(bounds_tuple_from_value)
@@ -720,6 +758,7 @@ pub(super) fn settings_click_from_instruction_anchor(
         Some(&instruction),
         heading.as_ref(),
         no_items.as_ref(),
+        section_break.as_ref(),
         content_bounds.as_ref(),
         list_bounds.as_ref(),
         row_height,
@@ -1193,6 +1232,40 @@ pub(super) fn find_settings_instruction(
     candidates.into_iter().next()
 }
 
+pub(super) fn find_settings_section_break(
+    texts: &[desktop_core::protocol::SnapshotText],
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    instruction: Option<&desktop_core::protocol::SnapshotText>,
+) -> Option<desktop_core::protocol::SnapshotText> {
+    let mut candidates: Vec<_> = texts
+        .iter()
+        .filter(|text| {
+            let lower = text.text.to_lowercase();
+            lower.contains("system audio recording only") || lower.contains("audio recording only")
+        })
+        .cloned()
+        .collect();
+    if let Some(heading) = heading {
+        candidates.retain(|text| {
+            text.bounds.y >= heading.bounds.y + heading.bounds.height + 28.0
+                && text.bounds.y <= heading.bounds.y + 420.0
+                && text.bounds.x + text.bounds.width >= heading.bounds.x - 20.0
+        });
+    }
+    if let Some(instruction) = instruction {
+        let instruction_bottom = instruction.bounds.y + instruction.bounds.height;
+        candidates.retain(|text| text.bounds.y >= instruction_bottom + 48.0);
+    }
+    candidates.sort_by(|a, b| {
+        a.bounds
+            .y
+            .total_cmp(&b.bounds.y)
+            .then_with(|| a.bounds.x.total_cmp(&b.bounds.x))
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+    });
+    candidates.into_iter().next()
+}
+
 pub(super) fn infer_list_bounds_from_anchors(
     heading: Option<&desktop_core::protocol::SnapshotText>,
     no_items: Option<&desktop_core::protocol::SnapshotText>,
@@ -1484,6 +1557,7 @@ mod tests {
             Some(&instruction),
             Some(&heading),
             None,
+            None,
             Some(&content),
             Some(&list),
             14.0,
@@ -1528,6 +1602,7 @@ mod tests {
             Some(&instruction),
             Some(&heading),
             None,
+            None,
             Some(&content),
             None,
             14.0,
@@ -1539,6 +1614,66 @@ mod tests {
 
         let add = point_from_value(&controls["add_click"]).expect("add click");
         assert_eq!(add, (970, 317));
+    }
+
+    #[test]
+    fn instruction_anchor_uses_section_break_for_controls_y() {
+        let heading = text(
+            "Screen & System Audio Recording",
+            Bounds {
+                x: 962.0,
+                y: 202.0,
+                width: 312.0,
+                height: 20.0,
+            },
+        );
+        let instruction = text(
+            "Allow the applications below to record screen and system audio.",
+            Bounds {
+                x: 964.0,
+                y: 246.0,
+                width: 368.0,
+                height: 15.0,
+            },
+        );
+        let section_break = text(
+            "System Audio Recording Only",
+            Bounds {
+                x: 964.0,
+                y: 468.0,
+                width: 240.0,
+                height: 16.0,
+            },
+        );
+        let content = Bounds {
+            x: 900.0,
+            y: 180.0,
+            width: 560.0,
+            height: 760.0,
+        };
+        let list = Bounds {
+            x: 996.0,
+            y: 292.0,
+            width: 338.0,
+            height: 78.0,
+        };
+
+        let controls = infer_settings_controls_from_instruction_anchor(
+            Some(&instruction),
+            Some(&heading),
+            None,
+            Some(&section_break),
+            Some(&content),
+            Some(&list),
+            14.0,
+        )
+        .expect("controls should be inferred");
+
+        assert_eq!(controls["source"], "instruction_anchor");
+        assert_eq!(controls["y_source"], "section_break");
+
+        let add = point_from_value(&controls["add_click"]).expect("add click");
+        assert_eq!(add, (968, 448));
     }
 
     #[test]
@@ -1613,6 +1748,15 @@ mod tests {
                 height: 15.0,
             },
         );
+        let section_break = text(
+            "System Audio Recording Only",
+            Bounds {
+                x: 964.0,
+                y: 468.0,
+                width: 240.0,
+                height: 16.0,
+            },
+        );
         let no_items = text(
             "No Items",
             Bounds {
@@ -1663,6 +1807,7 @@ mod tests {
             &[
                 heading.clone(),
                 instruction.clone(),
+                section_break.clone(),
                 no_items.clone(),
                 top_plus,
                 top_minus,
@@ -1672,6 +1817,7 @@ mod tests {
             Some(&heading),
             Some(&no_items),
             Some(&instruction),
+            Some(&section_break),
             None,
             Some(&Bounds {
                 x: 900.0,
@@ -1685,7 +1831,10 @@ mod tests {
 
         assert_eq!(controls["source"], "ocr_symbols");
         let (_x, y) = point_from_value(&controls["add_click"]).expect("add click");
-        assert!(y < 420, "expected top controls row, got y={y}");
+        assert!(
+            (y as f64) < section_break.bounds.y,
+            "expected controls above section break, got y={y}"
+        );
     }
 
     #[test]
@@ -1744,6 +1893,7 @@ mod tests {
             Some(&heading),
             None,
             Some(&instruction),
+            None,
             Some(&list),
             Some(&Bounds {
                 x: 900.0,
