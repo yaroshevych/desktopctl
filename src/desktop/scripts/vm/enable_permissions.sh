@@ -261,6 +261,73 @@ submit_password_for_open_dialog() {
   run_host_dctl_direct wait 180
 }
 
+submit_password_for_settings_change() {
+  local reason="${1:-settings change}"
+  echo "info: unlock prompt detected after ${reason}; submitting password"
+  echo "info: typing VM_OS_PASSWORD=$VM_OS_PASSWORD"
+
+  # Optional dialog: only handle it when present.
+  if run_host_dctl_try ui settings unlock --password "$VM_OS_PASSWORD" --timeout 4200; then
+    run_host_dctl wait 140
+    return 0
+  fi
+
+  press_hotkey_direct cmd+a
+  run_host_dctl_direct wait 30
+  type_text_slowly "$VM_OS_PASSWORD" 15
+  press_hotkey_direct enter
+  run_host_dctl_direct wait 180
+}
+
+wait_for_password_prompt() {
+  local timeout_ms="${1:-1600}"
+  run_host_dctl_try wait --text "Password" --timeout "$timeout_ms" \
+    || run_host_dctl_try wait --text "Use Password" --timeout "$timeout_ms" \
+    || run_host_dctl_try wait --text "Touch ID or Password" --timeout "$timeout_ms"
+}
+
+wait_for_screen_recording_pane() {
+  local timeout_ms="${1:-8000}"
+  run_host_dctl_try wait --text "Screen & System Audio Recording" --timeout "$timeout_ms" \
+    || run_host_dctl_try wait --text "Allow the applications below to record the contents of your screen and system audio." --timeout "$timeout_ms" \
+    || run_host_dctl_try wait --text "Allow the applications below to record screen and system audio." --timeout "$timeout_ms" \
+    || run_host_dctl_try wait --text "Allow the applications below" --timeout "$timeout_ms"
+}
+
+close_settings_window_via_close_button() {
+  local payload wx wy cx cy attempt
+  for attempt in 1 2 3; do
+    payload="$(run_host_dctl_try screen settings --json 2>/dev/null || true)"
+    if [[ -z "$payload" ]]; then
+      payload="$(run_host_dctl_try screen layout --json 2>/dev/null || true)"
+    fi
+    wx="$(jq -r '.regions.settings_window.x // .regions.window.x // .frontmost_window.x // empty' <<<"$payload" 2>/dev/null || true)"
+    wy="$(jq -r '.regions.settings_window.y // .regions.window.y // .frontmost_window.y // empty' <<<"$payload" 2>/dev/null || true)"
+    if [[ -z "$wx" || -z "$wy" || "$wx" == "null" || "$wy" == "null" ]]; then
+      run_host_dctl wait 120 >/dev/null
+      continue
+    fi
+    # Red traffic-light center is near top-left + ~20px in both axes.
+    cx="$(awk -v x="$wx" 'BEGIN { printf("%d", x + 20.5) }')"
+    cy="$(awk -v y="$wy" 'BEGIN { printf("%d", y + 20.5) }')"
+    if [[ ! "$cx" =~ ^[0-9]+$ || ! "$cy" =~ ^[0-9]+$ ]]; then
+      run_host_dctl wait 120 >/dev/null
+      continue
+    fi
+    echo "info: closing Settings via traffic-light at (${cx},${cy}) [attempt ${attempt}]"
+    run_host_dctl pointer click "$cx" "$cy" >/dev/null
+    run_host_dctl wait 260 >/dev/null
+    return 0
+  done
+  return 1
+}
+
+click_settings_add_control() {
+  run_host_dctl ui click --settings-add \
+    || run_host_dctl ui click --text-offset "No Items" --dx -182 --dy 20 --timeout 1100 \
+    || run_host_dctl ui click --text-offset "Allow the applications" --dx -170 --dy 46 --timeout 1100
+}
+
 maximize_vm_window_on_host() {
   /usr/bin/osascript "$VM_WINDOW_APP" <<'APPLESCRIPT' >/dev/null 2>&1 || {
 on run argv
@@ -309,22 +376,26 @@ add_entry_in_current_pane() {
   normalize_host_workspace
   if click_text_fast "DesktopCtl" 900; then
     run_host_dctl_soft ui click --settings-remove
-    run_host_dctl wait 90
+    if wait_for_password_prompt 1700; then
+      submit_password_for_settings_change "remove (-) click"
+    fi
+    # After remove, macOS reflows the controls row; allow it to settle.
+    run_host_dctl wait 220
   else
     echo "info: DesktopCtl row not found in current pane; skipping remove"
   fi
 
-  run_host_dctl ui click --settings-add \
-    || run_host_dctl ui click --text-offset "No Items" --dx -182 --dy 20 --timeout 1100 \
-    || run_host_dctl ui click --text-offset "Allow the applications" --dx -170 --dy 46 --timeout 1100
+  click_settings_add_control
 
-  if run_host_dctl_try wait --text "Password" --timeout 1600 \
-    || run_host_dctl_try wait --text "Use Password" --timeout 1600 \
-    || run_host_dctl_try wait --text "Touch ID or Password" --timeout 1600; then
+  if wait_for_password_prompt 1600; then
     submit_password_for_open_dialog
+    if ! run_host_dctl_try wait --text "Open" --timeout 900; then
+      echo "info: Open dialog not visible after unlock; retrying '+' click once"
+      click_settings_add_control
+    fi
   fi
 
-  run_host_dctl wait --text "Open" --timeout 1600
+  run_host_dctl wait --text "Open" --timeout 2200
   local submitted_with_open=0
   if select_desktopctl_from_open_dialog 1; then
     submitted_with_open=1
@@ -396,8 +467,15 @@ configure_accessibility_pane() {
 configure_screen_recording_pane() {
   echo "[6/7] Configure Screen Recording pane in VM"
   normalize_host_workspace
-  run_ssh "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'"
-  run_host_dctl wait --text "Allow the applications below to record the contents of your screen and system audio." --timeout 8000
+  echo "      sending Cmd+Q to close Settings in VM before Screen Recording deep-link"
+  press_hotkey cmd+q
+  run_host_dctl wait 300
+  run_ssh "open -a 'System Settings' 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture' >/dev/null 2>&1 || open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'"
+  if ! wait_for_screen_recording_pane 8000; then
+    echo "warn: deep-link did not land on Screen Recording pane; trying sidebar navigation"
+    run_host_dctl_soft ui click --text "Screen & System Audio Recording" --timeout 1500
+    wait_for_screen_recording_pane 6000
+  fi
   add_entry_in_current_pane
   ensure_row_enabled "DesktopCtl"
   run_host_dctl ui click --text "Quit & Reopen" --timeout 2500 \

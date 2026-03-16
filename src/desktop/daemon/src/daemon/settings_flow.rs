@@ -28,7 +28,12 @@ pub(super) fn screen_settings_map() -> Result<Value, AppError> {
     let instruction = find_settings_instruction(&capture.snapshot.texts, heading.as_ref());
     let rows = infer_settings_rows(&capture.snapshot.texts, heading.as_ref());
     let row_height = median_row_height(&rows).unwrap_or(14.0);
-    let no_items = first_matching_text(&capture.snapshot.texts, "no items");
+    let no_items = find_settings_no_items(
+        &capture.snapshot.texts,
+        heading.as_ref(),
+        instruction.as_ref(),
+    )
+    .or_else(|| first_matching_text(&capture.snapshot.texts, "no items"));
     let mut rows_bounds = bounds_from_texts(&rows).map(|b| desktop_core::protocol::Bounds {
         x: (b.x - 18.0).max(0.0),
         y: (b.y - 6.0).max(0.0),
@@ -262,24 +267,28 @@ pub(super) fn infer_settings_controls_for_settings_pane(
     content_bounds: Option<&desktop_core::protocol::Bounds>,
     row_height: f64,
 ) -> Option<Value> {
-    if let Some(controls) =
-        infer_settings_controls_from_ocr_symbols(texts, heading, no_items, instruction, content_bounds)
-    {
+    // Prefer OCR symbols (+/- or "+ -") when present because they provide
+    // direct row Y. Fallback to instruction anchor if OCR symbols are absent.
+    if let Some(controls) = infer_settings_controls_from_ocr_symbols(
+        texts,
+        heading,
+        no_items,
+        instruction,
+        content_bounds,
+    ) {
         return Some(controls);
     }
-    if let Some(controls) = infer_settings_controls_from_anchor(heading, no_items) {
-        return Some(controls);
-    }
-    // In VM panes with populated rows, list bounds inferred from row labels can be
-    // horizontally biased to the right. Instruction anchor tends to align better
-    // with the +/- controls row in those cases.
     if let Some(controls) = infer_settings_controls_from_instruction_anchor(
         instruction,
         heading,
+        no_items,
         content_bounds,
         list_bounds,
         row_height,
     ) {
+        return Some(controls);
+    }
+    if let Some(controls) = infer_settings_controls_from_anchor(heading, no_items) {
         return Some(controls);
     }
     if let Some(controls) =
@@ -298,10 +307,17 @@ fn infer_settings_controls_from_ocr_symbols(
     content_bounds: Option<&desktop_core::protocol::Bounds>,
 ) -> Option<Value> {
     let heading = heading?;
-    let y_min = heading.bounds.y + heading.bounds.height + 8.0;
-    let y_max = heading.bounds.y + 360.0;
+    let mut y_min = heading.bounds.y + heading.bounds.height + 8.0;
+    let mut y_max = heading.bounds.y + 360.0;
     let mut x_min = heading.bounds.x - 100.0;
     let mut x_max = heading.bounds.x + 320.0;
+    if let Some(instruction) = instruction {
+        let instr_bottom = instruction.bounds.y + instruction.bounds.height;
+        y_min = y_min.max(instr_bottom + 8.0);
+        // Screen Recording panes may render two list sections; keep the control
+        // search window close to the active instruction block (top section).
+        y_max = y_max.min(instr_bottom + 210.0);
+    }
     if let Some(content) = content_bounds {
         x_min = x_min.max(content.x - 8.0);
         x_max = x_max.min(content.x + content.width * 0.55);
@@ -441,7 +457,10 @@ fn normalize_control_symbol(text: &str) -> Option<char> {
 fn split_compound_control_token_bounds(
     text: &str,
     bounds: &desktop_core::protocol::Bounds,
-) -> Option<(desktop_core::protocol::Bounds, desktop_core::protocol::Bounds)> {
+) -> Option<(
+    desktop_core::protocol::Bounds,
+    desktop_core::protocol::Bounds,
+)> {
     let value = text.trim();
     let has_plus = value.contains('+');
     let has_minus = value.chars().any(|ch| matches!(ch, '-' | '−' | '–' | '—'));
@@ -505,10 +524,12 @@ fn infer_settings_controls_from_anchor(
 fn infer_settings_controls_from_instruction_anchor(
     instruction: Option<&desktop_core::protocol::SnapshotText>,
     heading: Option<&desktop_core::protocol::SnapshotText>,
+    no_items: Option<&desktop_core::protocol::SnapshotText>,
     content_bounds: Option<&desktop_core::protocol::Bounds>,
     list_bounds: Option<&desktop_core::protocol::Bounds>,
     row_height: f64,
 ) -> Option<Value> {
+    const CONTROLS_Y_BIAS_PX: f64 = 10.0;
     let instruction = instruction?;
     if let Some(heading) = heading {
         if instruction.bounds.y < heading.bounds.y + heading.bounds.height + 4.0 {
@@ -532,6 +553,13 @@ fn infer_settings_controls_from_instruction_anchor(
             controls_y = list_controls_y;
             y_source = "list_bounds";
         }
+    }
+    if let Some(no_items) = no_items {
+        // Empty-list panes: anchor Y to the controls row relative to "No Items".
+        controls_y = no_items.bounds.y + no_items.bounds.height / 2.0 + 20.0;
+        y_source = "no_items";
+    } else {
+        controls_y += CONTROLS_Y_BIAS_PX;
     }
     if let Some(content) = content_bounds {
         add_x = add_x.max(content.x + 8.0);
@@ -557,6 +585,7 @@ fn infer_settings_controls_from_instruction_anchor(
     }))
 }
 
+#[cfg(test)]
 pub(super) fn settings_click_from_no_items_anchor(
     control: &str,
     payload: &Value,
@@ -606,6 +635,103 @@ pub(super) fn settings_click_from_no_items_anchor(
     Some((x.round().max(0.0) as u32, y))
 }
 
+pub(super) fn settings_click_from_instruction_anchor(
+    control: &str,
+    payload: &Value,
+) -> Option<(u32, u32)> {
+    let (ix, iy, iw, ih) = bounds_tuple_from_value(&payload["instruction"]["bounds"])?;
+    let instruction = desktop_core::protocol::SnapshotText {
+        text: String::new(),
+        bounds: desktop_core::protocol::Bounds {
+            x: ix,
+            y: iy,
+            width: iw,
+            height: ih,
+        },
+        confidence: 1.0,
+    };
+    let heading = payload
+        .get("heading")
+        .and_then(|v| v.get("bounds"))
+        .and_then(bounds_tuple_from_value)
+        .map(|(x, y, w, h)| desktop_core::protocol::SnapshotText {
+            text: String::new(),
+            bounds: desktop_core::protocol::Bounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            confidence: 1.0,
+        });
+    let no_items = payload
+        .get("no_items")
+        .and_then(|v| v.get("bounds"))
+        .and_then(bounds_tuple_from_value)
+        .map(|(x, y, w, h)| desktop_core::protocol::SnapshotText {
+            text: String::new(),
+            bounds: desktop_core::protocol::Bounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            confidence: 1.0,
+        });
+    let list_bounds = payload
+        .get("list_bounds")
+        .and_then(bounds_tuple_from_value)
+        .map(|(x, y, w, h)| desktop_core::protocol::Bounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+    let content_bounds = payload
+        .get("regions")
+        .and_then(|v| v.get("content"))
+        .and_then(bounds_tuple_from_value)
+        .map(|(x, y, w, h)| desktop_core::protocol::Bounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+    let row_height = payload
+        .get("rows")
+        .and_then(|rows| rows.as_array())
+        .and_then(|rows| {
+            let mut heights = rows
+                .iter()
+                .filter_map(|row| row.get("bounds"))
+                .filter_map(bounds_tuple_from_value)
+                .map(|(_, _, _, h)| h)
+                .filter(|h| *h > 0.0)
+                .collect::<Vec<_>>();
+            if heights.is_empty() {
+                return None;
+            }
+            heights.sort_by(|a, b| a.total_cmp(b));
+            Some(heights[heights.len() / 2])
+        })
+        .unwrap_or(14.0);
+
+    let controls = infer_settings_controls_from_instruction_anchor(
+        Some(&instruction),
+        heading.as_ref(),
+        no_items.as_ref(),
+        content_bounds.as_ref(),
+        list_bounds.as_ref(),
+        row_height,
+    )?;
+    let click = match control {
+        "add" => &controls["add_click"],
+        "remove" => &controls["remove_click"],
+        _ => return None,
+    };
+    point_from_value(click)
+}
+
 pub(super) fn click_settings_control(
     control: &str,
     row_text: Option<&str>,
@@ -615,14 +741,14 @@ pub(super) fn click_settings_control(
     let payload = screen_settings_map()?;
     let (x, y, details) = match control {
         "add" => {
-            if let Some((x, y)) = settings_click_from_no_items_anchor("add", &payload) {
+            if let Some((x, y)) = settings_click_from_instruction_anchor("add", &payload) {
                 (
                     x,
                     y,
                     json!({
                         "control": "add",
                         "click": { "x": x, "y": y },
-                        "derived_from": "no_items_anchor"
+                        "derived_from": "instruction_anchor"
                     }),
                 )
             } else {
@@ -634,14 +760,14 @@ pub(super) fn click_settings_control(
             }
         }
         "remove" => {
-            if let Some((x, y)) = settings_click_from_no_items_anchor("remove", &payload) {
+            if let Some((x, y)) = settings_click_from_instruction_anchor("remove", &payload) {
                 (
                     x,
                     y,
                     json!({
                         "control": "remove",
                         "click": { "x": x, "y": y },
-                        "derived_from": "no_items_anchor"
+                        "derived_from": "instruction_anchor"
                     }),
                 )
             } else {
@@ -711,18 +837,6 @@ pub(super) fn click_settings_control(
         )));
     }
     if matches!(control, "add" | "remove") {
-        if let Some((nx, ny, _nw, _nh)) = bounds_tuple_from_value(&payload["no_items"]["bounds"]) {
-            let xf = x as f64;
-            let yf = y as f64;
-            let x_ok = xf >= (nx - 520.0) && xf <= (nx - 20.0);
-            let y_ok = yf >= (ny - 90.0) && yf <= (ny + 90.0);
-            if !x_ok || !y_ok {
-                return Err(AppError::target_not_found(format!(
-                    "rejected unsafe settings {control} click ({x},{y}); anchor mismatch with No Items at ({:.1},{:.1})",
-                    nx, ny
-                )));
-            }
-        }
         if payload.get("heading").map(|v| v.is_null()).unwrap_or(true)
             && payload["regions"]
                 .get("settings_window")
@@ -1005,6 +1119,48 @@ pub(super) fn first_matching_text(
         .iter()
         .find(|t| t.text.to_lowercase().contains(&needle))
         .cloned()
+}
+
+pub(super) fn find_settings_no_items(
+    texts: &[desktop_core::protocol::SnapshotText],
+    heading: Option<&desktop_core::protocol::SnapshotText>,
+    instruction: Option<&desktop_core::protocol::SnapshotText>,
+) -> Option<desktop_core::protocol::SnapshotText> {
+    let mut candidates = texts
+        .iter()
+        .filter(|text| text.text.to_lowercase().contains("no items"))
+        .filter(|text| {
+            if let Some(heading) = heading {
+                if text.bounds.y < heading.bounds.y + heading.bounds.height + 8.0
+                    || text.bounds.y > heading.bounds.y + 360.0
+                {
+                    return false;
+                }
+            }
+            if let Some(instruction) = instruction {
+                let instruction_bottom = instruction.bounds.y + instruction.bounds.height;
+                if text.bounds.y < instruction_bottom - 2.0
+                    || text.bounds.y > instruction_bottom + 230.0
+                {
+                    return false;
+                }
+                if text.bounds.x + text.bounds.width < instruction.bounds.x - 40.0 {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|a, b| {
+        a.bounds
+            .y
+            .total_cmp(&b.bounds.y)
+            .then_with(|| a.bounds.x.total_cmp(&b.bounds.x))
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+    });
+    candidates.into_iter().next()
 }
 
 pub(super) fn find_settings_instruction(
@@ -1327,6 +1483,7 @@ mod tests {
         let controls = infer_settings_controls_from_instruction_anchor(
             Some(&instruction),
             Some(&heading),
+            None,
             Some(&content),
             Some(&list),
             14.0,
@@ -1337,7 +1494,7 @@ mod tests {
         assert_eq!(controls["y_source"], "list_bounds");
 
         let add = point_from_value(&controls["add_click"]).expect("add click");
-        assert_eq!(add, (970, 320));
+        assert_eq!(add, (970, 330));
     }
 
     #[test]
@@ -1370,6 +1527,7 @@ mod tests {
         let controls = infer_settings_controls_from_instruction_anchor(
             Some(&instruction),
             Some(&heading),
+            None,
             Some(&content),
             None,
             14.0,
@@ -1380,6 +1538,225 @@ mod tests {
         assert_eq!(controls["y_source"], "instruction_offset");
 
         let add = point_from_value(&controls["add_click"]).expect("add click");
-        assert_eq!(add, (970, 307));
+        assert_eq!(add, (970, 317));
+    }
+
+    #[test]
+    fn find_settings_no_items_prefers_top_section_near_instruction() {
+        let heading = text(
+            "Screen & System Audio Recording",
+            Bounds {
+                x: 962.0,
+                y: 202.0,
+                width: 312.0,
+                height: 20.0,
+            },
+        );
+        let instruction = text(
+            "Allow the applications below to record screen and system audio.",
+            Bounds {
+                x: 964.0,
+                y: 246.0,
+                width: 368.0,
+                height: 15.0,
+            },
+        );
+        let top_no_items = text(
+            "No Items",
+            Bounds {
+                x: 1138.0,
+                y: 312.0,
+                width: 62.0,
+                height: 14.0,
+            },
+        );
+        let lower_no_items = text(
+            "No Items",
+            Bounds {
+                x: 1140.0,
+                y: 508.0,
+                width: 64.0,
+                height: 14.0,
+            },
+        );
+        let selected = find_settings_no_items(
+            &[
+                heading.clone(),
+                instruction.clone(),
+                lower_no_items,
+                top_no_items,
+            ],
+            Some(&heading),
+            Some(&instruction),
+        )
+        .expect("no items should be found");
+        assert_eq!(selected.bounds.y.round() as i32, 312);
+    }
+
+    #[test]
+    fn ocr_symbols_pick_top_controls_when_two_rows_exist() {
+        let heading = text(
+            "Screen & System Audio Recording",
+            Bounds {
+                x: 962.0,
+                y: 202.0,
+                width: 312.0,
+                height: 20.0,
+            },
+        );
+        let instruction = text(
+            "Allow the applications below to record screen and system audio.",
+            Bounds {
+                x: 964.0,
+                y: 246.0,
+                width: 368.0,
+                height: 15.0,
+            },
+        );
+        let no_items = text(
+            "No Items",
+            Bounds {
+                x: 1138.0,
+                y: 312.0,
+                width: 62.0,
+                height: 14.0,
+            },
+        );
+        let top_plus = text(
+            "+",
+            Bounds {
+                x: 968.0,
+                y: 336.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        let top_minus = text(
+            "-",
+            Bounds {
+                x: 986.0,
+                y: 336.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        let lower_plus = text(
+            "+",
+            Bounds {
+                x: 968.0,
+                y: 516.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        let lower_minus = text(
+            "-",
+            Bounds {
+                x: 986.0,
+                y: 516.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+
+        let controls = infer_settings_controls_for_settings_pane(
+            &[
+                heading.clone(),
+                instruction.clone(),
+                no_items.clone(),
+                top_plus,
+                top_minus,
+                lower_plus,
+                lower_minus,
+            ],
+            Some(&heading),
+            Some(&no_items),
+            Some(&instruction),
+            None,
+            Some(&Bounds {
+                x: 900.0,
+                y: 180.0,
+                width: 560.0,
+                height: 760.0,
+            }),
+            14.0,
+        )
+        .expect("controls should be inferred");
+
+        assert_eq!(controls["source"], "ocr_symbols");
+        let (_x, y) = point_from_value(&controls["add_click"]).expect("add click");
+        assert!(y < 420, "expected top controls row, got y={y}");
+    }
+
+    #[test]
+    fn no_items_absent_prefers_instruction_anchor_for_controls() {
+        let heading = text(
+            "Screen & System Audio Recording",
+            Bounds {
+                x: 962.0,
+                y: 202.0,
+                width: 312.0,
+                height: 20.0,
+            },
+        );
+        let instruction = text(
+            "Allow the applications below to record screen and system audio.",
+            Bounds {
+                x: 964.0,
+                y: 246.0,
+                width: 368.0,
+                height: 15.0,
+            },
+        );
+        // OCR symbols may be noisy when multiple list sections are visible.
+        let lower_plus = text(
+            "+",
+            Bounds {
+                x: 968.0,
+                y: 516.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        let lower_minus = text(
+            "-",
+            Bounds {
+                x: 986.0,
+                y: 516.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        let list = Bounds {
+            x: 996.0,
+            y: 292.0,
+            width: 338.0,
+            height: 78.0,
+        };
+
+        let controls = infer_settings_controls_for_settings_pane(
+            &[
+                heading.clone(),
+                instruction.clone(),
+                lower_plus,
+                lower_minus,
+            ],
+            Some(&heading),
+            None,
+            Some(&instruction),
+            Some(&list),
+            Some(&Bounds {
+                x: 900.0,
+                y: 180.0,
+                width: 560.0,
+                height: 760.0,
+            }),
+            14.0,
+        )
+        .expect("controls should be inferred");
+
+        assert_eq!(controls["source"], "instruction_anchor");
+        let (x, _y) = point_from_value(&controls["add_click"]).expect("add click");
+        assert_eq!(x, 968);
     }
 }

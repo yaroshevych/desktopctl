@@ -2059,6 +2059,50 @@ mod tests {
     }
 
     #[test]
+    fn derives_settings_add_click_from_instruction_anchor_payload() {
+        let payload = json!({
+            "heading": {
+                "bounds": { "x": 1021.3, "y": 202.7, "width": 94.0, "height": 19.2 }
+            },
+            "instruction": {
+                "bounds": { "x": 965.8, "y": 247.5, "width": 329.0, "height": 15.0 }
+            },
+            "list_bounds": { "x": 997.3, "y": 229.9, "width": 338.0, "height": 76.0 },
+            "regions": {
+                "content": { "x": 720.0, "y": 184.0, "width": 715.0, "height": 625.0 }
+            },
+            "rows": [{
+                "bounds": { "x": 1004.0, "y": 274.0, "width": 132.0, "height": 14.0 }
+            }]
+        });
+        let (x, y) = super::settings_click_from_instruction_anchor("add", &payload)
+            .expect("add click from instruction payload");
+        assert_eq!((x, y), (970, 330));
+    }
+
+    #[test]
+    fn derives_settings_remove_click_from_instruction_anchor_payload() {
+        let payload = json!({
+            "heading": {
+                "bounds": { "x": 1021.3, "y": 202.7, "width": 94.0, "height": 19.2 }
+            },
+            "instruction": {
+                "bounds": { "x": 965.8, "y": 247.5, "width": 329.0, "height": 15.0 }
+            },
+            "list_bounds": { "x": 997.3, "y": 229.9, "width": 338.0, "height": 76.0 },
+            "regions": {
+                "content": { "x": 720.0, "y": 184.0, "width": 715.0, "height": 625.0 }
+            },
+            "rows": [{
+                "bounds": { "x": 1004.0, "y": 274.0, "width": 132.0, "height": 14.0 }
+            }]
+        });
+        let (x, y) = super::settings_click_from_instruction_anchor("remove", &payload)
+            .expect("remove click from instruction payload");
+        assert_eq!((x, y), (988, 330));
+    }
+
+    #[test]
     fn finds_settings_instruction_under_heading() {
         let heading = SnapshotText {
             text: "Accessibility".to_string(),
@@ -2194,7 +2238,12 @@ mod tests {
             confidence: 0.5,
         };
         let controls = super::infer_settings_controls_for_settings_pane(
-            &[heading.clone(), instruction.clone(), no_items.clone(), combined],
+            &[
+                heading.clone(),
+                instruction.clone(),
+                no_items.clone(),
+                combined,
+            ],
             Some(&heading),
             Some(&no_items),
             Some(&instruction),
