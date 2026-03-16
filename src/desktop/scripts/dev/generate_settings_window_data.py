@@ -5,6 +5,8 @@ Expected output JSON shape:
 {
   "image": "dark-forest-center.png",
   "window": { "x": 791, "y": 114, "width": 718, "height": 628 },
+  "list": { "x": 943, "y": 295, "width": 552, "height": 44 },
+  "add_button": { "x": 946, "y": 331 },
   "occluded": false
 }
 
@@ -62,6 +64,15 @@ class Bounds:
             "width": self.width,
             "height": self.height,
         }
+
+
+@dataclass(frozen=True)
+class Point:
+    x: int
+    y: int
+
+    def as_json(self) -> dict[str, int]:
+        return {"x": self.x, "y": self.y}
 
 
 @dataclass
@@ -469,6 +480,331 @@ def detect_bounds_from_traffic_lights(
             best_bounds = Bounds(x=x, y=y, width=w, height=h)
 
     return best_bounds
+
+
+def detect_list_and_add_button(
+    image: np.ndarray,
+    window: Bounds,
+) -> tuple[Bounds | None, Point | None]:
+    image_h, image_w = image.shape[:2]
+    if window.width <= 0 or window.height <= 0:
+        return None, None
+
+    content = infer_content_bounds(window, image_w=image_w, image_h=image_h)
+    if content.width < 80 or content.height < 80:
+        return None, None
+
+    dark_mode = infer_dark_mode(image, window)
+    add_seed = detect_add_button_pair(image, content, dark_mode)
+    if add_seed is None:
+        add_seed = detect_add_button_pair(image, content, not dark_mode)
+
+    list_bounds = detect_list_bounds_from_borders(image, content, add_seed)
+    if list_bounds is None:
+        list_bounds = fallback_list_bounds(content, image_w=image_w, image_h=image_h)
+    if list_bounds is None:
+        if add_seed is None:
+            return None, None
+        px = max(0, min(int(round(add_seed[0])), image_w - 1))
+        py = max(0, min(int(round(add_seed[1])), image_h - 1))
+        return None, Point(x=px, y=py)
+
+    add_x = int(round(list_bounds.x + 12.0))
+    add_y = int(round(list_bounds.y + list_bounds.height - 8.0))
+    if add_seed is not None:
+        if abs(add_seed[0] - add_x) <= 16.0 and abs(add_seed[1] - add_y) <= 16.0:
+            add_x = int(round(add_seed[0]))
+            add_y = int(round(add_seed[1]))
+
+    add_x = max(0, min(add_x, image_w - 1))
+    add_y = max(0, min(add_y, image_h - 1))
+    return list_bounds, Point(x=add_x, y=add_y)
+
+
+def infer_content_bounds(window: Bounds, *, image_w: int, image_h: int) -> Bounds:
+    title_h = int(round(max(30.0, min(56.0, window.height * 0.085))))
+    sidebar_w = int(round(max(148.0, min(235.0, window.width * 0.24))))
+    x = max(0, min(window.x + sidebar_w, image_w - 2))
+    y = max(0, min(window.y + title_h, image_h - 2))
+    x2 = max(x + 1, min(window.x2, image_w))
+    y2 = max(y + 1, min(window.y2, image_h))
+    return Bounds(x=x, y=y, width=x2 - x, height=y2 - y)
+
+
+def infer_dark_mode(image: np.ndarray, window: Bounds) -> bool:
+    image_h, image_w = image.shape[:2]
+    traffic_lights = find_traffic_light_centers(image)
+    for red_x, red_y in traffic_lights:
+        if not (window.x <= red_x <= window.x + min(130, window.width // 4)):
+            continue
+        if not (window.y <= red_y <= window.y + min(84, window.height // 6)):
+            continue
+        green_x = min(image_w - 1, red_x + 40)
+        lumas: list[float] = []
+        for dx in range(20, 220, 10):
+            sx = min(image_w - 1, max(0, green_x + dx))
+            sy = min(image_h - 1, max(0, red_y))
+            px = image[sy, sx]
+            lumas.append(float((int(px[0]) + int(px[1]) + int(px[2])) / 3.0))
+        if lumas:
+            return float(sum(lumas)) / float(len(lumas)) <= 150.0
+
+    # Fallback: sample title band in the detected window.
+    x0 = max(0, min(window.x + 80, image_w - 1))
+    x1 = max(x0 + 1, min(window.x2 - 20, image_w))
+    y0 = max(0, min(window.y + 14, image_h - 1))
+    y1 = max(y0 + 1, min(window.y + 42, image_h))
+    roi = image[y0:y1, x0:x1]
+    if roi.size == 0:
+        return False
+    luma = float(np.mean(roi))
+    return luma <= 150.0
+
+
+def detect_add_button_pair(
+    image: np.ndarray,
+    content: Bounds,
+    dark_mode: bool,
+) -> tuple[float, float] | None:
+    image_h, image_w = image.shape[:2]
+    x0 = int(max(0.0, np.floor(content.x + 4.0)))
+    x1 = int(min(float(image_w), np.ceil(content.x + content.width * 0.48)))
+    y0 = int(max(0.0, np.floor(content.y + content.height * 0.05)))
+    y1 = int(min(float(image_h), np.ceil(content.y + content.height * 0.34)))
+    if x1 - x0 < 40 or y1 - y0 < 60:
+        return None
+
+    roi = image[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+
+    max_c = np.max(roi, axis=2).astype(np.int16)
+    min_c = np.min(roi, axis=2).astype(np.int16)
+    chroma = max_c - min_c
+    luma = np.mean(roi, axis=2)
+    if dark_mode:
+        symbol_mask = ((luma >= 120.0) & (luma <= 220.0) & (chroma <= 30)).astype(np.uint8)
+    else:
+        symbol_mask = ((luma >= 70.0) & (luma <= 200.0) & (chroma <= 30)).astype(np.uint8)
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(symbol_mask, connectivity=4)
+    components: list[dict[str, float | int]] = []
+    for label in range(1, count):
+        sx, sy, sw, sh, area = stats[label]
+        if not (4 <= area <= 130):
+            continue
+        if sw > 24 or sh > 18:
+            continue
+
+        ys, xs = np.where(labels == label)
+        if xs.size == 0:
+            continue
+        center_x = x0 + (sx + (sw - 1) / 2.0)
+        center_y = y0 + (sy + (sh - 1) / 2.0)
+        cx_i = int(round((sx + sx + sw - 1) / 2.0))
+        cy_i = int(round((sy + sy + sh - 1) / 2.0))
+        vertical_near_center = int(np.count_nonzero(np.abs(xs - cx_i) <= 1))
+        horizontal_near_center = int(np.count_nonzero(np.abs(ys - cy_i) <= 1))
+        components.append(
+            {
+                "center_x": center_x,
+                "center_y": center_y,
+                "width": int(sw),
+                "height": int(sh),
+                "vertical_near_center": vertical_near_center,
+                "horizontal_near_center": horizontal_near_center,
+            }
+        )
+
+    plus_candidates = [
+        c
+        for c in components
+        if 4 <= int(c["width"]) <= 12
+        and 6 <= int(c["height"]) <= 12
+        and int(c["vertical_near_center"]) >= 3
+        and int(c["horizontal_near_center"]) >= 3
+    ]
+    minus_candidates = [
+        c
+        for c in components
+        if 6 <= int(c["width"]) <= 20
+        and 1 <= int(c["height"]) <= 5
+        and int(c["horizontal_near_center"]) >= 4
+        and int(c["vertical_near_center"]) <= 8
+    ]
+
+    expected_y = y0 + (y1 - y0) * 0.52
+    best: tuple[float, float, float] | None = None
+    for plus in plus_candidates:
+        for minus in minus_candidates:
+            plus_x = float(plus["center_x"])
+            plus_y = float(plus["center_y"])
+            minus_x = float(minus["center_x"])
+            minus_y = float(minus["center_y"])
+            if minus_x <= plus_x:
+                continue
+            dx = minus_x - plus_x
+            dy = abs(minus_y - plus_y)
+            if not (8.0 <= dx <= 34.0) or dy > 4.0:
+                continue
+            bg_penalty = 0.0 if dark_mode else local_background_penalty(image, plus_x, plus_y)
+            score = (
+                abs(dx - 24.0)
+                + (dy * 2.0)
+                + (abs(plus_y - expected_y) * 0.06)
+                + (bg_penalty * 1.4)
+            )
+            if best is None or score < best[0]:
+                best = (score, plus_x, plus_y)
+
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def detect_list_bounds_from_borders(
+    image: np.ndarray,
+    content: Bounds,
+    add_seed: tuple[float, float] | None,
+) -> Bounds | None:
+    image_h, image_w = image.shape[:2]
+    if image_h < 40 or image_w < 40:
+        return None
+
+    x0 = int(max(0.0, np.floor(content.x + 4.0)))
+    x1 = int(min(float(image_w), np.ceil(content.x + content.width - 4.0)))
+    y0 = int(max(0.0, np.floor(content.y + 6.0)))
+    y1 = int(min(float(image_h), np.ceil(content.y + content.height * 0.62)))
+    if x1 - x0 < 180 or y1 - y0 < 48:
+        return None
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    grad_x = np.abs(np.diff(gray.astype(np.int16), axis=1))
+    grad_y = np.abs(np.diff(gray.astype(np.int16), axis=0))
+
+    anchor_y = int(round(add_seed[1])) if add_seed is not None else (y0 + y1) // 2
+    bottom_min = max(y0 + 24, min(anchor_y - 4, y1 - 2))
+    bottom_max = max(bottom_min + 1, min(anchor_y + 28, y1 - 1))
+    y_bottom = snap_horizontal_edge(
+        grad_y,
+        x0=x0,
+        x1=x1,
+        search_start=bottom_min,
+        search_end=bottom_max,
+    )
+    if y_bottom is None:
+        return None
+
+    top_min = min(y0 + 6, y_bottom - 10)
+    top_max = max(top_min + 1, min(y_bottom - 24, y_bottom - 1))
+    y_top = snap_horizontal_edge(
+        grad_y,
+        x0=x0,
+        x1=x1,
+        search_start=top_min,
+        search_end=top_max,
+    )
+    if y_top is None:
+        return None
+
+    table_h = y_bottom - y_top
+    if table_h < 36:
+        y_top = max(y0 + 6, y_bottom - 44)
+        table_h = y_bottom - y_top
+    if table_h < 24 or table_h > 116:
+        return None
+
+    if add_seed is not None:
+        left_min = max(x0, min(int(round(add_seed[0])) - 20, x1 - 2))
+        left_max = max(left_min + 1, min(int(round(add_seed[0])) - 6, x1 - 1))
+    else:
+        left_min = x0
+        left_max = max(left_min + 1, min(int(round(x0 + (x1 - x0) * 0.35)), x1 - 1))
+    x_left = snap_vertical_edge(
+        grad_x,
+        y0=y_top,
+        y1=y_bottom,
+        search_start=left_min,
+        search_end=left_max,
+    )
+    if x_left is None:
+        return None
+
+    right_min = int(round(x0 + (x1 - x0) * 0.58))
+    right_min = max(x_left + 24, min(right_min, x1 - 2))
+    right_max = max(right_min + 1, x1 - 1)
+    x_right = snap_vertical_edge(
+        grad_x,
+        y0=y_top,
+        y1=y_bottom,
+        search_start=right_min,
+        search_end=right_max,
+    )
+    if x_right is None:
+        return None
+    if x_right - x_left < 160:
+        return None
+
+    if add_seed is not None:
+        expected_x = x_left + 12.0
+        expected_y = y_bottom - 8.0
+        if abs(expected_x - add_seed[0]) > 18.0 or abs(expected_y - add_seed[1]) > 18.0:
+            return None
+
+    return Bounds(
+        x=int(x_left),
+        y=int(y_top),
+        width=max(0, int(x_right - x_left)),
+        height=max(0, int(y_bottom - y_top)),
+    )
+
+
+def fallback_list_bounds(content: Bounds, *, image_w: int, image_h: int) -> Bounds | None:
+    if content.width <= 0 or content.height <= 0:
+        return None
+    x = max(0, min(int(round(content.x + 18.0)), image_w - 2))
+    y = max(0, min(int(round(content.y + 66.0)), image_h - 2))
+    w = int(round(max(140.0, content.width - 30.0)))
+    h = int(round(max(56.0, min(92.0, content.height * 0.14))))
+    x2 = max(x + 1, min(image_w, x + w))
+    y2 = max(y + 1, min(image_h, y + h))
+    return Bounds(x=x, y=y, width=x2 - x, height=y2 - y)
+
+
+def local_background_penalty(image: np.ndarray, x: float, y: float) -> float:
+    image_h, image_w = image.shape[:2]
+    offsets = [
+        (-8, 0),
+        (8, 0),
+        (0, -8),
+        (0, 8),
+        (-10, -6),
+        (10, -6),
+        (-10, 6),
+        (10, 6),
+    ]
+    penalty = 0.0
+    samples = 0
+    for dx, dy in offsets:
+        sx = max(0, min(int(round(x)) + dx, image_w - 1))
+        sy = max(0, min(int(round(y)) + dy, image_h - 1))
+        px = image[sy, sx]
+        max_c = int(max(int(px[0]), int(px[1]), int(px[2])))
+        min_c = int(min(int(px[0]), int(px[1]), int(px[2])))
+        chroma = float(max_c - min_c)
+        luma = float((int(px[0]) + int(px[1]) + int(px[2])) / 3.0)
+        if luma < 165.0:
+            penalty += 0.8
+        elif luma < 182.0:
+            penalty += 0.25
+        if chroma > 24.0:
+            penalty += 0.6
+        elif chroma > 16.0:
+            penalty += 0.2
+        samples += 1
+    if samples == 0:
+        return 1.0
+    return penalty / float(samples)
 
 
 def detect_window_bounds_with_grounding(
@@ -917,7 +1253,14 @@ def intersection_over_union(a: Bounds, b: Bounds) -> float:
     return intersection / float(union)
 
 
-def write_json(output_dir: Path, image_path: Path, bounds: Bounds, overwrite: bool) -> Path | None:
+def write_json(
+    output_dir: Path,
+    image_path: Path,
+    bounds: Bounds,
+    list_bounds: Bounds | None,
+    add_button: Point | None,
+    overwrite: bool,
+) -> Path | None:
     output_path = output_path_for(output_dir, image_path, ".window.json")
     if output_path.exists() and not overwrite:
         return None
@@ -925,13 +1268,22 @@ def write_json(output_dir: Path, image_path: Path, bounds: Bounds, overwrite: bo
     payload = {
         "image": image_path.name,
         "window": bounds.as_json(),
+        "list": list_bounds.as_json() if list_bounds is not None else None,
+        "add_button": add_button.as_json() if add_button is not None else None,
         "occluded": False,
     }
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return output_path
 
 
-def write_overlay(output_dir: Path, image_path: Path, image: np.ndarray, bounds: Bounds) -> Path:
+def write_overlay(
+    output_dir: Path,
+    image_path: Path,
+    image: np.ndarray,
+    bounds: Bounds,
+    list_bounds: Bounds | None,
+    add_button: Point | None,
+) -> Path:
     overlay = image.copy()
     cv2.rectangle(
         overlay,
@@ -940,6 +1292,24 @@ def write_overlay(output_dir: Path, image_path: Path, image: np.ndarray, bounds:
         (64, 220, 110),
         3,
     )
+    if list_bounds is not None:
+        cv2.rectangle(
+            overlay,
+            (list_bounds.x, list_bounds.y),
+            (list_bounds.x2, list_bounds.y2),
+            (255, 111, 97),
+            2,
+        )
+    if add_button is not None:
+        cv2.drawMarker(
+            overlay,
+            (add_button.x, add_button.y),
+            (90, 255, 90),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=16,
+            thickness=2,
+            line_type=cv2.LINE_AA,
+        )
     output_path = output_path_for(output_dir, image_path, ".window.overlay.png")
     cv2.imwrite(str(output_path), overlay)
     return output_path
@@ -995,13 +1365,25 @@ def process_image(
     payload = {
         "image": path.name,
         "window": bounds.as_json(),
+        "list": None,
+        "add_button": None,
         "occluded": False,
     }
+    list_bounds, add_button = detect_list_and_add_button(image, bounds)
+    payload["list"] = list_bounds.as_json() if list_bounds is not None else None
+    payload["add_button"] = add_button.as_json() if add_button is not None else None
 
     output_dir = resolve_output_dir(args, path)
-    written = write_json(output_dir, path, bounds, overwrite=args.overwrite)
+    written = write_json(
+        output_dir,
+        path,
+        bounds,
+        list_bounds,
+        add_button,
+        overwrite=args.overwrite,
+    )
     if args.write_overlays:
-        write_overlay(output_dir, path, image, bounds)
+        write_overlay(output_dir, path, image, bounds, list_bounds, add_button)
     if args.write_crops:
         write_crop(output_dir, path, image, bounds)
     if args.write_sips_crops:
