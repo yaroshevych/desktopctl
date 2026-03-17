@@ -200,6 +200,34 @@ fn execute(command: Command) -> Result<Value, AppError> {
             trace::log(format!("app_isolate:ok name={name} hidden={hidden}"));
             Ok(json!({ "app": name, "state": "isolated", "hidden_apps": hidden }))
         }
+        Command::WindowList => {
+            let backend = new_backend()?;
+            backend.check_accessibility_permission()?;
+            let windows = list_windows()?;
+            Ok(json!({
+                "windows": windows.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
+            }))
+        }
+        Command::WindowBounds { title } => {
+            let backend = new_backend()?;
+            backend.check_accessibility_permission()?;
+            let windows = list_windows()?;
+            let selected = select_window_candidate(&windows, &title)?;
+            Ok(json!({
+                "window": selected.as_json()
+            }))
+        }
+        Command::WindowFocus { title } => {
+            let backend = new_backend()?;
+            backend.check_accessibility_permission()?;
+            let windows = list_windows()?;
+            let selected = select_window_candidate(&windows, &title)?;
+            focus_window_candidate(selected)?;
+            Ok(json!({
+                "window": selected.as_json(),
+                "focused": true
+            }))
+        }
         Command::OpenApp {
             name,
             args,
@@ -1468,6 +1496,241 @@ fn frontmost_app_name() -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
+#[derive(Debug, Clone)]
+struct WindowInfo {
+    id: String,
+    pid: i64,
+    index: u32,
+    app: String,
+    title: String,
+    bounds: desktop_core::protocol::Bounds,
+    frontmost: bool,
+    visible: bool,
+}
+
+impl WindowInfo {
+    fn as_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "pid": self.pid,
+            "index": self.index,
+            "app": self.app,
+            "title": self.title,
+            "bounds": self.bounds,
+            "frontmost": self.frontmost,
+            "visible": self.visible
+        })
+    }
+}
+
+fn parse_applescript_bool(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("true")
+}
+
+fn parse_window_line(line: &str) -> Option<WindowInfo> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() != 10 {
+        return None;
+    }
+
+    let pid = fields[0].trim().parse::<i64>().ok()?;
+    let index = fields[1].trim().parse::<u32>().ok()?;
+    let app = fields[2].trim().to_string();
+    let title = fields[3].trim().to_string();
+    let x = fields[4].trim().parse::<f64>().ok()?;
+    let y = fields[5].trim().parse::<f64>().ok()?;
+    let width = fields[6].trim().parse::<f64>().ok()?;
+    let height = fields[7].trim().parse::<f64>().ok()?;
+    let frontmost = parse_applescript_bool(fields[8]);
+    let visible = parse_applescript_bool(fields[9]);
+
+    Some(WindowInfo {
+        id: format!("{pid}:{index}"),
+        pid,
+        index,
+        app,
+        title,
+        bounds: desktop_core::protocol::Bounds {
+            x: x.max(0.0),
+            y: y.max(0.0),
+            width: width.max(0.0),
+            height: height.max(0.0),
+        },
+        frontmost,
+        visible,
+    })
+}
+
+fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
+    let script = r#"tell application "System Events"
+set outLines to {}
+repeat with p in (application processes whose background only is false)
+    set pname to (name of p) as text
+    set pfront to (frontmost of p) as string
+    set pvisible to (visible of p) as string
+    set ppid to unix id of p
+    set widx to 0
+    repeat with w in (windows of p)
+        set widx to widx + 1
+        try
+            set wname to (name of w) as text
+        on error
+            set wname to ""
+        end try
+        try
+            set winPos to position of w
+            set winSize to size of w
+            set wx to item 1 of winPos
+            set wy to item 2 of winPos
+            set ww to item 1 of winSize
+            set wh to item 2 of winSize
+            set end of outLines to (ppid as string) & tab & (widx as string) & tab & pname & tab & wname & tab & (wx as string) & tab & (wy as string) & tab & (ww as string) & tab & (wh as string) & tab & pfront & tab & pvisible
+        end try
+    end repeat
+end repeat
+set AppleScript's text item delimiters to linefeed
+set outputText to outLines as text
+set AppleScript's text item delimiters to ""
+return outputText
+end tell"#;
+
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AppError::backend_unavailable(format!(
+            "failed to enumerate windows: {stderr}"
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut windows: Vec<WindowInfo> = raw.lines().filter_map(parse_window_line).collect();
+    windows.sort_by(|a, b| {
+        b.frontmost
+            .cmp(&a.frontmost)
+            .then_with(|| a.app.to_lowercase().cmp(&b.app.to_lowercase()))
+            .then_with(|| a.index.cmp(&b.index))
+    });
+    Ok(windows)
+}
+
+fn select_window_candidate<'a>(
+    windows: &'a [WindowInfo],
+    query: &str,
+) -> Result<&'a WindowInfo, AppError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(AppError::invalid_argument("window title must not be empty"));
+    }
+
+    let lower = query.to_lowercase();
+
+    let exact_title: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|w| w.title.eq_ignore_ascii_case(query))
+        .collect();
+    if exact_title.len() == 1 {
+        return Ok(exact_title[0]);
+    }
+    if exact_title.len() > 1 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple windows matched title \"{query}\""
+        ))
+        .with_details(json!({
+            "query": query,
+            "candidates": exact_title.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
+        })));
+    }
+
+    let exact_app: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|w| w.app.eq_ignore_ascii_case(query))
+        .collect();
+    if exact_app.len() == 1 {
+        return Ok(exact_app[0]);
+    }
+    if exact_app.len() > 1 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple windows matched app \"{query}\""
+        ))
+        .with_details(json!({
+            "query": query,
+            "candidates": exact_app.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
+        })));
+    }
+
+    let partial: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|w| {
+            w.title.to_lowercase().contains(&lower) || w.app.to_lowercase().contains(&lower)
+        })
+        .collect();
+    if partial.len() == 1 {
+        return Ok(partial[0]);
+    }
+    if partial.len() > 1 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple windows partially matched \"{query}\""
+        ))
+        .with_details(json!({
+            "query": query,
+            "candidates": partial.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
+        })));
+    }
+
+    Err(AppError::target_not_found(format!(
+        "window \"{query}\" was not found"
+    )))
+}
+
+fn focus_window_candidate(window: &WindowInfo) -> Result<(), AppError> {
+    let escaped_app = window.app.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"tell application "System Events"
+set targetPid to {pid}
+set targetIndex to {index}
+repeat with p in (application processes whose background only is false)
+    if (unix id of p) is targetPid then
+        set frontmost of p to true
+        set idx to 0
+        repeat with w in (windows of p)
+            set idx to idx + 1
+            if idx is targetIndex then
+                try
+                    perform action "AXRaise" of w
+                end try
+                exit repeat
+            end if
+        end repeat
+        return "ok"
+    end if
+end repeat
+return ""
+end tell
+tell application "{escaped_app}" to activate"#,
+        pid = window.pid,
+        index = window.index
+    );
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AppError::internal(format!(
+            "failed to focus window \"{}\": {stderr}",
+            window.title
+        )));
+    }
+    Ok(())
+}
+
 fn ui_read_with_clipboard_restore() -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
@@ -1602,6 +1865,46 @@ mod tests {
     fn ping_returns_message() {
         let result = execute(desktop_core::protocol::Command::Ping).expect("ping");
         assert_eq!(result["message"], "pong");
+    }
+
+    fn test_window(pid: i64, index: u32, app: &str, title: &str) -> super::WindowInfo {
+        super::WindowInfo {
+            id: format!("{pid}:{index}"),
+            pid,
+            index,
+            app: app.to_string(),
+            title: title.to_string(),
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            frontmost: false,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn select_window_prefers_exact_title() {
+        let windows = vec![
+            test_window(10, 1, "TextEdit", "Document 1"),
+            test_window(11, 1, "Calculator", "Calculator"),
+        ];
+        let selected = super::select_window_candidate(&windows, "Calculator").expect("selected");
+        assert_eq!(selected.app, "Calculator");
+        assert_eq!(selected.title, "Calculator");
+    }
+
+    #[test]
+    fn select_window_reports_ambiguous_app_matches() {
+        let windows = vec![
+            test_window(20, 1, "Safari", "Tab A"),
+            test_window(20, 2, "Safari", "Tab B"),
+        ];
+        let err =
+            super::select_window_candidate(&windows, "Safari").expect_err("must be ambiguous");
+        assert_eq!(err.code, ErrorCode::AmbiguousTarget);
     }
 
     #[test]

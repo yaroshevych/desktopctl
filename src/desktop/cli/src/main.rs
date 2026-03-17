@@ -61,6 +61,7 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
     match args[0].as_str() {
         "ping" => Ok(Command::Ping),
         "app" => parse_app(&args[1..]),
+        "window" => parse_window(&args[1..]),
         "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
         "ui" => parse_ui(&args[1..]),
@@ -97,6 +98,61 @@ fn parse_app(args: &[String]) -> Result<Command, AppError> {
         "isolate" => Ok(Command::AppIsolate { name }),
         _ => Err(AppError::invalid_argument(
             "usage: desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
+        )),
+    }
+}
+
+fn parse_window(args: &[String]) -> Result<Command, AppError> {
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(
+            "usage: desktopctl window list [--json] | desktopctl window bounds --title <text> [--json] | desktopctl window focus --title <text>",
+        ));
+    }
+
+    match args[0].as_str() {
+        "list" => {
+            if args.len() > 1 && args[1] != "--json" {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl window list [--json]",
+                ));
+            }
+            Ok(Command::WindowList)
+        }
+        "bounds" => {
+            if args.len() < 3 || args[1] != "--title" {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl window bounds --title <text> [--json]",
+                ));
+            }
+            let title = args[2].clone();
+            if title.trim().is_empty() {
+                return Err(AppError::invalid_argument(
+                    "missing title: desktopctl window bounds --title <text>",
+                ));
+            }
+            if args.len() > 3 && args[3] != "--json" {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl window bounds --title <text> [--json]",
+                ));
+            }
+            Ok(Command::WindowBounds { title })
+        }
+        "focus" => {
+            if args.len() != 3 || args[1] != "--title" {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl window focus --title <text>",
+                ));
+            }
+            let title = args[2].clone();
+            if title.trim().is_empty() {
+                return Err(AppError::invalid_argument(
+                    "missing title: desktopctl window focus --title <text>",
+                ));
+            }
+            Ok(Command::WindowFocus { title })
+        }
+        _ => Err(AppError::invalid_argument(
+            "usage: desktopctl window list [--json] | desktopctl window bounds --title <text> [--json] | desktopctl window focus --title <text>",
         )),
     }
 }
@@ -653,6 +709,9 @@ fn usage() -> &'static str {
   desktopctl app hide <application>
   desktopctl app show <application>
   desktopctl app isolate <application>
+  desktopctl window list [--json]
+  desktopctl window bounds --title <text> [--json]
+  desktopctl window focus --title <text>
   desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl open spotlight
   desktopctl open launchpad
@@ -1042,6 +1101,36 @@ mod tests {
         let command = parse_command(&args).expect("app isolate should parse");
         match command {
             Command::AppIsolate { name } => assert_eq!(name, "UTM"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_window_list() {
+        let command = parse_command(&["window", "list", "--json"].map(str::to_string))
+            .expect("window list should parse");
+        assert!(matches!(command, Command::WindowList));
+    }
+
+    #[test]
+    fn parses_window_bounds_with_title() {
+        let command = parse_command(
+            &["window", "bounds", "--title", "Calculator", "--json"].map(str::to_string),
+        )
+        .expect("window bounds should parse");
+        match command {
+            Command::WindowBounds { title } => assert_eq!(title, "Calculator"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_window_focus_with_title() {
+        let command =
+            parse_command(&["window", "focus", "--title", "Reminders"].map(str::to_string))
+                .expect("window focus should parse");
+        match command {
+            Command::WindowFocus { title } => assert_eq!(title, "Reminders"),
             other => panic!("unexpected command: {other:?}"),
         }
     }

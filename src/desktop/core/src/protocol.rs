@@ -36,6 +36,13 @@ pub enum Command {
     AppIsolate {
         name: String,
     },
+    WindowList,
+    WindowBounds {
+        title: String,
+    },
+    WindowFocus {
+        title: String,
+    },
     OpenApp {
         name: String,
         args: Vec<String>,
@@ -143,6 +150,9 @@ impl Command {
             Command::AppHide { .. } => "app_hide",
             Command::AppShow { .. } => "app_show",
             Command::AppIsolate { .. } => "app_isolate",
+            Command::WindowList => "window_list",
+            Command::WindowBounds { .. } => "window_bounds",
+            Command::WindowFocus { .. } => "window_focus",
             Command::OpenApp { .. } => "open",
             Command::OpenSpotlight => "open_spotlight",
             Command::OpenLaunchpad => "open_launchpad",
