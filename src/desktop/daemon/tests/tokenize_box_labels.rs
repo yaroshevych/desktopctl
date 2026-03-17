@@ -13,6 +13,7 @@ use serde::Deserialize;
 const DEFAULT_LABELS_ROOT: &str = "/Users/oleg/Projects/DesktopCtl/tmp/tokenize-20260317-phase1/labels/selected/grounding_dino/broad_020_020_full52/grounding_dino";
 const IOU_MATCH_THRESHOLD: f64 = 0.5;
 const EXPECTED_RECALL_THRESHOLD: f64 = 0.35;
+const EXPECTED_PRECISION_THRESHOLD: f64 = 0.03;
 
 #[derive(Debug, Deserialize)]
 struct LabelFile {
@@ -116,6 +117,8 @@ fn broad_grounding_labels_have_minimum_box_recall() {
 
     let mut total_expected = 0usize;
     let mut total_matched = 0usize;
+    let mut total_predicted = 0usize;
+    let mut total_predicted_matched = 0usize;
 
     for label_path in label_files {
         let raw = fs::read_to_string(&label_path).expect("read label file");
@@ -135,14 +138,26 @@ fn broad_grounding_labels_have_minimum_box_recall() {
             .filter(|element| element.kind == "box")
             .filter_map(|element| to_bounds(element.bbox))
             .collect();
+        assert!(
+            !expected.is_empty(),
+            "no expected box labels in {}",
+            label_path.display()
+        );
 
         total_expected += expected.len();
+        total_predicted += predicted.len();
         for e in &expected {
             if predicted
                 .iter()
                 .any(|p| iou(p, e) >= IOU_MATCH_THRESHOLD)
             {
                 total_matched += 1;
+            }
+        }
+
+        for p in &predicted {
+            if expected.iter().any(|e| iou(p, e) >= IOU_MATCH_THRESHOLD) {
+                total_predicted_matched += 1;
             }
         }
     }
@@ -152,6 +167,15 @@ fn broad_grounding_labels_have_minimum_box_recall() {
     } else {
         total_matched as f64 / total_expected as f64
     };
+    let precision = if total_predicted == 0 {
+        0.0
+    } else {
+        total_predicted_matched as f64 / total_predicted as f64
+    };
+    println!(
+        "tokenize_box_labels metrics: recall={:.3} precision={:.3} matched={} expected={} predicted={} predicted_matched={}",
+        recall, precision, total_matched, total_expected, total_predicted, total_predicted_matched
+    );
     assert!(
         recall >= EXPECTED_RECALL_THRESHOLD,
         "box recall too low: {:.3} (matched {} / expected {}), threshold {:.3}",
@@ -159,5 +183,13 @@ fn broad_grounding_labels_have_minimum_box_recall() {
         total_matched,
         total_expected,
         EXPECTED_RECALL_THRESHOLD
+    );
+    assert!(
+        precision >= EXPECTED_PRECISION_THRESHOLD,
+        "box precision too low: {:.3} (predicted-matched {} / predicted {}), threshold {:.3}",
+        precision,
+        total_predicted_matched,
+        total_predicted,
+        EXPECTED_PRECISION_THRESHOLD
     );
 }
