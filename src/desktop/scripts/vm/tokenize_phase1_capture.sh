@@ -11,7 +11,7 @@ RUNS_ROOT="${DESKTOPCTL_RUNS_ROOT:-/tmp/desktopctl-tokenize-runs}"
 VM_CLEAN_APPS_BETWEEN_CAPTURES="${VM_CLEAN_APPS_BETWEEN_CAPTURES:-1}"
 VM_PHASE1_OPEN_DIR="${VM_PHASE1_OPEN_DIR:-0}"
 VM_PHASE1_THEMES="${VM_PHASE1_THEMES:-light,dark}"
-VM_PHASE1_APPS="${VM_PHASE1_APPS:-Calculator,Reminders,System Settings,Calendar,Finder,Mail,Messages,Notes,Photos,Maps,Safari,Music,Podcasts,Preview,TextEdit,App Store,FaceTime,Contacts,Terminal}"
+VM_PHASE1_APPS="${VM_PHASE1_APPS:-Calculator,Reminders,System Settings,Calendar,Finder,Mail,Messages,Notes,Photos,Maps,Safari,Music,Podcasts,Preview,TextEdit,App Store,FaceTime,Contacts,Terminal,Disk Utility,Tips,Dictionary,Font Book,Grapher,Stocks,Find My}"
 VM_PHASE1_SETTINGS_DEEPLINKS="${VM_PHASE1_SETTINGS_DEEPLINKS:-x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility,x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture}"
 
 usage() {
@@ -117,11 +117,11 @@ run_vm_cli() {
 }
 
 close_vm_apps_for_ocr_stability() {
-  run_ssh "for app in TextEdit Calculator Reminders Notes Preview Safari \"System Settings\" Settings Calendar Weather Mail Messages Photos Maps Music Podcasts \"App Store\" FaceTime Contacts Terminal; do osascript -e \"tell application \\\"\$app\\\" to if it is running then quit saving no\" >/dev/null 2>&1 || true; done; osascript -e 'tell application \"Finder\" to close every window' >/dev/null 2>&1 || true; sleep 0.3; pkill -x TextEdit || true; pkill -x Calculator || true; pkill -x Reminders || true; pkill -x Notes || true; pkill -x Preview || true; pkill -x Safari || true; pkill -x 'System Settings' || true; pkill -x Settings || true; pkill -x Calendar || true; pkill -x Weather || true; pkill -x Mail || true; pkill -x Messages || true; pkill -x Photos || true; pkill -x Maps || true; pkill -x Music || true; pkill -x Podcasts || true; pkill -x 'App Store' || true; pkill -x FaceTime || true; pkill -x Contacts || true; pkill -x Terminal || true"
+  run_ssh "for app in TextEdit Calculator Reminders Notes Preview Safari \"System Settings\" Settings Calendar Weather Mail Messages Photos Maps Music Podcasts \"App Store\" FaceTime Contacts Terminal \"Disk Utility\" Tips Dictionary \"Font Book\" Grapher Stocks \"Find My\"; do osascript -e \"tell application \\\"\$app\\\" to if it is running then quit saving no\" >/dev/null 2>&1 || true; done; osascript -e 'tell application \"Finder\" to close every window' >/dev/null 2>&1 || true; sleep 0.3; pkill -x TextEdit || true; pkill -x Calculator || true; pkill -x Reminders || true; pkill -x Notes || true; pkill -x Preview || true; pkill -x Safari || true; pkill -x 'System Settings' || true; pkill -x Settings || true; pkill -x Calendar || true; pkill -x Weather || true; pkill -x Mail || true; pkill -x Messages || true; pkill -x Photos || true; pkill -x Maps || true; pkill -x Music || true; pkill -x Podcasts || true; pkill -x 'App Store' || true; pkill -x FaceTime || true; pkill -x Contacts || true; pkill -x Terminal || true; pkill -x 'Disk Utility' || true; pkill -x Tips || true; pkill -x Dictionary || true; pkill -x 'Font Book' || true; pkill -x Grapher || true; pkill -x Stocks || true; pkill -x 'Find My' || true"
 }
 
 verify_vm_apps_closed_for_ocr() {
-  run_ssh "for app in TextEdit Calculator Reminders Notes Preview Safari 'System Settings' Settings Calendar Weather Mail Messages Photos Maps Music Podcasts 'App Store' FaceTime Contacts Terminal; do if pgrep -x \"\$app\" >/dev/null; then echo \"still-running:\$app\"; exit 1; fi; done"
+  run_ssh "for app in TextEdit Calculator Reminders Notes Preview Safari 'System Settings' Settings Calendar Weather Mail Messages Photos Maps Music Podcasts 'App Store' FaceTime Contacts Terminal 'Disk Utility' Tips Dictionary 'Font Book' Grapher Stocks 'Find My'; do if pgrep -x \"\$app\" >/dev/null; then echo \"still-running:\$app\"; exit 1; fi; done"
 }
 
 record_step() {
