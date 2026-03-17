@@ -98,10 +98,10 @@ Manual checks I will perform:
 
 ## Phase 2: Window primitives
 
-- [ ] implement `window list --json`
-- [ ] implement `window bounds --title <text> --json`
-- [ ] implement `window focus --title <text>`
-- [ ] add parser + daemon + contract tests
+- [x] implement `window list --json`
+- [x] implement `window bounds --title <text> --json`
+- [x] implement `window focus --title <text>`
+- [x] add parser + daemon + contract tests
 
 Verification commands I will run:
 
