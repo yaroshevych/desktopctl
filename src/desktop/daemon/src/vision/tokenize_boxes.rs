@@ -125,12 +125,17 @@ fn grid_cell_boxes(gray: &[u8], width: usize, height: usize) -> Vec<Bounds> {
             .collect::<Vec<_>>(),
         3,
     );
-    if h_lines.len() < 4 || v_lines.len() < 3 {
+    if h_lines.len() < 6 || v_lines.len() < 4 {
         return Vec::new();
     }
 
     let mut boxes = Vec::new();
     for y_pair in h_lines.windows(2) {
+        if h_edges[y_pair[0]] < (width as f64 * 0.24) as usize
+            || h_edges[y_pair[1]] < (width as f64 * 0.24) as usize
+        {
+            continue;
+        }
         let y0 = y_pair[0] as f64;
         let y1 = y_pair[1] as f64;
         let h = y1 - y0;
@@ -138,10 +143,18 @@ fn grid_cell_boxes(gray: &[u8], width: usize, height: usize) -> Vec<Bounds> {
             continue;
         }
         for x_pair in v_lines.windows(2) {
+            if v_edges[x_pair[0]] < (height as f64 * 0.20) as usize
+                || v_edges[x_pair[1]] < (height as f64 * 0.20) as usize
+            {
+                continue;
+            }
             let x0 = x_pair[0] as f64;
             let x1 = x_pair[1] as f64;
             let w = x1 - x0;
             if !(28.0..=620.0).contains(&w) {
+                continue;
+            }
+            if (w * h) > (width as f64 * height as f64 * 0.24) {
                 continue;
             }
             boxes.push(Bounds {
