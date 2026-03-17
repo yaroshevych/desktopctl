@@ -35,6 +35,7 @@ resolve_inputs() {
   VM_HOST="${host_input:-${VM_HOST:-}}"
   VM_USER="${user_input:-${VM_USER:-}}"
   VM_WINDOW_APP="${window_input:-${VM_WINDOW_APP:-UTM}}"
+  VM_MAXIMIZE_WINDOW="${VM_MAXIMIZE_WINDOW:-0}"
   HOST_RETURN_APP="${HOST_RETURN_APP:-}"
   VM_APP_DIR="${VM_APP_DIR:-/Users/${VM_USER}/DesktopCtl/dist}"
   VM_DIALOG_DIR="${VM_DIALOG_DIR:-/Users/${VM_USER}/Downloads}"
@@ -516,8 +517,12 @@ focus_vm_window_on_host() {
   "$HOST_DCTL" open "$VM_WINDOW_APP" --wait
   # Brief settle so the window is ready before AppleScript resizes it.
   sleep 0.3
-  log_action "focus_vm_window_on_host: maximize"
-  maximize_vm_window_on_host
+  if [[ "$VM_MAXIMIZE_WINDOW" == "1" ]]; then
+    log_action "focus_vm_window_on_host: maximize"
+    maximize_vm_window_on_host
+  else
+    log_action "focus_vm_window_on_host: skip maximize"
+  fi
   log_action "focus_vm_window_on_host: done"
 }
 
