@@ -39,3 +39,8 @@ vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   DESKTOP_WORKSPACE_DIR="{{workspace_dir}}" \
   "{{workspace_dir}}/scripts/vm/enable_permissions.sh" \
     "{{vm_host}}" "{{vm_user}}" "{{vm_window_app}}"
+
+vm-smoke vm_host="" vm_user="" vm_window_app="" iterations="1":
+  DESKTOP_WORKSPACE_DIR="{{workspace_dir}}" \
+  "{{workspace_dir}}/scripts/vm/smoke.sh" \
+    "{{vm_host}}" "{{vm_user}}" "{{vm_window_app}}" "{{iterations}}"

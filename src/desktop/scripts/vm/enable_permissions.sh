@@ -11,6 +11,7 @@ DIST_DIR="$WORKSPACE_DIR/dist"
 HOST_APP_PATH="$DIST_DIR/DesktopCtl.app"
 HOST_DCTL="$DIST_DIR/desktopctl"
 ENV_FILE="$WORKSPACE_DIR/.env"
+VM_SKIP_HOST_BUILD="${VM_SKIP_HOST_BUILD:-0}"
 
 log_action() {
   local action_str="$1"
@@ -54,11 +55,19 @@ ensure_required_inputs() {
 }
 
 run_build() {
+  if [[ "$VM_SKIP_HOST_BUILD" == "1" ]]; then
+    echo "info: skipping host build (VM_SKIP_HOST_BUILD=1)"
+    return
+  fi
   (cd "$WORKSPACE_DIR" && just build)
 }
 
 ensure_host_cli() {
   if [[ ! -x "$HOST_DCTL" ]]; then
+    if [[ "$VM_SKIP_HOST_BUILD" == "1" ]]; then
+      echo "Missing host CLI at $HOST_DCTL and VM_SKIP_HOST_BUILD=1. Build once first with: just -f src/desktop/Justfile build"
+      exit 1
+    fi
     run_build
   fi
 }
@@ -342,6 +351,7 @@ close_settings_window_via_close_button() {
 }
 
 click_settings_add_control() {
+  sleep 0.1
   local mode="${1:-default}"
   log_action "click_settings_add_control: mode=$mode"
   if [[ "$mode" == "screen_audio" ]]; then
@@ -471,6 +481,10 @@ ensure_row_enabled() {
 }
 
 build_host_artifacts() {
+  if [[ "$VM_SKIP_HOST_BUILD" == "1" ]]; then
+    echo "[1/7] Skip host build (VM_SKIP_HOST_BUILD=1)"
+    return
+  fi
   echo "[1/7] Build host artifacts"
   run_build
 }
