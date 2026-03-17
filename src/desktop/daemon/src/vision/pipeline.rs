@@ -2,7 +2,10 @@ use std::{path::PathBuf, process::Command as ProcessCommand};
 
 use desktop_core::{
     error::AppError,
-    protocol::{Bounds, SnapshotPayload, TokenEntry, TokenizePayload},
+    protocol::{
+        Bounds, SnapshotPayload, TokenEntry, TokenizeElement, TokenizeImage, TokenizePayload,
+        TokenizeWindow,
+    },
 };
 use image::{ImageFormat, imageops::crop_imm};
 
@@ -189,6 +192,7 @@ pub fn tokenize() -> Result<TokenizePayload, AppError> {
         .collect();
     let snapshot_id = capture.snapshot.snapshot_id;
     let timestamp = capture.snapshot.timestamp.clone();
+    let (image_meta, windows) = build_window_elements(&capture.snapshot, &capture.image_path)?;
     with_state(|state| state.replace_token_map(tokens.clone()))?;
     trace::log(format!(
         "pipeline:tokenize:ok snapshot_id={} tokens={}",
@@ -199,7 +203,81 @@ pub fn tokenize() -> Result<TokenizePayload, AppError> {
         snapshot_id,
         timestamp,
         tokens,
+        image: Some(image_meta),
+        windows,
     })
+}
+
+fn build_window_elements(
+    snapshot: &SnapshotPayload,
+    image_path: &std::path::Path,
+) -> Result<(TokenizeImage, Vec<TokenizeWindow>), AppError> {
+    let image = image::open(image_path).map_err(|err| {
+        AppError::backend_unavailable(format!(
+            "failed to load capture image for tokenize boxes: {err}"
+        ))
+    })?;
+    let rgba = image.to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    let box_bounds = super::tokenize_boxes::detect_ui_boxes(&rgba);
+
+    let mut elements = Vec::new();
+    for (idx, text) in snapshot.texts.iter().enumerate() {
+        elements.push(TokenizeElement {
+            id: format!("text_{:04}", idx + 1),
+            kind: "text".to_string(),
+            bbox: bounds_to_bbox(&text.bounds),
+            text: Some(text.text.clone()),
+            confidence: Some(text.confidence),
+            source: "vision_ocr".to_string(),
+        });
+    }
+    for (idx, bounds) in box_bounds.iter().enumerate() {
+        elements.push(TokenizeElement {
+            id: format!("box_{:04}", idx + 1),
+            kind: "box".to_string(),
+            bbox: bounds_to_bbox(bounds),
+            text: None,
+            confidence: None,
+            source: "rust_edge_grid_v1".to_string(),
+        });
+    }
+    elements.sort_by(|a, b| {
+        a.bbox[1]
+            .partial_cmp(&b.bbox[1])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.bbox[0]
+                    .partial_cmp(&b.bbox[0])
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+
+    let window = TokenizeWindow {
+        id: "win_0001".to_string(),
+        title: snapshot
+            .focused_app
+            .clone()
+            .unwrap_or_else(|| "active_window".to_string()),
+        bounds: Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: width as f64,
+            height: height as f64,
+        },
+        elements,
+    };
+    let image_meta = TokenizeImage {
+        path: image_path.display().to_string(),
+        width,
+        height,
+    };
+    Ok((image_meta, vec![window]))
+}
+
+fn bounds_to_bbox(bounds: &Bounds) -> [f64; 4] {
+    [bounds.x, bounds.y, bounds.width, bounds.height]
 }
 
 pub fn token(n: u32) -> Result<Option<TokenEntry>, AppError> {
@@ -223,9 +301,10 @@ fn focused_app_name() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use desktop_core::protocol::Bounds;
+    use desktop_core::protocol::{Bounds, SnapshotDisplay, SnapshotPayload, SnapshotText};
+    use image::{Rgba, RgbaImage};
 
-    use super::window_crop_rect;
+    use super::{build_window_elements, window_crop_rect};
 
     #[test]
     fn window_crop_rect_scales_from_logical_to_pixels() {
@@ -250,5 +329,54 @@ mod tests {
         };
         let rect = window_crop_rect(1000, 600, 1000, 600, &bounds).expect("rect");
         assert_eq!(rect, (900, 500, 100, 100));
+    }
+
+    #[test]
+    fn build_window_elements_emits_text_and_box_entries() {
+        let image_path = std::env::temp_dir().join(format!(
+            "desktopctl-tokenize-test-{}.png",
+            std::process::id()
+        ));
+        let mut image = RgbaImage::from_pixel(220, 140, Rgba([240, 240, 240, 255]));
+        for y in 40..100 {
+            for x in 40..180 {
+                if x == 40 || x == 179 || y == 40 || y == 99 {
+                    image.put_pixel(x, y, Rgba([60, 60, 60, 255]));
+                }
+            }
+        }
+        image.save(&image_path).expect("write test image");
+
+        let snapshot = SnapshotPayload {
+            snapshot_id: 1,
+            timestamp: "t".to_string(),
+            display: SnapshotDisplay {
+                id: 1,
+                width: 220,
+                height: 140,
+                scale: 1.0,
+            },
+            focused_app: Some("TestApp".to_string()),
+            texts: vec![SnapshotText {
+                text: "Hello".to_string(),
+                bounds: Bounds {
+                    x: 56.0,
+                    y: 56.0,
+                    width: 48.0,
+                    height: 18.0,
+                },
+                confidence: 0.93,
+            }],
+        };
+
+        let (meta, windows) = build_window_elements(&snapshot, &image_path).expect("build windows");
+        assert_eq!(meta.width, 220);
+        assert_eq!(meta.height, 140);
+        assert_eq!(windows.len(), 1);
+        let elements = &windows[0].elements;
+        assert!(elements.iter().any(|e| e.kind == "text"));
+        assert!(elements.iter().any(|e| e.kind == "box"));
+
+        let _ = std::fs::remove_file(&image_path);
     }
 }
