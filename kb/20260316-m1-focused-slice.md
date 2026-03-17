@@ -66,11 +66,12 @@ Manual screenshot verification checklist:
 
 ## Phase 1: Gate + artifacts
 
-- [ ] add `just vm-smoke` entrypoint
-- [ ] add skip-host-build support in VM flow (example: `VM_SKIP_HOST_BUILD=1`)
-- [ ] persist run artifacts under `/tmp/desktopctl-runs/<timestamp>/`
-- [ ] write `summary.json` with step status and durations
-- [ ] record `host_app_sha_before` and `host_app_sha_after` in summary
+- [x] add `just vm-smoke` entrypoint
+- [x] add skip-host-build support in VM flow (example: `VM_SKIP_HOST_BUILD=1`)
+- [x] persist run artifacts under `/tmp/desktopctl-runs/<timestamp>/`
+- [x] write `summary.json` with step status and durations
+- [x] record `host_app_sha_before` and `host_app_sha_after` in summary
+- [x] close noisy VM apps before and after each iteration, then verify they are closed
 
 Verification commands I will run:
 

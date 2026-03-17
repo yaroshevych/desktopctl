@@ -159,7 +159,7 @@ Acceptance:
   - [ ] smoke suite
   - [ ] artifact collection
   - [ ] summary JSON + non-zero exit on failure
-- [ ] Add loop mode for reliability measurement (example: `--iterations 20`).
+- [ ] Add loop mode for reliability measurement (example: positional arg: `... vm-smoke <host> <user> <window> 20`).
 - [ ] Record pass rate, median latency, p95 latency for key commands.
 
 Acceptance:
