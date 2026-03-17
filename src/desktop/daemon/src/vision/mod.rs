@@ -5,4 +5,5 @@ pub mod ocr;
 pub mod pipeline;
 pub mod regions;
 pub mod state;
+pub mod tokenize_boxes;
 pub mod types;
