@@ -246,6 +246,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
         "capture" => {
             let mut out_path: Option<String> = None;
             let mut overlay = false;
+            let mut active_window = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -262,6 +263,10 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                         overlay = true;
                         i += 1;
                     }
+                    "--active-window" => {
+                        active_window = true;
+                        i += 1;
+                    }
                     flag => {
                         return Err(AppError::invalid_argument(format!(
                             "unknown flag for screen capture: {flag}"
@@ -269,7 +274,11 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     }
                 }
             }
-            Ok(Command::ScreenCapture { out_path, overlay })
+            Ok(Command::ScreenCapture {
+                out_path,
+                overlay,
+                active_window,
+            })
         }
         "snapshot" => {
             let mut screenshot_path: Option<String> = None;
@@ -715,7 +724,7 @@ fn usage() -> &'static str {
   desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl open spotlight
   desktopctl open launchpad
-  desktopctl screen capture [--out <path>] [--overlay]
+  desktopctl screen capture [--out <path>] [--overlay] [--active-window]
   desktopctl screen snapshot [--json] [--screenshot <path>]
   desktopctl screen tokenize [--json]
   desktopctl screen find --text <text> [--all] [--json]
@@ -1053,12 +1062,18 @@ mod tests {
             "--out".to_string(),
             "/tmp/cap.png".to_string(),
             "--overlay".to_string(),
+            "--active-window".to_string(),
         ];
         let command = parse_command(&args).expect("screen capture should parse");
         match command {
-            Command::ScreenCapture { out_path, overlay } => {
+            Command::ScreenCapture {
+                out_path,
+                overlay,
+                active_window,
+            } => {
                 assert_eq!(out_path.as_deref(), Some("/tmp/cap.png"));
                 assert!(overlay);
+                assert!(active_window);
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -373,10 +373,31 @@ fn execute(command: Command) -> Result<Value, AppError> {
             backend.sleep_ms(ms);
             Ok(json!({}))
         }
-        Command::ScreenCapture { out_path, overlay } => {
+        Command::ScreenCapture {
+            out_path,
+            overlay,
+            active_window,
+        } => {
             trace::log("execute:screen_capture:start");
             permissions::ensure_screen_recording_permission()?;
-            let capture = vision::pipeline::capture_and_update(out_path.map(Into::into))?;
+            let window_bounds = if active_window {
+                Some(frontmost_window_bounds().ok_or_else(|| {
+                    AppError::target_not_found(
+                        "frontmost window not found; ensure a standard app window is focused",
+                    )
+                })?)
+            } else {
+                None
+            };
+            let capture_out_path: Option<PathBuf> = out_path.map(Into::into);
+            let capture = if let Some(bounds) = window_bounds.clone() {
+                vision::pipeline::capture_and_update_active_window(
+                    capture_out_path.clone(),
+                    bounds,
+                )?
+            } else {
+                vision::pipeline::capture_and_update(capture_out_path)?
+            };
             let overlay_path = if overlay {
                 let path = write_capture_overlay(&capture)?;
                 Some(path.display().to_string())
@@ -393,6 +414,8 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 "timestamp": capture.snapshot.timestamp,
                 "path": capture.image_path,
                 "overlay_path": overlay_path,
+                "capture_scope": if active_window { "active_window" } else { "display" },
+                "window_bounds": window_bounds,
                 "display": capture.snapshot.display,
                 "focused_app": capture.snapshot.focused_app,
                 "event_ids": capture.event_ids

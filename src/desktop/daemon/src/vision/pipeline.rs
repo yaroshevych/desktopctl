@@ -2,8 +2,9 @@ use std::{path::PathBuf, process::Command as ProcessCommand};
 
 use desktop_core::{
     error::AppError,
-    protocol::{SnapshotPayload, TokenEntry, TokenizePayload},
+    protocol::{Bounds, SnapshotPayload, TokenEntry, TokenizePayload},
 };
+use image::{ImageFormat, imageops::crop_imm};
 
 use crate::trace;
 
@@ -22,8 +23,29 @@ pub struct CaptureResult {
 }
 
 pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, AppError> {
+    capture_and_update_internal(out_path, None)
+}
+
+pub fn capture_and_update_active_window(
+    out_path: Option<PathBuf>,
+    bounds: Bounds,
+) -> Result<CaptureResult, AppError> {
+    capture_and_update_internal(out_path, Some(bounds))
+}
+
+fn capture_and_update_internal(
+    out_path: Option<PathBuf>,
+    crop_bounds: Option<Bounds>,
+) -> Result<CaptureResult, AppError> {
     trace::log("pipeline:capture_and_update:start");
-    let capture = capture_screen_png(out_path)?;
+    let mut capture = capture_screen_png(out_path)?;
+    if let Some(bounds) = crop_bounds.as_ref() {
+        crop_capture_to_bounds(&mut capture, bounds)?;
+        trace::log(format!(
+            "pipeline:capture_and_update:active_window_crop_ok size={}x{}",
+            capture.width, capture.height
+        ));
+    }
     trace::log(format!(
         "pipeline:capture_and_update:capture_ok path={} size={}x{}",
         capture.image_path.display(),
@@ -67,6 +89,83 @@ pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, Ap
             event_ids,
         }
     })
+}
+
+fn crop_capture_to_bounds(
+    capture: &mut super::types::CapturedFrame,
+    bounds: &Bounds,
+) -> Result<(), AppError> {
+    let image = image::open(&capture.image_path).map_err(|err| {
+        AppError::backend_unavailable(format!(
+            "failed to open capture image for active-window crop: {err}"
+        ))
+    })?;
+    let rgba = image.to_rgba8();
+    let image_width = rgba.width();
+    let image_height = rgba.height();
+    let (x, y, width, height) = window_crop_rect(
+        image_width,
+        image_height,
+        capture.width,
+        capture.height,
+        bounds,
+    )
+    .ok_or_else(|| {
+        AppError::target_not_found("active window bounds are outside the captured display area")
+    })?;
+    let cropped = crop_imm(&rgba, x, y, width, height).to_image();
+    cropped
+        .save_with_format(&capture.image_path, ImageFormat::Png)
+        .map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to write active-window capture image: {err}"
+            ))
+        })?;
+    capture.width = width;
+    capture.height = height;
+    Ok(())
+}
+
+fn window_crop_rect(
+    image_width: u32,
+    image_height: u32,
+    logical_width: u32,
+    logical_height: u32,
+    bounds: &Bounds,
+) -> Option<(u32, u32, u32, u32)> {
+    if image_width == 0 || image_height == 0 {
+        return None;
+    }
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return None;
+    }
+
+    let sx = if logical_width > 0 {
+        image_width as f64 / logical_width as f64
+    } else {
+        1.0
+    };
+    let sy = if logical_height > 0 {
+        image_height as f64 / logical_height as f64
+    } else {
+        1.0
+    };
+
+    let x = (bounds.x.max(0.0) * sx).floor() as i64;
+    let y = (bounds.y.max(0.0) * sy).floor() as i64;
+    let width = (bounds.width * sx).ceil().max(1.0) as i64;
+    let height = (bounds.height * sy).ceil().max(1.0) as i64;
+
+    let x1 = x.clamp(0, image_width as i64);
+    let y1 = y.clamp(0, image_height as i64);
+    let x2 = (x1 + width).clamp(0, image_width as i64);
+    let y2 = (y1 + height).clamp(0, image_height as i64);
+
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+
+    Some((x1 as u32, y1 as u32, (x2 - x1) as u32, (y2 - y1) as u32))
 }
 
 pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
@@ -120,4 +219,36 @@ fn focused_app_name() -> Option<String> {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value.is_empty() { None } else { Some(value) }
+}
+
+#[cfg(test)]
+mod tests {
+    use desktop_core::protocol::Bounds;
+
+    use super::window_crop_rect;
+
+    #[test]
+    fn window_crop_rect_scales_from_logical_to_pixels() {
+        let bounds = Bounds {
+            x: 50.0,
+            y: 30.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        // Image is 2x logical dimensions.
+        let rect = window_crop_rect(2000, 1200, 1000, 600, &bounds).expect("rect");
+        assert_eq!(rect, (100, 60, 400, 200));
+    }
+
+    #[test]
+    fn window_crop_rect_clamps_to_image_edges() {
+        let bounds = Bounds {
+            x: 900.0,
+            y: 500.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let rect = window_crop_rect(1000, 600, 1000, 600, &bounds).expect("rect");
+        assert_eq!(rect, (900, 500, 100, 100));
+    }
 }

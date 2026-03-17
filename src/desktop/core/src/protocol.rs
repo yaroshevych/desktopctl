@@ -93,6 +93,8 @@ pub enum Command {
         out_path: Option<String>,
         #[serde(default)]
         overlay: bool,
+        #[serde(default)]
+        active_window: bool,
     },
     ScreenSnapshot {
         screenshot_path: Option<String>,

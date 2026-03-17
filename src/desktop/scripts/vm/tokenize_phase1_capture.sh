@@ -11,7 +11,7 @@ RUNS_ROOT="${DESKTOPCTL_RUNS_ROOT:-/tmp/desktopctl-tokenize-runs}"
 VM_CLEAN_APPS_BETWEEN_CAPTURES="${VM_CLEAN_APPS_BETWEEN_CAPTURES:-1}"
 VM_PHASE1_OPEN_DIR="${VM_PHASE1_OPEN_DIR:-0}"
 VM_PHASE1_THEMES="${VM_PHASE1_THEMES:-light,dark}"
-VM_PHASE1_APPS="${VM_PHASE1_APPS:-Calculator,Reminders,System Settings,Calendar,Finder,Weather,Mail,Messages,Notes,Photos,Maps,Safari,Music,Podcasts,Preview,TextEdit,App Store,FaceTime,Contacts,Terminal}"
+VM_PHASE1_APPS="${VM_PHASE1_APPS:-Calculator,Reminders,System Settings,Calendar,Finder,Mail,Messages,Notes,Photos,Maps,Safari,Music,Podcasts,Preview,TextEdit,App Store,FaceTime,Contacts,Terminal}"
 VM_PHASE1_SETTINGS_DEEPLINKS="${VM_PHASE1_SETTINGS_DEEPLINKS:-x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility,x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture}"
 
 usage() {
@@ -258,7 +258,7 @@ capture_case() {
 
   run_step "${capture_prefix}_wait" run_ssh "sleep $wait_secs" || true
 
-  run_step "${capture_prefix}_screen_capture" run_vm_cli "screen capture --out '$remote_png'" || true
+  run_step "${capture_prefix}_screen_capture" run_vm_cli "screen capture --out '$remote_png' --active-window" || true
   if [[ "$LAST_STEP_EXIT_CODE" -ne 0 ]]; then
     case_status="fail"
     reason="screen_capture_failed"
