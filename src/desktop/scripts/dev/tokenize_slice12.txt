@@ -1,0 +1,13 @@
+# 12-image benchmark subset for box detector experiments
+calendar/calendar_default_light_0004.png
+calendar/calendar_default_dark_0032.png
+calculator/calculator_default_light_0001.png
+calculator/calculator_default_dark_0029.png
+reminders/reminders_default_light_0002.png
+reminders/reminders_default_dark_0030.png
+finder/finder_default_light_0005.png
+finder/finder_default_dark_0033.png
+system-settings/system-settings_deeplink-x-apple-systempreferences-com-apple-preference-security-privacy-accessibility_light_0027.png
+system-settings/system-settings_deeplink-x-apple-systempreferences-com-apple-preference-security-privacy-screencapture_dark_0056.png
+dictionary/dictionary_default_light_0022.png
+stocks/stocks_default_dark_0053.png
