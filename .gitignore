@@ -4,6 +4,7 @@
 # Rust/Cargo build artifacts
 **/target/
 **/dist/
+src/desktop/runtime-stable/
 
 # Logs and temp files
 *.log

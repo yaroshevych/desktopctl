@@ -6,6 +6,9 @@ app_dir := dist_dir + "/DesktopCtl.app"
 contents_dir := app_dir + "/Contents"
 macos_dir := contents_dir + "/MacOS"
 cli_path := dist_dir + "/desktopctl"
+stable_runtime_dir := workspace_dir + "/runtime-stable"
+stable_app_dir := stable_runtime_dir + "/DesktopCtl.app"
+stable_cli_path := stable_runtime_dir + "/desktopctl"
 
 build:
   cd {{workspace_dir}} && cargo build --release -p desktopctld -p desktopctl
@@ -34,6 +37,21 @@ clean:
 clean-all:
   just clean
   rm -rf {{workspace_dir}}/target
+
+stable-runtime-refresh build_first="1":
+  if [[ "{{build_first}}" == "1" ]]; then \
+    just -f {{workspace_dir}}/Justfile build; \
+  fi
+  rm -rf {{stable_app_dir}}
+  mkdir -p {{stable_runtime_dir}}
+  cp -R {{app_dir}} {{stable_app_dir}}
+  cp {{cli_path}} {{stable_cli_path}}
+  chmod +x {{stable_cli_path}} {{stable_app_dir}}/Contents/MacOS/desktopctld
+  codesign --force --sign - {{stable_cli_path}} >/dev/null 2>&1 || true
+  codesign --force --deep --sign - {{stable_app_dir}} >/dev/null 2>&1 || true
+  echo "Stable runtime refreshed:"
+  echo "  {{stable_app_dir}}"
+  echo "  {{stable_cli_path}}"
 
 vm-enable-permissions vm_host="" vm_user="" vm_window_app="":
   DESKTOP_WORKSPACE_DIR="{{workspace_dir}}" \

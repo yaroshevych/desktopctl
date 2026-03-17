@@ -8,8 +8,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="${DESKTOP_WORKSPACE_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 DIST_DIR="$WORKSPACE_DIR/dist"
-HOST_APP_PATH="$DIST_DIR/DesktopCtl.app"
-HOST_DCTL="$DIST_DIR/desktopctl"
+STABLE_RUNTIME_DIR="$WORKSPACE_DIR/runtime-stable"
+HOST_RUNTIME_SOURCE="${HOST_RUNTIME_SOURCE:-stable}"
+HOST_APP_PATH=""
+HOST_DCTL=""
 ENV_FILE="$WORKSPACE_DIR/.env"
 VM_SKIP_HOST_BUILD="${VM_SKIP_HOST_BUILD:-0}"
 
@@ -42,6 +44,21 @@ resolve_inputs() {
   VM_APP_PATH="${VM_APP_DIR}/DesktopCtl.app"
   VM_DIALOG_APP_PATH="${VM_DIALOG_DIR}/DesktopCtl.app"
   VM_CLI_PATH="${VM_APP_DIR}/desktopctl"
+
+  case "$HOST_RUNTIME_SOURCE" in
+    stable)
+      HOST_APP_PATH="${HOST_APP_PATH:-$STABLE_RUNTIME_DIR/DesktopCtl.app}"
+      HOST_DCTL="${HOST_DCTL:-$STABLE_RUNTIME_DIR/desktopctl}"
+      ;;
+    dist)
+      HOST_APP_PATH="${HOST_APP_PATH:-$DIST_DIR/DesktopCtl.app}"
+      HOST_DCTL="${HOST_DCTL:-$DIST_DIR/desktopctl}"
+      ;;
+    *)
+      echo "Invalid HOST_RUNTIME_SOURCE: $HOST_RUNTIME_SOURCE (expected: stable|dist)"
+      exit 1
+      ;;
+  esac
 }
 
 ensure_required_inputs() {
@@ -55,7 +72,7 @@ ensure_required_inputs() {
   fi
 }
 
-run_build() {
+run_build_dist() {
   if [[ "$VM_SKIP_HOST_BUILD" == "1" ]]; then
     echo "info: skipping host build (VM_SKIP_HOST_BUILD=1)"
     return
@@ -64,12 +81,25 @@ run_build() {
 }
 
 ensure_host_cli() {
-  if [[ ! -x "$HOST_DCTL" ]]; then
-    if [[ "$VM_SKIP_HOST_BUILD" == "1" ]]; then
-      echo "Missing host CLI at $HOST_DCTL and VM_SKIP_HOST_BUILD=1. Build once first with: just -f src/desktop/Justfile build"
+  if [[ "$HOST_RUNTIME_SOURCE" == "stable" ]]; then
+    if [[ ! -x "$HOST_DCTL" || ! -x "$HOST_APP_PATH/Contents/MacOS/desktopctld" ]]; then
+      echo "Missing stable runtime at:"
+      echo "  $HOST_APP_PATH"
+      echo "  $HOST_DCTL"
+      echo "Refresh it once with:"
+      echo "  just -f $WORKSPACE_DIR/Justfile stable-runtime-refresh"
       exit 1
     fi
-    run_build
+    return
+  fi
+
+  if [[ ! -x "$HOST_DCTL" || ! -x "$HOST_APP_PATH/Contents/MacOS/desktopctld" ]]; then
+    if [[ "$VM_SKIP_HOST_BUILD" == "1" ]]; then
+      echo "Missing host dist runtime at $HOST_APP_PATH / $HOST_DCTL and VM_SKIP_HOST_BUILD=1."
+      echo "Build once first with: just -f $WORKSPACE_DIR/Justfile build"
+      exit 1
+    fi
+    run_build_dist
   fi
 }
 
@@ -482,16 +512,24 @@ ensure_row_enabled() {
 }
 
 build_host_artifacts() {
+  if [[ "$HOST_RUNTIME_SOURCE" == "stable" ]]; then
+    echo "[1/7] Use stable host runtime"
+    echo "      source: ${HOST_APP_PATH}"
+    return
+  fi
   if [[ "$VM_SKIP_HOST_BUILD" == "1" ]]; then
     echo "[1/7] Skip host build (VM_SKIP_HOST_BUILD=1)"
     return
   fi
-  echo "[1/7] Build host artifacts"
-  run_build
+  echo "[1/7] Build host dist artifacts"
+  run_build_dist
 }
 
 deploy_artifacts_to_vm() {
   echo "[2/7] Copy artifacts to VM (${VM_HOST})"
+  echo "      host runtime source: ${HOST_RUNTIME_SOURCE}"
+  echo "      host app: ${HOST_APP_PATH}"
+  echo "      host cli: ${HOST_DCTL}"
   echo "      VM deploy dir: ${VM_APP_DIR}"
   echo "      VM Open-dialog dir: ${VM_DIALOG_DIR}"
   run_ssh "mkdir -p '$VM_APP_DIR' '$VM_DIALOG_DIR'"
