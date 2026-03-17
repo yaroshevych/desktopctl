@@ -12,8 +12,9 @@ use serde::Deserialize;
 
 const DEFAULT_LABELS_ROOT: &str = "/Users/oleg/Projects/DesktopCtl/tmp/tokenize-20260317-phase1/labels/selected/grounding_dino/broad_020_020_full52/grounding_dino";
 const IOU_MATCH_THRESHOLD: f64 = 0.5;
-const EXPECTED_RECALL_THRESHOLD: f64 = 0.35;
-const EXPECTED_PRECISION_THRESHOLD: f64 = 0.03;
+const EXPECTED_RECALL_THRESHOLD: f64 = 0.50;
+const EXPECTED_PRECISION_THRESHOLD: f64 = 0.20;
+const MAX_PREDICTED_TO_EXPECTED_RATIO: f64 = 2.5;
 
 #[derive(Debug, Deserialize)]
 struct LabelFile {
@@ -172,9 +173,20 @@ fn broad_grounding_labels_have_minimum_box_recall() {
     } else {
         total_predicted_matched as f64 / total_predicted as f64
     };
+    let predicted_to_expected = if total_expected == 0 {
+        0.0
+    } else {
+        total_predicted as f64 / total_expected as f64
+    };
     println!(
-        "tokenize_box_labels metrics: recall={:.3} precision={:.3} matched={} expected={} predicted={} predicted_matched={}",
-        recall, precision, total_matched, total_expected, total_predicted, total_predicted_matched
+        "tokenize_box_labels metrics: recall={:.3} precision={:.3} predicted_to_expected={:.3} matched={} expected={} predicted={} predicted_matched={}",
+        recall,
+        precision,
+        predicted_to_expected,
+        total_matched,
+        total_expected,
+        total_predicted,
+        total_predicted_matched
     );
     assert!(
         recall >= EXPECTED_RECALL_THRESHOLD,
@@ -191,5 +203,13 @@ fn broad_grounding_labels_have_minimum_box_recall() {
         total_predicted_matched,
         total_predicted,
         EXPECTED_PRECISION_THRESHOLD
+    );
+    assert!(
+        predicted_to_expected <= MAX_PREDICTED_TO_EXPECTED_RATIO,
+        "predicted box flood too high: {:.3} (predicted {} / expected {}), max {:.3}",
+        predicted_to_expected,
+        total_predicted,
+        total_expected,
+        MAX_PREDICTED_TO_EXPECTED_RATIO
     );
 }
