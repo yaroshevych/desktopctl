@@ -87,8 +87,12 @@ run_vm_cli() {
 }
 
 close_vm_apps_for_ocr_stability() {
-  # Keep Finder and System Settings available; close common foreground apps that add OCR noise.
-  run_ssh "pkill -x TextEdit || true; pkill -x Calculator || true; pkill -x Reminders || true; pkill -x Notes || true; pkill -x Preview || true; pkill -x Safari || true"
+  # Keep Finder available; close common foreground apps that add OCR noise.
+  run_ssh "for app in TextEdit Calculator Reminders Notes Preview Safari \"System Settings\" Settings; do osascript -e \"tell application \\\"\$app\\\" to if it is running then quit saving no\" >/dev/null 2>&1 || true; done; sleep 0.3; pkill -x TextEdit || true; pkill -x Calculator || true; pkill -x Reminders || true; pkill -x Notes || true; pkill -x Preview || true; pkill -x Safari || true; pkill -x 'System Settings' || true; pkill -x Settings || true"
+}
+
+verify_vm_apps_closed_for_ocr() {
+  run_ssh "for app in TextEdit Calculator Reminders Notes Preview Safari 'System Settings' Settings; do if pgrep -x \"\$app\" >/dev/null; then echo \"still-running:\$app\"; exit 1; fi; done"
 }
 
 record_step() {
@@ -296,6 +300,10 @@ main() {
       run_step "$i" "screen_tokenize_json" run_vm_cli "screen tokenize --json" || iter_status="fail"
       run_step "$i" "debug_snapshot" run_vm_cli "debug snapshot" || iter_status="fail"
       run_host_capture "$i" "final"
+      if [[ "$VM_CLEAN_APPS_BETWEEN_TESTS" == "1" ]]; then
+        run_step "$i" "vm_cleanup_apps_post" close_vm_apps_for_ocr_stability || iter_status="fail"
+        run_step "$i" "vm_cleanup_verify" verify_vm_apps_closed_for_ocr || iter_status="fail"
+      fi
 
       iter_end_ms="$(now_ms)"
       iter_duration_ms=$((iter_end_ms - iter_start_ms))
@@ -307,6 +315,11 @@ main() {
   else
     echo "vm-smoke: skipping smoke iterations because vm_enable_permissions failed"
     any_fail=1
+  fi
+
+  if [[ "$VM_CLEAN_APPS_BETWEEN_TESTS" == "1" ]]; then
+    run_step "final" "vm_cleanup_apps_final" close_vm_apps_for_ocr_stability || any_fail=1
+    run_step "final" "vm_cleanup_verify_final" verify_vm_apps_closed_for_ocr || any_fail=1
   fi
 
   HOST_APP_SHA_AFTER="$(sha256_or_missing "$host_app_bin")"
