@@ -203,6 +203,103 @@ def box_from_text(text_elements: list[dict[str, Any]], width: int, height: int, 
     return boxes
 
 
+def detect_edge_box_rects(image: np.ndarray, text_elements: list[dict[str, Any]]) -> list[Rect]:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 55, 160)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
+    contours, _hier = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    h, w = gray.shape[:2]
+    image_area = max(1, w * h)
+    text_rects = [Rect(*el["bbox"]) for el in text_elements]
+    candidates: list[Rect] = []
+
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        if bw < 20 or bh < 14:
+            continue
+        area = bw * bh
+        if area < 450:
+            continue
+        if area > int(image_area * 0.92):
+            continue
+        aspect = bw / max(1, bh)
+        if aspect < 0.2 or aspect > 24.0:
+            continue
+
+        roi = edges[y : y + bh, x : x + bw]
+        edge_density = float(np.count_nonzero(roi)) / float(max(1, area))
+        if edge_density < 0.008:
+            continue
+
+        rect = Rect(x=x, y=y, w=bw, h=bh)
+        # Prefer UI controls/panels likely tied to text, while still allowing icon-like boxes.
+        if text_rects:
+            text_overlap = max((iou(rect, t) for t in text_rects), default=0.0)
+            if text_overlap < 0.01 and area > 15000:
+                continue
+        candidates.append(rect)
+
+    # Deduplicate highly-overlapping candidates.
+    candidates.sort(key=lambda r: (r.y, r.x, r.w * r.h))
+    deduped: list[Rect] = []
+    for rect in candidates:
+        if any(iou(rect, existing) > 0.90 for existing in deduped):
+            continue
+        deduped.append(rect)
+    return deduped
+
+
+def merge_box_elements(
+    image: np.ndarray,
+    text_elements: list[dict[str, Any]],
+    width: int,
+    height: int,
+    padding: int,
+) -> list[dict[str, Any]]:
+    edge_rects = detect_edge_box_rects(image, text_elements)
+    text_boxes = box_from_text(text_elements, width=width, height=height, padding=padding)
+    boxes: list[dict[str, Any]] = []
+
+    next_id = 1
+    for rect in edge_rects:
+        boxes.append(
+            {
+                "id": f"box_{next_id:04d}",
+                "type": "box",
+                "bbox": rect.as_list(),
+                "confidence": 0.68,
+                "source": "edge_contour",
+            }
+        )
+        next_id += 1
+
+    # Backfill with text-anchored boxes only when edge boxes don't cover a text span.
+    edge_for_overlap = [Rect(*box["bbox"]) for box in boxes]
+    for text_box in text_boxes:
+        t_rect = Rect(*text_box["bbox"])
+        covered = any(overlap_ratio(t_rect, edge_box) > 0.70 for edge_box in edge_for_overlap)
+        if covered:
+            continue
+        if any(iou(t_rect, Rect(*box["bbox"])) > 0.90 for box in boxes):
+            continue
+        boxes.append(
+            {
+                "id": f"box_{next_id:04d}",
+                "type": "box",
+                "bbox": t_rect.as_list(),
+                "confidence": 0.58,
+                "source": "text_anchor_fallback",
+            }
+        )
+        next_id += 1
+
+    boxes.sort(key=lambda e: (e["bbox"][1], e["bbox"][0], e["id"]))
+    return boxes
+
+
 def overlap_ratio(a: Rect, b: Rect) -> float:
     ix1 = max(a.x, b.x)
     iy1 = max(a.y, b.y)
@@ -365,7 +462,13 @@ def main() -> int:
         h, w = image.shape[:2]
         rows = run_tesseract_tsv(image_path, lang=args.lang)
         text_elements = extract_text_elements(rows, width=w, height=h)
-        box_elements = box_from_text(text_elements, width=w, height=h, padding=max(0, args.box_padding))
+        box_elements = merge_box_elements(
+            image=image,
+            text_elements=text_elements,
+            width=w,
+            height=h,
+            padding=max(0, args.box_padding),
+        )
         glyph_elements = [] if args.skip_glyphs else detect_glyphs(image, text_elements)
         payload = make_payload(image_path, image, text_elements, box_elements, glyph_elements)
         label_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
