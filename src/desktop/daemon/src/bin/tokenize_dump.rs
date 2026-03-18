@@ -16,6 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input: Option<PathBuf> = None;
     let mut overlay_out: Option<PathBuf> = None;
     let mut json_out: Option<PathBuf> = None;
+    let mut skip_ocr = false;
+    let mut timings = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -28,25 +30,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--json" => {
                 json_out = args.next().map(PathBuf::from);
             }
+            "--skip-ocr" => {
+                skip_ocr = true;
+            }
+            "--timings" => {
+                timings = true;
+            }
             _ => {}
         }
     }
 
+    let t_total = std::time::Instant::now();
     let input = input.ok_or("missing --input <image.png>")?;
+    let t_image = std::time::Instant::now();
     let image = image::open(&input)?.to_rgba8();
     let width = image.width();
     let height = image.height();
+    let image_ms = t_image.elapsed().as_secs_f64() * 1000.0;
 
-    let texts = match ocr::recognize_text_from_image(&input, width, height) {
-        Ok(texts) => texts,
-        Err(err) => {
-            eprintln!("warn: OCR unavailable for {}: {}", input.display(), err.message);
-            Vec::new()
+    let t_ocr = std::time::Instant::now();
+    let texts = if skip_ocr {
+        Vec::new()
+    } else {
+        match ocr::recognize_text_from_image(&input, width, height) {
+            Ok(texts) => texts,
+            Err(err) => {
+                eprintln!("warn: OCR unavailable for {}: {}", input.display(), err.message);
+                Vec::new()
+            }
         }
     };
+    let ocr_ms = t_ocr.elapsed().as_secs_f64() * 1000.0;
+
+    let t_detect = std::time::Instant::now();
     let boxes = tokenize_boxes::detect_ui_boxes(&image);
     let text_bounds: Vec<Bounds> = texts.iter().map(|t| t.bounds.clone()).collect();
     let glyphs = tokenize_boxes::detect_glyphs(&image, &text_bounds);
+    let detect_ms = t_detect.elapsed().as_secs_f64() * 1000.0;
 
     let payload = json!({
         "image": {
@@ -62,13 +82,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }]
     });
 
+    let t_json = std::time::Instant::now();
     if let Some(path) = json_out {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&path, serde_json::to_vec_pretty(&payload)?)?;
     }
+    let json_ms = t_json.elapsed().as_secs_f64() * 1000.0;
 
+    let t_overlay = std::time::Instant::now();
     if let Some(path) = overlay_out {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -96,6 +119,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         canvas.save(path)?;
     }
+    let overlay_ms = t_overlay.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
     println!(
         "{}",
@@ -103,9 +128,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "image": input,
             "text_count": texts.len(),
             "box_count": boxes.len(),
-            "glyph_count": glyphs.len()
+            "glyph_count": glyphs.len(),
+            "timings_ms": {
+                "image_load": image_ms,
+                "ocr": ocr_ms,
+                "detect_boxes_and_glyphs": detect_ms,
+                "write_json": json_ms,
+                "write_overlay": overlay_ms,
+                "total": total_ms
+            }
         })
     );
+    if timings {
+        eprintln!(
+            "timings_ms image_load={:.2} ocr={:.2} detect={:.2} json={:.2} overlay={:.2} total={:.2}",
+            image_ms, ocr_ms, detect_ms, json_ms, overlay_ms, total_ms
+        );
+    }
 
     Ok(())
 }

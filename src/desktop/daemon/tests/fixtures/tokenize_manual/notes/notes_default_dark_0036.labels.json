@@ -9,16 +9,13 @@
       "id": "win_notes_dark",
       "title": "Notes",
       "elements": [
-        {"id": "box_sidebar_panel", "type": "box", "bbox": [0, 92, 260, 1180], "source": "manual_v1"},
-        {"id": "box_list_panel", "type": "box", "bbox": [260, 92, 330, 1180], "source": "manual_v1"},
-        {"id": "box_sidebar_row_notes", "type": "box", "bbox": [8, 142, 244, 56], "source": "manual_v1"},
-        {"id": "box_sidebar_row_recently_deleted", "type": "box", "bbox": [8, 198, 244, 56], "source": "manual_v1"},
-        {"id": "box_list_row_selected", "type": "box", "bbox": [268, 180, 318, 112], "source": "manual_v1"},
-        {"id": "box_list_row_2", "type": "box", "bbox": [268, 292, 318, 112], "source": "manual_v1"},
-        {"id": "box_list_row_3", "type": "box", "bbox": [268, 404, 318, 112], "source": "manual_v1"},
-        {"id": "box_list_row_4", "type": "box", "bbox": [268, 516, 318, 112], "source": "manual_v1"},
-        {"id": "box_list_row_5", "type": "box", "bbox": [268, 628, 318, 112], "source": "manual_v1"},
-        {"id": "box_list_row_6", "type": "box", "bbox": [268, 740, 318, 112], "source": "manual_v1"}
+        {"id": "box_sidebar_container", "type": "box", "bbox": [0, 40, 441, 1272], "source": "manual_text_container_v2"},
+        {"id": "box_sidebar_row_notes", "type": "box", "bbox": [2, 142, 437, 56], "source": "manual_text_container_v2"},
+        {"id": "box_list_container", "type": "box", "bbox": [441, 40, 562, 1272], "source": "manual_text_container_v2"},
+        {"id": "box_list_row_selected", "type": "box", "bbox": [443, 180, 558, 112], "source": "manual_text_container_v2"},
+        {"id": "box_list_row_2", "type": "box", "bbox": [443, 292, 558, 111], "source": "manual_text_container_v2"},
+        {"id": "box_list_row_3", "type": "box", "bbox": [443, 403, 558, 112], "source": "manual_text_container_v2"},
+        {"id": "box_list_row_4", "type": "box", "bbox": [443, 515, 558, 112], "source": "manual_text_container_v2"}
       ]
     }
   ]

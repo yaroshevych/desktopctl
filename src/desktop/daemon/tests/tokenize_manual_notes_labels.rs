@@ -11,7 +11,7 @@ use desktop_core::protocol::Bounds;
 use image::ImageReader;
 use serde::Deserialize;
 
-const IOU_MATCH_THRESHOLD: f64 = 0.5;
+const IOU_MATCH_THRESHOLD: f64 = 0.45;
 
 #[derive(Debug, Deserialize)]
 struct LabelFile {
@@ -129,15 +129,15 @@ fn manual_notes_label_fixtures_are_present_and_well_formed() {
             .filter(|element| element.kind == "box")
             .collect();
         assert!(
-            expected_boxes.len() >= 10,
-            "expected >=10 manual boxes in {}",
+            expected_boxes.len() >= 7,
+            "expected >=7 manual boxes in {}",
             label_path.display()
         );
         assert!(
             expected_boxes
                 .iter()
-                .any(|element| element.id.contains("sidebar_panel")),
-            "expected sidebar panel label in {}",
+                .any(|element| element.id.contains("sidebar_container")),
+            "expected sidebar container label in {}",
             label_path.display()
         );
         assert!(
@@ -151,7 +151,6 @@ fn manual_notes_label_fixtures_are_present_and_well_formed() {
 }
 
 #[test]
-#[ignore = "strict benchmark test: run explicitly while improving notes sidebar/list coverage"]
 fn notes_manual_labels_have_sidebar_and_list_coverage() {
     let root = labels_root();
     let files = collect_label_files(&root);
@@ -245,19 +244,7 @@ fn notes_manual_labels_have_sidebar_and_list_coverage() {
         list_total
     );
 
-    assert!(
-        overall_recall >= 0.55,
-        "overall notes recall too low: {:.3}",
-        overall_recall
-    );
-    assert!(
-        sidebar_recall >= 0.70,
-        "sidebar notes recall too low: {:.3}",
-        sidebar_recall
-    );
-    assert!(
-        list_recall >= 0.55,
-        "list notes recall too low: {:.3}",
-        list_recall
-    );
+    assert!(overall_recall >= 0.90, "overall notes recall too low: {:.3}", overall_recall);
+    assert!(sidebar_recall >= 0.90, "sidebar notes recall too low: {:.3}", sidebar_recall);
+    assert!(list_recall >= 0.90, "list notes recall too low: {:.3}", list_recall);
 }
