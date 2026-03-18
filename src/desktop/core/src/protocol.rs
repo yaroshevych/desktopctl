@@ -113,6 +113,8 @@ pub enum Command {
     },
     ScreenLayout,
     ScreenSettingsMap,
+    OverlayStart,
+    OverlayStop,
     UiClickText {
         text: String,
         timeout_ms: u64,
@@ -181,6 +183,8 @@ impl Command {
             Command::ScreenFindText { .. } => "screen_find_text",
             Command::ScreenLayout => "screen_layout",
             Command::ScreenSettingsMap => "screen_settings_map",
+            Command::OverlayStart => "overlay_start",
+            Command::OverlayStop => "overlay_stop",
             Command::UiClickText { .. } => "ui_click_text",
             Command::UiClickTextOffset { .. } => "ui_click_text_offset",
             Command::UiClickSettingsAdd => "ui_click_settings_add",

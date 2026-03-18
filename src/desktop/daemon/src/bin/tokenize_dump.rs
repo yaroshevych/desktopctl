@@ -5,6 +5,9 @@ use image::{Rgba, RgbaImage};
 use serde::Deserialize;
 use serde_json::json;
 
+// Dev-only threshold for external label files used by tokenize_dump batch runs.
+const TEXT_LABEL_CONFIDENCE_MIN: f32 = 0.50;
+
 #[path = "../vision/ocr.rs"]
 mod ocr;
 #[path = "../vision/tokenize_boxes.rs"]
@@ -251,6 +254,10 @@ fn load_texts_from_labels(
             if text.trim().is_empty() {
                 continue;
             }
+            let confidence = element.confidence.unwrap_or(0.75);
+            if confidence < TEXT_LABEL_CONFIDENCE_MIN {
+                continue;
+            }
             // Label bbox is interpreted as [x, y, width, height] (xywh).
             let x1 = element.bbox[0].clamp(0.0, image_w.max(1.0));
             let y1 = element.bbox[1].clamp(0.0, image_h.max(1.0));
@@ -268,7 +275,7 @@ fn load_texts_from_labels(
             texts.push(SnapshotText {
                 text,
                 bounds,
-                confidence: element.confidence.unwrap_or(0.75),
+                confidence,
             });
         }
     }

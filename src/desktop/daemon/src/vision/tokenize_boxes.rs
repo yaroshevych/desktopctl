@@ -12,6 +12,11 @@ pub(crate) const GLYPH_IOU_TEXT_OVERLAP_MAX: f64 = 0.08;
 const GLYPH_DEDUPE_IOU: f64 = 0.72;
 const GLYPH_CAP: usize = 140;
 const TEXT_ANCHORED_BOX_CAP: usize = 220;
+// Sparse/noisy OCR seeds frequently degrade text-anchored boxes on icon-heavy UIs
+// (e.g. Calculator/Music toolbar), so fall back to raw geometry when below this count.
+const TEXT_SEED_MIN_COUNT: usize = 4;
+// Reject implausibly-large OCR seeds (often full-pane OCR noise) before grouping.
+const TEXT_SEED_MAX_REL_AREA: f64 = 0.06;
 
 #[allow(dead_code)]
 pub fn detect_ui_boxes(image: &RgbaImage) -> Vec<Bounds> {
@@ -25,7 +30,11 @@ pub fn detect_ui_boxes_with_text(image: &RgbaImage, text_bounds: &[Bounds]) -> V
     }
     let width = image.width() as f64;
     let height = image.height() as f64;
-    let text_groups = group_text_bounds(text_bounds, width, height);
+    let clean_text_bounds = sanitize_text_seeds(text_bounds, width, height);
+    if !should_use_text_anchors(&clean_text_bounds) {
+        return raw;
+    }
+    let text_groups = group_text_bounds(&clean_text_bounds, width, height);
     if text_groups.is_empty() {
         return raw;
     }
@@ -49,6 +58,27 @@ pub fn detect_ui_boxes_with_text(image: &RgbaImage, text_bounds: &[Bounds]) -> V
         deduped.truncate(TEXT_ANCHORED_BOX_CAP);
     }
     deduped
+}
+
+fn sanitize_text_seeds(text_bounds: &[Bounds], image_w: f64, image_h: f64) -> Vec<Bounds> {
+    let image_area = (image_w * image_h).max(1.0);
+    let mut out: Vec<Bounds> = text_bounds
+        .iter()
+        .filter_map(|text| clamp_bounds(text, image_w, image_h))
+        .filter(|text| {
+            let area = text.width * text.height;
+            area >= 8.0
+                && area <= image_area * TEXT_SEED_MAX_REL_AREA
+                && text.width <= image_w * 0.90
+                && text.height <= image_h * 0.28
+        })
+        .collect();
+    out = dedupe_boxes(out, 0.96);
+    out
+}
+
+fn should_use_text_anchors(text_bounds: &[Bounds]) -> bool {
+    text_bounds.len() >= TEXT_SEED_MIN_COUNT
 }
 
 fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
@@ -940,5 +970,85 @@ mod tests {
         assert!(local.x >= 0.0 && local.y >= 0.0);
         assert!(local.x + local.width <= 40.0);
         assert!(local.y + local.height <= 30.0);
+    }
+
+    #[test]
+    fn text_anchor_gate_rejects_sparse_or_oversized_seed() {
+        let seeds = vec![
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 350.0,
+                height: 1402.0,
+            },
+            Bounds {
+                x: 991.0,
+                y: 28.0,
+                width: 36.0,
+                height: 47.0,
+            },
+            Bounds {
+                x: 1943.0,
+                y: 29.0,
+                width: 197.0,
+                height: 67.0,
+            },
+            Bounds {
+                x: 535.0,
+                y: 39.0,
+                width: 104.0,
+                height: 25.0,
+            },
+        ];
+        let clean = sanitize_text_seeds(&seeds, 2440.0, 1402.0);
+        assert!(
+            clean.len() < TEXT_SEED_MIN_COUNT,
+            "sparse/noisy seeds should fail text-anchor gate"
+        );
+        assert!(!should_use_text_anchors(&clean));
+    }
+
+    #[test]
+    fn text_anchor_gate_accepts_notes_like_seed() {
+        let seeds = vec![
+            Bounds {
+                x: 90.0,
+                y: 158.0,
+                width: 82.0,
+                height: 22.0,
+            },
+            Bounds {
+                x: 94.0,
+                y: 246.0,
+                width: 126.0,
+                height: 20.0,
+            },
+            Bounds {
+                x: 94.0,
+                y: 294.0,
+                width: 80.0,
+                height: 20.0,
+            },
+            Bounds {
+                x: 94.0,
+                y: 342.0,
+                width: 70.0,
+                height: 20.0,
+            },
+            Bounds {
+                x: 488.0,
+                y: 213.0,
+                width: 228.0,
+                height: 24.0,
+            },
+            Bounds {
+                x: 488.0,
+                y: 324.0,
+                width: 204.0,
+                height: 22.0,
+            },
+        ];
+        let clean = sanitize_text_seeds(&seeds, 2000.0, 1312.0);
+        assert!(should_use_text_anchors(&clean));
     }
 }

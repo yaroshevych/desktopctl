@@ -23,6 +23,8 @@ use desktop_core::{
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 
+#[cfg(target_os = "macos")]
+use crate::overlay;
 use crate::{clipboard, permissions, recording, replay, trace, vision};
 
 mod settings_flow;
@@ -520,6 +522,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
                     overlay_path.display()
                 ));
             }
+            #[cfg(target_os = "macos")]
+            if let Err(err) = overlay::update_from_tokenize(&payload) {
+                trace::log(format!("execute:screen_tokenize:overlay_update_warn {err}"));
+            }
             trace::log(format!(
                 "execute:screen_tokenize:ok snapshot_id={} tokens={}",
                 payload.snapshot_id,
@@ -540,6 +546,34 @@ fn execute(command: Command) -> Result<Value, AppError> {
         Command::ScreenSettingsMap => {
             permissions::ensure_screen_recording_permission()?;
             screen_settings_map()
+        }
+        Command::OverlayStart => {
+            #[cfg(target_os = "macos")]
+            {
+                let started = overlay::start_overlay()?;
+                return Ok(json!({
+                    "overlay_running": true,
+                    "started": started
+                }));
+            }
+            #[allow(unreachable_code)]
+            Err(AppError::backend_unavailable(
+                "overlay is supported only on macOS",
+            ))
+        }
+        Command::OverlayStop => {
+            #[cfg(target_os = "macos")]
+            {
+                let stopped = overlay::stop_overlay()?;
+                return Ok(json!({
+                    "overlay_running": false,
+                    "stopped": stopped
+                }));
+            }
+            #[allow(unreachable_code)]
+            Err(AppError::backend_unavailable(
+                "overlay is supported only on macOS",
+            ))
         }
         Command::WaitText {
             text,
@@ -1713,7 +1747,9 @@ fn resolve_tokenize_window_target(
                 .find(|w| w.visible && w.bounds.width > 8.0 && w.bounds.height > 8.0)
         })
         .cloned()
-        .ok_or_else(|| AppError::target_not_found("no visible window available for screen tokenize"))
+        .ok_or_else(|| {
+            AppError::target_not_found("no visible window available for screen tokenize")
+        })
 }
 
 fn select_window_candidate<'a>(

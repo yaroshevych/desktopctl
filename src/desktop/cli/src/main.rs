@@ -64,6 +64,7 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "window" => parse_window(&args[1..]),
         "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
+        "overlay" => parse_overlay(&args[1..]),
         "ui" => parse_ui(&args[1..]),
         "permissions" => parse_permissions(&args[1..]),
         "clipboard" => parse_clipboard(&args[1..]),
@@ -332,9 +333,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                             )
                         })?;
                         if id.trim().is_empty() {
-                            return Err(AppError::invalid_argument(
-                                "window id must not be empty",
-                            ));
+                            return Err(AppError::invalid_argument("window id must not be empty"));
                         }
                         window_id = Some(id.clone());
                         i += 2;
@@ -410,6 +409,21 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             Ok(Command::ScreenSettingsMap)
         }
         _ => Err(AppError::invalid_argument(usage())),
+    }
+}
+
+fn parse_overlay(args: &[String]) -> Result<Command, AppError> {
+    if args.len() != 1 {
+        return Err(AppError::invalid_argument(
+            "usage: desktopctl overlay start | desktopctl overlay stop",
+        ));
+    }
+    match args[0].as_str() {
+        "start" => Ok(Command::OverlayStart),
+        "stop" => Ok(Command::OverlayStop),
+        _ => Err(AppError::invalid_argument(
+            "usage: desktopctl overlay start | desktopctl overlay stop",
+        )),
     }
 }
 
@@ -782,6 +796,8 @@ fn usage() -> &'static str {
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen layout [--json]
   desktopctl screen settings [--json]
+  desktopctl overlay start
+  desktopctl overlay stop
   desktopctl ui click --text <text> [--timeout <ms>]
   desktopctl ui click --text-offset <text> --dx <px> --dy <px> [--timeout <ms>]
   desktopctl ui click --settings-add
@@ -1147,10 +1163,7 @@ mod tests {
                 window_id,
                 screenshot_path,
             } => {
-                assert_eq!(
-                    overlay_out_path.as_deref(),
-                    Some("/tmp/tokens.overlay.png")
-                );
+                assert_eq!(overlay_out_path.as_deref(), Some("/tmp/tokens.overlay.png"));
                 assert!(window_id.is_none());
                 assert!(screenshot_path.is_none());
             }
@@ -1193,6 +1206,17 @@ mod tests {
         ];
         let err = parse_command(&args).expect_err("must reject incompatible flags");
         assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn parses_overlay_start_stop() {
+        let start = parse_command(&["overlay", "start"].map(str::to_string))
+            .expect("overlay start should parse");
+        assert!(matches!(start, Command::OverlayStart));
+
+        let stop = parse_command(&["overlay", "stop"].map(str::to_string))
+            .expect("overlay stop should parse");
+        assert!(matches!(stop, Command::OverlayStop));
     }
 
     #[test]
