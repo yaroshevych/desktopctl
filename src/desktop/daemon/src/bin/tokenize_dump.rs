@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use desktop_core::protocol::Bounds;
+use desktop_core::protocol::{Bounds, SnapshotText};
 use image::{Rgba, RgbaImage};
+use serde::Deserialize;
 use serde_json::json;
 
 #[path = "../vision/ocr.rs"]
@@ -16,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input: Option<PathBuf> = None;
     let mut overlay_out: Option<PathBuf> = None;
     let mut json_out: Option<PathBuf> = None;
+    let mut text_labels: Option<PathBuf> = None;
     let mut skip_ocr = false;
     let mut timings = false;
 
@@ -29,6 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--json" => {
                 json_out = args.next().map(PathBuf::from);
+            }
+            "--text-labels" => {
+                text_labels = args.next().map(PathBuf::from);
             }
             "--skip-ocr" => {
                 skip_ocr = true;
@@ -49,7 +54,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image_ms = t_image.elapsed().as_secs_f64() * 1000.0;
 
     let t_ocr = std::time::Instant::now();
-    let texts = if skip_ocr {
+    let texts = if let Some(labels_path) = text_labels.as_ref() {
+        load_texts_from_labels(labels_path, width as f64, height as f64)?
+    } else if skip_ocr {
         Vec::new()
     } else {
         match ocr::recognize_text_from_image(&input, width, height) {
@@ -154,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_elements_json(
-    texts: &[desktop_core::protocol::SnapshotText],
+    texts: &[SnapshotText],
     boxes: &[Bounds],
     glyphs: &[Bounds],
 ) -> Vec<serde_json::Value> {
@@ -195,6 +202,77 @@ fn build_elements_json(
             .then(ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
     });
     out
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelFile {
+    #[serde(default)]
+    bbox_format: Option<String>,
+    windows: Vec<LabelWindow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelWindow {
+    elements: Vec<LabelElement>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelElement {
+    #[serde(rename = "type")]
+    kind: String,
+    bbox: [f64; 4],
+    text: Option<String>,
+    confidence: Option<f32>,
+}
+
+fn load_texts_from_labels(
+    labels_path: &std::path::Path,
+    image_w: f64,
+    image_h: f64,
+) -> Result<Vec<SnapshotText>, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(labels_path)?;
+    let parsed: LabelFile = serde_json::from_str(&raw)?;
+    if let Some(format) = parsed.bbox_format.as_deref() {
+        if format != "xywh" {
+            return Err(format!(
+                "unsupported bbox format in {}: {format}",
+                labels_path.display()
+            )
+            .into());
+        }
+    }
+    let mut texts = Vec::new();
+    for window in parsed.windows {
+        for element in window.elements {
+            if element.kind != "text" {
+                continue;
+            }
+            let text = element.text.unwrap_or_default();
+            if text.trim().is_empty() {
+                continue;
+            }
+            // Label bbox is interpreted as [x, y, width, height] (xywh).
+            let x1 = element.bbox[0].clamp(0.0, image_w.max(1.0));
+            let y1 = element.bbox[1].clamp(0.0, image_h.max(1.0));
+            let x2 = (element.bbox[0] + element.bbox[2]).clamp(0.0, image_w.max(1.0));
+            let y2 = (element.bbox[1] + element.bbox[3]).clamp(0.0, image_h.max(1.0));
+            let bounds = Bounds {
+                x: x1,
+                y: y1,
+                width: (x2 - x1).max(0.0),
+                height: (y2 - y1).max(0.0),
+            };
+            if bounds.width < 2.0 || bounds.height < 2.0 {
+                continue;
+            }
+            texts.push(SnapshotText {
+                text,
+                bounds,
+                confidence: element.confidence.unwrap_or(0.75),
+            });
+        }
+    }
+    Ok(texts)
 }
 
 fn draw_bounds_outline(image: &mut RgbaImage, bounds: &Bounds, color: Rgba<u8>, thickness: u32) {
