@@ -1,0 +1,25 @@
+{
+  "image": {
+    "path": "notes_default_dark_0036.png",
+    "width": 2000,
+    "height": 1312
+  },
+  "windows": [
+    {
+      "id": "win_notes_dark",
+      "title": "Notes",
+      "elements": [
+        {"id": "box_sidebar_panel", "type": "box", "bbox": [0, 92, 260, 1180], "source": "manual_v1"},
+        {"id": "box_list_panel", "type": "box", "bbox": [260, 92, 330, 1180], "source": "manual_v1"},
+        {"id": "box_sidebar_row_notes", "type": "box", "bbox": [8, 142, 244, 56], "source": "manual_v1"},
+        {"id": "box_sidebar_row_recently_deleted", "type": "box", "bbox": [8, 198, 244, 56], "source": "manual_v1"},
+        {"id": "box_list_row_selected", "type": "box", "bbox": [268, 180, 318, 112], "source": "manual_v1"},
+        {"id": "box_list_row_2", "type": "box", "bbox": [268, 292, 318, 112], "source": "manual_v1"},
+        {"id": "box_list_row_3", "type": "box", "bbox": [268, 404, 318, 112], "source": "manual_v1"},
+        {"id": "box_list_row_4", "type": "box", "bbox": [268, 516, 318, 112], "source": "manual_v1"},
+        {"id": "box_list_row_5", "type": "box", "bbox": [268, 628, 318, 112], "source": "manual_v1"},
+        {"id": "box_list_row_6", "type": "box", "bbox": [268, 740, 318, 112], "source": "manual_v1"}
+      ]
+    }
+  ]
+}

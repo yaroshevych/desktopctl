@@ -26,6 +26,9 @@ pub fn detect_ui_boxes(image: &RgbaImage) -> Vec<Bounds> {
     boxes.extend(edge_component_boxes(&gray, width, height));
     boxes.extend(text_component_boxes(&gray, width, height, mean_luma));
     boxes.extend(grid_cell_boxes(&gray, width, height));
+    let structural_panels = structural_panel_boxes(&gray, width, height);
+    boxes.extend(structural_panels.iter().cloned());
+    boxes.extend(structural_row_boxes(&gray, width, height, &structural_panels));
 
     let mut deduped = dedupe_boxes(boxes, 0.88);
     // Keep a broad candidate set for pseudo-label recall, but prevent runaway noise.
@@ -306,6 +309,10 @@ fn connected_component_boxes(
             if pixels < min_area / 4 {
                 continue;
             }
+            // Suppress very large sparse outlines that often appear in light-mode split panes.
+            if area > (width * height) / 6 && pixels < area / 8 {
+                continue;
+            }
             boxes.push(Bounds {
                 x: min_x as f64,
                 y: min_y as f64,
@@ -389,6 +396,143 @@ fn compress_indices(indices: &[usize], max_gap: usize) -> Vec<usize> {
     }
     out.push((run_start + prev) / 2);
     out
+}
+
+fn structural_panel_boxes(gray: &[u8], width: usize, height: usize) -> Vec<Bounds> {
+    if width < 320 || height < 220 {
+        return Vec::new();
+    }
+
+    let toolbar_bottom = infer_toolbar_bottom(gray, width, height);
+    let mut v_edges = vec![0usize; width];
+    for y in toolbar_bottom.max(1)..height {
+        for x in 1..width {
+            let idx = y * width + x;
+            let gx = (gray[idx] as i16 - gray[idx - 1] as i16).unsigned_abs() as usize;
+            if gx >= 24 {
+                v_edges[x] += 1;
+            }
+        }
+    }
+
+    let mut split_candidates: Vec<usize> = (0..width)
+        .filter(|x| {
+            let nx = *x as f64 / width as f64;
+            (0.06..0.94).contains(&nx) && v_edges[*x] >= ((height - toolbar_bottom) as f64 * 0.58) as usize
+        })
+        .collect();
+    split_candidates = compress_indices(&split_candidates, 5);
+    if split_candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut boundaries = vec![0usize];
+    boundaries.extend(split_candidates);
+    boundaries.push(width - 1);
+
+    let mut panels = Vec::new();
+    for pair in boundaries.windows(2) {
+        let x0 = pair[0];
+        let x1 = pair[1];
+        if x1 <= x0 + 8 {
+            continue;
+        }
+        let w = x1 - x0;
+        if w < 140 || w > (width as f64 * 0.7) as usize {
+            continue;
+        }
+        panels.push(Bounds {
+            x: x0 as f64,
+            y: toolbar_bottom as f64,
+            width: w as f64,
+            height: (height - toolbar_bottom) as f64,
+        });
+    }
+    panels
+}
+
+fn structural_row_boxes(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    panels: &[Bounds],
+) -> Vec<Bounds> {
+    if panels.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for panel in panels {
+        let panel_w = panel.width as usize;
+        // Focus row proposals on sidebar/list panes; skip broad editor/content panes.
+        if panel_w < 180 || panel_w > (width as f64 * 0.42) as usize {
+            continue;
+        }
+        let x0 = panel.x.max(0.0).floor() as usize;
+        let x1 = (panel.x + panel.width).min(width as f64).ceil() as usize;
+        let y0 = panel.y.max(1.0).floor() as usize;
+        let y1 = (panel.y + panel.height).min(height as f64).ceil() as usize;
+        if x1 <= x0 + 8 || y1 <= y0 + 8 {
+            continue;
+        }
+        let mut h_edges = vec![0usize; y1 - y0];
+        for y in y0.max(1)..y1 {
+            let mut hits = 0usize;
+            for x in x0..x1 {
+                let idx = y * width + x;
+                let gy = (gray[idx] as i16 - gray[idx - width] as i16).unsigned_abs() as usize;
+                if gy >= 14 {
+                    hits += 1;
+                }
+            }
+            h_edges[y - y0] = hits;
+        }
+        let lines: Vec<usize> = (0..h_edges.len())
+            .filter(|i| h_edges[*i] >= ((x1 - x0) as f64 * 0.33) as usize)
+            .map(|i| y0 + i)
+            .collect();
+        let lines = compress_indices(&lines, 2);
+        if lines.len() < 2 {
+            continue;
+        }
+        for pair in lines.windows(2) {
+            let yy0 = pair[0];
+            let yy1 = pair[1];
+            if yy1 <= yy0 + 4 {
+                continue;
+            }
+            let h = yy1 - yy0;
+            if !(20..=120).contains(&h) {
+                continue;
+            }
+            rows.push(Bounds {
+                x: x0 as f64 + 2.0,
+                y: yy0 as f64,
+                width: (x1 - x0).saturating_sub(4) as f64,
+                height: h as f64,
+            });
+        }
+    }
+    rows
+}
+
+fn infer_toolbar_bottom(gray: &[u8], width: usize, height: usize) -> usize {
+    let probe_max = height.min(260);
+    let mut best_y = (height as f64 * 0.08) as usize;
+    for y in 2..probe_max {
+        let mut hits = 0usize;
+        for x in 0..width {
+            let idx = y * width + x;
+            let gy = (gray[idx] as i16 - gray[idx - width] as i16).unsigned_abs() as usize;
+            if gy >= 18 {
+                hits += 1;
+            }
+        }
+        if hits >= (width as f64 * 0.45) as usize {
+            best_y = y;
+            break;
+        }
+    }
+    best_y.clamp(40, height.saturating_sub(1))
 }
 
 fn iou(a: &Bounds, b: &Bounds) -> f64 {
