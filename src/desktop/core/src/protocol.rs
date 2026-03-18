@@ -99,7 +99,14 @@ pub enum Command {
     ScreenSnapshot {
         screenshot_path: Option<String>,
     },
-    ScreenTokenize,
+    ScreenTokenize {
+        #[serde(default)]
+        overlay_out_path: Option<String>,
+        #[serde(default)]
+        window_id: Option<String>,
+        #[serde(default)]
+        screenshot_path: Option<String>,
+    },
     ScreenFindText {
         text: String,
         all: bool,
@@ -170,7 +177,7 @@ impl Command {
             Command::WaitText { .. } => "wait_text",
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenSnapshot { .. } => "screen_snapshot",
-            Command::ScreenTokenize => "screen_tokenize",
+            Command::ScreenTokenize { .. } => "screen_tokenize",
             Command::ScreenFindText { .. } => "screen_find_text",
             Command::ScreenLayout => "screen_layout",
             Command::ScreenSettingsMap => "screen_settings_map",
@@ -326,7 +333,11 @@ pub struct TokenizeImage {
 pub struct TokenizeWindow {
     pub id: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
     pub bounds: Bounds,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_bounds: Option<Bounds>,
     pub elements: Vec<TokenizeElement>,
 }
 

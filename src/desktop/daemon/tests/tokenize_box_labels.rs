@@ -213,3 +213,82 @@ fn broad_grounding_labels_have_minimum_box_recall() {
         MAX_PREDICTED_TO_EXPECTED_RATIO
     );
 }
+
+#[test]
+fn glyph_detection_is_deterministic_and_bounded() {
+    let root = labels_root();
+    assert!(
+        root.exists(),
+        "labels root does not exist: {} (set DESKTOPCTL_TOKENIZE_LABELS_DIR if needed)",
+        root.display()
+    );
+
+    let mut label_files = collect_label_files(&root);
+    label_files.truncate(20);
+    assert!(
+        !label_files.is_empty(),
+        "no .labels.json files found under {}",
+        root.display()
+    );
+
+    for label_path in label_files {
+        let raw = fs::read_to_string(&label_path).expect("read label file");
+        let labels: LabelFile = serde_json::from_str(&raw).expect("parse label JSON");
+        let image_path = PathBuf::from(&labels.image.path);
+        let image = ImageReader::open(&image_path)
+            .expect("open labeled image")
+            .decode()
+            .expect("decode labeled image")
+            .to_rgba8();
+
+        let text_bounds: Vec<Bounds> = labels
+            .windows
+            .iter()
+            .flat_map(|window| window.elements.iter())
+            .filter(|element| element.kind == "text")
+            .filter_map(|element| to_bounds(element.bbox))
+            .collect();
+
+        let run_a = tokenize_boxes::detect_glyphs(&image, &text_bounds);
+        let run_b = tokenize_boxes::detect_glyphs(&image, &text_bounds);
+        assert_eq!(
+            run_a.len(),
+            run_b.len(),
+            "glyph count changed between deterministic runs for {}",
+            label_path.display()
+        );
+        for (idx, (a, b)) in run_a.iter().zip(run_b.iter()).enumerate() {
+            let same = (a.x - b.x).abs() < 0.001
+                && (a.y - b.y).abs() < 0.001
+                && (a.width - b.width).abs() < 0.001
+                && (a.height - b.height).abs() < 0.001;
+            assert!(
+                same,
+                "glyph {} changed between deterministic runs for {}",
+                idx,
+                label_path.display()
+            );
+        }
+        assert!(
+            run_a.len() <= 140,
+            "glyph cap violated for {}: {}",
+            label_path.display(),
+            run_a.len()
+        );
+        let overlaps_text = run_a
+            .iter()
+            .filter(|glyph| {
+                text_bounds
+                    .iter()
+                    .any(|text| iou(glyph, text) >= tokenize_boxes::GLYPH_IOU_TEXT_OVERLAP_MAX)
+            })
+            .count();
+        // OCR/text boxes are noisy pseudo-labels; allow a tiny overlap budget.
+        assert!(
+            overlaps_text <= 2,
+            "too many glyph/text overlaps for {}: {}",
+            label_path.display(),
+            overlaps_text
+        );
+    }
+}

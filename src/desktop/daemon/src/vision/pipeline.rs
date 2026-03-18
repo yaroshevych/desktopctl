@@ -1,13 +1,16 @@
-use std::{path::PathBuf, process::Command as ProcessCommand};
+use std::{
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+};
 
 use desktop_core::{
     error::AppError,
     protocol::{
-        Bounds, SnapshotPayload, TokenEntry, TokenizeElement, TokenizeImage, TokenizePayload,
-        TokenizeWindow,
+        Bounds, SnapshotDisplay, SnapshotPayload, TokenEntry, TokenizeElement, TokenizeImage,
+        TokenizePayload, TokenizeWindow, now_millis,
     },
 };
-use image::{ImageFormat, imageops::crop_imm};
+use image::{ImageFormat, Rgba, imageops::crop_imm};
 
 use crate::trace;
 
@@ -23,6 +26,14 @@ pub struct CaptureResult {
     pub snapshot: SnapshotPayload,
     pub image_path: PathBuf,
     pub event_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenizeWindowMeta {
+    pub id: String,
+    pub title: String,
+    pub app: Option<String>,
+    pub bounds: Bounds,
 }
 
 pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, AppError> {
@@ -175,11 +186,46 @@ pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
     with_state(|state| state.latest_snapshot())
 }
 
-pub fn tokenize() -> Result<TokenizePayload, AppError> {
-    trace::log("pipeline:tokenize:start");
-    let capture = capture_and_update(None)?;
-    let tokens: Vec<TokenEntry> = capture
-        .snapshot
+pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayload, AppError> {
+    trace::log("pipeline:tokenize:window_mode");
+    let capture = capture_and_update_active_window(None, window_meta.bounds.clone())?;
+    tokenize_from_snapshot(capture.snapshot, capture.image_path.as_path(), Some(window_meta))
+}
+
+pub fn tokenize_screenshot(
+    screenshot_path: &Path,
+    window_meta: Option<TokenizeWindowMeta>,
+) -> Result<TokenizePayload, AppError> {
+    let image = image::open(screenshot_path).map_err(|err| {
+        AppError::invalid_argument(format!(
+            "failed to open screenshot {}: {err}",
+            screenshot_path.display()
+        ))
+    })?;
+    let width = image.width();
+    let height = image.height();
+    let texts = recognize_text_from_image(screenshot_path, width, height)?;
+    let snapshot = SnapshotPayload {
+        snapshot_id: now_millis() as u64,
+        timestamp: now_millis().to_string(),
+        display: SnapshotDisplay {
+            id: 1,
+            width,
+            height,
+            scale: 1.0,
+        },
+        focused_app: window_meta.as_ref().and_then(|meta| meta.app.clone()),
+        texts,
+    };
+    tokenize_from_snapshot(snapshot, screenshot_path, window_meta)
+}
+
+fn tokenize_from_snapshot(
+    snapshot: SnapshotPayload,
+    image_path: &Path,
+    window_meta: Option<TokenizeWindowMeta>,
+) -> Result<TokenizePayload, AppError> {
+    let tokens: Vec<TokenEntry> = snapshot
         .texts
         .iter()
         .enumerate()
@@ -190,9 +236,9 @@ pub fn tokenize() -> Result<TokenizePayload, AppError> {
             confidence: text.confidence,
         })
         .collect();
-    let snapshot_id = capture.snapshot.snapshot_id;
-    let timestamp = capture.snapshot.timestamp.clone();
-    let (image_meta, windows) = build_window_elements(&capture.snapshot, &capture.image_path)?;
+    let snapshot_id = snapshot.snapshot_id;
+    let timestamp = snapshot.timestamp.clone();
+    let (image_meta, windows) = build_window_elements(&snapshot, image_path, window_meta)?;
     with_state(|state| state.replace_token_map(tokens.clone()))?;
     trace::log(format!(
         "pipeline:tokenize:ok snapshot_id={} tokens={}",
@@ -210,7 +256,8 @@ pub fn tokenize() -> Result<TokenizePayload, AppError> {
 
 fn build_window_elements(
     snapshot: &SnapshotPayload,
-    image_path: &std::path::Path,
+    image_path: &Path,
+    window_meta: Option<TokenizeWindowMeta>,
 ) -> Result<(TokenizeImage, Vec<TokenizeWindow>), AppError> {
     let image = image::open(image_path).map_err(|err| {
         AppError::backend_unavailable(format!(
@@ -221,6 +268,8 @@ fn build_window_elements(
     let width = rgba.width();
     let height = rgba.height();
     let box_bounds = super::tokenize_boxes::detect_ui_boxes(&rgba);
+    let text_bounds: Vec<Bounds> = snapshot.texts.iter().map(|text| text.bounds.clone()).collect();
+    let glyph_bounds = super::tokenize_boxes::detect_glyphs(&rgba, &text_bounds);
 
     let mut elements = Vec::new();
     for (idx, text) in snapshot.texts.iter().enumerate() {
@@ -243,6 +292,16 @@ fn build_window_elements(
             source: "rust_edge_grid_v1".to_string(),
         });
     }
+    for (idx, bounds) in glyph_bounds.iter().enumerate() {
+        elements.push(TokenizeElement {
+            id: format!("glyph_{:04}", idx + 1),
+            kind: "glyph".to_string(),
+            bbox: bounds_to_bbox(bounds),
+            text: None,
+            confidence: None,
+            source: "rust_cc_glyph_v1".to_string(),
+        });
+    }
     elements.sort_by(|a, b| {
         a.bbox[1]
             .partial_cmp(&b.bbox[1])
@@ -254,18 +313,36 @@ fn build_window_elements(
             )
     });
 
+    let title = window_meta
+        .as_ref()
+        .and_then(|meta| {
+            if meta.title.trim().is_empty() {
+                None
+            } else {
+                Some(meta.title.clone())
+            }
+        })
+        .or_else(|| snapshot.focused_app.clone())
+        .unwrap_or_else(|| "active_window".to_string());
+    let app = window_meta
+        .as_ref()
+        .and_then(|meta| meta.app.clone())
+        .or_else(|| snapshot.focused_app.clone());
+    let os_bounds = window_meta.as_ref().map(|meta| meta.bounds.clone());
     let window = TokenizeWindow {
-        id: "win_0001".to_string(),
-        title: snapshot
-            .focused_app
-            .clone()
-            .unwrap_or_else(|| "active_window".to_string()),
+        id: window_meta
+            .as_ref()
+            .map(|meta| meta.id.clone())
+            .unwrap_or_else(|| "win_0001".to_string()),
+        title,
+        app,
         bounds: Bounds {
             x: 0.0,
             y: 0.0,
             width: width as f64,
             height: height as f64,
         },
+        os_bounds,
         elements,
     };
     let image_meta = TokenizeImage {
@@ -282,6 +359,89 @@ fn bounds_to_bbox(bounds: &Bounds) -> [f64; 4] {
 
 pub fn token(n: u32) -> Result<Option<TokenEntry>, AppError> {
     with_state(|state| state.token(n))
+}
+
+pub fn write_tokenize_overlay(payload: &TokenizePayload, out_path: &std::path::Path) -> Result<(), AppError> {
+    let image_meta = payload.image.as_ref().ok_or_else(|| {
+        AppError::invalid_argument("token payload does not include image metadata")
+    })?;
+    let source_path = std::path::Path::new(&image_meta.path);
+    let base = image::open(source_path).map_err(|err| {
+        AppError::backend_unavailable(format!(
+            "failed to open tokenize source image {}: {err}",
+            source_path.display()
+        ))
+    })?;
+    let mut canvas = base.to_rgba8();
+
+    for window in &payload.windows {
+        draw_bounds_outline(&mut canvas, &window.bounds, Rgba([255, 255, 255, 255]), 2);
+        for element in &window.elements {
+            let color = match element.kind.as_str() {
+                "text" => Rgba([0, 190, 0, 255]),
+                "box" => Rgba([40, 120, 255, 255]),
+                "glyph" => Rgba([255, 220, 0, 255]),
+                _ => Rgba([220, 220, 220, 255]),
+            };
+            let bounds = Bounds {
+                x: element.bbox[0],
+                y: element.bbox[1],
+                width: element.bbox[2],
+                height: element.bbox[3],
+            };
+            draw_bounds_outline(&mut canvas, &bounds, color, 1);
+        }
+    }
+
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to create tokenize overlay dir {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    canvas.save_with_format(out_path, ImageFormat::Png).map_err(|err| {
+        AppError::backend_unavailable(format!(
+            "failed to write tokenize overlay {}: {err}",
+            out_path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn draw_bounds_outline(image: &mut image::RgbaImage, bounds: &Bounds, color: Rgba<u8>, thickness: u32) {
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return;
+    }
+    let w = image.width() as i32;
+    let h = image.height() as i32;
+    let x0 = bounds.x.floor() as i32;
+    let y0 = bounds.y.floor() as i32;
+    let x1 = (bounds.x + bounds.width).ceil() as i32 - 1;
+    let y1 = (bounds.y + bounds.height).ceil() as i32 - 1;
+    if x1 < 0 || y1 < 0 || x0 >= w || y0 >= h {
+        return;
+    }
+
+    let t = thickness.max(1) as i32;
+    for offset in 0..t {
+        let lx = (x0 + offset).clamp(0, w - 1);
+        let rx = (x1 - offset).clamp(0, w - 1);
+        let ty = (y0 + offset).clamp(0, h - 1);
+        let by = (y1 - offset).clamp(0, h - 1);
+        if lx > rx || ty > by {
+            continue;
+        }
+        for x in lx..=rx {
+            image.put_pixel(x as u32, ty as u32, color);
+            image.put_pixel(x as u32, by as u32, color);
+        }
+        for y in ty..=by {
+            image.put_pixel(lx as u32, y as u32, color);
+            image.put_pixel(rx as u32, y as u32, color);
+        }
+    }
 }
 
 fn focused_app_name() -> Option<String> {
@@ -301,10 +461,13 @@ fn focused_app_name() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use desktop_core::protocol::{Bounds, SnapshotDisplay, SnapshotPayload, SnapshotText};
+    use desktop_core::protocol::{
+        Bounds, SnapshotDisplay, SnapshotPayload, SnapshotText, TokenizeElement, TokenizeImage,
+        TokenizePayload, TokenizeWindow,
+    };
     use image::{Rgba, RgbaImage};
 
-    use super::{build_window_elements, window_crop_rect};
+    use super::{TokenizeWindowMeta, build_window_elements, window_crop_rect, write_tokenize_overlay};
 
     #[test]
     fn window_crop_rect_scales_from_logical_to_pixels() {
@@ -369,14 +532,161 @@ mod tests {
             }],
         };
 
-        let (meta, windows) = build_window_elements(&snapshot, &image_path).expect("build windows");
+        let window_meta = TokenizeWindowMeta {
+            id: "pid:7".to_string(),
+            title: "Sample".to_string(),
+            app: Some("TestApp".to_string()),
+            bounds: Bounds {
+                x: 150.0,
+                y: 90.0,
+                width: 220.0,
+                height: 140.0,
+            },
+        };
+        let (meta, windows) =
+            build_window_elements(&snapshot, &image_path, Some(window_meta)).expect("build windows");
         assert_eq!(meta.width, 220);
         assert_eq!(meta.height, 140);
         assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id, "pid:7");
+        assert_eq!(windows[0].title, "Sample");
+        assert_eq!(windows[0].app.as_deref(), Some("TestApp"));
+        assert!(windows[0].os_bounds.is_some());
         let elements = &windows[0].elements;
         assert!(elements.iter().any(|e| e.kind == "text"));
         assert!(elements.iter().any(|e| e.kind == "box"));
 
         let _ = std::fs::remove_file(&image_path);
+    }
+
+    #[test]
+    fn build_window_elements_is_deterministic_for_same_input() {
+        let image_path = std::env::temp_dir().join(format!(
+            "desktopctl-tokenize-determinism-{}.png",
+            std::process::id()
+        ));
+        let mut image = RgbaImage::from_pixel(240, 150, Rgba([22, 22, 24, 255]));
+        for y in 22..120 {
+            for x in 32..208 {
+                if x == 32 || x == 207 || y == 22 || y == 119 {
+                    image.put_pixel(x, y, Rgba([228, 228, 228, 255]));
+                }
+            }
+        }
+        image.save(&image_path).expect("write test image");
+
+        let snapshot = SnapshotPayload {
+            snapshot_id: 5,
+            timestamp: "t".to_string(),
+            display: SnapshotDisplay {
+                id: 1,
+                width: 240,
+                height: 150,
+                scale: 1.0,
+            },
+            focused_app: Some("Determinism".to_string()),
+            texts: vec![SnapshotText {
+                text: "Allow".to_string(),
+                bounds: Bounds {
+                    x: 60.0,
+                    y: 58.0,
+                    width: 46.0,
+                    height: 16.0,
+                },
+                confidence: 0.97,
+            }],
+        };
+        let window_meta = TokenizeWindowMeta {
+            id: "abc:1".to_string(),
+            title: "Determinism".to_string(),
+            app: Some("Determinism".to_string()),
+            bounds: Bounds {
+                x: 400.0,
+                y: 200.0,
+                width: 240.0,
+                height: 150.0,
+            },
+        };
+        let (_, run_a) =
+            build_window_elements(&snapshot, &image_path, Some(window_meta.clone())).expect("run a");
+        let (_, run_b) =
+            build_window_elements(&snapshot, &image_path, Some(window_meta)).expect("run b");
+        let a = serde_json::to_value(&run_a).expect("json a");
+        let b = serde_json::to_value(&run_b).expect("json b");
+        assert_eq!(a, b, "window elements must be deterministic across runs");
+
+        let _ = std::fs::remove_file(&image_path);
+    }
+
+    #[test]
+    fn write_tokenize_overlay_writes_png() {
+        let source_path = std::env::temp_dir().join(format!(
+            "desktopctl-tokenize-overlay-source-{}.png",
+            std::process::id()
+        ));
+        let overlay_path = std::env::temp_dir().join(format!(
+            "desktopctl-tokenize-overlay-out-{}.png",
+            std::process::id()
+        ));
+
+        let mut image = RgbaImage::from_pixel(180, 120, Rgba([240, 240, 240, 255]));
+        for y in 28..92 {
+            for x in 24..156 {
+                if x == 24 || x == 155 || y == 28 || y == 91 {
+                    image.put_pixel(x, y, Rgba([30, 30, 30, 255]));
+                }
+            }
+        }
+        image.save(&source_path).expect("write source");
+
+        let payload = TokenizePayload {
+            snapshot_id: 1,
+            timestamp: "1".to_string(),
+            tokens: vec![],
+            image: Some(TokenizeImage {
+                path: source_path.display().to_string(),
+                width: 180,
+                height: 120,
+            }),
+            windows: vec![TokenizeWindow {
+                id: "win_0001".to_string(),
+                title: "Sample".to_string(),
+                app: Some("Sample".to_string()),
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 180.0,
+                    height: 120.0,
+                },
+                os_bounds: None,
+                elements: vec![
+                    TokenizeElement {
+                        id: "text_0001".to_string(),
+                        kind: "text".to_string(),
+                        bbox: [40.0, 40.0, 40.0, 16.0],
+                        text: Some("Hello".to_string()),
+                        confidence: Some(0.99),
+                        source: "vision_ocr".to_string(),
+                    },
+                    TokenizeElement {
+                        id: "box_0001".to_string(),
+                        kind: "box".to_string(),
+                        bbox: [30.0, 34.0, 120.0, 56.0],
+                        text: None,
+                        confidence: None,
+                        source: "rust_edge_grid_v1".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        write_tokenize_overlay(&payload, &overlay_path).expect("write overlay");
+        assert!(overlay_path.exists(), "overlay file should exist");
+        let overlay = image::open(&overlay_path).expect("open overlay");
+        assert_eq!(overlay.width(), 180);
+        assert_eq!(overlay.height(), 120);
+
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&overlay_path);
     }
 }

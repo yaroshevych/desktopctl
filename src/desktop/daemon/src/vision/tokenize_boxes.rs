@@ -1,6 +1,17 @@
 use desktop_core::protocol::Bounds;
 use image::RgbaImage;
 
+const GLYPH_MIN_W: usize = 6;
+const GLYPH_MIN_H: usize = 6;
+const GLYPH_MIN_AREA: usize = 24;
+const GLYPH_MAX_AREA: usize = 1800;
+const GLYPH_MIN_ASPECT: f64 = 0.2;
+const GLYPH_MAX_ASPECT: f64 = 5.0;
+const GLYPH_MAX_SIZE_PX: f64 = 52.0;
+pub(crate) const GLYPH_IOU_TEXT_OVERLAP_MAX: f64 = 0.08;
+const GLYPH_DEDUPE_IOU: f64 = 0.72;
+const GLYPH_CAP: usize = 140;
+
 pub fn detect_ui_boxes(image: &RgbaImage) -> Vec<Bounds> {
     let width = image.width() as usize;
     let height = image.height() as usize;
@@ -20,6 +31,51 @@ pub fn detect_ui_boxes(image: &RgbaImage) -> Vec<Bounds> {
     // Keep a broad candidate set for pseudo-label recall, but prevent runaway noise.
     if deduped.len() > 320 {
         deduped.truncate(320);
+    }
+    deduped
+}
+
+pub fn detect_glyphs(image: &RgbaImage, text_bounds: &[Bounds]) -> Vec<Bounds> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    if width < 16 || height < 16 {
+        return Vec::new();
+    }
+
+    let gray = grayscale(image);
+    let mean_luma = gray.iter().map(|v| *v as f64).sum::<f64>() / (gray.len() as f64);
+    let mut mask = vec![false; width * height];
+    if mean_luma >= 128.0 {
+        for i in 0..mask.len() {
+            mask[i] = gray[i] <= 110;
+        }
+    } else {
+        for i in 0..mask.len() {
+            mask[i] = gray[i] >= 164;
+        }
+    }
+    let mask = dilate_rect(&mask, width, height, 1, 1);
+    let mask = erode_rect(&mask, width, height, 1, 1);
+    let mut glyphs = connected_component_boxes(
+        &mask,
+        width,
+        height,
+        GLYPH_MIN_W,
+        GLYPH_MIN_H,
+        GLYPH_MIN_AREA,
+        GLYPH_MAX_AREA,
+        GLYPH_MIN_ASPECT,
+        GLYPH_MAX_ASPECT,
+    );
+    glyphs.retain(|glyph| {
+        glyph.width <= GLYPH_MAX_SIZE_PX
+            && glyph.height <= GLYPH_MAX_SIZE_PX
+            && !overlaps_text(glyph, text_bounds)
+            && !inside_text_padding(glyph, text_bounds, 2.0)
+    });
+    let mut deduped = dedupe_boxes(glyphs, GLYPH_DEDUPE_IOU);
+    if deduped.len() > GLYPH_CAP {
+        deduped.truncate(GLYPH_CAP);
     }
     deduped
 }
@@ -379,4 +435,22 @@ fn dedupe_boxes(mut boxes: Vec<Bounds>, iou_threshold: f64) -> Vec<Bounds> {
             .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
     });
     kept
+}
+
+fn overlaps_text(candidate: &Bounds, texts: &[Bounds]) -> bool {
+    texts
+        .iter()
+        .any(|text| iou(candidate, text) >= GLYPH_IOU_TEXT_OVERLAP_MAX)
+}
+
+fn inside_text_padding(candidate: &Bounds, texts: &[Bounds], padding: f64) -> bool {
+    // Centroid gating drops small icon fragments still "inside" text labels even with tiny IoU.
+    let cx = candidate.x + (candidate.width / 2.0);
+    let cy = candidate.y + (candidate.height / 2.0);
+    texts.iter().any(|text| {
+        cx >= text.x - padding
+            && cx <= text.x + text.width + padding
+            && cy >= text.y - padding
+            && cy <= text.y + text.height + padding
+    })
 }

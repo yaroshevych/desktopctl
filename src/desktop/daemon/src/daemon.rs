@@ -478,10 +478,48 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 }
             }
         }
-        Command::ScreenTokenize => {
+        Command::ScreenTokenize {
+            overlay_out_path,
+            window_id,
+            screenshot_path,
+        } => {
             trace::log("execute:screen_tokenize:start");
-            permissions::ensure_screen_recording_permission()?;
-            let payload = vision::pipeline::tokenize()?;
+            let payload = if let Some(path_raw) = screenshot_path {
+                if window_id.is_some() {
+                    return Err(AppError::invalid_argument(
+                        "--window cannot be combined with --screenshot for screen tokenize",
+                    ));
+                }
+                let screenshot = PathBuf::from(path_raw);
+                if !screenshot.exists() {
+                    return Err(AppError::invalid_argument(format!(
+                        "screenshot file does not exist: {}",
+                        screenshot.display()
+                    )));
+                }
+                vision::pipeline::tokenize_screenshot(&screenshot, None)?
+            } else {
+                permissions::ensure_screen_recording_permission()?;
+                let backend = new_backend()?;
+                backend.check_accessibility_permission()?;
+                let windows = list_windows()?;
+                let target = resolve_tokenize_window_target(&windows, window_id.as_deref())?;
+                let window_meta = vision::pipeline::TokenizeWindowMeta {
+                    id: target.id.clone(),
+                    title: target.title.clone(),
+                    app: Some(target.app.clone()),
+                    bounds: target.bounds.clone(),
+                };
+                vision::pipeline::tokenize_window(window_meta)?
+            };
+            if let Some(path_raw) = overlay_out_path {
+                let overlay_path = PathBuf::from(path_raw);
+                vision::pipeline::write_tokenize_overlay(&payload, &overlay_path)?;
+                trace::log(format!(
+                    "execute:screen_tokenize:overlay_ok path={}",
+                    overlay_path.display()
+                ));
+            }
             trace::log(format!(
                 "execute:screen_tokenize:ok snapshot_id={} tokens={}",
                 payload.snapshot_id,
@@ -1641,6 +1679,43 @@ end tell"#;
     Ok(windows)
 }
 
+fn resolve_tokenize_window_target(
+    windows: &[WindowInfo],
+    query: Option<&str>,
+) -> Result<WindowInfo, AppError> {
+    if windows.is_empty() {
+        return Err(AppError::target_not_found(
+            "no windows available for screen tokenize",
+        ));
+    }
+
+    if let Some(query) = query {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::invalid_argument(
+                "window id must not be empty for screen tokenize",
+            ));
+        }
+        if let Some(found) = windows.iter().find(|w| w.id == trimmed) {
+            return Ok(found.clone());
+        }
+        let selected = select_window_candidate(windows, trimmed)?;
+        return Ok(selected.clone());
+    }
+
+    // Filter out tiny transient windows (tooltips/popovers) that destabilize tokenization.
+    windows
+        .iter()
+        .find(|w| w.frontmost && w.visible && w.bounds.width > 8.0 && w.bounds.height > 8.0)
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|w| w.visible && w.bounds.width > 8.0 && w.bounds.height > 8.0)
+        })
+        .cloned()
+        .ok_or_else(|| AppError::target_not_found("no visible window available for screen tokenize"))
+}
+
 fn select_window_candidate<'a>(
     windows: &'a [WindowInfo],
     query: &str,
@@ -1928,6 +2003,31 @@ mod tests {
         let err =
             super::select_window_candidate(&windows, "Safari").expect_err("must be ambiguous");
         assert_eq!(err.code, ErrorCode::AmbiguousTarget);
+    }
+
+    #[test]
+    fn tokenize_target_prefers_explicit_window_id() {
+        let mut windows = vec![
+            test_window(20, 1, "Safari", "Tab A"),
+            test_window(22, 2, "Calculator", "Calculator"),
+        ];
+        windows[0].frontmost = true;
+        let selected =
+            super::resolve_tokenize_window_target(&windows, Some("22:2")).expect("selected");
+        assert_eq!(selected.id, "22:2");
+        assert_eq!(selected.app, "Calculator");
+    }
+
+    #[test]
+    fn tokenize_target_defaults_to_frontmost_visible() {
+        let mut windows = vec![
+            test_window(20, 1, "Safari", "Tab A"),
+            test_window(22, 2, "Calculator", "Calculator"),
+        ];
+        windows[1].frontmost = true;
+        let selected =
+            super::resolve_tokenize_window_target(&windows, None).expect("selected frontmost");
+        assert_eq!(selected.id, "22:2");
     }
 
     #[test]
