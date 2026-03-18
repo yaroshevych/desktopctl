@@ -4,12 +4,12 @@ use desktop_core::protocol::Bounds;
 use image::{Rgba, RgbaImage};
 use serde_json::json;
 
-#[path = "../trace.rs"]
-mod trace;
 #[path = "../vision/ocr.rs"]
 mod ocr;
 #[path = "../vision/tokenize_boxes.rs"]
 mod tokenize_boxes;
+#[path = "../trace.rs"]
+mod trace;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -55,7 +55,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match ocr::recognize_text_from_image(&input, width, height) {
             Ok(texts) => texts,
             Err(err) => {
-                eprintln!("warn: OCR unavailable for {}: {}", input.display(), err.message);
+                eprintln!(
+                    "warn: OCR unavailable for {}: {}",
+                    input.display(),
+                    err.message
+                );
                 Vec::new()
             }
         }
@@ -63,8 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ocr_ms = t_ocr.elapsed().as_secs_f64() * 1000.0;
 
     let t_detect = std::time::Instant::now();
-    let boxes = tokenize_boxes::detect_ui_boxes(&image);
     let text_bounds: Vec<Bounds> = texts.iter().map(|t| t.bounds.clone()).collect();
+    let boxes = tokenize_boxes::detect_ui_boxes_with_text(&image, &text_bounds);
     let glyphs = tokenize_boxes::detect_glyphs(&image, &text_bounds);
     let detect_ms = t_detect.elapsed().as_secs_f64() * 1000.0;
 
@@ -170,7 +174,7 @@ fn build_elements_json(
             "id": format!("box_{:04}", idx + 1),
             "type": "box",
             "bbox": [bounds.x, bounds.y, bounds.width, bounds.height],
-            "source": "rust_edge_grid_v1"
+            "source": "rust_text_anchor_v2"
         }));
     }
     for (idx, bounds) in glyphs.iter().enumerate() {

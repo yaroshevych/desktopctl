@@ -77,11 +77,7 @@ fn iou(a: &Bounds, b: &Bounds) -> f64 {
         return 0.0;
     }
     let union = (a.width * a.height) + (b.width * b.height) - inter;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter / union
-    }
+    if union <= 0.0 { 0.0 } else { inter / union }
 }
 
 fn to_bounds(raw: [f64; 4]) -> Option<Bounds> {
@@ -101,7 +97,11 @@ fn to_bounds(raw: [f64; 4]) -> Option<Bounds> {
 #[test]
 fn manual_notes_label_fixtures_are_present_and_well_formed() {
     let root = labels_root();
-    assert!(root.exists(), "missing manual labels root: {}", root.display());
+    assert!(
+        root.exists(),
+        "missing manual labels root: {}",
+        root.display()
+    );
 
     let files = collect_label_files(&root);
     assert!(
@@ -120,7 +120,11 @@ fn manual_notes_label_fixtures_are_present_and_well_formed() {
                 .expect("label parent")
                 .join(&labels.image.path)
         };
-        assert!(image_path.exists(), "missing fixture image: {}", image_path.display());
+        assert!(
+            image_path.exists(),
+            "missing fixture image: {}",
+            image_path.display()
+        );
 
         let expected_boxes: Vec<&LabeledElement> = labels
             .windows
@@ -128,9 +132,20 @@ fn manual_notes_label_fixtures_are_present_and_well_formed() {
             .flat_map(|window| window.elements.iter())
             .filter(|element| element.kind == "box")
             .collect();
+        let expected_texts: Vec<&LabeledElement> = labels
+            .windows
+            .iter()
+            .flat_map(|window| window.elements.iter())
+            .filter(|element| element.kind == "text")
+            .collect();
         assert!(
             expected_boxes.len() >= 7,
             "expected >=7 manual boxes in {}",
+            label_path.display()
+        );
+        assert!(
+            expected_texts.len() >= 5,
+            "expected >=5 manual text seeds in {}",
             label_path.display()
         );
         assert!(
@@ -180,7 +195,19 @@ fn notes_manual_labels_have_sidebar_and_list_coverage() {
             .decode()
             .expect("decode fixture image")
             .to_rgba8();
-        let predicted = tokenize_boxes::detect_ui_boxes(&image);
+        let text_bounds: Vec<Bounds> = labels
+            .windows
+            .iter()
+            .flat_map(|window| window.elements.iter())
+            .filter(|element| element.kind == "text")
+            .filter_map(|element| to_bounds(element.bbox))
+            .collect();
+        assert!(
+            !text_bounds.is_empty(),
+            "expected text seeds in {}",
+            label_path.display()
+        );
+        let predicted = tokenize_boxes::detect_ui_boxes_with_text(&image, &text_bounds);
 
         let expected: Vec<&LabeledElement> = labels
             .windows
@@ -244,7 +271,19 @@ fn notes_manual_labels_have_sidebar_and_list_coverage() {
         list_total
     );
 
-    assert!(overall_recall >= 0.90, "overall notes recall too low: {:.3}", overall_recall);
-    assert!(sidebar_recall >= 0.90, "sidebar notes recall too low: {:.3}", sidebar_recall);
-    assert!(list_recall >= 0.90, "list notes recall too low: {:.3}", list_recall);
+    assert!(
+        overall_recall >= 0.90,
+        "overall notes recall too low: {:.3}",
+        overall_recall
+    );
+    assert!(
+        sidebar_recall >= 0.90,
+        "sidebar notes recall too low: {:.3}",
+        sidebar_recall
+    );
+    assert!(
+        list_recall >= 0.90,
+        "list notes recall too low: {:.3}",
+        list_recall
+    );
 }

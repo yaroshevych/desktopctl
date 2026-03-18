@@ -189,7 +189,11 @@ pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
 pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayload, AppError> {
     trace::log("pipeline:tokenize:window_mode");
     let capture = capture_and_update_active_window(None, window_meta.bounds.clone())?;
-    tokenize_from_snapshot(capture.snapshot, capture.image_path.as_path(), Some(window_meta))
+    tokenize_from_snapshot(
+        capture.snapshot,
+        capture.image_path.as_path(),
+        Some(window_meta),
+    )
 }
 
 pub fn tokenize_screenshot(
@@ -267,8 +271,12 @@ fn build_window_elements(
     let rgba = image.to_rgba8();
     let width = rgba.width();
     let height = rgba.height();
-    let box_bounds = super::tokenize_boxes::detect_ui_boxes(&rgba);
-    let text_bounds: Vec<Bounds> = snapshot.texts.iter().map(|text| text.bounds.clone()).collect();
+    let text_bounds: Vec<Bounds> = snapshot
+        .texts
+        .iter()
+        .map(|text| text.bounds.clone())
+        .collect();
+    let box_bounds = super::tokenize_boxes::detect_ui_boxes_with_text(&rgba, &text_bounds);
     let glyph_bounds = super::tokenize_boxes::detect_glyphs(&rgba, &text_bounds);
 
     let mut elements = Vec::new();
@@ -289,7 +297,7 @@ fn build_window_elements(
             bbox: bounds_to_bbox(bounds),
             text: None,
             confidence: None,
-            source: "rust_edge_grid_v1".to_string(),
+            source: "rust_text_anchor_v2".to_string(),
         });
     }
     for (idx, bounds) in glyph_bounds.iter().enumerate() {
@@ -361,7 +369,10 @@ pub fn token(n: u32) -> Result<Option<TokenEntry>, AppError> {
     with_state(|state| state.token(n))
 }
 
-pub fn write_tokenize_overlay(payload: &TokenizePayload, out_path: &std::path::Path) -> Result<(), AppError> {
+pub fn write_tokenize_overlay(
+    payload: &TokenizePayload,
+    out_path: &std::path::Path,
+) -> Result<(), AppError> {
     let image_meta = payload.image.as_ref().ok_or_else(|| {
         AppError::invalid_argument("token payload does not include image metadata")
     })?;
@@ -401,16 +412,23 @@ pub fn write_tokenize_overlay(payload: &TokenizePayload, out_path: &std::path::P
             ))
         })?;
     }
-    canvas.save_with_format(out_path, ImageFormat::Png).map_err(|err| {
-        AppError::backend_unavailable(format!(
-            "failed to write tokenize overlay {}: {err}",
-            out_path.display()
-        ))
-    })?;
+    canvas
+        .save_with_format(out_path, ImageFormat::Png)
+        .map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to write tokenize overlay {}: {err}",
+                out_path.display()
+            ))
+        })?;
     Ok(())
 }
 
-fn draw_bounds_outline(image: &mut image::RgbaImage, bounds: &Bounds, color: Rgba<u8>, thickness: u32) {
+fn draw_bounds_outline(
+    image: &mut image::RgbaImage,
+    bounds: &Bounds,
+    color: Rgba<u8>,
+    thickness: u32,
+) {
     if bounds.width <= 0.0 || bounds.height <= 0.0 {
         return;
     }
@@ -467,7 +485,9 @@ mod tests {
     };
     use image::{Rgba, RgbaImage};
 
-    use super::{TokenizeWindowMeta, build_window_elements, window_crop_rect, write_tokenize_overlay};
+    use super::{
+        TokenizeWindowMeta, build_window_elements, window_crop_rect, write_tokenize_overlay,
+    };
 
     #[test]
     fn window_crop_rect_scales_from_logical_to_pixels() {
@@ -543,8 +563,8 @@ mod tests {
                 height: 140.0,
             },
         };
-        let (meta, windows) =
-            build_window_elements(&snapshot, &image_path, Some(window_meta)).expect("build windows");
+        let (meta, windows) = build_window_elements(&snapshot, &image_path, Some(window_meta))
+            .expect("build windows");
         assert_eq!(meta.width, 220);
         assert_eq!(meta.height, 140);
         assert_eq!(windows.len(), 1);
@@ -607,8 +627,8 @@ mod tests {
                 height: 150.0,
             },
         };
-        let (_, run_a) =
-            build_window_elements(&snapshot, &image_path, Some(window_meta.clone())).expect("run a");
+        let (_, run_a) = build_window_elements(&snapshot, &image_path, Some(window_meta.clone()))
+            .expect("run a");
         let (_, run_b) =
             build_window_elements(&snapshot, &image_path, Some(window_meta)).expect("run b");
         let a = serde_json::to_value(&run_a).expect("json a");
@@ -674,7 +694,7 @@ mod tests {
                         bbox: [30.0, 34.0, 120.0, 56.0],
                         text: None,
                         confidence: None,
-                        source: "rust_edge_grid_v1".to_string(),
+                        source: "rust_text_anchor_v2".to_string(),
                     },
                 ],
             }],

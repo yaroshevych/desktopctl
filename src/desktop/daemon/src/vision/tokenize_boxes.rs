@@ -11,8 +11,47 @@ const GLYPH_MAX_SIZE_PX: f64 = 52.0;
 pub(crate) const GLYPH_IOU_TEXT_OVERLAP_MAX: f64 = 0.08;
 const GLYPH_DEDUPE_IOU: f64 = 0.72;
 const GLYPH_CAP: usize = 140;
+const TEXT_ANCHORED_BOX_CAP: usize = 220;
 
+#[allow(dead_code)]
 pub fn detect_ui_boxes(image: &RgbaImage) -> Vec<Bounds> {
+    detect_ui_boxes_with_text(image, &[])
+}
+
+pub fn detect_ui_boxes_with_text(image: &RgbaImage, text_bounds: &[Bounds]) -> Vec<Bounds> {
+    let raw = detect_ui_boxes_raw(image);
+    if text_bounds.is_empty() {
+        return raw;
+    }
+    let width = image.width() as f64;
+    let height = image.height() as f64;
+    let text_groups = group_text_bounds(text_bounds, width, height);
+    if text_groups.is_empty() {
+        return raw;
+    }
+    let mut anchored = text_groups
+        .iter()
+        .map(|group| local_text_box(group, width, height))
+        .collect::<Vec<_>>();
+    for group in &text_groups {
+        if let Some(candidate) = best_container_for_group(group, &raw, width, height) {
+            anchored.push(candidate);
+        }
+    }
+    anchored.extend(multi_text_panel_candidates(
+        &raw,
+        &text_groups,
+        width,
+        height,
+    ));
+    let mut deduped = dedupe_boxes(anchored, 0.84);
+    if deduped.len() > TEXT_ANCHORED_BOX_CAP {
+        deduped.truncate(TEXT_ANCHORED_BOX_CAP);
+    }
+    deduped
+}
+
+fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
     let width = image.width() as usize;
     let height = image.height() as usize;
     if width < 24 || height < 24 {
@@ -28,7 +67,12 @@ pub fn detect_ui_boxes(image: &RgbaImage) -> Vec<Bounds> {
     boxes.extend(grid_cell_boxes(&gray, width, height));
     let structural_panels = structural_panel_boxes(&gray, width, height);
     boxes.extend(structural_panels.iter().cloned());
-    boxes.extend(structural_row_boxes(&gray, width, height, &structural_panels));
+    boxes.extend(structural_row_boxes(
+        &gray,
+        width,
+        height,
+        &structural_panels,
+    ));
 
     let mut deduped = dedupe_boxes(boxes, 0.88);
     // Keep a broad candidate set for pseudo-label recall, but prevent runaway noise.
@@ -418,7 +462,8 @@ fn structural_panel_boxes(gray: &[u8], width: usize, height: usize) -> Vec<Bound
     let mut split_candidates: Vec<usize> = (0..width)
         .filter(|x| {
             let nx = *x as f64 / width as f64;
-            (0.06..0.94).contains(&nx) && v_edges[*x] >= ((height - toolbar_bottom) as f64 * 0.58) as usize
+            (0.06..0.94).contains(&nx)
+                && v_edges[*x] >= ((height - toolbar_bottom) as f64 * 0.58) as usize
         })
         .collect();
     split_candidates = compress_indices(&split_candidates, 5);
@@ -535,6 +580,223 @@ fn infer_toolbar_bottom(gray: &[u8], width: usize, height: usize) -> usize {
     best_y.clamp(40, height.saturating_sub(1))
 }
 
+fn group_text_bounds(text_bounds: &[Bounds], image_w: f64, image_h: f64) -> Vec<Bounds> {
+    let normalized: Vec<Bounds> = text_bounds
+        .iter()
+        .filter_map(|text| clamp_bounds(text, image_w, image_h))
+        .collect();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let n = normalized.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+
+    fn find(parent: &mut [usize], idx: usize) -> usize {
+        if parent[idx] != idx {
+            let root = find(parent, parent[idx]);
+            parent[idx] = root;
+        }
+        parent[idx]
+    }
+
+    fn union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if text_boxes_connected(&normalized[i], &normalized[j], image_w, image_h) {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+
+    let mut groups = std::collections::HashMap::<usize, Bounds>::new();
+    for (idx, item) in normalized.iter().enumerate() {
+        let root = find(&mut parent, idx);
+        groups
+            .entry(root)
+            .and_modify(|acc| *acc = union_bounds(acc, item))
+            .or_insert_with(|| item.clone());
+    }
+
+    let mut out: Vec<Bounds> = groups.into_values().collect();
+    out.retain(|group| group.width >= 2.0 && group.height >= 2.0);
+    out = dedupe_boxes(out, 0.92);
+    out
+}
+
+fn text_boxes_connected(a: &Bounds, b: &Bounds, image_w: f64, image_h: f64) -> bool {
+    let pad_a = (a.height * 0.50).clamp(2.0, 14.0);
+    let pad_b = (b.height * 0.50).clamp(2.0, 14.0);
+    let ea = expand_bounds(a, pad_a, pad_a, image_w, image_h);
+    let eb = expand_bounds(b, pad_b, pad_b, image_w, image_h);
+    rect_intersects(&ea, &eb)
+}
+
+fn local_text_box(group: &Bounds, image_w: f64, image_h: f64) -> Bounds {
+    let pad_x = (group.height * 0.70).clamp(4.0, 20.0);
+    let pad_y = (group.height * 0.45).clamp(3.0, 16.0);
+    expand_bounds(group, pad_x, pad_y, image_w, image_h)
+}
+
+fn best_container_for_group(
+    group: &Bounds,
+    candidates: &[Bounds],
+    image_w: f64,
+    image_h: f64,
+) -> Option<Bounds> {
+    let group_area = (group.width * group.height).max(1.0);
+    let expansion_cap = (group.height * 1.10).clamp(8.0, 20.0);
+    let mut best: Option<(f64, Bounds)> = None;
+
+    for candidate in candidates {
+        if candidate.width < 2.0 || candidate.height < 2.0 {
+            continue;
+        }
+        if !rect_contains(candidate, group, 1.0) {
+            continue;
+        }
+        let left = (group.x - candidate.x).max(0.0);
+        let right = ((candidate.x + candidate.width) - (group.x + group.width)).max(0.0);
+        let top = (group.y - candidate.y).max(0.0);
+        let bottom = ((candidate.y + candidate.height) - (group.y + group.height)).max(0.0);
+        let max_side = left.max(right).max(top).max(bottom);
+        let row_like = is_row_like(candidate, group, image_w);
+        let panel_like = is_panel_like(candidate, group, image_w, image_h);
+        if max_side > expansion_cap && !row_like && !panel_like {
+            continue;
+        }
+        let extra_area = (candidate.width * candidate.height) / group_area;
+        let mean_expand = (left + right + top + bottom) / 4.0;
+        let mut score = extra_area + (mean_expand / expansion_cap).min(4.0);
+        // Row/panel relaxers allow candidates beyond strict expansion caps,
+        // but we still mildly penalize broad structural regions to prefer tighter control boxes.
+        if row_like {
+            score += 0.30;
+        }
+        if panel_like {
+            score += 0.80;
+        }
+        match &best {
+            Some((best_score, _)) if *best_score <= score => {}
+            _ => best = Some((score, candidate.clone())),
+        }
+    }
+    best.map(|(_, candidate)| candidate)
+}
+
+fn multi_text_panel_candidates(
+    candidates: &[Bounds],
+    groups: &[Bounds],
+    image_w: f64,
+    image_h: f64,
+) -> Vec<Bounds> {
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if candidate.width <= image_w * 0.52
+            && candidate.height >= image_h * 0.20
+            && candidate.height <= image_h * 0.98
+        {
+            let covered = groups
+                .iter()
+                .filter(|group| {
+                    let cx = group.x + group.width / 2.0;
+                    let cy = group.y + group.height / 2.0;
+                    point_in_bounds(candidate, cx, cy)
+                })
+                .count();
+            if covered >= 3 {
+                out.push(candidate.clone());
+            }
+        }
+    }
+    out
+}
+
+fn is_row_like(candidate: &Bounds, group: &Bounds, image_w: f64) -> bool {
+    let gh = group.height.max(1.0);
+    candidate.height >= gh * 1.3
+        && candidate.height <= gh * 6.2
+        && candidate.width >= group.width * 1.4
+        && candidate.width <= image_w * 0.68
+        && candidate.height <= 140.0
+}
+
+fn is_panel_like(candidate: &Bounds, group: &Bounds, image_w: f64, image_h: f64) -> bool {
+    candidate.width >= group.width * 1.2
+        && candidate.width <= image_w * 0.48
+        && candidate.height >= image_h * 0.20
+        && candidate.height <= image_h * 0.96
+}
+
+fn union_bounds(a: &Bounds, b: &Bounds) -> Bounds {
+    let x1 = a.x.min(b.x);
+    let y1 = a.y.min(b.y);
+    let x2 = (a.x + a.width).max(b.x + b.width);
+    let y2 = (a.y + a.height).max(b.y + b.height);
+    Bounds {
+        x: x1,
+        y: y1,
+        width: (x2 - x1).max(0.0),
+        height: (y2 - y1).max(0.0),
+    }
+}
+
+fn expand_bounds(bounds: &Bounds, pad_x: f64, pad_y: f64, image_w: f64, image_h: f64) -> Bounds {
+    let x1 = (bounds.x - pad_x).clamp(0.0, image_w.max(1.0));
+    let y1 = (bounds.y - pad_y).clamp(0.0, image_h.max(1.0));
+    let x2 = (bounds.x + bounds.width + pad_x).clamp(0.0, image_w.max(1.0));
+    let y2 = (bounds.y + bounds.height + pad_y).clamp(0.0, image_h.max(1.0));
+    Bounds {
+        x: x1,
+        y: y1,
+        width: (x2 - x1).max(0.0),
+        height: (y2 - y1).max(0.0),
+    }
+}
+
+fn clamp_bounds(bounds: &Bounds, image_w: f64, image_h: f64) -> Option<Bounds> {
+    let x1 = bounds.x.clamp(0.0, image_w.max(1.0));
+    let y1 = bounds.y.clamp(0.0, image_h.max(1.0));
+    let x2 = (bounds.x + bounds.width).clamp(0.0, image_w.max(1.0));
+    let y2 = (bounds.y + bounds.height).clamp(0.0, image_h.max(1.0));
+    let width = (x2 - x1).max(0.0);
+    let height = (y2 - y1).max(0.0);
+    if width < 2.0 || height < 2.0 {
+        return None;
+    }
+    Some(Bounds {
+        x: x1,
+        y: y1,
+        width,
+        height,
+    })
+}
+
+fn rect_contains(outer: &Bounds, inner: &Bounds, tolerance: f64) -> bool {
+    outer.x <= inner.x + tolerance
+        && outer.y <= inner.y + tolerance
+        && outer.x + outer.width >= inner.x + inner.width - tolerance
+        && outer.y + outer.height >= inner.y + inner.height - tolerance
+}
+
+fn rect_intersects(a: &Bounds, b: &Bounds) -> bool {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    ax2 >= b.x && bx2 >= a.x && ay2 >= b.y && by2 >= a.y
+}
+
+fn point_in_bounds(bounds: &Bounds, x: f64, y: f64) -> bool {
+    x >= bounds.x && x <= bounds.x + bounds.width && y >= bounds.y && y <= bounds.y + bounds.height
+}
+
 fn iou(a: &Bounds, b: &Bounds) -> f64 {
     let ax2 = a.x + a.width;
     let ay2 = a.y + a.height;
@@ -597,4 +859,86 @@ fn inside_text_padding(candidate: &Bounds, texts: &[Bounds], padding: f64) -> bo
             && cy >= text.y - padding
             && cy <= text.y + text.height + padding
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_text_bounds_merges_close_lines_only() {
+        let text = vec![
+            Bounds {
+                x: 100.0,
+                y: 100.0,
+                width: 80.0,
+                height: 16.0,
+            },
+            Bounds {
+                x: 184.0,
+                y: 101.0,
+                width: 64.0,
+                height: 16.0,
+            },
+            Bounds {
+                x: 102.0,
+                y: 170.0,
+                width: 92.0,
+                height: 16.0,
+            },
+        ];
+        let groups = group_text_bounds(&text, 800.0, 600.0);
+        assert_eq!(
+            groups.len(),
+            2,
+            "first line should merge, distant line separate"
+        );
+    }
+
+    #[test]
+    fn best_container_prefers_row_over_large_panel() {
+        let group = Bounds {
+            x: 120.0,
+            y: 220.0,
+            width: 90.0,
+            height: 18.0,
+        };
+        let row_candidate = Bounds {
+            x: 92.0,
+            y: 205.0,
+            width: 320.0,
+            height: 52.0,
+        };
+        let panel_candidate = Bounds {
+            x: 0.0,
+            y: 100.0,
+            width: 430.0,
+            height: 520.0,
+        };
+        let chosen = best_container_for_group(
+            &group,
+            &[panel_candidate.clone(), row_candidate.clone()],
+            1200.0,
+            900.0,
+        )
+        .expect("expected a candidate");
+        assert!(
+            iou(&chosen, &row_candidate) > 0.80,
+            "row candidate should win over broad panel candidate"
+        );
+    }
+
+    #[test]
+    fn local_text_box_respects_image_bounds() {
+        let group = Bounds {
+            x: 4.0,
+            y: 5.0,
+            width: 20.0,
+            height: 12.0,
+        };
+        let local = local_text_box(&group, 40.0, 30.0);
+        assert!(local.x >= 0.0 && local.y >= 0.0);
+        assert!(local.x + local.width <= 40.0);
+        assert!(local.y + local.height <= 30.0);
+    }
 }
