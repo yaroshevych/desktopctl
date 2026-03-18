@@ -53,12 +53,27 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
     daemon::start_background(daemon::DaemonConfig::resident())?;
 
     let menu = Menu::new();
+    let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
     let quit = MenuItem::new("Exit", true, None);
+    menu.append(&toggle_overlay)
+        .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
     menu.append(&quit)
         .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
 
+    let toggle_overlay_id = toggle_overlay.id().clone();
     let quit_id = quit.id().clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if event.id == toggle_overlay_id {
+            let result = if overlay::is_active() {
+                overlay::stop_overlay()
+            } else {
+                overlay::start_overlay()
+            };
+            if let Err(err) = result {
+                eprintln!("overlay toggle failed: {err}");
+            }
+            return;
+        }
         if event.id == quit_id {
             std::process::exit(0);
         }

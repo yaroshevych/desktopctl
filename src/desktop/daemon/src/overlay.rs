@@ -51,6 +51,10 @@ thread_local! {
 
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+pub fn is_active() -> bool {
+    OVERLAY_ACTIVE.load(Ordering::SeqCst)
+}
+
 pub fn start_overlay() -> Result<bool, AppError> {
     if OVERLAY_ACTIVE
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
