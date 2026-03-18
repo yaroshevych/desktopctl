@@ -64,13 +64,20 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
     let quit_id = quit.id().clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == toggle_overlay_id {
+            trace::log("menubar:toggle_overlay click");
             let result = if overlay::is_active() {
                 overlay::stop_overlay()
             } else {
                 overlay::start_overlay()
             };
             if let Err(err) = result {
+                trace::log(format!("menubar:toggle_overlay err {err}"));
                 eprintln!("overlay toggle failed: {err}");
+            } else {
+                trace::log(format!(
+                    "menubar:toggle_overlay ok active={}",
+                    overlay::is_active()
+                ));
             }
             return;
         }

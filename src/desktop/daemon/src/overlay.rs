@@ -19,6 +19,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
+use crate::trace;
+
 const MAX_OVERLAY_RECTS: usize = 900;
 
 #[derive(Debug, Clone)]
@@ -60,12 +62,16 @@ pub fn start_overlay() -> Result<bool, AppError> {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        trace::log("overlay:start already_active");
         return Ok(false);
     }
+    trace::log("overlay:start requested");
     if let Err(err) = run_on_main_sync(start_overlay_on_main) {
         OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
+        trace::log(format!("overlay:start failed {err}"));
         return Err(err);
     }
+    trace::log("overlay:start ok");
     Ok(true)
 }
 
@@ -74,9 +80,12 @@ pub fn stop_overlay() -> Result<bool, AppError> {
         .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        trace::log("overlay:stop already_stopped");
         return Ok(false);
     }
+    trace::log("overlay:stop requested");
     run_on_main_sync(stop_overlay_on_main)?;
+    trace::log("overlay:stop ok");
     Ok(true)
 }
 
@@ -271,10 +280,9 @@ fn run_on_main_sync<F>(job: F) -> Result<(), AppError>
 where
     F: FnOnce() -> Result<(), String> + Send + 'static,
 {
-    debug_assert!(
-        MainThreadMarker::new().is_none(),
-        "run_on_main_sync must not be invoked from the main thread"
-    );
+    if MainThreadMarker::new().is_some() {
+        return job().map_err(AppError::backend_unavailable);
+    }
     let (tx, rx) = mpsc::sync_channel(1);
     dispatch_main(move || {
         let _ = tx.send(job());
