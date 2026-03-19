@@ -676,11 +676,47 @@ fn group_text_bounds(text_bounds: &[Bounds], image_w: f64, image_h: f64) -> Vec<
 }
 
 fn text_boxes_connected(a: &Bounds, b: &Bounds, image_w: f64, image_h: f64) -> bool {
-    let pad_a = (a.height * 0.50).clamp(2.0, 14.0);
-    let pad_b = (b.height * 0.50).clamp(2.0, 14.0);
+    let min_h = a.height.min(b.height).max(1.0);
+    let min_w = a.width.min(b.width).max(1.0);
+    let vertical_overlap = overlap_1d(a.y, a.y + a.height, b.y, b.y + b.height);
+    let horizontal_overlap = overlap_1d(a.x, a.x + a.width, b.x, b.x + b.width);
+    let vertical_overlap_ratio = vertical_overlap / min_h;
+    let horizontal_overlap_ratio = horizontal_overlap / min_w;
+    let horizontal_gap = axis_gap(a.x, a.x + a.width, b.x, b.x + b.width);
+    let vertical_gap = axis_gap(a.y, a.y + a.height, b.y, b.y + b.height);
+
+    // Word-level grouping on the same baseline.
+    let same_line_gap = (min_h * 2.4).clamp(10.0, 72.0);
+    if vertical_overlap_ratio >= 0.45 && horizontal_gap <= same_line_gap {
+        return true;
+    }
+
+    // Paragraph-level grouping across nearby lines.
+    let multiline_gap = (min_h * 1.8).clamp(8.0, 42.0);
+    if horizontal_overlap_ratio >= 0.35 && vertical_gap <= multiline_gap {
+        return true;
+    }
+
+    // Small geometric fallback for near-miss OCR boxes.
+    let pad_a = (a.height * 0.80).clamp(3.0, 20.0);
+    let pad_b = (b.height * 0.80).clamp(3.0, 20.0);
     let ea = expand_bounds(a, pad_a, pad_a, image_w, image_h);
     let eb = expand_bounds(b, pad_b, pad_b, image_w, image_h);
     rect_intersects(&ea, &eb)
+}
+
+fn overlap_1d(a1: f64, a2: f64, b1: f64, b2: f64) -> f64 {
+    (a2.min(b2) - a1.max(b1)).max(0.0)
+}
+
+fn axis_gap(a1: f64, a2: f64, b1: f64, b2: f64) -> f64 {
+    if a2 < b1 {
+        b1 - a2
+    } else if b2 < a1 {
+        a1 - b2
+    } else {
+        0.0
+    }
 }
 
 fn local_text_box(group: &Bounds, image_w: f64, image_h: f64) -> Bounds {
@@ -1162,6 +1198,60 @@ mod tests {
             2,
             "first line should merge, distant line separate"
         );
+    }
+
+    #[test]
+    fn group_text_bounds_merges_word_boxes_into_phrase() {
+        let text = vec![
+            Bounds {
+                x: 40.0,
+                y: 48.0,
+                width: 56.0,
+                height: 18.0,
+            },
+            Bounds {
+                x: 122.0,
+                y: 49.0,
+                width: 72.0,
+                height: 18.0,
+            },
+            Bounds {
+                x: 220.0,
+                y: 47.0,
+                width: 65.0,
+                height: 19.0,
+            },
+        ];
+        let groups = group_text_bounds(&text, 640.0, 240.0);
+        assert_eq!(groups.len(), 1, "same-line words should merge into one phrase");
+        let merged = &groups[0];
+        assert!(merged.width >= 240.0, "merged phrase should span all words");
+    }
+
+    #[test]
+    fn group_text_bounds_merges_multiline_paragraph_blocks() {
+        let text = vec![
+            Bounds {
+                x: 60.0,
+                y: 90.0,
+                width: 220.0,
+                height: 20.0,
+            },
+            Bounds {
+                x: 68.0,
+                y: 123.0,
+                width: 240.0,
+                height: 21.0,
+            },
+            Bounds {
+                x: 420.0,
+                y: 40.0,
+                width: 80.0,
+                height: 18.0,
+            },
+        ];
+        let groups = group_text_bounds(&text, 900.0, 500.0);
+        assert_eq!(groups.len(), 2, "paragraph lines should merge; distant label separate");
     }
 
     #[test]
