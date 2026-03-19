@@ -1658,7 +1658,7 @@ fn parse_window_line(line: &str) -> Option<WindowInfo> {
 
 fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
     let script = r#"tell application "System Events"
-set outLines to {}
+set resultRows to {}
 repeat with p in (application processes whose background only is false)
     set pname to (name of p) as text
     set pfront to (frontmost of p) as string
@@ -1679,12 +1679,12 @@ repeat with p in (application processes whose background only is false)
             set wy to item 2 of winPos
             set ww to item 1 of winSize
             set wh to item 2 of winSize
-            set end of outLines to (ppid as string) & tab & (widx as string) & tab & pname & tab & wname & tab & (wx as string) & tab & (wy as string) & tab & (ww as string) & tab & (wh as string) & tab & pfront & tab & pvisible
+            set end of resultRows to (ppid as string) & tab & (widx as string) & tab & pname & tab & wname & tab & (wx as string) & tab & (wy as string) & tab & (ww as string) & tab & (wh as string) & tab & pfront & tab & pvisible
         end try
     end repeat
 end repeat
 set AppleScript's text item delimiters to linefeed
-set outputText to outLines as text
+set outputText to resultRows as text
 set AppleScript's text item delimiters to ""
 return outputText
 end tell"#;
