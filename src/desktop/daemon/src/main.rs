@@ -9,6 +9,26 @@ mod trace;
 mod vision;
 
 #[cfg(target_os = "macos")]
+use std::{
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    thread,
+    time::Duration,
+};
+
+#[cfg(target_os = "macos")]
+use desktop_core::{
+    ipc,
+    protocol::{Command, RequestEnvelope, ResponseEnvelope, now_millis},
+};
+
+#[cfg(target_os = "macos")]
+const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
+#[cfg(target_os = "macos")]
+static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static OVERLAY_LIVE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "macos")]
 fn main() {
     if let Err(err) = run_macos_app() {
         eprintln!("error: {err}");
@@ -66,9 +86,17 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
         if event.id == toggle_overlay_id {
             trace::log("menubar:toggle_overlay click");
             let result = if overlay::is_active() {
-                overlay::stop_overlay()
+                let result = overlay::stop_overlay();
+                if result.is_ok() {
+                    stop_overlay_live_loop();
+                }
+                result
             } else {
-                overlay::start_overlay()
+                let result = overlay::start_overlay();
+                if result.is_ok() {
+                    start_overlay_live_loop();
+                }
+                result
             };
             if let Err(err) = result {
                 trace::log(format!("menubar:toggle_overlay err {err}"));
@@ -123,4 +151,68 @@ fn default_icon() -> Result<tray_icon::Icon, desktop_core::error::AppError> {
 
     tray_icon::Icon::from_rgba(rgba, width, height)
         .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn start_overlay_live_loop() {
+    if OVERLAY_LIVE_ENABLED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        trace::log("overlay:live_loop already_running");
+        return;
+    }
+    trace::log("overlay:live_loop start");
+    thread::spawn(|| {
+        let mut consecutive_errors: usize = 0;
+        while OVERLAY_LIVE_ENABLED.load(Ordering::SeqCst) {
+            let request_id = format!(
+                "overlay-live-{}-{}",
+                now_millis(),
+                OVERLAY_LIVE_SEQ.fetch_add(1, Ordering::SeqCst)
+            );
+            let request = RequestEnvelope::new(
+                request_id,
+                Command::ScreenTokenize {
+                    overlay_out_path: None,
+                    window_id: None,
+                    screenshot_path: None,
+                },
+            );
+            match ipc::send_request(&request) {
+                Ok(ResponseEnvelope::Success(_)) => {
+                    if consecutive_errors > 0 {
+                        trace::log("overlay:live_loop recovered");
+                        consecutive_errors = 0;
+                    }
+                }
+                Ok(ResponseEnvelope::Error(err)) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors == 1 || consecutive_errors % 25 == 0 {
+                        trace::log(format!(
+                            "overlay:live_loop tick_error code={:?} msg={}",
+                            err.error.code, err.error.message
+                        ));
+                    }
+                }
+                Err(err) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors == 1 || consecutive_errors % 25 == 0 {
+                        trace::log(format!("overlay:live_loop ipc_error {err}"));
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(OVERLAY_LIVE_INTERVAL_MS));
+        }
+        trace::log("overlay:live_loop stop");
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn stop_overlay_live_loop() {
+    if OVERLAY_LIVE_ENABLED.swap(false, Ordering::SeqCst) {
+        trace::log("overlay:live_loop stop_requested");
+    } else {
+        trace::log("overlay:live_loop already_stopped");
+    }
 }
