@@ -7,11 +7,12 @@ const GLYPH_MIN_AREA: usize = 24;
 const GLYPH_MAX_AREA: usize = 1800;
 const GLYPH_MIN_ASPECT: f64 = 0.2;
 const GLYPH_MAX_ASPECT: f64 = 5.0;
-const GLYPH_MAX_SIZE_PX: f64 = 52.0;
+const GLYPH_MAX_SIZE_PX: f64 = 44.0;
 pub(crate) const GLYPH_IOU_TEXT_OVERLAP_MAX: f64 = 0.08;
 const GLYPH_DEDUPE_IOU: f64 = 0.72;
 const GLYPH_CAP: usize = 140;
 const TEXT_ANCHORED_BOX_CAP: usize = 220;
+const RAW_BOX_CAP: usize = 180;
 // Sparse/noisy OCR seeds frequently degrade text-anchored boxes on icon-heavy UIs
 // (e.g. Calculator/Music toolbar), so fall back to raw geometry when below this count.
 const TEXT_SEED_MIN_COUNT: usize = 4;
@@ -53,7 +54,14 @@ pub fn detect_ui_boxes_with_text(image: &RgbaImage, text_bounds: &[Bounds]) -> V
         width,
         height,
     ));
+    anchored.extend(aligned_list_candidates(
+        &text_groups,
+        &raw,
+        width,
+        height,
+    ));
     let mut deduped = dedupe_boxes(anchored, 0.84);
+    deduped = prune_nested_glitch_boxes(deduped);
     if deduped.len() > TEXT_ANCHORED_BOX_CAP {
         deduped.truncate(TEXT_ANCHORED_BOX_CAP);
     }
@@ -104,10 +112,11 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
         &structural_panels,
     ));
 
-    let mut deduped = dedupe_boxes(boxes, 0.88);
+    let mut deduped = dedupe_boxes(boxes, 0.86);
+    deduped = prune_nested_glitch_boxes(deduped);
     // Keep a broad candidate set for pseudo-label recall, but prevent runaway noise.
-    if deduped.len() > 320 {
-        deduped.truncate(320);
+    if deduped.len() > RAW_BOX_CAP {
+        deduped.truncate(RAW_BOX_CAP);
     }
     deduped
 }
@@ -131,6 +140,10 @@ pub fn detect_glyphs(image: &RgbaImage, text_bounds: &[Bounds]) -> Vec<Bounds> {
             mask[i] = gray[i] >= 164;
         }
     }
+    // Opening pass suppresses isolated JPEG-like speckles before CC extraction.
+    let mask = erode_rect(&mask, width, height, 1, 1);
+    let mask = dilate_rect(&mask, width, height, 1, 1);
+    // Mild closing keeps icon strokes connected after opening.
     let mask = dilate_rect(&mask, width, height, 1, 1);
     let mask = erode_rect(&mask, width, height, 1, 1);
     let mut glyphs = connected_component_boxes(
@@ -149,6 +162,8 @@ pub fn detect_glyphs(image: &RgbaImage, text_bounds: &[Bounds]) -> Vec<Bounds> {
             && glyph.height <= GLYPH_MAX_SIZE_PX
             && !overlaps_text(glyph, text_bounds)
             && !inside_text_padding(glyph, text_bounds, 2.0)
+            && near_text(glyph, text_bounds)
+            && mask_fill_density(&mask, width, glyph) >= 0.16
     });
     let mut deduped = dedupe_boxes(glyphs, GLYPH_DEDUPE_IOU);
     if deduped.len() > GLYPH_CAP {
@@ -748,6 +763,145 @@ fn multi_text_panel_candidates(
     out
 }
 
+fn aligned_list_candidates(
+    groups: &[Bounds],
+    candidates: &[Bounds],
+    image_w: f64,
+    image_h: f64,
+) -> Vec<Bounds> {
+    if groups.len() < 4 {
+        return Vec::new();
+    }
+    let mut rows: Vec<Bounds> = groups
+        .iter()
+        .filter(|g| g.width >= 8.0 && g.height >= 8.0)
+        .cloned()
+        .collect();
+    if rows.len() < 4 {
+        return Vec::new();
+    }
+    rows.sort_by(|a, b| {
+        a.x.partial_cmp(&b.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let avg_h = rows.iter().map(|r| r.height).sum::<f64>() / rows.len() as f64;
+    let left_tol = (avg_h * 0.9).clamp(8.0, 24.0);
+    let mut clusters: Vec<Vec<Bounds>> = Vec::new();
+    for row in rows {
+        if let Some(cluster) = clusters.iter_mut().find(|cluster| {
+            let cx = cluster.iter().map(|r| r.x).sum::<f64>() / cluster.len() as f64;
+            (row.x - cx).abs() <= left_tol
+        }) {
+            cluster.push(row);
+        } else {
+            clusters.push(vec![row]);
+        }
+    }
+
+    let mut out = Vec::new();
+    for mut cluster in clusters {
+        if cluster.len() < 4 {
+            continue;
+        }
+        cluster.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+
+        let min_left = cluster.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
+        let max_left = cluster
+            .iter()
+            .map(|r| r.x)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if (max_left - min_left) > left_tol * 1.2 {
+            continue;
+        }
+
+        let centers: Vec<f64> = cluster.iter().map(|r| r.y + (r.height / 2.0)).collect();
+        let gaps: Vec<f64> = centers.windows(2).map(|w| (w[1] - w[0]).max(0.0)).collect();
+        if gaps.len() < 3 {
+            continue;
+        }
+        let mean_gap = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        if mean_gap <= 2.0 {
+            continue;
+        }
+        let var_gap = gaps
+            .iter()
+            .map(|g| {
+                let d = *g - mean_gap;
+                d * d
+            })
+            .sum::<f64>()
+            / gaps.len() as f64;
+        let std_gap = var_gap.sqrt();
+        let cv_gap = std_gap / mean_gap.max(1.0);
+        let min_gap = gaps.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_gap = gaps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if cv_gap > 0.42 || min_gap < mean_gap * 0.34 || max_gap > mean_gap * 1.85 {
+            continue;
+        }
+
+        let list_union = cluster
+            .iter()
+            .skip(1)
+            .fold(cluster[0].clone(), |acc, row| union_bounds(&acc, row));
+        let span_h = list_union.height;
+        if span_h < avg_h * 2.5 {
+            continue;
+        }
+        let padded = expand_bounds(
+            &list_union,
+            (avg_h * 1.2).clamp(6.0, 26.0),
+            (avg_h * 0.9).clamp(4.0, 20.0),
+            image_w,
+            image_h,
+        );
+        if let Some(best) = best_list_container(&padded, &cluster, candidates, image_w) {
+            out.push(best);
+        } else {
+            out.push(padded);
+        }
+    }
+    dedupe_boxes(out, 0.88)
+}
+
+fn best_list_container(
+    list_bounds: &Bounds,
+    rows: &[Bounds],
+    candidates: &[Bounds],
+    image_w: f64,
+) -> Option<Bounds> {
+    let mut best: Option<(f64, Bounds)> = None;
+    for candidate in candidates {
+        if candidate.width < 2.0 || candidate.height < 2.0 {
+            continue;
+        }
+        if candidate.width > image_w * 0.75 {
+            continue;
+        }
+        if !rect_contains(candidate, list_bounds, 1.0) {
+            continue;
+        }
+        let covered = rows
+            .iter()
+            .filter(|row| {
+                let cx = row.x + (row.width / 2.0);
+                let cy = row.y + (row.height / 2.0);
+                point_in_bounds(candidate, cx, cy)
+            })
+            .count();
+        if covered < rows.len().saturating_sub(1) {
+            continue;
+        }
+        let area = (candidate.width * candidate.height).max(1.0);
+        match &best {
+            Some((best_area, _)) if *best_area <= area => {}
+            _ => best = Some((area, candidate.clone())),
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
 fn is_row_like(candidate: &Bounds, group: &Bounds, image_w: f64) -> bool {
     let gh = group.height.max(1.0);
     candidate.height >= gh * 1.3
@@ -873,6 +1027,47 @@ fn dedupe_boxes(mut boxes: Vec<Bounds>, iou_threshold: f64) -> Vec<Bounds> {
     kept
 }
 
+fn prune_nested_glitch_boxes(mut boxes: Vec<Bounds>) -> Vec<Bounds> {
+    boxes.sort_by(|a, b| {
+        let aa = a.width * a.height;
+        let bb = b.width * b.height;
+        aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut kept: Vec<Bounds> = Vec::new();
+    'next: for candidate in boxes {
+        for existing in &kept {
+            if is_immediately_nested(existing, &candidate) {
+                continue 'next;
+            }
+        }
+        kept.push(candidate);
+    }
+    kept.sort_by(|a, b| {
+        a.y.partial_cmp(&b.y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    kept
+}
+
+fn is_immediately_nested(inner: &Bounds, outer: &Bounds) -> bool {
+    if !rect_contains(outer, inner, 1.0) {
+        return false;
+    }
+    let inner_area = (inner.width * inner.height).max(1.0);
+    let outer_area = (outer.width * outer.height).max(1.0);
+    let ratio = inner_area / outer_area;
+    if ratio < 0.70 {
+        return false;
+    }
+    let left = (inner.x - outer.x).max(0.0);
+    let right = ((outer.x + outer.width) - (inner.x + inner.width)).max(0.0);
+    let top = (inner.y - outer.y).max(0.0);
+    let bottom = ((outer.y + outer.height) - (inner.y + inner.height)).max(0.0);
+    let max_gap = left.max(right).max(top).max(bottom);
+    max_gap <= (inner.height * 0.95).clamp(8.0, 26.0)
+}
+
 fn overlaps_text(candidate: &Bounds, texts: &[Bounds]) -> bool {
     texts
         .iter()
@@ -889,6 +1084,50 @@ fn inside_text_padding(candidate: &Bounds, texts: &[Bounds], padding: f64) -> bo
             && cy >= text.y - padding
             && cy <= text.y + text.height + padding
     })
+}
+
+fn near_text(candidate: &Bounds, texts: &[Bounds]) -> bool {
+    if texts.is_empty() {
+        return false;
+    }
+    let cx = candidate.x + (candidate.width / 2.0);
+    let cy = candidate.y + (candidate.height / 2.0);
+    texts.iter().any(|text| {
+        let margin = (text.height * 2.4).clamp(18.0, 120.0);
+        let x1 = text.x - margin;
+        let y1 = text.y - margin;
+        let x2 = text.x + text.width + margin;
+        let y2 = text.y + text.height + margin;
+        cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2
+    })
+}
+
+fn mask_fill_density(mask: &[bool], width: usize, bounds: &Bounds) -> f64 {
+    if width == 0 {
+        return 0.0;
+    }
+    let height = mask.len() / width;
+    if height == 0 {
+        return 0.0;
+    }
+    let x1 = bounds.x.floor().max(0.0) as usize;
+    let y1 = bounds.y.floor().max(0.0) as usize;
+    let x2 = (bounds.x + bounds.width).ceil().min(width as f64) as usize;
+    let y2 = (bounds.y + bounds.height).ceil().min(height as f64) as usize;
+    if x2 <= x1 || y2 <= y1 {
+        return 0.0;
+    }
+    let mut on = 0usize;
+    for y in y1..y2 {
+        let row = y * width;
+        for x in x1..x2 {
+            if mask[row + x] {
+                on += 1;
+            }
+        }
+    }
+    let area = (x2 - x1) * (y2 - y1);
+    on as f64 / area.max(1) as f64
 }
 
 #[cfg(test)]
@@ -970,6 +1209,68 @@ mod tests {
         assert!(local.x >= 0.0 && local.y >= 0.0);
         assert!(local.x + local.width <= 40.0);
         assert!(local.y + local.height <= 30.0);
+    }
+
+    #[test]
+    fn aligned_list_candidates_detect_uniform_left_aligned_rows() {
+        let groups = vec![
+            Bounds {
+                x: 72.0,
+                y: 120.0,
+                width: 120.0,
+                height: 20.0,
+            },
+            Bounds {
+                x: 74.0,
+                y: 168.0,
+                width: 132.0,
+                height: 19.0,
+            },
+            Bounds {
+                x: 71.0,
+                y: 216.0,
+                width: 125.0,
+                height: 20.0,
+            },
+            Bounds {
+                x: 73.0,
+                y: 264.0,
+                width: 136.0,
+                height: 19.0,
+            },
+        ];
+        let list = aligned_list_candidates(&groups, &[], 1280.0, 800.0);
+        assert!(!list.is_empty(), "expected aligned list container candidate");
+        let union = groups
+            .iter()
+            .skip(1)
+            .fold(groups[0].clone(), |acc, row| super::union_bounds(&acc, row));
+        assert!(
+            list.iter().any(|candidate| super::rect_contains(candidate, &union, 3.0)),
+            "at least one list candidate should contain grouped rows"
+        );
+    }
+
+    #[test]
+    fn prune_nested_glitch_boxes_discards_immediate_outer_duplicate() {
+        let inner = Bounds {
+            x: 102.0,
+            y: 84.0,
+            width: 280.0,
+            height: 88.0,
+        };
+        let outer = Bounds {
+            x: 94.0,
+            y: 76.0,
+            width: 296.0,
+            height: 104.0,
+        };
+        let kept = prune_nested_glitch_boxes(vec![outer.clone(), inner.clone()]);
+        assert_eq!(kept.len(), 1, "expected one nested glitch box to be dropped");
+        assert!(
+            iou(&kept[0], &inner) > 0.95,
+            "smaller inner container should be retained"
+        );
     }
 
     #[test]

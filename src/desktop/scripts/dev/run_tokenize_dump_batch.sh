@@ -77,7 +77,13 @@ for img in "${IMAGES[@]}"; do
   fi
 
   echo "--- $rel" | tee -a "$LOG_FILE"
-  if summary="$($BIN --input "$img" --json "$out_json" --overlay "$out_overlay" "${extra_args[@]}" --timings 2>>"$LOG_FILE")"; then
+  cmd=("$BIN" --input "$img" --json "$out_json" --overlay "$out_overlay")
+  if [[ ${#extra_args[@]} -gt 0 ]]; then
+    cmd+=("${extra_args[@]}")
+  fi
+  cmd+=(--timings)
+
+  if summary="$("${cmd[@]}" 2>>"$LOG_FILE")"; then
     echo "$summary" | tee -a "$LOG_FILE"
   else
     failures=$((failures + 1))
