@@ -9,7 +9,7 @@ use std::{
 
 use desktop_core::{
     error::AppError,
-    protocol::{TokenizePayload, TokenizeWindow},
+    protocol::{TokenEntry, TokenizePayload, TokenizeWindow},
 };
 use dispatch2::DispatchQueue;
 use objc2::{MainThreadMarker, MainThreadOnly, msg_send, rc::Retained};
@@ -22,6 +22,8 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 use crate::trace;
 
 const MAX_OVERLAY_RECTS: usize = 900;
+const PROBE_WIDTH: f64 = 120.0;
+const PROBE_HEIGHT: f64 = 80.0;
 
 #[derive(Debug, Clone)]
 struct OverlayRect {
@@ -94,6 +96,12 @@ pub fn update_from_tokenize(payload: &TokenizePayload) -> Result<(), AppError> {
         return Ok(());
     }
     let rects = overlay_rects_from_payload(payload);
+    trace::log(format!(
+        "overlay:update windows={} tokens={} rects={}",
+        payload.windows.len(),
+        payload.tokens.len(),
+        rects.len()
+    ));
     dispatch_main(move || {
         apply_overlay_update_on_main(rects);
     });
@@ -123,8 +131,8 @@ fn start_overlay_on_main() -> Result<(), String> {
         window.setOpaque(false);
         window.setHasShadow(false);
         window.setIgnoresMouseEvents(true);
-        // Keep overlay above regular app windows without entering system/screen-saver levels.
-        window.setLevel(NSFloatingWindowLevel + 2);
+        // Keep overlay above regular app windows while avoiding extreme system levels.
+        window.setLevel(NSFloatingWindowLevel + 20);
         window.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::Stationary,
         );
@@ -136,6 +144,7 @@ fn start_overlay_on_main() -> Result<(), String> {
             NSView::alloc(mtm),
             NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
         );
+        content_view.setWantsLayer(true);
         window.setContentView(Some(&content_view));
         window.orderFrontRegardless();
 
@@ -183,6 +192,7 @@ fn apply_overlay_update_on_main(rects: Vec<OverlayRect>) {
             view.removeFromSuperview();
         }
 
+        let mut drawn = 0usize;
         for rect in rects {
             let Some(frame) = rect_to_overlay_frame(&rect, screen_frame) else {
                 continue;
@@ -197,7 +207,32 @@ fn apply_overlay_update_on_main(rects: Vec<OverlayRect>) {
             token_box.setBorderColor(&overlay_color(rect.kind));
             content.addSubview(&token_box);
             state.token_views.push(token_box);
+            drawn += 1;
         }
+        if drawn == 0 {
+            // Probe marker helps verify overlay rendering when tokenization yielded no drawables.
+            let probe_x = (screen_frame.size.width - PROBE_WIDTH) / 2.0;
+            let probe_y = (screen_frame.size.height - PROBE_HEIGHT) / 2.0;
+            let probe_frame = NSRect::new(
+                NSPoint::new(probe_x.max(0.0), probe_y.max(0.0)),
+                NSSize::new(PROBE_WIDTH, PROBE_HEIGHT),
+            );
+            let probe_box: Retained<NSBox> =
+                unsafe { msg_send![NSBox::alloc(mtm), initWithFrame: probe_frame] };
+            probe_box.setBoxType(NSBoxType::Custom);
+            probe_box.setTitlePosition(NSTitlePosition::NoTitle);
+            probe_box.setBorderWidth(2.2);
+            probe_box.setTransparent(false);
+            probe_box.setFillColor(&NSColor::clearColor());
+            probe_box.setBorderColor(&NSColor::systemRedColor());
+            content.addSubview(&probe_box);
+            state.token_views.push(probe_box);
+            drawn += 1;
+            trace::log("overlay:apply_on_main probe_drawn");
+        }
+
+        content.setNeedsDisplay(true);
+        trace::log(format!("overlay:apply_on_main drawn={drawn}"));
     });
 }
 
@@ -234,7 +269,17 @@ fn overlay_rects_from_payload(payload: &TokenizePayload) -> Vec<OverlayRect> {
             break;
         }
     }
+    let mut used_token_fallback = false;
+    if out.is_empty() && !payload.tokens.is_empty() {
+        if let Some(window) = payload.windows.first() {
+            append_token_rects(window, &payload.tokens, image_w, image_h, &mut out);
+            used_token_fallback = true;
+        }
+    }
     out.truncate(MAX_OVERLAY_RECTS);
+    if used_token_fallback {
+        trace::log("overlay:update using_token_fallback");
+    }
     out
 }
 
@@ -269,6 +314,37 @@ fn append_window_rects(
             width,
             height,
             kind,
+        });
+        if out.len() >= MAX_OVERLAY_RECTS {
+            break;
+        }
+    }
+}
+
+fn append_token_rects(
+    window: &TokenizeWindow,
+    tokens: &[TokenEntry],
+    image_w: Option<f64>,
+    image_h: Option<f64>,
+    out: &mut Vec<OverlayRect>,
+) {
+    let anchor_bounds = window.os_bounds.as_ref().unwrap_or(&window.bounds);
+    let img_w = image_w.unwrap_or(window.bounds.width).max(1.0);
+    let img_h = image_h.unwrap_or(window.bounds.height).max(1.0);
+    let sx = (anchor_bounds.width / img_w).max(0.0001);
+    let sy = (anchor_bounds.height / img_h).max(0.0001);
+    for token in tokens {
+        let width = token.bounds.width * sx;
+        let height = token.bounds.height * sy;
+        if width < 2.0 || height < 2.0 {
+            continue;
+        }
+        out.push(OverlayRect {
+            x: anchor_bounds.x + (token.bounds.x * sx),
+            y: anchor_bounds.y + (token.bounds.y * sy),
+            width,
+            height,
+            kind: OverlayKind::Text,
         });
         if out.len() >= MAX_OVERLAY_RECTS {
             break;

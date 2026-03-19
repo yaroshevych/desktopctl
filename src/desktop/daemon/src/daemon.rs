@@ -504,15 +504,39 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 permissions::ensure_screen_recording_permission()?;
                 let backend = new_backend()?;
                 backend.check_accessibility_permission()?;
-                let windows = list_windows()?;
-                let target = resolve_tokenize_window_target(&windows, window_id.as_deref())?;
-                let window_meta = vision::pipeline::TokenizeWindowMeta {
-                    id: target.id.clone(),
-                    title: target.title.clone(),
-                    app: Some(target.app.clone()),
-                    bounds: target.bounds.clone(),
-                };
-                vision::pipeline::tokenize_window(window_meta)?
+                if window_id.is_none() {
+                    if let Some(bounds) = frontmost_window_bounds() {
+                        let app = frontmost_app_name();
+                        let title = app.clone().unwrap_or_else(|| "active_window".to_string());
+                        let window_meta = vision::pipeline::TokenizeWindowMeta {
+                            id: "frontmost:1".to_string(),
+                            title,
+                            app,
+                            bounds,
+                        };
+                        vision::pipeline::tokenize_window(window_meta)?
+                    } else {
+                        let windows = list_windows()?;
+                        let target = resolve_tokenize_window_target(&windows, None)?;
+                        let window_meta = vision::pipeline::TokenizeWindowMeta {
+                            id: target.id.clone(),
+                            title: target.title.clone(),
+                            app: Some(target.app.clone()),
+                            bounds: target.bounds.clone(),
+                        };
+                        vision::pipeline::tokenize_window(window_meta)?
+                    }
+                } else {
+                    let windows = list_windows()?;
+                    let target = resolve_tokenize_window_target(&windows, window_id.as_deref())?;
+                    let window_meta = vision::pipeline::TokenizeWindowMeta {
+                        id: target.id.clone(),
+                        title: target.title.clone(),
+                        app: Some(target.app.clone()),
+                        bounds: target.bounds.clone(),
+                    };
+                    vision::pipeline::tokenize_window(window_meta)?
+                }
             };
             if let Some(path_raw) = overlay_out_path {
                 let overlay_path = PathBuf::from(path_raw);
