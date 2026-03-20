@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-desktopctl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: labelstudio
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-desktopctl}"]
+      interval: 5s
+      retries: 10
+
+  labelstudio:
+    image: heartexlabs/label-studio:latest
+    ports:
+      - "8080:8080"
+    environment:
+      DJANGO_DB: postgresql
+      POSTGRE_HOST: postgres
+      POSTGRE_PORT: 5432
+      POSTGRE_NAME: labelstudio
+      POSTGRE_USER: ${POSTGRES_USER:-desktopctl}
+      POSTGRE_PASSWORD: ${POSTGRES_PASSWORD}
+      LABEL_STUDIO_SECRET_KEY: ${LS_SECRET_KEY}
+      LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED: "true"
+      LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT: /data/local-files
+    volumes:
+      - ls_data:/label-studio/data
+      - ${DATA_DIR}:/data/local-files:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    command: >
+      mlflow server
+        --backend-store-uri postgresql://${POSTGRES_USER:-desktopctl}:${POSTGRES_PASSWORD}@postgres/mlflow
+        --artifacts-destination /mlflow/artifacts
+        --host 0.0.0.0
+    ports:
+      - "5001:5000"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  ls_data:
+  mlflow_artifacts:
