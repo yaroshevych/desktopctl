@@ -1,0 +1,11 @@
+[project]
+name = "desktopctl-eval"
+version = "0.1.0"
+description = "Label Studio + MLflow tooling for tokenizer evaluation."
+requires-python = ">=3.12"
+dependencies = [
+  "mlflow>=2.14",
+  "psycopg2-binary>=2.9",
+  "requests>=2.32",
+  "python-dotenv>=1.0",
+]

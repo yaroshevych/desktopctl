@@ -27,8 +27,8 @@ services:
       POSTGRE_USER: ${POSTGRES_USER:-desktopctl}
       POSTGRE_PASSWORD: ${POSTGRES_PASSWORD}
       LABEL_STUDIO_SECRET_KEY: ${LS_SECRET_KEY}
-      LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED: "true"
-      LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT: /data/local-files
+      LOCAL_FILES_SERVING_ENABLED: "true"
+      LOCAL_FILES_DOCUMENT_ROOT: /data/local-files
     volumes:
       - ls_data:/label-studio/data
       - ${DATA_DIR}:/data/local-files:ro

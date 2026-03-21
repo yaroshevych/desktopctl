@@ -38,6 +38,24 @@ The same `sample_id` can appear multiple times with different `label_id` values 
 
 Label sets are maintained in Label Studio (Postgres-backed).
 
+## Label Studio Tips
+
+### Auto-submit on keypress (1/2/3)
+
+LS selects choices with 1/2/3 but doesn't auto-submit. Paste this in devtools console
+once per page load to auto-submit when a key is pressed:
+
+```js
+document.addEventListener("keydown", function(e) {
+  if (!["1","2","3"].includes(e.key)) return;
+  setTimeout(function() {
+    Array.from(document.querySelectorAll("button"))
+      .find(b => b.textContent.trim() === "Submit")
+      ?.click();
+  }, 300);
+});
+```
+
 ## MLflow Contract
 
 Every test run is tracked by `run_id` in MLflow.

@@ -1,0 +1,46 @@
+set dotenv-load := true
+
+compose := "docker-compose"
+
+# Start all services (Label Studio + MLflow + Postgres)
+up:
+    {{compose}} up -d
+
+# Stop all services
+down:
+    {{compose}} down
+
+# Tail logs
+logs:
+    {{compose}} logs -f
+
+# Open Label Studio in browser
+ls:
+    open http://localhost:8080
+
+# Open MLflow in browser
+mlflow:
+    open http://localhost:5001
+
+# Backup Label Studio database to datasets/ls_backup_<timestamp>.sql.gz
+backup:
+    {{compose}} exec postgres pg_dump -U ${POSTGRES_USER:-desktopctl} labelstudio | gzip > datasets/backup/ls_backup_$(date +%Y%m%d_%H%M%S).sql.gz && echo "backed up"
+
+# Open psql in the labelstudio database
+psql:
+    {{compose}} exec postgres psql -U ${POSTGRES_USER:-desktopctl} labelstudio
+
+# Run a SQL query and print results.
+# Usage: just sql "SELECT id, title FROM projects_project"
+sql QUERY:
+    {{compose}} exec postgres psql -U ${POSTGRES_USER:-desktopctl} labelstudio -c '{{QUERY}}'
+
+# Import a label dir into Label Studio.
+# Usage: just import "datasets/path/to/dataset/labels/text_fields" "golden-set"
+import DIR PROJECT:
+    uv run import/import_batch.py --dir "{{DIR}}" --project "{{PROJECT}}"
+
+# Log labels from a project to MLflow.
+# Usage: just log-run PROJECT_ID=1 RUN="v4-maps" PARAMS="threshold=0.7"
+log-run PROJECT_ID RUN PARAMS="":
+    uv run export/log_run.py --project-id {{PROJECT_ID}} --run-name "{{RUN}}" {{PARAMS}}
