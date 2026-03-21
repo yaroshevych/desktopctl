@@ -67,6 +67,7 @@ pub fn detect_ui_boxes_with_text(image: &RgbaImage, text_bounds: &[Bounds]) -> V
     ));
     let mut deduped = dedupe_boxes(anchored, 0.84);
     deduped = prune_nested_glitch_boxes(deduped);
+    deduped = ensure_min_field_candidate_per_group(deduped, &text_groups, width, height);
     if deduped.len() > TEXT_ANCHORED_BOX_CAP {
         deduped.truncate(TEXT_ANCHORED_BOX_CAP);
     }
@@ -117,6 +118,7 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
         &structural_panels,
     ));
     boxes.extend(text_row_and_paragraph_boxes(&gray, width, height, &boxes));
+    boxes.extend(toolbar_field_expansions(&boxes, width as f64, height as f64));
 
     let mut deduped = dedupe_boxes(boxes, 0.86);
     deduped = prune_nested_glitch_boxes(deduped);
@@ -125,6 +127,70 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
         deduped.truncate(RAW_BOX_CAP);
     }
     deduped
+}
+
+fn toolbar_field_expansions(seed_boxes: &[Bounds], image_w: f64, image_h: f64) -> Vec<Bounds> {
+    if seed_boxes.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(f64, Bounds)> = Vec::new();
+    for seed in seed_boxes {
+        if seed.y > image_h * 0.20
+            || seed.height < 22.0
+            || seed.height > 72.0
+            || seed.width < 110.0
+            || seed.width > image_w * 0.62
+        {
+            continue;
+        }
+        let aspect = seed.width / seed.height.max(1.0);
+        if aspect < 2.4 {
+            continue;
+        }
+        let left_space = seed.x.max(0.0);
+        let right_space = (image_w - (seed.x + seed.width)).max(0.0);
+        if left_space < seed.width * 0.18 && right_space < seed.width * 0.18 {
+            continue;
+        }
+
+        let mut left = (seed.x - (seed.height * 0.35).clamp(3.0, 14.0)).max(0.0);
+        if seed.x >= image_w * 0.22 {
+            left = (seed.x - (seed.width * 0.55).clamp(32.0, image_w * 0.30)).max(0.0);
+        }
+        let mut right = (seed.x + seed.width + (seed.width * 0.95).clamp(60.0, image_w * 0.48))
+            .min(image_w);
+        if right_space > seed.width * 0.30 {
+            right = (seed.x + seed.width + (right_space * 0.92)).min(image_w);
+        }
+        if seed.x > image_w * 0.45 {
+            right = (image_w - 2.0).max(right);
+        }
+        let top = (seed.y - (seed.height * 0.28).clamp(2.0, 10.0)).max(0.0);
+        let bottom = (seed.y + seed.height + (seed.height * 0.30).clamp(3.0, 14.0)).min(image_h);
+        let candidate = Bounds {
+            x: left,
+            y: top,
+            width: (right - left).max(0.0),
+            height: (bottom - top).max(0.0),
+        };
+        if candidate.width < seed.width + 80.0
+            || candidate.width > image_w * 0.93
+            || candidate.height < 24.0
+            || candidate.height > 96.0
+            || (candidate.width / candidate.height.max(1.0)) < 2.4
+            || !rect_contains(&candidate, seed, 1.0)
+        {
+            continue;
+        }
+        let growth = (candidate.width / seed.width.max(1.0)).clamp(1.0, 5.0);
+        let top_bonus = (1.0 - (seed.y / image_h.max(1.0))).clamp(0.0, 1.0);
+        let side_bonus = if seed.x > image_w * 0.25 { 0.35 } else { 0.0 };
+        let score = growth + top_bonus + side_bonus;
+        scored.push((score, candidate));
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let top_k: Vec<Bounds> = scored.into_iter().take(60).map(|(_, b)| b).collect();
+    dedupe_boxes(top_k, 0.86)
 }
 
 fn text_row_and_paragraph_boxes(
@@ -1519,12 +1585,15 @@ fn maybe_enforce_toolbar_field_padding(
         return candidate.clone();
     }
     let needed = (target_total_pad - cur_total_pad).max(0.0);
-    let expand_each = (needed / 2.0).clamp(8.0, 48.0);
+    // For search-like fields, tolerate less left expansion because the magnifier icon
+    // often occupies the left-side padding region near the text anchor.
+    let expand_left = (needed * 0.30).clamp(4.0, 20.0);
+    let expand_right = (needed * 0.70).clamp(10.0, 56.0);
     let expanded = Bounds {
-        x: (candidate.x - expand_each).max(0.0),
+        x: (candidate.x - expand_left).max(0.0),
         y: candidate.y,
-        width: ((candidate.x + candidate.width + expand_each).min(image_w)
-            - (candidate.x - expand_each).max(0.0))
+        width: ((candidate.x + candidate.width + expand_right).min(image_w)
+            - (candidate.x - expand_left).max(0.0))
         .max(0.0),
         height: candidate.height,
     };
@@ -1537,20 +1606,162 @@ fn maybe_enforce_toolbar_field_padding(
     expanded
 }
 
+fn ensure_min_field_candidate_per_group(
+    mut boxes: Vec<Bounds>,
+    groups: &[Bounds],
+    image_w: f64,
+    image_h: f64,
+) -> Vec<Bounds> {
+    if boxes.is_empty() || groups.is_empty() {
+        return boxes;
+    }
+    let eligible_groups: Vec<&Bounds> = groups
+        .iter()
+        .filter(|g| {
+            g.width >= 28.0
+                && g.width <= image_w * 0.72
+                && g.height >= 10.0
+                && g.height <= 44.0
+                && (g.width / g.height.max(1.0)) >= 1.4
+        })
+        .collect();
+    if eligible_groups.is_empty() {
+        return boxes;
+    }
+
+    for group in eligible_groups {
+        let avail_right_ratio =
+            ((image_w - (group.x + group.width)).max(0.0)) / group.width.max(1.0);
+        let min_right_ratio = if group.y <= image_h * 0.16 && avail_right_ratio >= 2.0 {
+            0.90
+        } else {
+            0.16
+        };
+        let has_good = boxes.iter().any(|candidate| {
+            if !rect_contains(candidate, group, 1.0) {
+                return false;
+            }
+            let (left, right, top, bottom) = padding_sides(candidate, group);
+            let hpad = (left + right) / group.width.max(1.0);
+            let right_ratio = right / group.width.max(1.0);
+            let vpad = (top + bottom) / group.height.max(1.0);
+            let area_ratio =
+                (candidate.width * candidate.height) / (group.width * group.height).max(1.0);
+            hpad >= 0.14
+                && hpad <= 3.2
+                && right_ratio >= min_right_ratio
+                && vpad >= 0.08
+                && candidate.height >= 20.0
+                && area_ratio <= 14.0
+        });
+        if has_good {
+            continue;
+        }
+
+        // Right-biased fallback: tolerate shorter left side (search icon/loupe zone)
+        // while ensuring text field extent to the right is captured.
+        let left_pad = (group.height * 0.45).clamp(4.0, 14.0);
+        let right_pad = (group.width * 0.34)
+            .max(group.height * 1.6)
+            .clamp(16.0, 128.0);
+        let top_pad = (group.height * 0.28).clamp(2.0, 10.0);
+        let bottom_pad = (group.height * 0.42).clamp(4.0, 16.0);
+        let candidate = Bounds {
+            x: (group.x - left_pad).max(0.0),
+            y: (group.y - top_pad).max(0.0),
+            width: ((group.x + group.width + right_pad).min(image_w)
+                - (group.x - left_pad).max(0.0))
+            .max(0.0),
+            height: ((group.y + group.height + bottom_pad).min(image_h)
+                - (group.y - top_pad).max(0.0))
+            .max(0.0),
+        };
+        if candidate.width >= group.width + 12.0
+            && candidate.height >= 20.0
+            && candidate.height <= 96.0
+            && (candidate.width / candidate.height.max(1.0)) >= 1.7
+            && rect_contains(&candidate, group, 1.0)
+        {
+            boxes.push(candidate);
+        }
+
+        // Wide top-toolbar/search fallback: common for macOS search fields where
+        // OCR anchor covers only "Q Search" but the input extends far right.
+        if group.y <= image_h * 0.14 && group.width >= 80.0 && group.width <= image_w * 0.34 {
+            let left_pad = (group.height * 0.35).clamp(3.0, 12.0);
+            let right_pad = (group.width * 4.2)
+                .max(group.height * 6.0)
+                .clamp(120.0, image_w * 0.62);
+            let top_pad = (group.height * 0.30).clamp(2.0, 10.0);
+            let bottom_pad = (group.height * 0.46).clamp(4.0, 18.0);
+            let candidate = Bounds {
+                x: (group.x - left_pad).max(0.0),
+                y: (group.y - top_pad).max(0.0),
+                width: ((group.x + group.width + right_pad).min(image_w)
+                    - (group.x - left_pad).max(0.0))
+                .max(0.0),
+                height: ((group.y + group.height + bottom_pad).min(image_h)
+                    - (group.y - top_pad).max(0.0))
+                .max(0.0),
+            };
+            if candidate.width >= group.width + 28.0
+                && candidate.height >= 20.0
+                && candidate.height <= 90.0
+                && (candidate.width / candidate.height.max(1.0)) >= 2.0
+                && candidate.width <= image_w * 0.92
+                && rect_contains(&candidate, group, 1.0)
+            {
+                boxes.push(candidate);
+            }
+        }
+
+        // Dialog row fallback for long rows where label + text field span most of width.
+        if group.width >= image_w * 0.24 && group.y <= image_h * 0.28 {
+            let left = (group.x - (group.height * 0.45).clamp(3.0, 12.0)).max(0.0);
+            let right = (group.x + group.width + image_w * 0.55).min(image_w);
+            let top = (group.y - (group.height * 0.24).clamp(2.0, 10.0)).max(0.0);
+            let bottom =
+                (group.y + group.height + (group.height * 0.40).clamp(4.0, 16.0)).min(image_h);
+            let candidate = Bounds {
+                x: left,
+                y: top,
+                width: (right - left).max(0.0),
+                height: (bottom - top).max(0.0),
+            };
+            if candidate.width >= group.width + 70.0
+                && candidate.height >= 20.0
+                && candidate.height <= 96.0
+                && (candidate.width / candidate.height.max(1.0)) >= 2.2
+                && rect_contains(&candidate, group, 1.0)
+            {
+                boxes.push(candidate);
+            }
+        }
+    }
+
+    let mut out = dedupe_boxes(boxes, 0.84);
+    out = prune_nested_glitch_boxes(out);
+    out
+}
+
 fn horizontal_padding_ratio(candidate: &Bounds, group: &Bounds) -> f64 {
+    let (left, right, _, _) = padding_sides(candidate, group);
+    (left + right) / group.width.max(1.0)
+}
+
+fn padding_sides(candidate: &Bounds, group: &Bounds) -> (f64, f64, f64, f64) {
     let left = (group.x - candidate.x).max(0.0);
     let right = ((candidate.x + candidate.width) - (group.x + group.width)).max(0.0);
-    (left + right) / group.width.max(1.0)
+    let top = (group.y - candidate.y).max(0.0);
+    let bottom = ((candidate.y + candidate.height) - (group.y + group.height)).max(0.0);
+    (left, right, top, bottom)
 }
 
 fn is_good_existing_text_field_candidate(candidate: &Bounds, group: &Bounds) -> bool {
     if !rect_contains(candidate, group, 1.0) {
         return false;
     }
-    let left = (group.x - candidate.x).max(0.0);
-    let right = ((candidate.x + candidate.width) - (group.x + group.width)).max(0.0);
-    let top = (group.y - candidate.y).max(0.0);
-    let bottom = ((candidate.y + candidate.height) - (group.y + group.height)).max(0.0);
+    let (left, right, top, bottom) = padding_sides(candidate, group);
     let total_h = left + right;
     let total_v = top + bottom;
     let min_total_h = (group.height * 0.95).clamp(8.0, 26.0);
