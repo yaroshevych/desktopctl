@@ -58,7 +58,12 @@ fn collect_label_files(root: &Path) -> Vec<PathBuf> {
                 stack.push(path);
                 continue;
             }
-            if path.file_name().and_then(|s| s.to_str()).unwrap_or_default().ends_with(".labels.json") {
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .ends_with(".labels.json")
+            {
                 files.push(path);
             }
         }
@@ -148,10 +153,7 @@ fn broad_grounding_labels_have_minimum_box_recall() {
         total_expected += expected.len();
         total_predicted += predicted.len();
         for e in &expected {
-            if predicted
-                .iter()
-                .any(|p| iou(p, e) >= IOU_MATCH_THRESHOLD)
-            {
+            if predicted.iter().any(|p| iou(p, e) >= IOU_MATCH_THRESHOLD) {
                 total_matched += 1;
             }
         }

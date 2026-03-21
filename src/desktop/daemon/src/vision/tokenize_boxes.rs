@@ -39,6 +39,9 @@ pub fn detect_ui_boxes_with_text(image: &RgbaImage, text_bounds: &[Bounds]) -> V
     if text_groups.is_empty() {
         return raw;
     }
+    let gray = grayscale(image);
+    let image_w_px = image.width() as usize;
+    let image_h_px = image.height() as usize;
     let mut anchored = text_groups
         .iter()
         .map(|group| local_text_box(group, width, height))
@@ -54,11 +57,13 @@ pub fn detect_ui_boxes_with_text(image: &RgbaImage, text_bounds: &[Bounds]) -> V
         width,
         height,
     ));
-    anchored.extend(aligned_list_candidates(
+    anchored.extend(aligned_list_candidates(&text_groups, &raw, width, height));
+    anchored.extend(text_control_candidates(
+        &gray,
+        image_w_px,
+        image_h_px,
         &text_groups,
         &raw,
-        width,
-        height,
     ));
     let mut deduped = dedupe_boxes(anchored, 0.84);
     deduped = prune_nested_glitch_boxes(deduped);
@@ -111,6 +116,7 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
         height,
         &structural_panels,
     ));
+    boxes.extend(text_row_and_paragraph_boxes(&gray, width, height, &boxes));
 
     let mut deduped = dedupe_boxes(boxes, 0.86);
     deduped = prune_nested_glitch_boxes(deduped);
@@ -119,6 +125,166 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
         deduped.truncate(RAW_BOX_CAP);
     }
     deduped
+}
+
+fn text_row_and_paragraph_boxes(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    seed_boxes: &[Bounds],
+) -> Vec<Bounds> {
+    let words: Vec<Bounds> = seed_boxes
+        .iter()
+        .filter(|b| {
+            b.width >= 12.0
+                && b.width <= 460.0
+                && b.height >= 10.0
+                && b.height <= 44.0
+                && (b.width * b.height) <= 14000.0
+                && (b.width / b.height.max(1.0)) <= 22.0
+        })
+        .cloned()
+        .collect();
+    if words.len() < 3 {
+        return Vec::new();
+    }
+
+    let line_components = cluster_bounds(&words, |a, b| {
+        let min_h = a.height.min(b.height).max(1.0);
+        let vertical_overlap = overlap_1d(a.y, a.y + a.height, b.y, b.y + b.height);
+        let vertical_ratio = vertical_overlap / min_h;
+        let hgap = axis_gap(a.x, a.x + a.width, b.x, b.x + b.width);
+        vertical_ratio >= 0.40 && hgap <= (min_h * 2.0).clamp(12.0, 64.0)
+    });
+
+    let mut line_boxes = Vec::new();
+    for line in line_components {
+        if line.is_empty() {
+            continue;
+        }
+        let merged = line
+            .iter()
+            .skip(1)
+            .fold(line[0].clone(), |acc, b| union_bounds(&acc, b));
+        if line.len() == 1 && merged.width < 88.0 {
+            continue;
+        }
+        line_boxes.push(expand_bounds(
+            &merged,
+            (merged.height * 0.26).clamp(2.0, 10.0),
+            (merged.height * 0.16).clamp(1.0, 6.0),
+            width as f64,
+            height as f64,
+        ));
+    }
+
+    let para_components = cluster_bounds(&line_boxes, |a, b| {
+        let min_h = a.height.min(b.height).max(1.0);
+        let vgap = axis_gap(a.y, a.y + a.height, b.y, b.y + b.height);
+        if vgap > (min_h * 2.1).clamp(10.0, 42.0) {
+            return false;
+        }
+        let hoverlap = overlap_1d(a.x, a.x + a.width, b.x, b.x + b.width);
+        let min_w = a.width.min(b.width).max(1.0);
+        let hoverlap_ratio = hoverlap / min_w;
+        let left_align = (a.x - b.x).abs() <= (min_h * 1.6).clamp(8.0, 26.0);
+        hoverlap_ratio >= 0.22 || left_align
+    });
+
+    let mut out = Vec::new();
+    out.extend(line_boxes.iter().cloned());
+    for paragraph in para_components {
+        if paragraph.len() < 2 {
+            continue;
+        }
+        let merged = paragraph
+            .iter()
+            .skip(1)
+            .fold(paragraph[0].clone(), |acc, b| union_bounds(&acc, b));
+        if merged.width < 120.0 || merged.height < 28.0 {
+            continue;
+        }
+        out.push(expand_bounds(
+            &merged,
+            (merged.height * 0.20).clamp(4.0, 12.0),
+            (merged.height * 0.14).clamp(3.0, 10.0),
+            width as f64,
+            height as f64,
+        ));
+    }
+
+    for line in &line_boxes {
+        let cx = line.x + line.width / 2.0;
+        let cy = line.y + line.height / 2.0;
+        let mut best: Option<(f64, Bounds)> = None;
+        for (sx, sy) in [(1.6, 1.6), (2.3, 1.9), (3.2, 2.1)] {
+            let candidate = expand_from_center(line, cx, cy, sx, sy, width as f64, height as f64);
+            if candidate.width < 70.0 || candidate.width > width as f64 * 0.75 {
+                continue;
+            }
+            if candidate.height < 22.0 || candidate.height > 88.0 {
+                continue;
+            }
+            let border = rect_border_energy(gray, width, height, &candidate);
+            let inner = rect_inner_energy(gray, width, height, &candidate);
+            let score = border - (inner * 0.68);
+            if score < 8.8 {
+                continue;
+            }
+            match &best {
+                Some((best_score, _)) if *best_score >= score => {}
+                _ => best = Some((score, candidate)),
+            }
+        }
+        if let Some((_, c)) = best {
+            out.push(c);
+        }
+    }
+    dedupe_boxes(out, 0.86)
+}
+
+fn cluster_bounds<F>(items: &[Bounds], mut connected: F) -> Vec<Vec<Bounds>>
+where
+    F: FnMut(&Bounds, &Bounds) -> bool,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let n = items.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+
+    fn find(parent: &mut [usize], idx: usize) -> usize {
+        if parent[idx] != idx {
+            let root = find(parent, parent[idx]);
+            parent[idx] = root;
+        }
+        parent[idx]
+    }
+
+    fn union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if connected(&items[i], &items[j]) {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+
+    let mut groups = std::collections::HashMap::<usize, Vec<Bounds>>::new();
+    for (idx, item) in items.iter().enumerate() {
+        let root = find(&mut parent, idx);
+        groups.entry(root).or_default().push(item.clone());
+    }
+    let mut out: Vec<Vec<Bounds>> = groups.into_values().collect();
+    out.sort_by_key(|group| group.len());
+    out
 }
 
 pub fn detect_glyphs(image: &RgbaImage, text_bounds: &[Bounds]) -> Vec<Bounds> {
@@ -938,6 +1104,559 @@ fn best_list_container(
     best.map(|(_, c)| c)
 }
 
+fn text_control_candidates(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    groups: &[Bounds],
+    raw_candidates: &[Bounds],
+) -> Vec<Bounds> {
+    if groups.is_empty() || width < 32 || height < 32 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let image_w = width as f64;
+    let image_h = height as f64;
+    for group in groups {
+        if group.width < 22.0 || group.width > 520.0 || group.height < 10.0 || group.height > 42.0 {
+            continue;
+        }
+
+        let cx = group.x + group.width / 2.0;
+        let cy = group.y + group.height / 2.0;
+
+        // Prefer a raw control candidate when it already contains text with plausible field padding.
+        let mut best_raw: Option<(f64, Bounds)> = None;
+        for candidate in raw_candidates {
+            if !rect_contains(candidate, group, 1.0) {
+                continue;
+            }
+            if candidate.height < 20.0
+                || candidate.height > (group.height * 4.2).clamp(28.0, 110.0)
+                || candidate.width > image_w * 0.86
+                || candidate.width < (group.width + 14.0).max(46.0)
+            {
+                continue;
+            }
+            let edge_contrast = control_edge_contrast(gray, width, height, candidate);
+            let padding_ratio = horizontal_padding_ratio(candidate, group);
+            let aspect = candidate.width / candidate.height.max(1.0);
+            if edge_contrast < 7.4 || padding_ratio < 0.18 || aspect < 1.8 {
+                continue;
+            }
+            let oversize_penalty = ((candidate.width / group.width.max(1.0)) - 6.0).max(0.0) * 2.4;
+            let score = edge_contrast + (padding_ratio * 9.0) - oversize_penalty;
+            match &best_raw {
+                Some((best_score, _)) if *best_score >= score => {}
+                _ => best_raw = Some((score, candidate.clone())),
+            }
+        }
+
+        // If raw candidates already include a strong field boundary, avoid synthesizing duplicates.
+        if best_raw
+            .as_ref()
+            .is_some_and(|(_, c)| is_good_existing_text_field_candidate(c, group))
+        {
+            out.push(best_raw.expect("checked is_some").1);
+            continue;
+        }
+
+        let mut best_synth: Option<(f64, Bounds)> = None;
+        for (sx, sy) in [(2.2, 1.8), (3.2, 2.0), (4.4, 2.2), (5.8, 2.4), (7.0, 2.7)] {
+            let candidate = expand_from_center(group, cx, cy, sx, sy, image_w, image_h);
+            if candidate.width < (group.width + 18.0).max(50.0)
+                || candidate.width > image_w.min(group.width * 7.8 + 52.0)
+            {
+                continue;
+            }
+            if candidate.height < 20.0 || candidate.height > 88.0 {
+                continue;
+            }
+            if (candidate.width / candidate.height.max(1.0)) < 1.8 {
+                continue;
+            }
+            let edge_contrast = control_edge_contrast(gray, width, height, &candidate);
+            let padding_ratio = horizontal_padding_ratio(&candidate, group);
+            if edge_contrast < 7.4 || padding_ratio < 0.18 {
+                continue;
+            }
+            let border = rect_border_energy(gray, width, height, &candidate);
+            let inner = rect_inner_energy(gray, width, height, &candidate);
+            let score = edge_contrast + (padding_ratio * 9.0) - ((inner / 28.0).min(1.8));
+            // Prefer candidates where most border energy is concentrated on horizontal edges,
+            // a common signal for text inputs/search fields.
+            let horizontal_border_bias = border / (inner + 1.0);
+            let final_score = score + horizontal_border_bias.min(2.4);
+            match &best_synth {
+                Some((best_score, _)) if *best_score >= final_score => {}
+                _ => best_synth = Some((final_score, candidate)),
+            }
+        }
+        if let Some((score, candidate)) =
+            edge_scan_text_field_candidate(gray, width, height, group, image_w, image_h)
+        {
+            match &best_synth {
+                Some((best_score, _)) if *best_score >= score => {}
+                _ => best_synth = Some((score, candidate)),
+            }
+        }
+
+        let chosen = match (best_raw, best_synth) {
+            (Some((raw_score, raw)), Some((synth_score, synth))) => {
+                if raw_score >= synth_score - 0.8 {
+                    Some(raw)
+                } else {
+                    Some(synth)
+                }
+            }
+            (Some((_, raw)), None) => Some(raw),
+            (None, Some((_, synth))) => Some(synth),
+            (None, None) => None,
+        };
+        if let Some(candidate) = chosen {
+            let widened =
+                maybe_widen_control_candidate(gray, width, height, &candidate, group, image_w);
+            let padded = maybe_enforce_toolbar_field_padding(
+                gray, width, height, &widened, group, image_w, image_h,
+            );
+            out.push(padded);
+        }
+    }
+    dedupe_boxes(out, 0.88)
+}
+
+fn edge_scan_text_field_candidate(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    group: &Bounds,
+    image_w: f64,
+    image_h: f64,
+) -> Option<(f64, Bounds)> {
+    let gx1 = group.x.max(1.0).floor() as usize;
+    let gy1 = group.y.max(1.0).floor() as usize;
+    let gx2 = (group.x + group.width).min(image_w - 1.0).ceil() as usize;
+    let gy2 = (group.y + group.height).min(image_h - 1.0).ceil() as usize;
+    if gx2 <= gx1 + 4 || gy2 <= gy1 + 3 {
+        return None;
+    }
+
+    let side_span = (group.height * 9.0).clamp(48.0, 220.0) as usize;
+    let v_span = (group.height * 2.8).clamp(12.0, 42.0) as usize;
+    let y0 = gy1.saturating_sub((group.height * 0.8).clamp(4.0, 16.0) as usize);
+    let y1 = (gy2 + (group.height * 0.9).clamp(6.0, 22.0) as usize).min(height.saturating_sub(1));
+    if y1 <= y0 + 2 {
+        return None;
+    }
+
+    let left_start = gx1.saturating_sub(side_span);
+    let left_end = gx1.saturating_sub(2);
+    let right_start = (gx2 + 2).min(width.saturating_sub(2));
+    let right_end = (gx2 + side_span).min(width.saturating_sub(2));
+    if left_end <= left_start || right_end <= right_start {
+        return None;
+    }
+
+    let mut best_left: Option<(f64, usize)> = None;
+    for x in left_start..=left_end {
+        let s = col_edge_strength(gray, width, height, x, y0, y1);
+        if s < 5.8 {
+            continue;
+        }
+        match best_left {
+            Some((best_s, _)) if best_s >= s => {}
+            _ => best_left = Some((s, x)),
+        }
+    }
+    let mut best_right: Option<(f64, usize)> = None;
+    for x in right_start..=right_end {
+        let s = col_edge_strength(gray, width, height, x, y0, y1);
+        if s < 5.8 {
+            continue;
+        }
+        match best_right {
+            Some((best_s, _)) if best_s >= s => {}
+            _ => best_right = Some((s, x)),
+        }
+    }
+    let (left_score, left_x) = best_left?;
+    let (right_score, right_x) = best_right?;
+    if right_x <= left_x + 20 {
+        return None;
+    }
+
+    let x0 = left_x.max(1);
+    let x1 = right_x.min(width.saturating_sub(2));
+    if x1 <= x0 + 20 {
+        return None;
+    }
+
+    let top_start = gy1.saturating_sub(v_span);
+    let top_end = gy1.saturating_sub(1);
+    let bottom_start = (gy2 + 1).min(height.saturating_sub(2));
+    let bottom_end = (gy2 + v_span).min(height.saturating_sub(2));
+    if top_end <= top_start || bottom_end <= bottom_start {
+        return None;
+    }
+
+    let mut best_top: Option<(f64, usize)> = None;
+    for y in top_start..=top_end {
+        let s = row_edge_strength(gray, width, height, y, x0, x1);
+        if s < 5.0 {
+            continue;
+        }
+        match best_top {
+            Some((best_s, _)) if best_s >= s => {}
+            _ => best_top = Some((s, y)),
+        }
+    }
+    let mut best_bottom: Option<(f64, usize)> = None;
+    for y in bottom_start..=bottom_end {
+        let s = row_edge_strength(gray, width, height, y, x0, x1);
+        if s < 5.0 {
+            continue;
+        }
+        match best_bottom {
+            Some((best_s, _)) if best_s >= s => {}
+            _ => best_bottom = Some((s, y)),
+        }
+    }
+    let (top_score, top_y) = best_top?;
+    let (bottom_score, bottom_y) = best_bottom?;
+    if bottom_y <= top_y + 8 {
+        return None;
+    }
+
+    let candidate = Bounds {
+        x: x0 as f64,
+        y: top_y as f64,
+        width: (x1 - x0 + 1) as f64,
+        height: (bottom_y - top_y + 1) as f64,
+    };
+    if !rect_contains(&candidate, group, 1.0) {
+        return None;
+    }
+    if candidate.height < 20.0 || candidate.height > 92.0 {
+        return None;
+    }
+    if candidate.width < (group.width + 14.0).max(48.0)
+        || candidate.width > image_w.min(group.width * 8.0 + 62.0)
+    {
+        return None;
+    }
+    let aspect = candidate.width / candidate.height.max(1.0);
+    if aspect < 1.8 {
+        return None;
+    }
+    let edge_contrast = control_edge_contrast(gray, width, height, &candidate);
+    let padding_ratio = horizontal_padding_ratio(&candidate, group);
+    if edge_contrast < 6.8 || padding_ratio < 0.20 {
+        return None;
+    }
+    let side_pair_score = (left_score + right_score) * 0.35;
+    let top_bottom_score = (top_score + bottom_score) * 0.25;
+    let score = edge_contrast + (padding_ratio * 8.0) + side_pair_score + top_bottom_score;
+    Some((score, candidate))
+}
+
+fn col_edge_strength(
+    gray: &[u8],
+    width: usize,
+    _height: usize,
+    x: usize,
+    y0: usize,
+    y1: usize,
+) -> f64 {
+    if x == 0 || x + 1 >= width || y1 <= y0 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for y in y0..=y1 {
+        let idx = y * width + x;
+        let left = gray[idx - 1] as f64;
+        let center = gray[idx] as f64;
+        let right = gray[idx + 1] as f64;
+        sum += (center - left).abs() + (center - right).abs();
+        count += 1;
+    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
+}
+
+fn row_edge_strength(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    y: usize,
+    x0: usize,
+    x1: usize,
+) -> f64 {
+    if y == 0 || y + 1 >= height || x1 <= x0 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for x in x0..=x1 {
+        let idx = y * width + x;
+        let up = gray[idx - width] as f64;
+        let center = gray[idx] as f64;
+        let down = gray[idx + width] as f64;
+        sum += (center - up).abs() + (center - down).abs();
+        count += 1;
+    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
+}
+
+fn maybe_widen_control_candidate(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    candidate: &Bounds,
+    group: &Bounds,
+    image_w: f64,
+) -> Bounds {
+    let base_pad = horizontal_padding_ratio(candidate, group);
+    if base_pad >= 0.28 || candidate.width >= image_w * 0.85 {
+        return candidate.clone();
+    }
+    let x1 = candidate.x.max(1.0).floor() as usize;
+    let x2 = (candidate.x + candidate.width).min(image_w - 1.0).ceil() as usize;
+    let y0 = candidate.y.max(1.0).floor() as usize;
+    let y1 = (candidate.y + candidate.height)
+        .min(height as f64 - 1.0)
+        .ceil() as usize;
+    if x2 <= x1 + 6 || y1 <= y0 + 2 {
+        return candidate.clone();
+    }
+    let probe_y0 = (y0 + 1).min(height.saturating_sub(2));
+    let probe_y1 = y1.saturating_sub(1).min(height.saturating_sub(2));
+    if probe_y1 <= probe_y0 + 1 {
+        return candidate.clone();
+    }
+
+    let max_extra = (group.height * 3.5).clamp(16.0, 96.0) as usize;
+    let left_start = x1.saturating_sub(max_extra);
+    let left_end = x1.saturating_sub(1);
+    let right_start = (x2 + 1).min(width.saturating_sub(2));
+    let right_end = (x2 + max_extra).min(width.saturating_sub(2));
+    if left_end <= left_start || right_end <= right_start {
+        return candidate.clone();
+    }
+
+    let mut best_left: Option<(f64, usize)> = None;
+    for x in left_start..=left_end {
+        let dist = (x1.saturating_sub(x)) as f64;
+        let s = col_edge_strength(gray, width, height, x, probe_y0, probe_y1) + (dist * 0.04);
+        if s < 4.0 {
+            continue;
+        }
+        match best_left {
+            Some((best_s, _)) if best_s >= s => {}
+            _ => best_left = Some((s, x)),
+        }
+    }
+    let mut best_right: Option<(f64, usize)> = None;
+    for x in right_start..=right_end {
+        let dist = (x.saturating_sub(x2)) as f64;
+        let s = col_edge_strength(gray, width, height, x, probe_y0, probe_y1) + (dist * 0.04);
+        if s < 4.0 {
+            continue;
+        }
+        match best_right {
+            Some((best_s, _)) if best_s >= s => {}
+            _ => best_right = Some((s, x)),
+        }
+    }
+    let Some((_, left_x)) = best_left else {
+        return candidate.clone();
+    };
+    let Some((_, right_x)) = best_right else {
+        return candidate.clone();
+    };
+    if right_x <= left_x + 24 {
+        return candidate.clone();
+    }
+
+    let widened = Bounds {
+        x: left_x as f64,
+        y: candidate.y,
+        width: (right_x.saturating_sub(left_x) + 1) as f64,
+        height: candidate.height,
+    };
+    if !rect_contains(&widened, group, 1.0) {
+        return candidate.clone();
+    }
+    if widened.width > image_w * 0.86 {
+        return candidate.clone();
+    }
+    let widened_pad = horizontal_padding_ratio(&widened, group);
+    if widened_pad < base_pad + 0.08 {
+        return candidate.clone();
+    }
+    widened
+}
+
+fn maybe_enforce_toolbar_field_padding(
+    _gray: &[u8],
+    _width: usize,
+    _height: usize,
+    candidate: &Bounds,
+    group: &Bounds,
+    image_w: f64,
+    image_h: f64,
+) -> Bounds {
+    if group.width < 160.0 || group.height > 34.0 {
+        return candidate.clone();
+    }
+    if group.y > image_h * 0.22 || candidate.height > 64.0 {
+        return candidate.clone();
+    }
+    let cur_total_pad = (candidate.width - group.width).max(0.0);
+    let target_total_pad = (group.width * 0.28)
+        .max(group.height * 2.4)
+        .clamp(38.0, 160.0);
+    if cur_total_pad >= target_total_pad {
+        return candidate.clone();
+    }
+    let needed = (target_total_pad - cur_total_pad).max(0.0);
+    let expand_each = (needed / 2.0).clamp(8.0, 48.0);
+    let expanded = Bounds {
+        x: (candidate.x - expand_each).max(0.0),
+        y: candidate.y,
+        width: ((candidate.x + candidate.width + expand_each).min(image_w)
+            - (candidate.x - expand_each).max(0.0))
+        .max(0.0),
+        height: candidate.height,
+    };
+    if expanded.width > image_w * 0.90 {
+        return candidate.clone();
+    }
+    if !rect_contains(&expanded, group, 1.0) {
+        return candidate.clone();
+    }
+    expanded
+}
+
+fn horizontal_padding_ratio(candidate: &Bounds, group: &Bounds) -> f64 {
+    let left = (group.x - candidate.x).max(0.0);
+    let right = ((candidate.x + candidate.width) - (group.x + group.width)).max(0.0);
+    (left + right) / group.width.max(1.0)
+}
+
+fn is_good_existing_text_field_candidate(candidate: &Bounds, group: &Bounds) -> bool {
+    if !rect_contains(candidate, group, 1.0) {
+        return false;
+    }
+    let left = (group.x - candidate.x).max(0.0);
+    let right = ((candidate.x + candidate.width) - (group.x + group.width)).max(0.0);
+    let top = (group.y - candidate.y).max(0.0);
+    let bottom = ((candidate.y + candidate.height) - (group.y + group.height)).max(0.0);
+    let total_h = left + right;
+    let total_v = top + bottom;
+    let min_total_h = (group.height * 0.95).clamp(8.0, 26.0);
+    let min_total_v = (group.height * 0.20).clamp(2.0, 10.0);
+    let aspect = candidate.width / candidate.height.max(1.0);
+    total_h >= min_total_h
+        && total_v >= min_total_v
+        && candidate.width >= group.width + min_total_h
+        && candidate.height >= (group.height * 1.10)
+        && aspect >= 1.8
+}
+
+fn control_edge_contrast(gray: &[u8], width: usize, height: usize, rect: &Bounds) -> f64 {
+    let border = rect_border_energy(gray, width, height, rect);
+    let inner = rect_inner_energy(gray, width, height, rect);
+    border - (inner * 0.68)
+}
+
+fn expand_from_center(
+    seed: &Bounds,
+    cx: f64,
+    cy: f64,
+    scale_x: f64,
+    scale_y: f64,
+    image_w: f64,
+    image_h: f64,
+) -> Bounds {
+    let target_w = (seed.width * scale_x).max(seed.width + 24.0);
+    let target_h = (seed.height * scale_y).max(seed.height + 8.0);
+    let x1 = (cx - target_w / 2.0).clamp(0.0, image_w.max(1.0));
+    let y1 = (cy - target_h / 2.0).clamp(0.0, image_h.max(1.0));
+    let x2 = (cx + target_w / 2.0).clamp(0.0, image_w.max(1.0));
+    let y2 = (cy + target_h / 2.0).clamp(0.0, image_h.max(1.0));
+    Bounds {
+        x: x1,
+        y: y1,
+        width: (x2 - x1).max(0.0),
+        height: (y2 - y1).max(0.0),
+    }
+}
+
+fn rect_border_energy(gray: &[u8], width: usize, height: usize, rect: &Bounds) -> f64 {
+    let (x1, y1, x2, y2) = quantize_rect(rect, width, height);
+    if x2 <= x1 + 2 || y2 <= y1 + 2 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    let top = y1;
+    let bottom = y2 - 1;
+    for x in x1 + 1..x2 - 1 {
+        sum += pixel_grad(gray, width, height, x, top);
+        sum += pixel_grad(gray, width, height, x, bottom);
+        count += 2;
+    }
+    let left = x1;
+    let right = x2 - 1;
+    for y in y1 + 1..y2 - 1 {
+        sum += pixel_grad(gray, width, height, left, y);
+        sum += pixel_grad(gray, width, height, right, y);
+        count += 2;
+    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
+}
+
+fn rect_inner_energy(gray: &[u8], width: usize, height: usize, rect: &Bounds) -> f64 {
+    let (x1, y1, x2, y2) = quantize_rect(rect, width, height);
+    if x2 <= x1 + 6 || y2 <= y1 + 6 {
+        return 0.0;
+    }
+    let ix1 = x1 + 2;
+    let iy1 = y1 + 2;
+    let ix2 = x2 - 2;
+    let iy2 = y2 - 2;
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for y in iy1..iy2 {
+        for x in ix1..ix2 {
+            sum += pixel_grad(gray, width, height, x, y);
+            count += 1;
+        }
+    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
+}
+
+fn quantize_rect(rect: &Bounds, width: usize, height: usize) -> (usize, usize, usize, usize) {
+    let x1 = rect.x.max(0.0).floor() as usize;
+    let y1 = rect.y.max(0.0).floor() as usize;
+    let x2 = (rect.x + rect.width).min(width as f64).ceil() as usize;
+    let y2 = (rect.y + rect.height).min(height as f64).ceil() as usize;
+    (x1.min(width), y1.min(height), x2.min(width), y2.min(height))
+}
+
+fn pixel_grad(gray: &[u8], width: usize, height: usize, x: usize, y: usize) -> f64 {
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+    let xm = x.saturating_sub(1);
+    let xp = (x + 1).min(width - 1);
+    let ym = y.saturating_sub(1);
+    let yp = (y + 1).min(height - 1);
+    let gx = (gray[y * width + xp] as f64 - gray[y * width + xm] as f64).abs();
+    let gy = (gray[yp * width + x] as f64 - gray[ym * width + x] as f64).abs();
+    gx + gy
+}
+
 fn is_row_like(candidate: &Bounds, group: &Bounds, image_w: f64) -> bool {
     let gh = group.height.max(1.0);
     candidate.height >= gh * 1.3
@@ -1223,7 +1942,11 @@ mod tests {
             },
         ];
         let groups = group_text_bounds(&text, 640.0, 240.0);
-        assert_eq!(groups.len(), 1, "same-line words should merge into one phrase");
+        assert_eq!(
+            groups.len(),
+            1,
+            "same-line words should merge into one phrase"
+        );
         let merged = &groups[0];
         assert!(merged.width >= 240.0, "merged phrase should span all words");
     }
@@ -1251,7 +1974,11 @@ mod tests {
             },
         ];
         let groups = group_text_bounds(&text, 900.0, 500.0);
-        assert_eq!(groups.len(), 2, "paragraph lines should merge; distant label separate");
+        assert_eq!(
+            groups.len(),
+            2,
+            "paragraph lines should merge; distant label separate"
+        );
     }
 
     #[test]
@@ -1330,13 +2057,17 @@ mod tests {
             },
         ];
         let list = aligned_list_candidates(&groups, &[], 1280.0, 800.0);
-        assert!(!list.is_empty(), "expected aligned list container candidate");
+        assert!(
+            !list.is_empty(),
+            "expected aligned list container candidate"
+        );
         let union = groups
             .iter()
             .skip(1)
             .fold(groups[0].clone(), |acc, row| super::union_bounds(&acc, row));
         assert!(
-            list.iter().any(|candidate| super::rect_contains(candidate, &union, 3.0)),
+            list.iter()
+                .any(|candidate| super::rect_contains(candidate, &union, 3.0)),
             "at least one list candidate should contain grouped rows"
         );
     }
@@ -1356,7 +2087,11 @@ mod tests {
             height: 104.0,
         };
         let kept = prune_nested_glitch_boxes(vec![outer.clone(), inner.clone()]);
-        assert_eq!(kept.len(), 1, "expected one nested glitch box to be dropped");
+        assert_eq!(
+            kept.len(),
+            1,
+            "expected one nested glitch box to be dropped"
+        );
         assert!(
             iou(&kept[0], &inner) > 0.95,
             "smaller inner container should be retained"
@@ -1441,5 +2176,248 @@ mod tests {
         ];
         let clean = sanitize_text_seeds(&seeds, 2000.0, 1312.0);
         assert!(should_use_text_anchors(&clean));
+    }
+
+    #[test]
+    fn text_row_and_paragraph_boxes_merge_fragmented_words() {
+        let width = 520usize;
+        let height = 320usize;
+        let mut gray = vec![230u8; width * height];
+        // Draw a simple input-like border around the first line.
+        for x in 40..360 {
+            gray[60 * width + x] = 110;
+            gray[94 * width + x] = 110;
+        }
+        for y in 60..95 {
+            gray[y * width + 40] = 110;
+            gray[y * width + 359] = 110;
+        }
+        let seed = vec![
+            Bounds {
+                x: 72.0,
+                y: 68.0,
+                width: 42.0,
+                height: 16.0,
+            },
+            Bounds {
+                x: 126.0,
+                y: 68.0,
+                width: 58.0,
+                height: 16.0,
+            },
+            Bounds {
+                x: 197.0,
+                y: 69.0,
+                width: 38.0,
+                height: 16.0,
+            },
+            Bounds {
+                x: 70.0,
+                y: 122.0,
+                width: 108.0,
+                height: 18.0,
+            },
+            Bounds {
+                x: 186.0,
+                y: 123.0,
+                width: 116.0,
+                height: 18.0,
+            },
+        ];
+        let merged = text_row_and_paragraph_boxes(&gray, width, height, &seed);
+        assert!(
+            merged.iter().any(|b| b.width >= 240.0 && b.height <= 60.0),
+            "expected at least one merged line/control-sized box"
+        );
+        assert!(
+            merged.iter().any(|b| b.width >= 250.0 && b.height >= 50.0),
+            "expected paragraph-level merged candidate"
+        );
+    }
+
+    #[test]
+    fn text_control_candidates_expand_past_tight_raw_box() {
+        let width = 420usize;
+        let height = 180usize;
+        let mut gray = vec![235u8; width * height];
+        // Draw a low-contrast input border.
+        for x in 92..350 {
+            gray[48 * width + x] = 128;
+            gray[82 * width + x] = 128;
+        }
+        for y in 48..83 {
+            gray[y * width + 92] = 128;
+            gray[y * width + 349] = 128;
+        }
+
+        let text_group = Bounds {
+            x: 188.0,
+            y: 58.0,
+            width: 72.0,
+            height: 16.0,
+        };
+        let too_tight_raw = Bounds {
+            x: 186.0,
+            y: 56.0,
+            width: 76.0,
+            height: 20.0,
+        };
+        let out = text_control_candidates(
+            &gray,
+            width,
+            height,
+            &[text_group.clone()],
+            &[too_tight_raw],
+        );
+        assert!(!out.is_empty(), "expected synthesized control candidate");
+        assert!(
+            out.iter().any(|candidate| {
+                rect_contains(candidate, &text_group, 1.0)
+                    && candidate.width >= 150.0
+                    && candidate.height >= 24.0
+                    && candidate.x <= 130.0
+                    && (candidate.x + candidate.width) >= 320.0
+            }),
+            "expected expanded field boundary candidate; got {out:?}"
+        );
+    }
+
+    #[test]
+    fn text_control_candidates_keep_good_raw_field_box() {
+        let width = 420usize;
+        let height = 180usize;
+        let mut gray = vec![235u8; width * height];
+        for x in 92..350 {
+            gray[48 * width + x] = 124;
+            gray[82 * width + x] = 124;
+        }
+        for y in 48..83 {
+            gray[y * width + 92] = 124;
+            gray[y * width + 349] = 124;
+        }
+        let text_group = Bounds {
+            x: 188.0,
+            y: 58.0,
+            width: 72.0,
+            height: 16.0,
+        };
+        let good_raw = Bounds {
+            x: 92.0,
+            y: 48.0,
+            width: 258.0,
+            height: 34.0,
+        };
+        let out = text_control_candidates(&gray, width, height, &[text_group], &[good_raw.clone()]);
+        assert!(!out.is_empty(), "expected a control candidate");
+        assert!(
+            out.iter()
+                .any(|candidate| iou(candidate, &good_raw) >= 0.70),
+            "expected raw field boundary to be retained; got {out:?}"
+        );
+    }
+
+    #[test]
+    fn text_control_candidates_detect_low_contrast_boundary() {
+        let width = 420usize;
+        let height = 180usize;
+        let mut gray = vec![232u8; width * height];
+        // Very low contrast input field border.
+        for x in 110..332 {
+            gray[58 * width + x] = 150;
+            gray[88 * width + x] = 150;
+        }
+        for y in 58..89 {
+            gray[y * width + 110] = 150;
+            gray[y * width + 331] = 150;
+        }
+
+        let text_group = Bounds {
+            x: 198.0,
+            y: 66.0,
+            width: 56.0,
+            height: 15.0,
+        };
+        let out = text_control_candidates(&gray, width, height, &[text_group.clone()], &[]);
+        assert!(
+            !out.is_empty(),
+            "expected low-contrast text-field candidate"
+        );
+        let candidate = out
+            .iter()
+            .find(|candidate| rect_contains(candidate, &text_group, 1.0))
+            .cloned()
+            .expect("expected candidate containing text group");
+        assert!(
+            candidate.width >= 190.0 && candidate.height >= 24.0,
+            "candidate too small: {candidate:?}"
+        );
+    }
+
+    #[test]
+    fn maybe_widen_control_candidate_expands_horizontally_when_padding_too_small() {
+        let width = 520usize;
+        let height = 220usize;
+        let mut gray = vec![230u8; width * height];
+        // Input border with significant horizontal padding around OCR text.
+        for x in 120..420 {
+            gray[70 * width + x] = 126;
+            gray[102 * width + x] = 126;
+        }
+        for y in 70..103 {
+            gray[y * width + 120] = 126;
+            gray[y * width + 419] = 126;
+        }
+        let group = Bounds {
+            x: 186.0,
+            y: 78.0,
+            width: 176.0,
+            height: 16.0,
+        };
+        let narrow = Bounds {
+            x: 165.0,
+            y: 72.0,
+            width: 220.0,
+            height: 30.0,
+        };
+        let widened =
+            maybe_widen_control_candidate(&gray, width, height, &narrow, &group, width as f64);
+        assert!(
+            widened.width >= narrow.width + 28.0,
+            "expected widening for insufficient text padding: {widened:?}"
+        );
+        assert!(rect_contains(&widened, &group, 1.0));
+    }
+
+    #[test]
+    fn maybe_enforce_toolbar_field_padding_widens_top_search_candidate() {
+        let width = 1600usize;
+        let height = 900usize;
+        let gray = vec![126u8; width * height];
+        let group = Bounds {
+            x: 1116.0,
+            y: 41.0,
+            width: 268.0,
+            height: 27.0,
+        };
+        let candidate = Bounds {
+            x: 1098.0,
+            y: 30.0,
+            width: 305.0,
+            height: 51.0,
+        };
+        let out = maybe_enforce_toolbar_field_padding(
+            &gray,
+            width,
+            height,
+            &candidate,
+            &group,
+            width as f64,
+            height as f64,
+        );
+        assert!(
+            out.width > candidate.width,
+            "top toolbar search candidate should widen"
+        );
+        assert!(rect_contains(&out, &group, 1.0));
     }
 }
