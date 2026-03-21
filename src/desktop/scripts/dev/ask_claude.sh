@@ -43,4 +43,38 @@ if [[ -z "${prompt//[[:space:]]/}" ]]; then
   exit 2
 fi
 
-exec claude -p "$prompt"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+env_file="${DESKTOPCTL_ENV_FILE:-$script_dir/../../.env}"
+if [[ -f "$env_file" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+fi
+
+project_root="${DESKTOPCTL_PROJECT_ROOT:-}"
+if [[ -z "$project_root" ]]; then
+  project_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -z "$project_root" ]]; then
+  echo "error: set DESKTOPCTL_PROJECT_ROOT in $env_file or run from a git checkout" >&2
+  exit 2
+fi
+
+log_file="${DESKTOPCTL_ASK_CLAUDE_LOG:-$project_root/tmp/ask_claude.md}"
+mkdir -p "$(dirname "$log_file")"
+
+answer="$(cd "$project_root" && claude -p "$prompt")"
+
+{
+  echo "## $(date '+%Y-%m-%d %H:%M:%S')"
+  echo ""
+  echo "**Q:** $prompt"
+  echo ""
+  echo "**A:** $answer"
+  echo ""
+  echo "---"
+  echo ""
+} >> "$log_file"
+
+printf '%s\n' "$answer"

@@ -42,26 +42,51 @@ Label sets are maintained in Label Studio (Postgres-backed).
 
 ```bash
 # 1. Export accepted labels from LS into a run folder
-just run-export PROJECT_ID=3 SLUG=text_fields CONTROL=text_fields
+just run-export 3 text_fields text_fields
 # → datasets/runs/<timestamp>-text_fields/artifacts.csv
 
 # 2. Run tokenizer on images listed in artifacts.csv
-#    (writes overlay.png + label.json + metadata.json per label_id into results/)
+just run-tokenize datasets/runs/<timestamp>-text_fields
+# → results/<label_id>/overlay.png + label.json + metadata.json
 
 # 3. Import tokenizer results into LS (project name = run_id)
-just run-import 20260321-143000-text_fields
+just run-import datasets/runs/<timestamp>-text_fields
 
 # 4. Label in LS (accept / reject / follow_up)
 
-# 5. Log metrics to MLflow
-just run-log 20260321-143000-text_fields
+# 5. Log metrics to MLflow + export annotations.csv
+just run-log datasets/runs/<timestamp>-text_fields
+```
+
+All `run-*` commands accept either the run folder name or a full path
+(e.g. `datasets/runs/20260321-143000-text_fields`) for tab-completion convenience.
+
+### Iterating on a subset
+
+After logging, `annotations.csv` contains every verdict and comment. To create a
+focused follow-up run from a subset:
+
+```bash
+# Filter by verdict (comma-separated for multiple)
+just run-subset datasets/runs/<timestamp>-text_fields follow_up text_fields_v2
+# or
+just run-subset datasets/runs/<timestamp>-text_fields accept,follow_up text_fields_v2
+# → datasets/runs/<timestamp>-text_fields_v2/artifacts.csv
+#   (includes verdict + comment columns for manual filtering before re-running)
+
+# Then continue the normal loop from step 2
+just run-tokenize datasets/runs/<timestamp>-text_fields_v2
+just run-import   datasets/runs/<timestamp>-text_fields_v2
+just run-log      datasets/runs/<timestamp>-text_fields_v2
 ```
 
 Run folder layout:
 
 ```
 datasets/runs/<timestamp>-<slug>/
-  artifacts.csv       ← source images exported from LS accepted labels
+  artifacts.csv       ← source images (+ verdict/comment if created via run-subset)
+  annotations.csv     ← per-sample verdicts + comments exported from LS
+  meta.json           ← run metadata
   results/
     <label_id>/
       overlay.png     ← tokenizer output rendered

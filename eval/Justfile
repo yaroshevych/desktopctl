@@ -50,19 +50,31 @@ run-export project_id slug control="":
 # Fast mode defaults to tokenize_dump with parallel workers and image dedupe.
 # Usage: just run-tokenize 20260321-185915-text_fields [dump|desktopctl] [jobs]
 run-tokenize RUN ENGINE="dump" JOBS="0":
-    python3 run/run_tokenizer_overlays.py --run-dir "datasets/runs/{{RUN}}" --overwrite --engine "{{ENGINE}}" --jobs "{{JOBS}}"
+    python3 run/run_tokenizer_overlays.py --run-dir "datasets/runs/$(basename '{{RUN}}')" --overwrite --engine "{{ENGINE}}" --jobs "{{JOBS}}"
 
 # Incremental tokenize rerun: keep existing results and only fill missing labels.
 # Usage: just run-tokenize-resume 20260321-185915-text_fields [dump|desktopctl] [jobs]
 run-tokenize-resume RUN ENGINE="dump" JOBS="0":
-    python3 run/run_tokenizer_overlays.py --run-dir "datasets/runs/{{RUN}}" --engine "{{ENGINE}}" --jobs "{{JOBS}}" --skip-existing
+    python3 run/run_tokenizer_overlays.py --run-dir "datasets/runs/$(basename '{{RUN}}')" --engine "{{ENGINE}}" --jobs "{{JOBS}}" --skip-existing
 
 # Import tokenizer results for a run into Label Studio.
 # Usage: just run-import 20260321-143000-text_fields
 run-import RUN:
-    uv run import/import_batch.py --dir "datasets/runs/{{RUN}}/results" --project "{{RUN}}" --run
+    uv run import/import_batch.py --dir "datasets/runs/$(basename '{{RUN}}')/results" --project "$(basename '{{RUN}}')" --run
 
 # Log run labels from Label Studio to MLflow.
 # Usage: just run-log 20260321-143000-text_fields
 run-log RUN:
-    uv run run/log_run.py "{{RUN}}"
+    uv run run/log_run.py "$(basename '{{RUN}}')"
+
+# Create a new run folder from a filtered subset of an existing run.
+# VERDICT: comma-separated, e.g. follow_up or accept,follow_up
+# Usage: just run-subset datasets/runs/20260321-185915-text_fields follow_up my_slug
+run-subset SOURCE VERDICT SLUG:
+    uv run run/subset_run.py --source "{{SOURCE}}" --verdict "{{VERDICT}}" --slug "{{SLUG}}"
+
+# Create focused label subset with image+overlay+label+metadata
+# for accepted/gold rows and text-field-boundary comments.
+# Usage: just run-focus-set 20260321-185915-text_fields
+run-focus-set RUN:
+    python3 run/create_focus_label_set.py --run-dir "datasets/runs/$(basename '{{RUN}}')" --overwrite

@@ -35,7 +35,6 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 LS_LABEL_CONFIG = """
 <View>
   <Image name="overlay" value="$overlay_image" zoom="true"/>
-  <Image name="original" value="$image" zoom="true"/>
   <Choices name="verdict" toName="overlay" choice="single" required="true"
            showInLine="true">
     <Choice value="gold"/>
@@ -49,12 +48,27 @@ LS_LABEL_CONFIG = """
 </View>
 """
 
+LS_RUN_LABEL_CONFIG = """
+<View>
+  <Image name="overlay" value="$overlay_image" zoom="true"/>
+  <Choices name="verdict" toName="overlay" choice="single" required="true"
+           showInLine="true">
+    <Choice value="accept"/>
+    <Choice value="reject"/>
+    <Choice value="follow_up"/>
+  </Choices>
+  <TextArea name="comments" toName="overlay"
+            placeholder="Comments (optional)" rows="2"
+            perRegion="false"/>
+</View>
+"""
+
 
 def ls_headers(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Token {api_key}", "Content-Type": "application/json"}
 
 
-def get_or_create_project(base_url: str, api_key: str, name: str) -> int:
+def get_or_create_project(base_url: str, api_key: str, name: str, storage_path: str | None = None, label_config: str = LS_LABEL_CONFIG) -> int:
     hdrs = ls_headers(api_key)
     r = requests.get(f"{base_url}/api/projects", headers=hdrs)
     r.raise_for_status()
@@ -66,11 +80,21 @@ def get_or_create_project(base_url: str, api_key: str, name: str) -> int:
     r = requests.post(
         f"{base_url}/api/projects",
         headers=hdrs,
-        json={"title": name, "label_config": LS_LABEL_CONFIG},
+        json={"title": name, "label_config": label_config},
     )
     r.raise_for_status()
     proj_id = r.json()["id"]
     print(f"  created project #{proj_id}: {name}")
+
+    if storage_path:
+        r2 = requests.post(
+            f"{base_url}/api/storages/localfiles",
+            headers=hdrs,
+            json={"project": proj_id, "title": "files", "path": storage_path, "use_blob_urls": True},
+        )
+        r2.raise_for_status()
+        print(f"  created storage: {storage_path}")
+
     return proj_id
 
 
@@ -91,10 +115,14 @@ def collect_label_dirs(scan_dir: Path) -> list[Path]:
 
 def build_task(label_dir: Path, data_dir: Path) -> dict:
     metadata = json.loads((label_dir / "metadata.json").read_text())
+    overlay_path = label_dir / "overlay.png"
+    image_path = label_dir / "image.png"
+    # Overlay-only runs skip image copy for speed; use overlay as the original panel fallback.
+    image_url_path = image_path if image_path.exists() else overlay_path
 
     data: dict = {
-        "overlay_image": path_to_ls_url(label_dir / "overlay.png", data_dir),
-        "image": path_to_ls_url(label_dir / "image.png", data_dir),
+        "overlay_image": path_to_ls_url(overlay_path, data_dir),
+        "image": path_to_ls_url(image_url_path, data_dir),
         "label_id": metadata.get("label_id", label_dir.name),
         "sample_id": metadata.get("sample_id", ""),
         "control_type": metadata.get("control_type", ""),
@@ -128,6 +156,7 @@ def main() -> None:
     ap.add_argument("--ls-url", default=os.getenv("LS_URL", "http://localhost:8080"))
     ap.add_argument("--ls-key", default=os.getenv("LS_API_KEY"), help="LS API token")
     ap.add_argument("--data-dir", default=os.getenv("DATA_DIR"), help="Host path mounted as /data/local-files")
+    ap.add_argument("--run", action="store_true", help="Use run label config (accept/reject/follow_up)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -157,7 +186,12 @@ def main() -> None:
         print(json.dumps(tasks[0], indent=2))
         return
 
-    project_id = get_or_create_project(args.ls_url, args.ls_key, args.project)
+    # storage path = /data/local-files/<top-level-segment> so LS can serve all files in the tree
+    rel = scan_dir.relative_to(data_dir)
+    storage_path = "/data/local-files/" + rel.parts[0]
+
+    label_config = LS_RUN_LABEL_CONFIG if args.run else LS_LABEL_CONFIG
+    project_id = get_or_create_project(args.ls_url, args.ls_key, args.project, storage_path=storage_path, label_config=label_config)
     import_tasks(args.ls_url, args.ls_key, project_id, tasks)
     print(f"done → {args.ls_url}/projects/{project_id}/")
 
