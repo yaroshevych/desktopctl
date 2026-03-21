@@ -38,6 +38,37 @@ The same `sample_id` can appear multiple times with different `label_id` values 
 
 Label sets are maintained in Label Studio (Postgres-backed).
 
+## Test Run Workflow
+
+```bash
+# 1. Export accepted labels from LS into a run folder
+just run-export PROJECT_ID=3 SLUG=text_fields CONTROL=text_fields
+# → datasets/runs/<timestamp>-text_fields/artifacts.csv
+
+# 2. Run tokenizer on images listed in artifacts.csv
+#    (writes overlay.png + label.json + metadata.json per label_id into results/)
+
+# 3. Import tokenizer results into LS (project name = run_id)
+just run-import 20260321-143000-text_fields
+
+# 4. Label in LS (accept / reject / follow_up)
+
+# 5. Log metrics to MLflow
+just run-log 20260321-143000-text_fields
+```
+
+Run folder layout:
+
+```
+datasets/runs/<timestamp>-<slug>/
+  artifacts.csv       ← source images exported from LS accepted labels
+  results/
+    <label_id>/
+      overlay.png     ← tokenizer output rendered
+      label.json      ← tokenizer output as JSON
+      metadata.json   ← run_id, source label_id, git hash, params
+```
+
 ## Label Studio Tips
 
 ### Auto-submit on keypress (1/2/3)
