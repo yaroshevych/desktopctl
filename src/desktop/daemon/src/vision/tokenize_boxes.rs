@@ -33,7 +33,7 @@ pub fn detect_controls(
     let dbg = debug_enabled();
     let mut controls = Vec::new();
 
-    for text in text_lines {
+    for (idx, text) in text_lines.iter().enumerate() {
         let Some(enclosing) = find_enclosing_control(frame, text) else {
             if dbg {
                 eprintln!(
@@ -43,6 +43,39 @@ pub fn detect_controls(
             }
             continue;
         };
+
+        // Reject if the enclosing box overlaps other text lines at a similar
+        // vertical position — that means we hit a container/toolbar border,
+        // not a single control's border. We check for horizontal overlap with
+        // any other text on the same row (within font-height vertical distance).
+        let font_h = text.height.max(1.0);
+        let contains_others = text_lines.iter().enumerate().any(|(j, other)| {
+            if j == idx {
+                return false;
+            }
+            // Same row: vertical centers within font_h of each other.
+            let cy = text.y + text.height / 2.0;
+            let oy = other.y + other.height / 2.0;
+            if (cy - oy).abs() > font_h * 1.5 {
+                return false;
+            }
+            // Other text overlaps the enclosing box horizontally.
+            let ox1 = other.x;
+            let ox2 = other.x + other.width;
+            let ex1 = enclosing.x;
+            let ex2 = enclosing.x + enclosing.width;
+            overlap_1d(ox1, ox2, ex1, ex2) > 0.0
+        });
+        if contains_others {
+            if dbg {
+                eprintln!(
+                    "  detect_control: CONTAINER [{:.0},{:.0},{:.0},{:.0}] text=[{:.0},{:.0},{:.0},{:.0}]",
+                    enclosing.x, enclosing.y, enclosing.width, enclosing.height,
+                    text.x, text.y, text.width, text.height,
+                );
+            }
+            continue;
+        }
 
         let kind = classify_control(&enclosing, text);
 

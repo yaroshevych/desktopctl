@@ -12,7 +12,8 @@
         "text": "Q Search"
       }
     ],
-    "buttons": []
+    "buttons": [],
+    "not_controls": ["Wikipedia"]
   },
   {
     "file": "dictionary_default_light.png",
@@ -27,7 +28,8 @@
         "text": "Q Search"
       }
     ],
-    "buttons": []
+    "buttons": [],
+    "not_controls": ["Wikipedia"]
   },
   {
     "file": "facetime_default_dark.png",

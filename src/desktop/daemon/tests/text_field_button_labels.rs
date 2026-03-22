@@ -52,6 +52,8 @@ struct ImageControls {
     file: String,
     text_fields: Vec<ControlLabel>,
     buttons: Vec<ControlLabel>,
+    #[serde(default)]
+    not_controls: Vec<String>,
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -147,11 +149,23 @@ fn match_controls(
     (matched, fp)
 }
 
+fn bbox_overlaps(a: &Bounds, b: &Bounds) -> bool {
+    a.x < b.x + b.width
+        && a.x + a.width > b.x
+        && a.y < b.y + b.height
+        && a.y + a.height > b.y
+}
+
 fn bbox_distance(a: &Bounds, b: &Bounds) -> f64 {
     (a.x - b.x).abs() + (a.y - b.y).abs() + (a.width - b.width).abs() + (a.height - b.height).abs()
 }
 
-fn run_text_pipeline(image_path: &std::path::Path) -> (Vec<Bounds>, metal_pipeline::ProcessedFrame) {
+struct TextLine {
+    bounds: Bounds,
+    text: String,
+}
+
+fn run_text_pipeline(image_path: &std::path::Path) -> (Vec<TextLine>, metal_pipeline::ProcessedFrame) {
     let image = ImageReader::open(image_path)
         .unwrap_or_else(|e| panic!("open image {}: {}", image_path.display(), e))
         .decode()
@@ -173,8 +187,14 @@ fn run_text_pipeline(image_path: &std::path::Path) -> (Vec<Bounds>, metal_pipeli
         .collect();
 
     let lines = group_words_into_lines(&words);
-    let line_bounds: Vec<Bounds> = lines.iter().map(|l| l.bounds.clone()).collect();
-    (line_bounds, frame)
+    let text_lines: Vec<TextLine> = lines
+        .iter()
+        .map(|l| TextLine {
+            bounds: l.bounds.clone(),
+            text: l.text.clone(),
+        })
+        .collect();
+    (text_lines, frame)
 }
 
 // ── test ────────────────────────────────────────────────────────────────────
@@ -207,7 +227,8 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
             continue;
         }
 
-        let (line_bounds, frame) = run_text_pipeline(&image_path);
+        let (text_lines, frame) = run_text_pipeline(&image_path);
+        let line_bounds: Vec<Bounds> = text_lines.iter().map(|l| l.bounds.clone()).collect();
         let predicted = tokenize_boxes::detect_controls(&frame, &line_bounds);
 
         // Split predictions by kind.
@@ -226,6 +247,21 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
         btn_total += entry.buttons.len();
         btn_matched += matched;
         btn_fp += fp;
+
+        // Negative assertions: text lines matching these strings must NOT
+        // produce a detected control.
+        for neg_text in &entry.not_controls {
+            // Find the text line containing this string.
+            let neg_line = text_lines.iter().find(|l| l.text.contains(neg_text.as_str()));
+            if let Some(line) = neg_line {
+                let bad = predicted.iter().any(|c| bbox_overlaps(&c.bounds, &line.bounds));
+                assert!(
+                    !bad,
+                    "NEGATIVE: {:?} in {} was detected as a control but should not be",
+                    neg_text, entry.file,
+                );
+            }
+        }
     }
 
     let tf_recall = if tf_total == 0 { 1.0 } else { tf_matched as f64 / tf_total as f64 };
