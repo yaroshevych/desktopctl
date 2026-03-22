@@ -184,14 +184,13 @@ where
 /// Vision merged two spatially separate words into one bounding box.
 pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<TextBox> {
     let dbg = debug_enabled();
-    let h = tb.bounds.height;
-    if h < 4.0 || tb.bounds.width < h * 2.5 {
-        return vec![tb];
-    }
-
-    // Tighten first to get accurate text height (OCR boxes are often padded).
+    // Tighten first so split gating uses actual text dimensions, not padded OCR
+    // bounds.
     let tight = tighten_to_content(&tb.bounds, frame);
     let h = tight.height;
+    if h < 4.0 || tight.width < h * 2.5 {
+        return vec![tb];
+    }
 
     // If tightening shrinks too much, keep scan on the original OCR box.
     // Thin symbols ("<", ">") can disappear during tighten, hiding real gaps.
@@ -222,22 +221,72 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
         return vec![tb];
     }
 
-    // Find background and text intensities from the region.
-    // Background: sample top and bottom edge rows (most likely pure bg).
-    // Text: find the peak deviation from background.
-    let mut bg_sum = 0u64;
-    let mut bg_count = 0u64;
+    // Align split scan luminance with OCR preprocessing:
+    // 1) invert on dark backgrounds, 2) local contrast stretch (1st..99th pct).
+    let mut raw_bg_sum = 0u64;
+    let mut raw_bg_count = 0u64;
     for x in x1..x2 {
-        bg_sum += frame.gray[y1 * frame.width + x] as u64;
-        bg_sum += frame.gray[(y2 - 1) * frame.width + x] as u64;
-        bg_count += 2;
+        raw_bg_sum += frame.gray[y1 * frame.width + x] as u64;
+        raw_bg_sum += frame.gray[(y2 - 1) * frame.width + x] as u64;
+        raw_bg_count += 2;
     }
-    let bg_luma = if bg_count > 0 {
-        bg_sum as f64 / bg_count as f64
+    let raw_bg_luma = if raw_bg_count > 0 {
+        raw_bg_sum as f64 / raw_bg_count as f64
     } else {
         128.0
     };
-    let is_dark_bg = bg_luma < 128.0;
+    let is_dark_bg = raw_bg_luma < 128.0;
+    let preprocess_luma = |raw: u8| -> u8 {
+        if is_dark_bg {
+            255u8.saturating_sub(raw)
+        } else {
+            raw
+        }
+    };
+
+    let mut hist = [0u32; 256];
+    let mut hist_total = 0u32;
+    for y in y1..y2 {
+        for x in x1..x2 {
+            let raw = frame.gray[y * frame.width + x];
+            let prep = preprocess_luma(raw);
+            hist[prep as usize] += 1;
+            hist_total += 1;
+        }
+    }
+    let lo_target = hist_total / 100;
+    let hi_target = hist_total.saturating_sub(hist_total / 100);
+    let mut cumulative = 0u32;
+    let mut lo = 0u8;
+    let mut hi = 255u8;
+    for (i, &count) in hist.iter().enumerate() {
+        cumulative += count;
+        if cumulative <= lo_target {
+            lo = i as u8;
+        }
+        if cumulative < hi_target {
+            hi = i as u8;
+        }
+    }
+    let stretch_range = (hi as f64 - lo as f64).max(1.0);
+    let to_scan_luma = |raw: u8| -> f64 {
+        let prep = preprocess_luma(raw) as f64;
+        ((prep - lo as f64) * (255.0 / stretch_range)).clamp(0.0, 255.0)
+    };
+
+    // Background: top/bottom edge rows in OCR-aligned luminance.
+    let mut bg_sum = 0.0f64;
+    let mut bg_count = 0usize;
+    for x in x1..x2 {
+        bg_sum += to_scan_luma(frame.gray[y1 * frame.width + x]);
+        bg_sum += to_scan_luma(frame.gray[(y2 - 1) * frame.width + x]);
+        bg_count += 2;
+    }
+    let bg_luma = if bg_count > 0 {
+        bg_sum / bg_count as f64
+    } else {
+        128.0
+    };
     // Scan only the center band to avoid counting 1px UI separators that run
     // across the entire box width (toolbar rules, field borders) as "text".
     let region_h = y2 - y1;
@@ -250,12 +299,9 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     let mut max_dev = 0.0f64;
     for x in x1..x2 {
         for y in scan_y1..scan_y2 {
-            let val = frame.gray[y * frame.width + x] as f64;
-            let dev = if is_dark_bg {
-                val - bg_luma
-            } else {
-                bg_luma - val
-            };
+            let val = to_scan_luma(frame.gray[y * frame.width + x]);
+            // In OCR space, text is expected darker than background.
+            let dev = (bg_luma - val).max(0.0);
             if dev > max_dev {
                 max_dev = dev;
             }
@@ -273,12 +319,8 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     for y in scan_y1..scan_y2 {
         let mut row_ink = 0usize;
         for x in x1..x2 {
-            let val = frame.gray[y * frame.width + x] as f64;
-            let is_text = if is_dark_bg {
-                val - bg_luma > threshold
-            } else {
-                bg_luma - val > threshold
-            };
+            let scan_luma = to_scan_luma(frame.gray[y * frame.width + x]);
+            let is_text = (bg_luma - scan_luma) > threshold;
             if is_text {
                 row_ink += 1;
             }
@@ -304,12 +346,8 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
             if !keep_row[y - scan_y1] {
                 continue;
             }
-            let val = frame.gray[y * frame.width + x] as f64;
-            let is_text = if is_dark_bg {
-                val - bg_luma > threshold
-            } else {
-                bg_luma - val > threshold
-            };
+            let scan_luma = to_scan_luma(frame.gray[y * frame.width + x]);
+            let is_text = (bg_luma - scan_luma) > threshold;
             if is_text {
                 ink += 1;
                 if ink >= min_ink_px {
@@ -323,10 +361,12 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     if dbg {
         let dropped_rows = keep_row.iter().filter(|&&v| !v).count();
         eprintln!(
-            "  split_scan {:?}: bg_luma={:.0} dark_bg={} max_dev={:.0} thresh={:.0} min_gap={:.0} scan_y={}..{} min_ink={} dropped_rows={}",
+            "  split_scan {:?}: bg_luma={:.0} dark_bg={} lo={} hi={} max_dev={:.0} thresh={:.0} min_gap={:.0} scan_y={}..{} min_ink={} dropped_rows={}",
             tb.text,
             bg_luma,
             is_dark_bg,
+            lo,
+            hi,
             max_dev,
             threshold,
             h * SPLIT_HGAP_FONT_RATIO,
@@ -726,7 +766,34 @@ where
         groups.entry(root).or_default().push(item.clone());
     }
     let mut out: Vec<Vec<TextBox>> = groups.into_values().collect();
-    out.sort_by_key(|group| group.len());
+    // Reading order: top-to-bottom, then left-to-right.
+    out.sort_by(|a, b| {
+        let a_min_y = a
+            .iter()
+            .map(|tb| tb.bounds.y)
+            .fold(f64::INFINITY, f64::min);
+        let b_min_y = b
+            .iter()
+            .map(|tb| tb.bounds.y)
+            .fold(f64::INFINITY, f64::min);
+        let y_ord = a_min_y
+            .partial_cmp(&b_min_y)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if y_ord != std::cmp::Ordering::Equal {
+            return y_ord;
+        }
+        let a_min_x = a
+            .iter()
+            .map(|tb| tb.bounds.x)
+            .fold(f64::INFINITY, f64::min);
+        let b_min_x = b
+            .iter()
+            .map(|tb| tb.bounds.x)
+            .fold(f64::INFINITY, f64::min);
+        a_min_x
+            .partial_cmp(&b_min_x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
