@@ -79,6 +79,7 @@ pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> 
 }
 
 /// Legacy wrapper: loads image from path, delegates to `recognize_text`.
+#[allow(dead_code)]
 pub fn recognize_text_from_image(
     path: &Path,
     _image_width: u32,

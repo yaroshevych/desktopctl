@@ -16,6 +16,7 @@ pub(super) fn debug_enabled() -> bool {
 // ── public API ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum ControlKind {
     TextField,
     Button,
@@ -24,6 +25,7 @@ pub enum ControlKind {
 #[derive(Debug, Clone)]
 pub struct DetectedControl {
     pub bounds: Bounds,
+    #[allow(dead_code)]
     pub kind: ControlKind,
 }
 

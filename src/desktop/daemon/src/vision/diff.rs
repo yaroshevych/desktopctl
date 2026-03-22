@@ -1,6 +1,4 @@
-use std::path::Path;
-
-use desktop_core::{error::AppError, protocol::Bounds};
+use desktop_core::protocol::Bounds;
 use image::{DynamicImage, GrayImage, imageops::FilterType};
 
 #[derive(Debug, Clone)]
@@ -16,13 +14,6 @@ pub struct ThumbRegion {
     pub y: u32,
     pub width: u32,
     pub height: u32,
-}
-
-pub fn thumbnail_from_png(path: &Path, width: u32, height: u32) -> Result<GrayThumbnail, AppError> {
-    let image = image::open(path).map_err(|err| {
-        AppError::backend_unavailable(format!("failed to open screenshot: {err}"))
-    })?;
-    Ok(thumbnail_from_image(&image, width, height))
 }
 
 pub fn thumbnail_from_image(image: &DynamicImage, width: u32, height: u32) -> GrayThumbnail {

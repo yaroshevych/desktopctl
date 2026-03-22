@@ -119,34 +119,6 @@ impl ProcessedFrame {
         }
     }
 
-    /// Mean grayscale value inside a rectangle.
-    pub fn interior_mean(&self, b: &Bounds) -> f64 {
-        let x1 = (b.x as usize).min(self.width.saturating_sub(1));
-        let y1 = (b.y as usize).min(self.height.saturating_sub(1));
-        let x2 = ((b.x + b.width) as usize).min(self.width.saturating_sub(1));
-        let y2 = ((b.y + b.height) as usize).min(self.height.saturating_sub(1));
-        if x2 <= x1 || y2 <= y1 {
-            return 0.0;
-        }
-        let area = (x2 - x1) as f64 * (y2 - y1) as f64;
-        self.rect_sum(&self.gray_sat, x1, y1, x2 - 1, y2 - 1) / area
-    }
-
-    /// Variance of grayscale values inside a rectangle.
-    pub fn interior_variance(&self, b: &Bounds) -> f64 {
-        let x1 = (b.x as usize).min(self.width.saturating_sub(1));
-        let y1 = (b.y as usize).min(self.height.saturating_sub(1));
-        let x2 = ((b.x + b.width) as usize).min(self.width.saturating_sub(1));
-        let y2 = ((b.y + b.height) as usize).min(self.height.saturating_sub(1));
-        if x2 <= x1 || y2 <= y1 {
-            return 0.0;
-        }
-        let area = (x2 - x1) as f64 * (y2 - y1) as f64;
-        let mean = self.rect_sum(&self.gray_sat, x1, y1, x2 - 1, y2 - 1) / area;
-        let mean_sq = self.rect_sum(&self.gray_sq_sat, x1, y1, x2 - 1, y2 - 1) / area;
-        (mean_sq - mean * mean).max(0.0)
-    }
-
     /// Mean edge energy inside a rectangle.
     pub fn interior_edge_energy(&self, b: &Bounds) -> f64 {
         let x1 = (b.x as usize).min(self.width.saturating_sub(1));

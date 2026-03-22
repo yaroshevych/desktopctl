@@ -26,6 +26,7 @@ pub(crate) struct TextBox {
 }
 
 impl TextBox {
+    #[cfg(test)]
     pub fn from_bounds(b: Bounds) -> Self {
         Self {
             bounds: b,

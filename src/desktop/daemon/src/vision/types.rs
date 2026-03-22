@@ -4,6 +4,7 @@ use image::RgbaImage;
 
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
+    #[allow(dead_code)]
     pub snapshot_id: u64,
     pub timestamp: String,
     pub display_id: u32,

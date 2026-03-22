@@ -1417,10 +1417,6 @@ pub(super) fn bounds_tuple_from_value(value: &serde_json::Value) -> Option<(f64,
     ))
 }
 
-pub(super) fn load_rgba_image(path: &std::path::Path) -> Option<RgbaImage> {
-    image::open(path).ok().map(|img| img.to_rgba8())
-}
-
 pub(super) fn estimate_toggle_state(
     image: Option<&RgbaImage>,
     bounds: &desktop_core::protocol::Bounds,
