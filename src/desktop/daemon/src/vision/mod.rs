@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod debug;
 pub mod diff;
+pub mod metal_pipeline;
 pub mod ocr;
 pub mod pipeline;
 pub mod regions;

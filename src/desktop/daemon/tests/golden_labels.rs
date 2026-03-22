@@ -2,6 +2,10 @@
 //! computes per-category recall at appropriate IoU thresholds.
 //! Uses detect_ui_boxes(image) — same as runtime with no OCR text seeds.
 
+#[path = "../src/vision/metal_pipeline.rs"]
+#[allow(dead_code)]
+mod metal_pipeline;
+
 #[path = "../src/vision/tokenize_boxes.rs"]
 #[allow(dead_code)]
 mod tokenize_boxes;

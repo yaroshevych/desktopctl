@@ -8,6 +8,9 @@ use serde_json::json;
 // Dev-only threshold for external label files used by tokenize_dump batch runs.
 const TEXT_LABEL_CONFIDENCE_MIN: f32 = 0.50;
 
+#[path = "../vision/metal_pipeline.rs"]
+#[allow(dead_code)]
+mod metal_pipeline;
 #[path = "../vision/ocr.rs"]
 mod ocr;
 #[path = "../vision/tokenize_boxes.rs"]
