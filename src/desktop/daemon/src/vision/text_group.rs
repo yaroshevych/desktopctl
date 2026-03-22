@@ -33,7 +33,7 @@ impl TextBox {
         Self { bounds: b, text }
     }
 
-    pub fn merge(items: &[TextBox]) -> TextBox {
+    pub fn merge_refs(items: &[&TextBox]) -> TextBox {
         let merged_bounds = items
             .iter()
             .skip(1)
@@ -41,7 +41,7 @@ impl TextBox {
                 union_bounds(&acc, &tb.bounds)
             });
         // Sort by x position and join texts with space.
-        let mut sorted: Vec<&TextBox> = items.iter().collect();
+        let mut sorted: Vec<&TextBox> = items.to_vec();
         sorted.sort_by(|a, b| {
             a.bounds
                 .x
@@ -84,87 +84,124 @@ fn tighten_to_content_with_min_ratio(
     }
 
     // Try text_mask first — it only marks actual text strokes, not UI borders.
-    if let Some(tight) = tighten_with(bounds, x1, y1, x2, y2, |x, y| {
-        frame.text_mask[y * frame.width + x]
-    }, min_ratio) {
+    if let Some(tight) = tighten_with_mask(
+        bounds,
+        x1,
+        y1,
+        x2,
+        y2,
+        frame.width,
+        &frame.text_mask,
+        min_ratio,
+    ) {
         return tight;
     }
 
     // Fall back to edge image for low-contrast text.
     const EDGE_THRESH: u8 = 12;
-    if let Some(tight) = tighten_with(bounds, x1, y1, x2, y2, |x, y| {
-        frame.edge[y * frame.width + x] > EDGE_THRESH
-    }, min_ratio) {
+    if let Some(tight) = tighten_with_edge(
+        bounds,
+        x1,
+        y1,
+        x2,
+        y2,
+        frame.width,
+        &frame.edge,
+        EDGE_THRESH,
+        min_ratio,
+    ) {
         return tight;
     }
 
     bounds.clone()
 }
 
-/// Generic tighten: scan inward from each edge using a pixel predicate.
+/// Tighten bounds against a boolean content map in a single row-major pass.
 /// Returns None if result is too small (below `min_ratio` of original in either dimension).
-fn tighten_with<F>(
+fn tighten_with_mask(
     bounds: &Bounds,
     x1: usize,
     y1: usize,
     x2: usize,
     y2: usize,
-    has_content: F,
+    width: usize,
+    mask: &[bool],
     min_ratio: f64,
-) -> Option<Bounds>
-where
-    F: Fn(usize, usize) -> bool,
-{
-    // Scan from top.
-    let mut top = y1;
-    'top: for y in y1..y2 {
-        for x in x1..x2 {
-            if has_content(x, y) {
-                top = y;
-                break 'top;
+) -> Option<Bounds> {
+    let mut left = x2;
+    let mut right = x1;
+    let mut top = y2;
+    let mut bottom = y1;
+    let mut found = false;
+
+    for y in y1..y2 {
+        let row = y * width + x1;
+        for x_off in 0..(x2 - x1) {
+            if mask[row + x_off] {
+                found = true;
+                let x = x1 + x_off;
+                left = left.min(x);
+                right = right.max(x + 1);
+                top = top.min(y);
+                bottom = bottom.max(y + 1);
             }
         }
     }
-
-    // Scan from bottom.
-    let mut bottom = y2;
-    'bottom: for y in (y1..y2).rev() {
-        for x in x1..x2 {
-            if has_content(x, y) {
-                bottom = y + 1;
-                break 'bottom;
-            }
-        }
-    }
-
-    // Scan from left.
-    let mut left = x1;
-    'left: for x in x1..x2 {
-        for y in top..bottom {
-            if has_content(x, y) {
-                left = x;
-                break 'left;
-            }
-        }
-    }
-
-    // Scan from right.
-    let mut right = x2;
-    'right: for x in (x1..x2).rev() {
-        for y in top..bottom {
-            if has_content(x, y) {
-                right = x + 1;
-                break 'right;
-            }
-        }
-    }
-
-    if right <= left || bottom <= top {
+    if !found {
         return None;
     }
+
     let new_w = (right - left) as f64;
     let new_h = (bottom - top) as f64;
-    // Don't tighten if result is too small.
+    if new_w < bounds.width * min_ratio || new_h < bounds.height * min_ratio {
+        return None;
+    }
+
+    Some(Bounds {
+        x: left as f64,
+        y: top as f64,
+        width: new_w,
+        height: new_h,
+    })
+}
+
+/// Tighten bounds against thresholded edge map in a single row-major pass.
+fn tighten_with_edge(
+    bounds: &Bounds,
+    x1: usize,
+    y1: usize,
+    x2: usize,
+    y2: usize,
+    width: usize,
+    edge: &[u8],
+    threshold: u8,
+    min_ratio: f64,
+) -> Option<Bounds> {
+    let mut left = x2;
+    let mut right = x1;
+    let mut top = y2;
+    let mut bottom = y1;
+    let mut found = false;
+
+    for y in y1..y2 {
+        let row = y * width + x1;
+        for x_off in 0..(x2 - x1) {
+            if edge[row + x_off] > threshold {
+                found = true;
+                let x = x1 + x_off;
+                left = left.min(x);
+                right = right.max(x + 1);
+                top = top.min(y);
+                bottom = bottom.max(y + 1);
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+
+    let new_w = (right - left) as f64;
+    let new_h = (bottom - top) as f64;
     if new_w < bounds.width * min_ratio || new_h < bounds.height * min_ratio {
         return None;
     }
@@ -184,11 +221,13 @@ where
 /// Vision merged two spatially separate words into one bounding box.
 pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<TextBox> {
     let dbg = debug_enabled();
+    let mut tb = tb;
     // Tighten first so split gating uses actual text dimensions, not padded OCR
     // bounds.
     let tight = tighten_to_content(&tb.bounds, frame);
     let h = tight.height;
     if h < 4.0 || tight.width < h * 2.5 {
+        tb.bounds = tight;
         return vec![tb];
     }
 
@@ -196,7 +235,11 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     // Thin symbols ("<", ">") can disappear during tighten, hiding real gaps.
     let use_original_scan =
         tight.width < tb.bounds.width * 0.72 || tight.height < tb.bounds.height * 0.72;
-    let scan = if use_original_scan { &tb.bounds } else { &tight };
+    let scan = if use_original_scan {
+        &tb.bounds
+    } else {
+        &tight
+    };
     if dbg && use_original_scan {
         eprintln!(
             "  split_scan_bounds {:?}: using original box [{:.0},{:.0},{:.0},{:.0}] over tight [{:.0},{:.0},{:.0},{:.0}]",
@@ -216,19 +259,26 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     let y1 = (scan.y as usize).min(frame.height.saturating_sub(1));
     let x2 = ((scan.x + scan.width) as usize).min(frame.width);
     let y2 = ((scan.y + scan.height) as usize).min(frame.height);
-
     if x2 <= x1 || y2 <= y1 {
+        tb.bounds = tight;
         return vec![tb];
     }
+    let region_w = x2 - x1;
+    let region_h = y2 - y1;
 
     // Align split scan luminance with OCR preprocessing:
     // 1) invert on dark backgrounds, 2) local contrast stretch (1st..99th pct).
     let mut raw_bg_sum = 0u64;
     let mut raw_bg_count = 0u64;
-    for x in x1..x2 {
-        raw_bg_sum += frame.gray[y1 * frame.width + x] as u64;
-        raw_bg_sum += frame.gray[(y2 - 1) * frame.width + x] as u64;
-        raw_bg_count += 2;
+    let top_row = y1 * frame.width + x1;
+    let bottom_row = (y2 - 1) * frame.width + x1;
+    for x_off in 0..region_w {
+        raw_bg_sum += frame.gray[top_row + x_off] as u64;
+        raw_bg_count += 1;
+        if bottom_row != top_row {
+            raw_bg_sum += frame.gray[bottom_row + x_off] as u64;
+            raw_bg_count += 1;
+        }
     }
     let raw_bg_luma = if raw_bg_count > 0 {
         raw_bg_sum as f64 / raw_bg_count as f64
@@ -238,19 +288,22 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     let is_dark_bg = raw_bg_luma < 128.0;
 
     let mut hist = [0u32; 256];
-    let mut hist_total = 0u32;
-    for y in y1..y2 {
-        for x in x1..x2 {
-            let raw = frame.gray[y * frame.width + x];
+    let mut region_raw = vec![0u8; region_w * region_h];
+    for y_off in 0..region_h {
+        let src_row = (y1 + y_off) * frame.width + x1;
+        let dst_row = y_off * region_w;
+        for x_off in 0..region_w {
+            let raw = frame.gray[src_row + x_off];
+            region_raw[dst_row + x_off] = raw;
             let prep = if is_dark_bg {
                 255u8.saturating_sub(raw)
             } else {
                 raw
             };
             hist[prep as usize] += 1;
-            hist_total += 1;
         }
     }
+    let hist_total = (region_w * region_h) as u32;
     let lo_target = hist_total / 100;
     let hi_target = hist_total.saturating_sub(hist_total / 100);
     let mut cumulative = 0u32;
@@ -266,9 +319,8 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
         }
     }
     let stretch_range = (hi as f64 - lo as f64).max(1.0);
-    // Precompute OCR-aligned luma transform for all 256 grayscale values.
-    let mut scan_lut = [0.0f64; 256];
     let scale = 255.0 / stretch_range;
+    let mut scan_lut = [0.0f64; 256];
     for raw in 0u16..=255u16 {
         let raw_u8 = raw as u8;
         let prep = if is_dark_bg {
@@ -279,33 +331,45 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
         scan_lut[raw as usize] = ((prep - lo as f64) * scale).clamp(0.0, 255.0);
     }
 
+    // Cache OCR-space normalized pixels for the region once; downstream logic
+    // reuses this buffer instead of rescanning frame.gray repeatedly.
+    let mut norm = vec![0.0f64; region_w * region_h];
+    for i in 0..region_raw.len() {
+        norm[i] = scan_lut[region_raw[i] as usize];
+    }
+
     // Background: top/bottom edge rows in OCR-aligned luminance.
     let mut bg_sum = 0.0f64;
     let mut bg_count = 0usize;
-    for x in x1..x2 {
-        bg_sum += scan_lut[frame.gray[y1 * frame.width + x] as usize];
-        bg_sum += scan_lut[frame.gray[(y2 - 1) * frame.width + x] as usize];
-        bg_count += 2;
+    for x_off in 0..region_w {
+        bg_sum += norm[x_off];
+        bg_count += 1;
+        if region_h > 1 {
+            bg_sum += norm[(region_h - 1) * region_w + x_off];
+            bg_count += 1;
+        }
     }
     let bg_luma = if bg_count > 0 {
         bg_sum / bg_count as f64
     } else {
         128.0
     };
+
     // Scan only the center band to avoid counting 1px UI separators that run
     // across the entire box width (toolbar rules, field borders) as "text".
-    let region_h = y2 - y1;
     let vpad = ((region_h as f64) * 0.18).round() as usize;
-    let scan_y1 = (y1 + vpad).min(y2.saturating_sub(1));
-    let scan_y2 = y2.saturating_sub(vpad).max(scan_y1 + 1);
-    let scan_h = scan_y2.saturating_sub(scan_y1).max(1);
+    let scan_r1 = vpad.min(region_h.saturating_sub(1));
+    let scan_r2 = region_h.saturating_sub(vpad).max(scan_r1 + 1);
+    let scan_h = scan_r2.saturating_sub(scan_r1).max(1);
+    let scan_y1 = y1 + scan_r1;
+    let scan_y2 = y1 + scan_r2;
 
     // Find peak text intensity (max deviation from bg).
     let mut max_dev = 0.0f64;
-    for x in x1..x2 {
-        for y in scan_y1..scan_y2 {
-            let val = scan_lut[frame.gray[y * frame.width + x] as usize];
-            // In OCR space, text is expected darker than background.
+    for y_off in scan_r1..scan_r2 {
+        let row = y_off * region_w;
+        for x_off in 0..region_w {
+            let val = norm[row + x_off];
             let dev = (bg_luma - val).max(0.0);
             if dev > max_dev {
                 max_dev = dev;
@@ -319,20 +383,19 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
 
     // Drop rows that are too "full". They are usually horizontal UI rules and
     // borders, which otherwise break long gaps between words.
-    let scan_w = x2 - x1;
     let mut keep_row = vec![true; scan_h];
-    for y in scan_y1..scan_y2 {
+    for (i, y_off) in (scan_r1..scan_r2).enumerate() {
         let mut row_ink = 0usize;
-        for x in x1..x2 {
-            let scan_luma = scan_lut[frame.gray[y * frame.width + x] as usize];
-            let is_text = (bg_luma - scan_luma) > threshold;
-            if is_text {
+        let row = y_off * region_w;
+        for x_off in 0..region_w {
+            let scan_luma = norm[row + x_off];
+            if (bg_luma - scan_luma) > threshold {
                 row_ink += 1;
             }
         }
-        let fill_ratio = row_ink as f64 / scan_w.max(1) as f64;
+        let fill_ratio = row_ink as f64 / region_w.max(1) as f64;
         if fill_ratio >= 0.72 {
-            keep_row[y - scan_y1] = false;
+            keep_row[i] = false;
         }
     }
     if !keep_row.iter().any(|&v| v) {
@@ -342,25 +405,24 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
 
     // Build column occupancy: a column has text only if it has enough
     // in-band text pixels, not just a single hot/noisy pixel.
-    let mut col_has_content = vec![false; x2 - x1];
+    let mut col_has_content = vec![false; region_w];
     let min_ink_px = ((usable_rows as f64) * 0.10).round() as usize;
     let min_ink_px = min_ink_px.max(3).min(usable_rows);
-    for x in x1..x2 {
-        let mut ink = 0usize;
-        for y in scan_y1..scan_y2 {
-            if !keep_row[y - scan_y1] {
-                continue;
-            }
-            let scan_luma = scan_lut[frame.gray[y * frame.width + x] as usize];
-            let is_text = (bg_luma - scan_luma) > threshold;
-            if is_text {
-                ink += 1;
-                if ink >= min_ink_px {
-                    col_has_content[x - x1] = true;
-                    break;
-                }
+    let mut col_ink = vec![0usize; region_w];
+    for (i, y_off) in (scan_r1..scan_r2).enumerate() {
+        if !keep_row[i] {
+            continue;
+        }
+        let row = y_off * region_w;
+        for x_off in 0..region_w {
+            let scan_luma = norm[row + x_off];
+            if (bg_luma - scan_luma) > threshold {
+                col_ink[x_off] += 1;
             }
         }
+    }
+    for x_off in 0..region_w {
+        col_has_content[x_off] = col_ink[x_off] >= min_ink_px;
     }
 
     if dbg {
@@ -411,6 +473,7 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     }
 
     if splits.is_empty() {
+        tb.bounds = tight;
         return vec![tb];
     }
 
@@ -455,6 +518,21 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
         .into_iter()
         .map(|b| TextBox::from_bounds_with_text(b, String::new()))
         .collect();
+    let lead_symbols = words
+        .iter()
+        .take_while(|w| !w.is_empty() && w.chars().all(|c| !c.is_alphanumeric()))
+        .count();
+    if lead_symbols > 1 && lead_symbols < words.len() && textboxes.len() > lead_symbols {
+        let merged_bounds = textboxes[1..lead_symbols]
+            .iter()
+            .fold(textboxes[0].bounds.clone(), |acc, sub| {
+                union_bounds(&acc, &sub.bounds)
+            });
+        let mut merged = Vec::with_capacity(textboxes.len() - lead_symbols + 1);
+        merged.push(TextBox::from_bounds_with_text(merged_bounds, String::new()));
+        merged.extend(textboxes.into_iter().skip(lead_symbols));
+        textboxes = merged;
+    }
 
     // Simple heuristic: if we have N sub-boxes and M words, distribute sequentially.
     if !words.is_empty() && !textboxes.is_empty() {
@@ -467,20 +545,13 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
             // grouped in the left-most split box instead of attaching to the
             // next word group.
             if textboxes.len() == 2 {
-                let lead_symbols = words
-                    .iter()
-                    .take_while(|w| {
-                        !w.is_empty() && w.chars().all(|c| !c.is_alphanumeric())
-                    })
-                    .count();
                 if lead_symbols > 0 && lead_symbols < words.len() {
                     textboxes[0].text = words[..lead_symbols].join(" ");
                     textboxes[1].text = words[lead_symbols..].join(" ");
                     if dbg {
                         eprintln!(
                             "    split_assign symbols: left={:?} right={:?}",
-                            textboxes[0].text,
-                            textboxes[1].text
+                            textboxes[0].text, textboxes[1].text
                         );
                     }
                     if dbg {
@@ -537,7 +608,11 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     if dbg {
         eprintln!(
             "  split_wide: {:?} [{:.0},{:.0},{:.0},{:.0}] → {} parts",
-            tb.text, tb.bounds.x, tb.bounds.y, tb.bounds.width, tb.bounds.height,
+            tb.text,
+            tb.bounds.x,
+            tb.bounds.y,
+            tb.bounds.width,
+            tb.bounds.height,
             textboxes.len()
         );
         for (i, sub) in textboxes.iter().enumerate() {
@@ -591,16 +666,35 @@ pub(crate) fn group_words_into_lines(words: &[TextBox]) -> Vec<TextBox> {
         if cluster.is_empty() {
             continue;
         }
-        let merged = TextBox::merge(cluster);
+        let merged = TextBox::merge_refs(cluster);
         // Skip very tiny isolated blobs (single glyph-sized).
-        let font_h =
-            cluster.iter().map(|w| w.bounds.height).sum::<f64>() / cluster.len() as f64;
+        let font_h = cluster.iter().map(|w| w.bounds.height).sum::<f64>() / cluster.len() as f64;
         if cluster.len() == 1 && merged.bounds.width < font_h * 1.2 {
+            let keep_tiny_symbol = merged.text.contains('<') || merged.text.contains('>');
+            if keep_tiny_symbol {
+                if dbg {
+                    eprintln!(
+                        "  line {:2}: KEEP (symbol) [{:.0},{:.0},{:.0},{:.0}]  {:?}",
+                        ci,
+                        merged.bounds.x,
+                        merged.bounds.y,
+                        merged.bounds.width,
+                        merged.bounds.height,
+                        merged.text
+                    );
+                }
+                lines.push(merged);
+                continue;
+            }
             if dbg {
                 eprintln!(
                     "  line {:2}: SKIP (tiny) [{:.0},{:.0},{:.0},{:.0}]  {:?}",
-                    ci, merged.bounds.x, merged.bounds.y, merged.bounds.width,
-                    merged.bounds.height, merged.text
+                    ci,
+                    merged.bounds.x,
+                    merged.bounds.y,
+                    merged.bounds.width,
+                    merged.bounds.height,
+                    merged.text
                 );
             }
             continue;
@@ -608,8 +702,14 @@ pub(crate) fn group_words_into_lines(words: &[TextBox]) -> Vec<TextBox> {
         if dbg {
             eprintln!(
                 "  line {:2}: {} words  [{:.0},{:.0},{:.0},{:.0}]  font_h={:.0}  {:?}",
-                ci, cluster.len(), merged.bounds.x, merged.bounds.y,
-                merged.bounds.width, merged.bounds.height, font_h, merged.text
+                ci,
+                cluster.len(),
+                merged.bounds.x,
+                merged.bounds.y,
+                merged.bounds.width,
+                merged.bounds.height,
+                font_h,
+                merged.text
             );
         }
         lines.push(merged);
@@ -672,22 +772,31 @@ pub(crate) fn group_lines_into_paragraphs(lines: &[TextBox]) -> Vec<TextBox> {
             if dbg && !cluster.is_empty() {
                 eprintln!(
                     "  para {:2}: SKIP (single line)  [{:.0},{:.0},{:.0},{:.0}]  {:?}",
-                    ci, cluster[0].bounds.x, cluster[0].bounds.y,
-                    cluster[0].bounds.width, cluster[0].bounds.height, cluster[0].text
+                    ci,
+                    cluster[0].bounds.x,
+                    cluster[0].bounds.y,
+                    cluster[0].bounds.width,
+                    cluster[0].bounds.height,
+                    cluster[0].text
                 );
             }
             continue;
         }
-        let merged = TextBox::merge(cluster);
-        let font_h =
-            cluster.iter().map(|l| l.bounds.height).sum::<f64>() / cluster.len() as f64;
+        let merged = TextBox::merge_refs(cluster);
+        let font_h = cluster.iter().map(|l| l.bounds.height).sum::<f64>() / cluster.len() as f64;
         // Min dimensions relative to font size.
         if merged.bounds.width < font_h * 3.0 || merged.bounds.height < font_h * 1.2 {
             if dbg {
                 eprintln!(
                     "  para {:2}: SKIP (too small) {} lines  [{:.0},{:.0},{:.0},{:.0}]  font_h={:.0}  {:?}",
-                    ci, cluster.len(), merged.bounds.x, merged.bounds.y,
-                    merged.bounds.width, merged.bounds.height, font_h, merged.text
+                    ci,
+                    cluster.len(),
+                    merged.bounds.x,
+                    merged.bounds.y,
+                    merged.bounds.width,
+                    merged.bounds.height,
+                    font_h,
+                    merged.text
                 );
             }
             continue;
@@ -695,8 +804,14 @@ pub(crate) fn group_lines_into_paragraphs(lines: &[TextBox]) -> Vec<TextBox> {
         if dbg {
             eprintln!(
                 "  para {:2}: {} lines  [{:.0},{:.0},{:.0},{:.0}]  font_h={:.0}  {:?}",
-                ci, cluster.len(), merged.bounds.x, merged.bounds.y,
-                merged.bounds.width, merged.bounds.height, font_h, merged.text
+                ci,
+                cluster.len(),
+                merged.bounds.x,
+                merged.bounds.y,
+                merged.bounds.width,
+                merged.bounds.height,
+                font_h,
+                merged.text
             );
         }
         paragraphs.push(merged);
@@ -709,7 +824,7 @@ pub(crate) fn group_lines_into_paragraphs(lines: &[TextBox]) -> Vec<TextBox> {
 
 // ── Clustering ──────────────────────────────────────────────────────────────
 
-fn cluster_textboxes<F>(items: &[TextBox], mut connected: F) -> Vec<Vec<TextBox>>
+fn cluster_textboxes<'a, F>(items: &'a [TextBox], mut connected: F) -> Vec<Vec<&'a TextBox>>
 where
     F: FnMut(&TextBox, &TextBox) -> bool,
 {
@@ -765,21 +880,21 @@ where
             }
         }
     }
-    let mut groups = std::collections::HashMap::<usize, Vec<TextBox>>::new();
-    for (idx, item) in items.iter().enumerate() {
+    let mut groups = std::collections::HashMap::<usize, Vec<usize>>::new();
+    for idx in 0..n {
         let root = find(&mut parent, idx);
-        groups.entry(root).or_default().push(item.clone());
+        groups.entry(root).or_default().push(idx);
     }
-    let mut keyed: Vec<(f64, f64, Vec<TextBox>)> = groups
+    let mut keyed: Vec<(f64, f64, Vec<usize>)> = groups
         .into_values()
         .map(|group| {
             let min_y = group
                 .iter()
-                .map(|tb| tb.bounds.y)
+                .map(|idx| items[*idx].bounds.y)
                 .fold(f64::INFINITY, f64::min);
             let min_x = group
                 .iter()
-                .map(|tb| tb.bounds.x)
+                .map(|idx| items[*idx].bounds.x)
                 .fold(f64::INFINITY, f64::min);
             (min_y, min_x, group)
         })
@@ -792,7 +907,10 @@ where
         }
         ax.partial_cmp(bx).unwrap_or(std::cmp::Ordering::Equal)
     });
-    keyed.into_iter().map(|(_, _, group)| group).collect()
+    keyed
+        .into_iter()
+        .map(|(_, _, group)| group.into_iter().map(|idx| &items[idx]).collect::<Vec<_>>())
+        .collect()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

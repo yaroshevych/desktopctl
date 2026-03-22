@@ -3,8 +3,7 @@ use image::RgbaImage;
 
 use super::metal_pipeline::{self, ProcessedFrame};
 use super::text_group::{
-    self, TextBox, group_lines_into_paragraphs, group_words_into_lines, split_wide_textbox,
-    tighten_to_content,
+    TextBox, group_lines_into_paragraphs, group_words_into_lines, split_wide_textbox,
 };
 
 const GLYPH_MIN_W: usize = 6;
@@ -101,30 +100,6 @@ pub fn detect_ui_boxes_with_labels(
     let words: Vec<TextBox> = words
         .into_iter()
         .flat_map(|tb| split_wide_textbox(tb, &frame))
-        .map(|tb| {
-            let tight = tighten_to_content(&tb.bounds, &frame);
-            if debug_enabled() {
-                let dx = tight.x - tb.bounds.x;
-                let dy = tight.y - tb.bounds.y;
-                let dw = tb.bounds.width - tight.width;
-                let dh = tb.bounds.height - tight.height;
-                if dx.abs() > 1.0 || dy.abs() > 1.0 || dw.abs() > 1.0 || dh.abs() > 1.0 {
-                    eprintln!(
-                        "  tighten {:?}: [{:.0},{:.0},{:.0},{:.0}] -> [{:.0},{:.0},{:.0},{:.0}]",
-                        tb.text,
-                        tb.bounds.x,
-                        tb.bounds.y,
-                        tb.bounds.width,
-                        tb.bounds.height,
-                        tight.x,
-                        tight.y,
-                        tight.width,
-                        tight.height
-                    );
-                }
-            }
-            TextBox::from_bounds_with_text(tight, tb.text)
-        })
         .collect();
 
     // Step 2: Group words → lines → paragraphs.
@@ -297,7 +272,11 @@ fn scan_peak_edge_h(
     let y1 = (text.y as usize).max(1).min(h - 2);
     let y2 = ((text.y + text.height) as usize).min(h - 2);
     if y2 <= y1 {
-        return if direction < 0 { text.x } else { text.x + text.width };
+        return if direction < 0 {
+            text.x
+        } else {
+            text.x + text.width
+        };
     }
 
     let start_x = if direction < 0 {
@@ -313,17 +292,27 @@ fn scan_peak_edge_h(
 
     for step in 1..=limit {
         let x = if direction < 0 {
-            if start_x < step { break; }
+            if start_x < step {
+                break;
+            }
             start_x - step
         } else {
             let nx = start_x + step;
-            if nx + strip_thick >= w { break; }
+            if nx + strip_thick >= w {
+                break;
+            }
             nx
         };
 
-        let sx1 = if direction < 0 { x.saturating_sub(strip_thick / 2) } else { x };
+        let sx1 = if direction < 0 {
+            x.saturating_sub(strip_thick / 2)
+        } else {
+            x
+        };
         let sx2 = (sx1 + strip_thick).min(w - 1);
-        if sx2 <= sx1 { continue; }
+        if sx2 <= sx1 {
+            continue;
+        }
 
         let e = frame.rect_sum(&frame.edge_sat, sx1, y1, sx2 - 1, y2 - 1);
         let pixels = (sx2 - sx1) as f64 * (y2 - y1) as f64;
@@ -361,7 +350,11 @@ fn scan_peak_edge_v(
     let x1 = (text.x as usize).max(1).min(w - 2);
     let x2 = ((text.x + text.width) as usize).min(w - 2);
     if x2 <= x1 {
-        return if direction < 0 { text.y } else { text.y + text.height };
+        return if direction < 0 {
+            text.y
+        } else {
+            text.y + text.height
+        };
     }
 
     let start_y = if direction < 0 {
@@ -376,17 +369,27 @@ fn scan_peak_edge_v(
 
     for step in 1..=limit {
         let y = if direction < 0 {
-            if start_y < step { break; }
+            if start_y < step {
+                break;
+            }
             start_y - step
         } else {
             let ny = start_y + step;
-            if ny + strip_thick >= h { break; }
+            if ny + strip_thick >= h {
+                break;
+            }
             ny
         };
 
-        let sy1 = if direction < 0 { y.saturating_sub(strip_thick / 2) } else { y };
+        let sy1 = if direction < 0 {
+            y.saturating_sub(strip_thick / 2)
+        } else {
+            y
+        };
         let sy2 = (sy1 + strip_thick).min(h - 1);
-        if sy2 <= sy1 { continue; }
+        if sy2 <= sy1 {
+            continue;
+        }
 
         let e = frame.rect_sum(&frame.edge_sat, x1, sy1, x2 - 1, sy2 - 1);
         let pixels = (x2 - x1) as f64 * (sy2 - sy1) as f64;
@@ -479,7 +482,9 @@ fn detect_empty_text_fields(frame: &ProcessedFrame) -> Vec<Bounds> {
         if kept.len() >= 20 {
             break;
         }
-        let dominated = kept.iter().any(|existing: &Bounds| iou(&candidate, existing) >= 0.30);
+        let dominated = kept
+            .iter()
+            .any(|existing: &Bounds| iou(&candidate, existing) >= 0.30);
         if !dominated {
             kept.push(candidate);
         }
@@ -514,13 +519,15 @@ fn detect_edge_rectangles(frame: &ProcessedFrame) -> Vec<Bounds> {
     // Max area capped: we want individual controls, not full dialog outlines.
     let max_control_area = (w * h / 8).min(200_000);
     let mut boxes = connected_component_boxes(
-        &edge_mask, w, h,
-        16,   // min_w (small enough for icons)
-        16,   // min_h
-        200,  // min_area
+        &edge_mask,
+        w,
+        h,
+        16,               // min_w (small enough for icons)
+        16,               // min_h
+        200,              // min_area
         max_control_area, // max_area
-        0.15, // min_aspect (allow tall-ish elements)
-        20.0, // max_aspect
+        0.15,             // min_aspect (allow tall-ish elements)
+        20.0,             // max_aspect
     );
 
     // Strict validation: border energy must clearly exceed interior.
@@ -550,9 +557,7 @@ fn detect_edge_rectangles(frame: &ProcessedFrame) -> Vec<Bounds> {
     // Filter out boxes spanning too much of the image (window chrome, not controls).
     let img_w = w as f64;
     let img_h = h as f64;
-    boxes.retain(|b| {
-        b.width < img_w * 0.55 && b.height < img_h * 0.55
-    });
+    boxes.retain(|b| b.width < img_w * 0.55 && b.height < img_h * 0.55);
 
     dedupe_boxes(boxes, 0.50)
 }
@@ -1031,8 +1036,18 @@ mod tests {
 
     #[test]
     fn prune_nested_glitch_boxes_works() {
-        let inner = Bounds { x: 102.0, y: 84.0, width: 280.0, height: 88.0 };
-        let outer = Bounds { x: 94.0, y: 76.0, width: 296.0, height: 104.0 };
+        let inner = Bounds {
+            x: 102.0,
+            y: 84.0,
+            width: 280.0,
+            height: 88.0,
+        };
+        let outer = Bounds {
+            x: 94.0,
+            y: 76.0,
+            width: 296.0,
+            height: 104.0,
+        };
         let kept = prune_nested_glitch_boxes(vec![outer.clone(), inner.clone()]);
         assert_eq!(kept.len(), 1);
         assert!(iou(&kept[0], &inner) > 0.95);
