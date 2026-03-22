@@ -29,9 +29,15 @@ use tokenize_boxes::{ControlKind, DetectedControl};
 /// Per-dimension pixel tolerance for bbox matching.
 const BBOX_TOLERANCE: f64 = 20.0;
 
-/// Minimum recall to pass.
+/// Minimum recall to pass (fraction of expected controls matched).
 const MIN_TEXT_FIELD_RECALL: f64 = 1.0;
 const MIN_BUTTON_RECALL: f64 = 1.0;
+
+/// Maximum allowed false positives per category (across all images).
+/// Current FPs are mostly unlabeled toolbar controls — will decrease as
+/// ground-truth labels become more comprehensive.
+const MAX_TEXT_FIELD_FP: usize = 10;
+const MAX_BUTTON_FP: usize = 14;
 
 // ── JSON schema ─────────────────────────────────────────────────────────────
 
@@ -92,6 +98,59 @@ fn closest_distance(predicted: &[DetectedControl], expected: &Bounds, kind: Cont
     )
 }
 
+/// 1:1 greedy matching: for each expected label, find the closest unmatched
+/// prediction within tolerance. Returns (matched_count, false_positive_count).
+fn match_controls(
+    predictions: &[&DetectedControl],
+    labels: &[ControlLabel],
+    file: &str,
+    kind_name: &str,
+    all_predicted: &[DetectedControl],
+) -> (usize, usize) {
+    let mut used = vec![false; predictions.len()];
+    let mut matched = 0usize;
+
+    for label in labels {
+        let expected = to_bounds(&label.bbox);
+        // Find closest unused prediction within tolerance.
+        let best = predictions
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !used[*i])
+            .filter(|(_, c)| bbox_matches(&c.bounds, &expected))
+            .min_by(|(_, a), (_, b)| {
+                let da = bbox_distance(&a.bounds, &expected);
+                let db = bbox_distance(&b.bounds, &expected);
+                da.partial_cmp(&db).unwrap()
+            });
+
+        if let Some((i, _)) = best {
+            used[i] = true;
+            matched += 1;
+        } else {
+            let kind = if kind_name == "text_field" {
+                ControlKind::TextField
+            } else {
+                ControlKind::Button
+            };
+            let hint = closest_distance(all_predicted, &expected, kind);
+            eprintln!(
+                "  MISS {} in {}: expected [{:.0},{:.0},{:.0},{:.0}] {:?}  {}",
+                kind_name, file,
+                expected.x, expected.y, expected.width, expected.height,
+                label.text, hint,
+            );
+        }
+    }
+
+    let fp = used.iter().filter(|u| !**u).count();
+    (matched, fp)
+}
+
+fn bbox_distance(a: &Bounds, b: &Bounds) -> f64 {
+    (a.x - b.x).abs() + (a.y - b.y).abs() + (a.width - b.width).abs() + (a.height - b.height).abs()
+}
+
 fn run_text_pipeline(image_path: &std::path::Path) -> (Vec<Bounds>, metal_pipeline::ProcessedFrame) {
     let image = ImageReader::open(image_path)
         .unwrap_or_else(|e| panic!("open image {}: {}", image_path.display(), e))
@@ -136,8 +195,10 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
 
     let mut tf_total = 0usize;
     let mut tf_matched = 0usize;
+    let mut tf_fp = 0usize;
     let mut btn_total = 0usize;
     let mut btn_matched = 0usize;
+    let mut btn_fp = 0usize;
 
     for entry in &fixtures {
         let image_path = dir.join(&entry.file);
@@ -149,55 +210,30 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
         let (line_bounds, frame) = run_text_pipeline(&image_path);
         let predicted = tokenize_boxes::detect_controls(&frame, &line_bounds);
 
-        // Check text fields.
-        for label in &entry.text_fields {
-            let expected = to_bounds(&label.bbox);
-            tf_total += 1;
-            let matched = predicted
-                .iter()
-                .any(|c| c.kind == ControlKind::TextField && bbox_matches(&c.bounds, &expected));
-            if matched {
-                tf_matched += 1;
-            } else {
-                let hint = closest_distance(&predicted, &expected, ControlKind::TextField);
-                eprintln!(
-                    "  MISS text_field in {}: expected [{:.0},{:.0},{:.0},{:.0}] {:?}  {}",
-                    entry.file,
-                    expected.x, expected.y, expected.width, expected.height,
-                    label.text,
-                    hint,
-                );
-            }
-        }
+        // Split predictions by kind.
+        let pred_tf: Vec<&DetectedControl> =
+            predicted.iter().filter(|c| c.kind == ControlKind::TextField).collect();
+        let pred_btn: Vec<&DetectedControl> =
+            predicted.iter().filter(|c| c.kind == ControlKind::Button).collect();
 
-        // Check buttons.
-        for label in &entry.buttons {
-            let expected = to_bounds(&label.bbox);
-            btn_total += 1;
-            let matched = predicted
-                .iter()
-                .any(|c| c.kind == ControlKind::Button && bbox_matches(&c.bounds, &expected));
-            if matched {
-                btn_matched += 1;
-            } else {
-                let hint = closest_distance(&predicted, &expected, ControlKind::Button);
-                eprintln!(
-                    "  MISS button in {}: expected [{:.0},{:.0},{:.0},{:.0}] {:?}  {}",
-                    entry.file,
-                    expected.x, expected.y, expected.width, expected.height,
-                    label.text,
-                    hint,
-                );
-            }
-        }
+        // 1:1 greedy matching: each expected consumes at most one prediction.
+        let (matched, fp) = match_controls(&pred_tf, &entry.text_fields, &entry.file, "text_field", &predicted);
+        tf_total += entry.text_fields.len();
+        tf_matched += matched;
+        tf_fp += fp;
+
+        let (matched, fp) = match_controls(&pred_btn, &entry.buttons, &entry.file, "button", &predicted);
+        btn_total += entry.buttons.len();
+        btn_matched += matched;
+        btn_fp += fp;
     }
 
     let tf_recall = if tf_total == 0 { 1.0 } else { tf_matched as f64 / tf_total as f64 };
     let btn_recall = if btn_total == 0 { 1.0 } else { btn_matched as f64 / btn_total as f64 };
 
     println!(
-        "controls: text_field recall={:.3} ({}/{})  button recall={:.3} ({}/{})",
-        tf_recall, tf_matched, tf_total, btn_recall, btn_matched, btn_total,
+        "controls: text_field recall={:.3} ({}/{}) fp={}  button recall={:.3} ({}/{}) fp={}",
+        tf_recall, tf_matched, tf_total, tf_fp, btn_recall, btn_matched, btn_total, btn_fp,
     );
 
     assert!(
@@ -211,5 +247,17 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
         "button recall too low: {:.3} (threshold {:.3})",
         btn_recall,
         MIN_BUTTON_RECALL,
+    );
+    assert!(
+        tf_fp <= MAX_TEXT_FIELD_FP,
+        "text_field false positives too high: {} (max {})",
+        tf_fp,
+        MAX_TEXT_FIELD_FP,
+    );
+    assert!(
+        btn_fp <= MAX_BUTTON_FP,
+        "button false positives too high: {} (max {})",
+        btn_fp,
+        MAX_BUTTON_FP,
     );
 }
