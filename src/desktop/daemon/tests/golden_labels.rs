@@ -1,0 +1,271 @@
+//! Integration test: loads golden/manifest.json, runs detector on each image,
+//! computes per-category recall at appropriate IoU thresholds.
+//! Uses detect_ui_boxes(image) — same as runtime with no OCR text seeds.
+
+#[path = "../src/vision/tokenize_boxes.rs"]
+#[allow(dead_code)]
+mod tokenize_boxes;
+
+use std::{collections::HashMap, fs, path::PathBuf};
+
+use desktop_core::protocol::Bounds;
+use image::ImageReader;
+use serde::Deserialize;
+
+// Path to the manifest relative to CARGO_MANIFEST_DIR.
+const MANIFEST_REL: &str = "tests/fixtures/golden/manifest.json";
+
+// Per-category IoU thresholds for a GT box to count as matched.
+struct CategoryConfig {
+    iou_threshold: f64,
+    // "box" matches all box predictions; "glyph" also counts glyph predictions.
+    match_glyphs: bool,
+    min_recall: f64,
+}
+
+fn category_configs() -> HashMap<&'static str, CategoryConfig> {
+    let mut m = HashMap::new();
+    m.insert(
+        "text_field",
+        CategoryConfig {
+            iou_threshold: 0.50,
+            match_glyphs: false,
+            min_recall: 0.30,
+        },
+    );
+    m.insert(
+        "container",
+        CategoryConfig {
+            iou_threshold: 0.40,
+            match_glyphs: false,
+            min_recall: 0.10,
+        },
+    );
+    m.insert(
+        "text_or_paragraph",
+        CategoryConfig {
+            iou_threshold: 0.35,
+            match_glyphs: false,
+            min_recall: 0.20,
+        },
+    );
+    m.insert(
+        "button",
+        CategoryConfig {
+            iou_threshold: 0.40,
+            match_glyphs: false,
+            min_recall: 0.20,
+        },
+    );
+    m.insert(
+        "icon",
+        CategoryConfig {
+            iou_threshold: 0.35,
+            match_glyphs: true,
+            min_recall: 0.10,
+        },
+    );
+    m.insert(
+        "list",
+        CategoryConfig {
+            iou_threshold: 0.40,
+            match_glyphs: false,
+            min_recall: 0.10,
+        },
+    );
+    m
+}
+
+// ── manifest schema ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct Manifest {
+    items: Vec<ManifestItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestItem {
+    id: String,
+    /// Path relative to eval/datasets/ (e.g. "labels/text_fields/<id>/image.png").
+    image_rel_path: String,
+    annotations: Vec<GtAnnotation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GtAnnotation {
+    id: String,
+    category: String,
+    bbox: [f64; 4],
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+fn iou(a: &Bounds, b: &Bounds) -> f64 {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    let ix1 = a.x.max(b.x);
+    let iy1 = a.y.max(b.y);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    let iw = (ix2 - ix1).max(0.0);
+    let ih = (iy2 - iy1).max(0.0);
+    let inter = iw * ih;
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let union = (a.width * a.height) + (b.width * b.height) - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+fn to_bounds(bbox: [f64; 4]) -> Option<Bounds> {
+    let w = bbox[2].max(0.0);
+    let h = bbox[3].max(0.0);
+    if w < 2.0 || h < 2.0 {
+        return None;
+    }
+    Some(Bounds {
+        x: bbox[0],
+        y: bbox[1],
+        width: w,
+        height: h,
+    })
+}
+
+// ── test ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn golden_labels_per_category_recall() {
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL);
+    assert!(
+        manifest_path.exists(),
+        "golden manifest not found: {} — run eval/run/export_golden_manifest.py first",
+        manifest_path.display()
+    );
+
+    let raw = fs::read_to_string(&manifest_path).expect("read manifest");
+    let manifest: Manifest = serde_json::from_str(&raw).expect("parse manifest JSON");
+    assert!(!manifest.items.is_empty(), "manifest has no items");
+
+    // Resolve image paths: manifest stores paths relative to eval/datasets/.
+    // CARGO_MANIFEST_DIR = src/desktop/daemon → repo root is ../../..
+    let datasets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("eval/datasets");
+
+    let configs = category_configs();
+
+    // per-category counters: matched, total
+    let mut matched: HashMap<String, usize> = HashMap::new();
+    let mut total: HashMap<String, usize> = HashMap::new();
+
+    // global predicted count for ratio check
+    let mut global_predicted = 0usize;
+    let mut global_gt = 0usize;
+
+    for item in &manifest.items {
+        let image_path = datasets_dir.join(&item.image_rel_path);
+        let image = ImageReader::open(&image_path)
+            .unwrap_or_else(|e| panic!("open image {}: {}", image_path.display(), e))
+            .decode()
+            .unwrap_or_else(|e| panic!("decode image {}: {}", image_path.display(), e))
+            .to_rgba8();
+
+        let predicted = tokenize_boxes::detect_ui_boxes(&image);
+        let glyph_text_bounds: Vec<Bounds> = Vec::new();
+        let predicted_glyphs = tokenize_boxes::detect_glyphs(&image, &glyph_text_bounds);
+
+        global_predicted += predicted.len();
+        global_gt += item.annotations.len();
+
+        for ann in &item.annotations {
+            let cat = ann.category.as_str();
+            let Some(gt) = to_bounds(ann.bbox) else {
+                continue;
+            };
+
+            *total.entry(ann.category.clone()).or_default() += 1;
+
+            let cfg = configs
+                .get(cat)
+                .unwrap_or_else(|| panic!("unknown category '{}' in annotation {}", cat, ann.id));
+
+            let hit_box = predicted.iter().any(|p| iou(p, &gt) >= cfg.iou_threshold);
+            let hit = if cfg.match_glyphs && !hit_box {
+                predicted_glyphs
+                    .iter()
+                    .any(|p| iou(p, &gt) >= cfg.iou_threshold)
+            } else {
+                hit_box
+            };
+
+            if hit {
+                *matched.entry(ann.category.clone()).or_default() += 1;
+            } else {
+                let best = predicted
+                    .iter()
+                    .map(|p| iou(p, &gt))
+                    .fold(0.0_f64, f64::max);
+                eprintln!(
+                    "  MISS {:<22} {:<60} bbox=[{:.0},{:.0},{:.0},{:.0}] best_iou={:.3}",
+                    cat, item.id, gt.x, gt.y, gt.width, gt.height, best
+                );
+            }
+        }
+    }
+
+    // Print summary
+    println!("\n=== golden_labels per-category recall ===");
+    println!(
+        "{:<22} {:>8} {:>8} {:>8}  gate",
+        "category", "matched", "total", "recall"
+    );
+    println!("{}", "-".repeat(56));
+
+    let ordered_cats = [
+        "text_field",
+        "container",
+        "text_or_paragraph",
+        "button",
+        "icon",
+        "list",
+    ];
+    for cat in &ordered_cats {
+        let t = *total.get(*cat).unwrap_or(&0);
+        let m = *matched.get(*cat).unwrap_or(&0);
+        let recall = if t == 0 { 0.0 } else { m as f64 / t as f64 };
+        let gate = configs[cat].min_recall;
+        println!(
+            "{:<22} {:>8} {:>8} {:>8.3}  >= {:.2}",
+            cat, m, t, recall, gate
+        );
+    }
+    let pred_ratio = if global_gt == 0 {
+        0.0
+    } else {
+        global_predicted as f64 / global_gt as f64
+    };
+    println!("{}", "-".repeat(56));
+    println!(
+        "global: predicted={} gt={} ratio={:.2}",
+        global_predicted, global_gt, pred_ratio
+    );
+
+    // Assert recall gates
+    for cat in &ordered_cats {
+        let t = *total.get(*cat).unwrap_or(&0);
+        let m = *matched.get(*cat).unwrap_or(&0);
+        let recall = if t == 0 { 0.0 } else { m as f64 / t as f64 };
+        let gate = configs[cat].min_recall;
+        assert!(
+            recall >= gate,
+            "{} recall too low: {:.3} ({}/{}) — gate >= {:.2}",
+            cat,
+            recall,
+            m,
+            t,
+            gate
+        );
+    }
+}

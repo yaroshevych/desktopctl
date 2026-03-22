@@ -15,5 +15,6 @@ tmp
 Justfile
 .claude/settings.local.json
 kb/20260311*
-/src/desktop/scripts/dev/__pycache__
 src/desktop/daemon/tests/fixtures/settings-screenshots/out/
+__pycache__
+src/desktop/daemon/tests/fixtures/golden/manifest.json

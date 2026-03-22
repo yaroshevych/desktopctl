@@ -64,7 +64,7 @@ fi
 log_file="${DESKTOPCTL_ASK_CLAUDE_LOG:-$project_root/tmp/ask_claude.md}"
 mkdir -p "$(dirname "$log_file")"
 
-answer="$(cd "$project_root" && claude -p "$prompt")"
+answer="$(cd "$project_root" && claude -p "$prompt" --model claude-sonnet-4-6)"
 
 {
   echo "## $(date '+%Y-%m-%d %H:%M:%S')"
