@@ -1,6 +1,35 @@
 use std::collections::VecDeque;
 
-use super::{Bounds, ProcessedFrame};
+use super::{Bounds, PixelRect, ProcessedFrame, clamp_bounds_to_pixel_rect};
+
+#[derive(Default)]
+pub(super) struct SobelScratch {
+    seen: Vec<u32>,
+    visit_mark: u32,
+    queue: VecDeque<usize>,
+    seeds: Vec<usize>,
+    mid_row_min_x: Vec<i32>,
+    mid_row_max_x: Vec<i32>,
+}
+
+impl SobelScratch {
+    #[inline]
+    fn begin_component_map(&mut self, need_len: usize) -> u32 {
+        if self.seen.len() < need_len {
+            self.seen.resize(need_len, 0);
+        }
+        if self.visit_mark == u32::MAX {
+            self.seen.fill(0);
+            self.visit_mark = 1;
+        } else if self.visit_mark == 0 {
+            self.visit_mark = 1;
+        }
+        let mark = self.visit_mark;
+        self.visit_mark = self.visit_mark.saturating_add(1);
+        self.queue.clear();
+        mark
+    }
+}
 
 pub(super) fn refine_enclosed_candidate(
     frame: &ProcessedFrame,
@@ -8,10 +37,11 @@ pub(super) fn refine_enclosed_candidate(
     candidate: &Bounds,
     pre_border_e: f64,
     corner_skip: usize,
+    scratch: &mut SobelScratch,
     dbg: bool,
 ) -> Option<Bounds> {
     let edge_thr = sobel_edge_threshold(pre_border_e);
-    sobel_enclosed_candidate(frame, text, candidate, edge_thr, corner_skip, dbg)
+    sobel_enclosed_candidate(frame, text, candidate, edge_thr, corner_skip, scratch, dbg)
 }
 
 fn sobel_edge_threshold(border_e: f64) -> u8 {
@@ -24,11 +54,13 @@ fn sobel_enclosed_candidate(
     candidate: &Bounds,
     edge_thr: u8,
     corner_skip: usize,
+    scratch: &mut SobelScratch,
     dbg: bool,
 ) -> Option<Bounds> {
-    let (top_y, bottom_y) = consensus_top_bottom_edges(frame, text, candidate, edge_thr)?;
-    let x1 = candidate.x.floor() as i32;
-    let x2 = (candidate.x + candidate.width).ceil() as i32 - 1;
+    let candidate_px = clamp_bounds_to_pixel_rect(candidate, frame.width, frame.height)?;
+    let (top_y, bottom_y) = consensus_top_bottom_edges(frame, text, candidate_px, edge_thr)?;
+    let x1 = candidate_px.x1;
+    let x2 = candidate_px.x2;
     if x2 - x1 < 8 || bottom_y - top_y < 8 {
         return None;
     }
@@ -48,7 +80,16 @@ fn sobel_enclosed_candidate(
     let min_cov = (0.82 + 0.10 * (edge_thr as f64 / 20.0)).clamp(0.82, 0.92);
     let top_ok = top_cov >= min_cov;
     let bottom_ok = bottom_cov >= min_cov;
-    let span_bounds = sobel_edge_bucket_span(frame, text, candidate, top_y, bottom_y, edge_thr, cs);
+    let span_bounds = sobel_edge_bucket_span(
+        frame,
+        text,
+        candidate_px,
+        top_y,
+        bottom_y,
+        edge_thr,
+        cs,
+        scratch,
+    );
     let loop_ok = span_bounds.is_some();
     if !(top_ok && bottom_ok && loop_ok) {
         if dbg {
@@ -76,7 +117,7 @@ fn sobel_enclosed_candidate(
 fn consensus_top_bottom_edges(
     frame: &ProcessedFrame,
     text: &Bounds,
-    candidate: &Bounds,
+    candidate: PixelRect,
     edge_thr: u8,
 ) -> Option<(i32, i32)> {
     let w = frame.width as i32;
@@ -99,8 +140,8 @@ fn consensus_top_bottom_edges(
     }
 
     let margin = 14;
-    let top_limit = candidate.y.floor() as i32 - margin;
-    let bottom_limit = (candidate.y + candidate.height).ceil() as i32 - 1 + margin;
+    let top_limit = candidate.y1 - margin;
+    let bottom_limit = candidate.y2 + margin;
     let start_up = text.y.floor() as i32 - 1;
     let start_down = (text.y + text.height).ceil() as i32 + 1;
 
@@ -250,16 +291,17 @@ fn best_horizontal_level(
 fn sobel_edge_bucket_span(
     frame: &ProcessedFrame,
     text: &Bounds,
-    candidate: &Bounds,
+    candidate: PixelRect,
     top_y: i32,
     bottom_y: i32,
     edge_thr: u8,
     corner_skip: i32,
+    scratch: &mut SobelScratch,
 ) -> Option<(i32, i32)> {
     let w = frame.width as i32;
     let h = frame.height as i32;
-    let x1 = candidate.x.floor() as i32;
-    let x2 = (candidate.x + candidate.width).ceil() as i32 - 1;
+    let x1 = candidate.x1;
+    let x2 = candidate.x2;
     if x2 - x1 < 8 || bottom_y - top_y < 8 {
         return None;
     }
@@ -276,7 +318,8 @@ fn sobel_edge_bucket_span(
     let rw = (rx2 - rx1 + 1) as usize;
     let rh = (ry2 - ry1 + 1) as usize;
     let n = rw * rh;
-    let mut seeds = Vec::<usize>::new();
+    let mark = scratch.begin_component_map(n);
+    scratch.seeds.clear();
     let top_band_y1 = (top_y - 2).clamp(0, h - 1);
     let top_band_y2 = (top_y + 2).clamp(0, h - 1);
     let bottom_band_y1 = (bottom_y - 2).clamp(0, h - 1);
@@ -289,42 +332,72 @@ fn sobel_edge_bucket_span(
         return None;
     }
     for y in top_band_y1..=top_band_y2 {
-        for x in seed_x1..=seed_x2 {
-            if x < rx1 || x > rx2 || y < ry1 || y > ry2 {
-                continue;
-            }
-            if frame.edge[y as usize * frame.width + x as usize] < thr {
-                continue;
-            }
-            let lx = (x - rx1) as usize;
-            let ly = (y - ry1) as usize;
-            let idx = ly * rw + lx;
-            seeds.push(idx);
+        gather_band_seeds(
+            frame,
+            y,
+            seed_x1,
+            seed_x2,
+            rx1,
+            ry1,
+            rw,
+            thr,
+            &mut scratch.seeds,
+        );
+    }
+    if scratch.seeds.is_empty() {
+        for y in bottom_band_y1..=bottom_band_y2 {
+            gather_band_seeds(
+                frame,
+                y,
+                seed_x1,
+                seed_x2,
+                rx1,
+                ry1,
+                rw,
+                thr,
+                &mut scratch.seeds,
+            );
         }
     }
-    if seeds.is_empty() {
+    if scratch.seeds.is_empty() {
         return None;
     }
 
-    let mut seen = vec![false; n];
-    let mut q = VecDeque::<usize>::new();
     let min_component = ((x2 - x1 + 1 + bottom_y - top_y + 2) as usize / 4).max(24);
+    let h_band = (bottom_y - top_y + 1).max(1);
+    let mid_y1 = (top_y + h_band / 4).clamp(0, h - 1);
+    let mid_y2 = (bottom_y - h_band / 4).clamp(0, h - 1);
+    let mid_rows = (mid_y2 - mid_y1 + 1).max(0) as usize;
+    if mid_rows == 0 {
+        return None;
+    }
+    if scratch.mid_row_min_x.len() < mid_rows {
+        scratch.mid_row_min_x.resize(mid_rows, i32::MAX);
+        scratch.mid_row_max_x.resize(mid_rows, i32::MIN);
+    }
+    let side_tol = ((h_band as f64) * 0.12).round().clamp(2.0, 7.0) as i32;
 
-    for seed in seeds {
-        if seen[seed] {
+    let seed_count = scratch.seeds.len();
+    for si in 0..seed_count {
+        let seed = scratch.seeds[si];
+        if scratch.seen[seed] == mark {
             continue;
         }
-        seen[seed] = true;
-        q.push_back(seed);
+        scratch.seen[seed] = mark;
+        scratch.queue.push_back(seed);
+
+        for row in 0..mid_rows {
+            scratch.mid_row_min_x[row] = i32::MAX;
+            scratch.mid_row_max_x[row] = i32::MIN;
+        }
 
         let mut component_size = 0usize;
         let mut touches_top = false;
         let mut touches_bottom = false;
         let mut comp_min_x = i32::MAX;
         let mut comp_max_x = i32::MIN;
-        let mut comp_points = Vec::<(i32, i32)>::new();
 
-        while let Some(idx) = q.pop_front() {
+        while let Some(idx) = scratch.queue.pop_front() {
             component_size += 1;
             let x = idx % rw;
             let y = idx / rw;
@@ -332,12 +405,16 @@ fn sobel_edge_bucket_span(
             let y_abs = ry1 + y as i32;
             comp_min_x = comp_min_x.min(x_abs);
             comp_max_x = comp_max_x.max(x_abs);
-            comp_points.push((x_abs, y_abs));
             if y_abs >= top_band_y1 && y_abs <= top_band_y2 {
                 touches_top = true;
             }
             if y_abs >= bottom_band_y1 && y_abs <= bottom_band_y2 {
                 touches_bottom = true;
+            }
+            if y_abs >= mid_y1 && y_abs <= mid_y2 {
+                let row = (y_abs - mid_y1) as usize;
+                scratch.mid_row_min_x[row] = scratch.mid_row_min_x[row].min(x_abs);
+                scratch.mid_row_max_x[row] = scratch.mid_row_max_x[row].max(x_abs);
             }
 
             let y0 = y.saturating_sub(1);
@@ -356,16 +433,31 @@ fn sobel_edge_bucket_span(
                         continue;
                     }
 
-                    if !seen[nidx] {
-                        seen[nidx] = true;
-                        q.push_back(nidx);
+                    if scratch.seen[nidx] != mark {
+                        scratch.seen[nidx] = mark;
+                        scratch.queue.push_back(nidx);
                     }
                 }
             }
         }
 
-        let side_support =
-            has_mid_side_support(&comp_points, comp_min_x, comp_max_x, top_y, bottom_y, h);
+        let mut left_hits = 0usize;
+        let mut right_hits = 0usize;
+        for row in 0..mid_rows {
+            let row_min = scratch.mid_row_min_x[row];
+            let row_max = scratch.mid_row_max_x[row];
+            if row_min == i32::MAX {
+                continue;
+            }
+            if row_min <= comp_min_x + side_tol {
+                left_hits += 1;
+            }
+            if row_max >= comp_max_x - side_tol {
+                right_hits += 1;
+            }
+        }
+        let need = (mid_rows / 5).max(3);
+        let side_support = left_hits >= need && right_hits >= need;
         if component_size >= min_component && touches_top && touches_bottom && side_support {
             return Some((comp_min_x, comp_max_x));
         }
@@ -373,43 +465,135 @@ fn sobel_edge_bucket_span(
     None
 }
 
-fn has_mid_side_support(
-    points: &[(i32, i32)],
-    min_x: i32,
-    max_x: i32,
-    top_y: i32,
-    bottom_y: i32,
-    img_h: i32,
-) -> bool {
-    if points.is_empty() || max_x <= min_x || bottom_y <= top_y {
-        return false;
+fn gather_band_seeds(
+    frame: &ProcessedFrame,
+    y: i32,
+    x1: i32,
+    x2: i32,
+    rx1: i32,
+    ry1: i32,
+    rw: usize,
+    thr: u8,
+    out: &mut Vec<usize>,
+) {
+    if y < 0 || y >= frame.height as i32 {
+        return;
     }
-    let h = (bottom_y - top_y + 1).max(1);
-    let mid_y1 = (top_y + h / 4).clamp(0, img_h - 1);
-    let mid_y2 = (bottom_y - h / 4).clamp(0, img_h - 1);
-    if mid_y2 < mid_y1 {
-        return false;
-    }
-    let rows = (mid_y2 - mid_y1 + 1) as usize;
-    let mut left_rows = vec![false; rows];
-    let mut right_rows = vec![false; rows];
-    let side_tol = ((h as f64) * 0.12).round().clamp(2.0, 7.0) as i32;
-
-    for &(x, y) in points {
-        if y < mid_y1 || y > mid_y2 {
+    for x in x1..=x2 {
+        if x < 0 || x >= frame.width as i32 {
             continue;
         }
-        let row = (y - mid_y1) as usize;
-        if x <= min_x + side_tol {
-            left_rows[row] = true;
+        let idx = y as usize * frame.width + x as usize;
+        if frame.edge[idx] < thr {
+            continue;
         }
-        if x >= max_x - side_tol {
-            right_rows[row] = true;
+        let lx = (x - rx1) as usize;
+        let ly = (y - ry1) as usize;
+        out.push(ly * rw + lx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_frame(width: usize, height: usize, edge: Vec<u8>) -> ProcessedFrame {
+        let sw = width + 1;
+        let sh = height + 1;
+        let sat_len = sw * sh;
+        let mut edge_sat = vec![0.0f64; sat_len];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                let si = (y + 1) * sw + (x + 1);
+                let e = edge[idx] as f64;
+                edge_sat[si] = e + edge_sat[si - 1] + edge_sat[si - sw] - edge_sat[si - sw - 1];
+            }
+        }
+        ProcessedFrame {
+            edge_sat,
+            gray_sat: vec![0.0; sat_len],
+            gray_sq_sat: vec![0.0; sat_len],
+            gray: vec![0; width * height],
+            edge,
+            text_mask: vec![false; width * height],
+            text_mask_sat: vec![0.0; sat_len],
+            width,
+            height,
         }
     }
 
-    let left_hits = left_rows.into_iter().filter(|v| *v).count();
-    let right_hits = right_rows.into_iter().filter(|v| *v).count();
-    let need = (rows / 5).max(3);
-    left_hits >= need && right_hits >= need
+    fn draw_rect_border(
+        edge: &mut [u8],
+        width: usize,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+        val: u8,
+        draw_top: bool,
+    ) {
+        if draw_top {
+            for x in x1..=x2 {
+                edge[y1 * width + x] = val;
+            }
+        }
+        for x in x1..=x2 {
+            edge[y2 * width + x] = val;
+        }
+        for y in y1..=y2 {
+            edge[y * width + x1] = val;
+            edge[y * width + x2] = val;
+        }
+    }
+
+    #[test]
+    fn refine_accepts_closed_border() {
+        let width = 100usize;
+        let height = 60usize;
+        let mut edge = vec![0u8; width * height];
+        draw_rect_border(&mut edge, width, 12, 10, 78, 34, 28, true);
+        let frame = make_frame(width, height, edge);
+        let text = Bounds {
+            x: 32.0,
+            y: 18.0,
+            width: 18.0,
+            height: 8.0,
+        };
+        let candidate = Bounds {
+            x: 10.0,
+            y: 8.0,
+            width: 72.0,
+            height: 30.0,
+        };
+        let mut scratch = SobelScratch::default();
+        let out =
+            refine_enclosed_candidate(&frame, &text, &candidate, 12.0, 3, &mut scratch, false);
+        assert!(out.is_some(), "closed border should be accepted");
+    }
+
+    #[test]
+    fn refine_rejects_open_top_border() {
+        let width = 100usize;
+        let height = 60usize;
+        let mut edge = vec![0u8; width * height];
+        draw_rect_border(&mut edge, width, 12, 10, 78, 34, 28, false);
+        let frame = make_frame(width, height, edge);
+        let text = Bounds {
+            x: 32.0,
+            y: 18.0,
+            width: 18.0,
+            height: 8.0,
+        };
+        let candidate = Bounds {
+            x: 10.0,
+            y: 8.0,
+            width: 72.0,
+            height: 30.0,
+        };
+        let mut scratch = SobelScratch::default();
+        let out =
+            refine_enclosed_candidate(&frame, &text, &candidate, 12.0, 3, &mut scratch, false);
+        assert!(out.is_none(), "open top border should be rejected");
+    }
 }

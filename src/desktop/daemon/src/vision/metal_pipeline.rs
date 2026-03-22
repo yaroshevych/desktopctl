@@ -1,9 +1,10 @@
-//! GPU-accelerated image preprocessing via Metal Performance Shaders.
+//! Image preprocessing for control detection and OCR post-processing.
 //!
 //! Computes Sobel edge detection and summed area tables (integral images) that
 //! enable O(1) rectangle scoring for box detection.
 //!
-//! Falls back to CPU computation when Metal is unavailable (CI, tests).
+//! Current implementation is CPU-only and deterministic across environments.
+//! A future Metal path can be added without changing `ProcessedFrame`.
 
 use desktop_core::protocol::Bounds;
 use image::RgbaImage;
@@ -22,6 +23,8 @@ pub struct ProcessedFrame {
     pub edge: Vec<u8>,
     /// Binary text mask (after threshold + morphology).
     pub text_mask: Vec<bool>,
+    /// Integral image of text-mask occupancy (1 for text pixels, 0 otherwise).
+    pub text_mask_sat: Vec<f64>,
     pub width: usize,
     pub height: usize,
 }
@@ -198,12 +201,14 @@ pub fn process_cpu(image: &RgbaImage) -> ProcessedFrame {
 
     // Sobel edge detection (|gx| + |gy|, clamped to 255).
     let mut edge = vec![0u8; n];
-    for y in 1..height - 1 {
-        for x in 1..width - 1 {
-            let idx = y * width + x;
-            let gx = gray_for_edge[idx + 1] as i32 - gray_for_edge[idx - 1] as i32;
-            let gy = gray_for_edge[idx + width] as i32 - gray_for_edge[idx - width] as i32;
-            edge[idx] = (gx.unsigned_abs() + gy.unsigned_abs()).min(255) as u8;
+    if width >= 3 && height >= 3 {
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let idx = y * width + x;
+                let gx = gray_for_edge[idx + 1] as i32 - gray_for_edge[idx - 1] as i32;
+                let gy = gray_for_edge[idx + width] as i32 - gray_for_edge[idx - width] as i32;
+                edge[idx] = (gx.unsigned_abs() + gy.unsigned_abs()).min(255) as u8;
+            }
         }
     }
 
@@ -247,6 +252,16 @@ pub fn process_cpu(image: &RgbaImage) -> ProcessedFrame {
     // Morphology: dilate then erode to merge nearby text strokes.
     let text_mask = dilate_mask(&text_mask, width, height, 6, 2);
     let text_mask = erode_mask(&text_mask, width, height, 2, 1);
+    let mut text_mask_sat = vec![0.0f64; sat_len];
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            let si = (y + 1) * sw + (x + 1);
+            let v = if text_mask[idx] { 1.0 } else { 0.0 };
+            text_mask_sat[si] =
+                v + text_mask_sat[si - 1] + text_mask_sat[si - sw] - text_mask_sat[si - sw - 1];
+        }
+    }
 
     ProcessedFrame {
         edge_sat,
@@ -255,6 +270,7 @@ pub fn process_cpu(image: &RgbaImage) -> ProcessedFrame {
         gray,
         edge,
         text_mask,
+        text_mask_sat,
         width,
         height,
     }
@@ -344,6 +360,24 @@ fn erode_mask(mask: &[bool], w: usize, h: usize, rx: usize, ry: usize) -> Vec<bo
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_cpu;
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn process_cpu_handles_tiny_images() {
+        let mut img = RgbaImage::new(2, 2);
+        for p in img.pixels_mut() {
+            *p = Rgba([120, 120, 120, 255]);
+        }
+        let frame = process_cpu(&img);
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.height, 2);
+        assert_eq!(frame.edge.len(), 4);
+    }
 }
 
 // ── Metal GPU pipeline (TODO) ───────────────────────────────────────────────

@@ -1,4 +1,4 @@
-use super::{Bounds, ProcessedFrame};
+use super::{Bounds, PixelRect, ProcessedFrame, clamp_bounds_to_pixel_rect};
 
 pub(super) fn distinct_background_delta(
     frame: &ProcessedFrame,
@@ -19,93 +19,61 @@ pub(super) fn distinct_background_delta(
         return None;
     }
 
-    let w = frame.width as i32;
-    let h = frame.height as i32;
-    let x1 = candidate.x.floor() as i32;
-    let y1 = candidate.y.floor() as i32;
-    let x2 = (candidate.x + candidate.width).ceil() as i32 - 1;
-    let y2 = (candidate.y + candidate.height).ceil() as i32 - 1;
-    if x2 - x1 < 10 || y2 - y1 < 10 {
+    let cand = clamp_bounds_to_pixel_rect(candidate, frame.width, frame.height)?;
+    if cand.width() < 11 || cand.height() < 11 {
         return None;
     }
 
     let outer_band = (font_h * 0.45).round().clamp(3.0, 10.0) as i32;
     let tx_pad_x = (font_h * 0.8).round().clamp(4.0, 18.0) as i32;
     let tx_pad_y = (font_h * 0.45).round().clamp(2.0, 10.0) as i32;
-    let tx1 = text.x.floor() as i32 - tx_pad_x;
-    let ty1 = text.y.floor() as i32 - tx_pad_y;
-    let tx2 = (text.x + text.width).ceil() as i32 - 1 + tx_pad_x;
-    let ty2 = (text.y + text.height).ceil() as i32 - 1 + tx_pad_y;
-
-    let mut inner_sum = 0.0f64;
-    let mut inner_sum_sq = 0.0f64;
-    let mut inner_n = 0usize;
-    for y in (y1 + 1).max(0)..=(y2 - 1).min(h - 1) {
-        for x in (x1 + 1).max(0)..=(x2 - 1).min(w - 1) {
-            if x >= tx1 && x <= tx2 && y >= ty1 && y <= ty2 {
-                continue;
-            }
-            let idx = y as usize * frame.width + x as usize;
-            if frame.text_mask[idx] {
-                continue;
-            }
-            let g = frame.gray[idx] as f64;
-            inner_sum += g;
-            inner_sum_sq += g * g;
-            inner_n += 1;
-        }
+    let tx_rect = clamp_bounds_to_pixel_rect(
+        &Bounds {
+            x: text.x - tx_pad_x as f64,
+            y: text.y - tx_pad_y as f64,
+            width: text.width + (tx_pad_x * 2) as f64,
+            height: text.height + (tx_pad_y * 2) as f64,
+        },
+        frame.width,
+        frame.height,
+    );
+    let inner_rect = PixelRect {
+        x1: cand.x1 + 1,
+        y1: cand.y1 + 1,
+        x2: cand.x2 - 1,
+        y2: cand.y2 - 1,
+    };
+    if inner_rect.x2 <= inner_rect.x1 || inner_rect.y2 <= inner_rect.y1 {
+        return None;
+    }
+    let mut inner = stats_on_rect(frame, inner_rect);
+    if let Some(tx) = tx_rect.and_then(|r| intersect_rect(inner_rect, r)) {
+        inner = inner.subtract(stats_on_rect(frame, tx));
     }
 
-    let rx1 = (x1 - outer_band).clamp(0, w - 1);
-    let ry1 = (y1 - outer_band).clamp(0, h - 1);
-    let rx2 = (x2 + outer_band).clamp(0, w - 1);
-    let ry2 = (y2 + outer_band).clamp(0, h - 1);
-    let mut outer_sum = 0.0f64;
-    let mut outer_sum_sq = 0.0f64;
-    let mut outer_n = 0usize;
-    for y in ry1..=ry2 {
-        for x in rx1..=rx2 {
-            if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
-                continue;
-            }
-            let dx = if x < x1 {
-                x1 - x
-            } else if x > x2 {
-                x - x2
-            } else {
-                0
-            };
-            let dy = if y < y1 {
-                y1 - y
-            } else if y > y2 {
-                y - y2
-            } else {
-                0
-            };
-            if dx.max(dy) > outer_band {
-                continue;
-            }
-            let idx = y as usize * frame.width + x as usize;
-            if frame.text_mask[idx] {
-                continue;
-            }
-            let g = frame.gray[idx] as f64;
-            outer_sum += g;
-            outer_sum_sq += g * g;
-            outer_n += 1;
-        }
-    }
+    let outer_rect = PixelRect {
+        x1: (cand.x1 - outer_band).clamp(0, frame.width as i32 - 1),
+        y1: (cand.y1 - outer_band).clamp(0, frame.height as i32 - 1),
+        x2: (cand.x2 + outer_band).clamp(0, frame.width as i32 - 1),
+        y2: (cand.y2 + outer_band).clamp(0, frame.height as i32 - 1),
+    };
+    let outer = stats_on_rect(frame, outer_rect).subtract(stats_on_rect(frame, cand));
 
-    if inner_n < 30 || outer_n < 50 {
+    if inner.count < 30 || outer.count < 50 {
+        return None;
+    }
+    let inner_text_ratio = inner.text_count as f64 / inner.count.max(1) as f64;
+    let outer_text_ratio = outer.text_count as f64 / outer.count.max(1) as f64;
+    if inner_text_ratio > 0.20 || outer_text_ratio > 0.20 {
         return None;
     }
 
-    let inner_mean = inner_sum / inner_n as f64;
-    let outer_mean = outer_sum / outer_n as f64;
+    let inner_mean = inner.sum / inner.count as f64;
+    let outer_mean = outer.sum / outer.count as f64;
     let delta = (inner_mean - outer_mean).abs();
 
-    let inner_var = (inner_sum_sq / inner_n as f64) - inner_mean * inner_mean;
-    let outer_var = (outer_sum_sq / outer_n as f64) - outer_mean * outer_mean;
+    let inner_var = (inner.sum_sq / inner.count as f64) - inner_mean * inner_mean;
+    let outer_var = (outer.sum_sq / outer.count as f64) - outer_mean * outer_mean;
     let inner_std = inner_var.max(0.0).sqrt();
     let outer_std = outer_var.max(0.0).sqrt();
     let texture = inner_std.min(outer_std);
@@ -115,5 +83,54 @@ pub(super) fn distinct_background_delta(
         Some(delta)
     } else {
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RegionStats {
+    sum: f64,
+    sum_sq: f64,
+    count: usize,
+    text_count: usize,
+}
+
+impl RegionStats {
+    #[inline]
+    fn subtract(self, other: RegionStats) -> RegionStats {
+        RegionStats {
+            sum: self.sum - other.sum,
+            sum_sq: self.sum_sq - other.sum_sq,
+            count: self.count.saturating_sub(other.count),
+            text_count: self.text_count.saturating_sub(other.text_count),
+        }
+    }
+}
+
+fn intersect_rect(a: PixelRect, b: PixelRect) -> Option<PixelRect> {
+    let x1 = a.x1.max(b.x1);
+    let y1 = a.y1.max(b.y1);
+    let x2 = a.x2.min(b.x2);
+    let y2 = a.y2.min(b.y2);
+    if x2 < x1 || y2 < y1 {
+        None
+    } else {
+        Some(PixelRect { x1, y1, x2, y2 })
+    }
+}
+
+fn stats_on_rect(frame: &ProcessedFrame, rect: PixelRect) -> RegionStats {
+    let x1 = rect.x1.max(0) as usize;
+    let y1 = rect.y1.max(0) as usize;
+    let x2 = rect.x2.max(0) as usize;
+    let y2 = rect.y2.max(0) as usize;
+    if x2 < x1 || y2 < y1 {
+        return RegionStats::default();
+    }
+    let count = (x2 - x1 + 1) * (y2 - y1 + 1);
+    RegionStats {
+        sum: frame.rect_sum(&frame.gray_sat, x1, y1, x2, y2),
+        sum_sq: frame.rect_sum(&frame.gray_sq_sat, x1, y1, x2, y2),
+        count,
+        text_count: frame.rect_sum(&frame.text_mask_sat, x1, y1, x2, y2).round() as usize,
     }
 }
