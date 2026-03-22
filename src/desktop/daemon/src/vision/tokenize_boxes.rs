@@ -105,19 +105,34 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
     let gray = grayscale(image);
     let mean_luma = gray.iter().map(|v| *v as f64).sum::<f64>() / (gray.len() as f64);
 
-    let mut boxes = Vec::new();
-    boxes.extend(edge_component_boxes(&gray, width, height));
-    boxes.extend(text_component_boxes(&gray, width, height, mean_luma));
-    boxes.extend(grid_cell_boxes(&gray, width, height));
+    let edge = edge_component_boxes(&gray, width, height);
+    let text = text_component_boxes(&gray, width, height, mean_luma);
+    let grid = grid_cell_boxes(&gray, width, height);
     let structural_panels = structural_panel_boxes(&gray, width, height);
+    let struct_rows = structural_row_boxes(&gray, width, height, &structural_panels);
+
+    let mut boxes = Vec::new();
+    boxes.extend(edge);
+    boxes.extend(text);
+    boxes.extend(grid);
     boxes.extend(structural_panels.iter().cloned());
-    boxes.extend(structural_row_boxes(
-        &gray,
-        width,
-        height,
-        &structural_panels,
-    ));
-    boxes.extend(text_row_and_paragraph_boxes(&gray, width, height, &boxes));
+    boxes.extend(struct_rows);
+
+    // Group word-level boxes into lines/paragraphs and remove consumed words.
+    let (text_groups, consumed_indices) =
+        text_row_and_paragraph_boxes(&gray, width, height, &boxes);
+    if !consumed_indices.is_empty() {
+        let consumed_set: std::collections::HashSet<usize> =
+            consumed_indices.into_iter().collect();
+        let mut i = 0;
+        boxes.retain(|_| {
+            let keep = !consumed_set.contains(&i);
+            i += 1;
+            keep
+        });
+    }
+    boxes.extend(text_groups);
+    boxes.extend(container_boxes(&gray, width, height, &boxes));
     boxes.extend(toolbar_field_expansions(
         &boxes,
         width as f64,
@@ -126,7 +141,6 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
 
     let mut deduped = dedupe_boxes(boxes, 0.86);
     deduped = prune_nested_glitch_boxes(deduped);
-    // Keep a broad candidate set for pseudo-label recall, but prevent runaway noise.
     if deduped.len() > RAW_BOX_CAP {
         deduped.truncate(RAW_BOX_CAP);
     }
@@ -167,30 +181,24 @@ fn toolbar_field_expansions(seed_boxes: &[Bounds], image_w: f64, image_h: f64) -
             .iter()
             .filter(|n| {
                 n.x > seed_right + 10.0
-                    && (n.y + n.height / 2.0 - seed.y - seed.height / 2.0).abs()
-                        < seed.height * 1.5
+                    && (n.y + n.height / 2.0 - seed.y - seed.height / 2.0).abs() < seed.height * 1.5
             })
             .min_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
-        let right_stop = right_neighbor
-            .map(|n| n.x - 4.0)
-            .unwrap_or(image_w);
+        let right_stop = right_neighbor.map(|n| n.x - 4.0).unwrap_or(image_w);
 
         // Find nearest same-row neighbor to the left.
         let left_neighbor = toolbar_seeds
             .iter()
             .filter(|n| {
                 n.x + n.width < seed.x - 10.0
-                    && (n.y + n.height / 2.0 - seed.y - seed.height / 2.0).abs()
-                        < seed.height * 1.5
+                    && (n.y + n.height / 2.0 - seed.y - seed.height / 2.0).abs() < seed.height * 1.5
             })
             .max_by(|a, b| {
                 (a.x + a.width)
                     .partial_cmp(&(b.x + b.width))
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-        let left_stop = left_neighbor
-            .map(|n| n.x + n.width + 4.0)
-            .unwrap_or(0.0);
+        let left_stop = left_neighbor.map(|n| n.x + n.width + 4.0).unwrap_or(0.0);
 
         // Generate a few expansion levels: modest, medium, bounded-by-neighbor.
         let expansions: &[(f64, f64)] = &[
@@ -223,15 +231,18 @@ fn toolbar_field_expansions(seed_boxes: &[Bounds], image_w: f64, image_h: f64) -
     dedupe_boxes(candidates, 0.80)
 }
 
+/// Returns (new_grouped_boxes, indices_of_consumed_seeds).
+/// Consumed seeds are word-level boxes that were merged into line or paragraph boxes.
 fn text_row_and_paragraph_boxes(
     gray: &[u8],
     width: usize,
     height: usize,
     seed_boxes: &[Bounds],
-) -> Vec<Bounds> {
-    let words: Vec<Bounds> = seed_boxes
+) -> (Vec<Bounds>, Vec<usize>) {
+    let word_indices: Vec<usize> = seed_boxes
         .iter()
-        .filter(|b| {
+        .enumerate()
+        .filter(|(_, b)| {
             b.width >= 12.0
                 && b.width <= 460.0
                 && b.height >= 10.0
@@ -239,13 +250,17 @@ fn text_row_and_paragraph_boxes(
                 && (b.width * b.height) <= 14000.0
                 && (b.width / b.height.max(1.0)) <= 22.0
         })
-        .cloned()
+        .map(|(i, _)| i)
+        .collect();
+    let words: Vec<Bounds> = word_indices
+        .iter()
+        .map(|&i| seed_boxes[i].clone())
         .collect();
     if words.len() < 3 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
-    let line_components = cluster_bounds(&words, |a, b| {
+    let line_components = cluster_bounds_indexed(&words, |a, b| {
         let min_h = a.height.min(b.height).max(1.0);
         let vertical_overlap = overlap_1d(a.y, a.y + a.height, b.y, b.y + b.height);
         let vertical_ratio = vertical_overlap / min_h;
@@ -253,8 +268,10 @@ fn text_row_and_paragraph_boxes(
         vertical_ratio >= 0.40 && hgap <= (min_h * 2.0).clamp(12.0, 64.0)
     });
 
+    // Track which seed_boxes indices were consumed into multi-word lines.
+    let mut consumed_seed_indices: Vec<usize> = Vec::new();
     let mut line_boxes = Vec::new();
-    for line in line_components {
+    for (word_local_indices, line) in &line_components {
         if line.is_empty() {
             continue;
         }
@@ -264,6 +281,12 @@ fn text_row_and_paragraph_boxes(
             .fold(line[0].clone(), |acc, b| union_bounds(&acc, b));
         if line.len() == 1 && merged.width < 88.0 {
             continue;
+        }
+        // Words in multi-word lines are consumed.
+        if line.len() >= 2 {
+            for &local_idx in word_local_indices {
+                consumed_seed_indices.push(word_indices[local_idx]);
+            }
         }
         line_boxes.push(expand_bounds(
             &merged,
@@ -276,14 +299,20 @@ fn text_row_and_paragraph_boxes(
 
     let para_components = cluster_bounds(&line_boxes, |a, b| {
         let min_h = a.height.min(b.height).max(1.0);
+        let max_h = a.height.max(b.height);
+        // Only group lines with similar font size (height ratio within 1.6x).
+        if max_h > min_h * 1.6 {
+            return false;
+        }
         let vgap = axis_gap(a.y, a.y + a.height, b.y, b.y + b.height);
-        if vgap > (min_h * 2.1).clamp(10.0, 42.0) {
+        // Gap threshold scales with font size — no absolute clamp.
+        if vgap > min_h * 2.1 {
             return false;
         }
         let hoverlap = overlap_1d(a.x, a.x + a.width, b.x, b.x + b.width);
         let min_w = a.width.min(b.width).max(1.0);
         let hoverlap_ratio = hoverlap / min_w;
-        let left_align = (a.x - b.x).abs() <= (min_h * 1.6).clamp(8.0, 26.0);
+        let left_align = (a.x - b.x).abs() <= min_h * 1.6;
         hoverlap_ratio >= 0.22 || left_align
     });
 
@@ -336,7 +365,7 @@ fn text_row_and_paragraph_boxes(
             out.push(c);
         }
     }
-    dedupe_boxes(out, 0.86)
+    (dedupe_boxes(out, 0.86), consumed_seed_indices)
 }
 
 fn cluster_bounds<F>(items: &[Bounds], mut connected: F) -> Vec<Vec<Bounds>>
@@ -380,6 +409,49 @@ where
     }
     let mut out: Vec<Vec<Bounds>> = groups.into_values().collect();
     out.sort_by_key(|group| group.len());
+    out
+}
+
+/// Like cluster_bounds but also returns the local indices of items in each group.
+fn cluster_bounds_indexed<F>(items: &[Bounds], mut connected: F) -> Vec<(Vec<usize>, Vec<Bounds>)>
+where
+    F: FnMut(&Bounds, &Bounds) -> bool,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let n = items.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], idx: usize) -> usize {
+        if parent[idx] != idx {
+            let root = find(parent, parent[idx]);
+            parent[idx] = root;
+        }
+        parent[idx]
+    }
+    fn union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if connected(&items[i], &items[j]) {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+    let mut groups = std::collections::HashMap::<usize, (Vec<usize>, Vec<Bounds>)>::new();
+    for (idx, item) in items.iter().enumerate() {
+        let root = find(&mut parent, idx);
+        let entry = groups.entry(root).or_default();
+        entry.0.push(idx);
+        entry.1.push(item.clone());
+    }
+    let mut out: Vec<(Vec<usize>, Vec<Bounds>)> = groups.into_values().collect();
+    out.sort_by_key(|(_, items)| items.len());
     out
 }
 
@@ -747,6 +819,61 @@ fn compress_indices(indices: &[usize], max_gap: usize) -> Vec<usize> {
     }
     out.push((run_start + prev) / 2);
     out
+}
+
+/// Detect container-level boxes (cards, dialogs, panels) by finding rectangular
+/// regions with strong border energy enclosing clusters of detected elements.
+fn container_boxes(gray: &[u8], width: usize, height: usize, seed_boxes: &[Bounds]) -> Vec<Bounds> {
+    let img_w = width as f64;
+    let img_h = height as f64;
+    if seed_boxes.len() < 3 || width < 200 || height < 200 {
+        return Vec::new();
+    }
+
+    // Cluster nearby boxes into spatial groups.
+    let clusters = cluster_bounds(seed_boxes, |a, b| {
+        let vgap = axis_gap(a.y, a.y + a.height, b.y, b.y + b.height);
+        let hgap = axis_gap(a.x, a.x + a.width, b.x, b.x + b.width);
+        vgap <= 40.0 && hgap <= 60.0
+    });
+
+    let mut candidates = Vec::new();
+    for cluster in &clusters {
+        if cluster.len() < 2 {
+            continue;
+        }
+        let merged = cluster
+            .iter()
+            .skip(1)
+            .fold(cluster[0].clone(), |acc, b| union_bounds(&acc, b));
+        // Only consider clusters that form a substantial rectangular region.
+        if merged.width < 120.0 || merged.height < 80.0 {
+            continue;
+        }
+        if merged.width > img_w * 0.92 && merged.height > img_h * 0.85 {
+            continue; // Skip near-full-screen clusters.
+        }
+
+        // Probe multiple padding levels to find the best container boundary.
+        for pad in &[8.0, 16.0, 28.0, 44.0] {
+            let candidate = expand_bounds(&merged, *pad, *pad, img_w, img_h);
+            if candidate.width < 160.0 || candidate.height < 100.0 {
+                continue;
+            }
+            if candidate.width > img_w * 0.95 || candidate.height > img_h * 0.92 {
+                continue;
+            }
+            let border = rect_border_energy(gray, width, height, &candidate);
+            let inner = rect_inner_energy(gray, width, height, &candidate);
+            let score = border - inner * 0.5;
+            if score >= 6.0 {
+                candidates.push(candidate);
+                break; // Use first good padding level.
+            }
+        }
+    }
+
+    dedupe_boxes(candidates, 0.60)
 }
 
 fn structural_panel_boxes(gray: &[u8], width: usize, height: usize) -> Vec<Bounds> {
@@ -2046,6 +2173,53 @@ fn prune_nested_glitch_boxes(mut boxes: Vec<Bounds>) -> Vec<Bounds> {
     kept
 }
 
+/// Remove small boxes that are fully contained inside a text-line or paragraph box.
+/// Only suppresses when the outer box looks like a text grouping (moderate aspect
+/// ratio, not a huge structural panel) and the inner box is word-sized.
+fn suppress_contained_boxes(mut boxes: Vec<Bounds>) -> Vec<Bounds> {
+    // Sort largest first.
+    boxes.sort_by(|a, b| {
+        let aa = a.width * a.height;
+        let bb = b.width * b.height;
+        bb.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let n = boxes.len();
+    let mut suppressed = vec![false; n];
+    for i in 0..n {
+        if suppressed[i] {
+            continue;
+        }
+        let outer = &boxes[i];
+        let outer_area = outer.width * outer.height;
+        let outer_aspect = outer.width / outer.height.max(1.0);
+        // Only suppress inside text-line-shaped boxes (wide, moderate height).
+        // Skip tall panels, near-square containers, and very large structural boxes.
+        if outer.height > 120.0 || outer_aspect < 1.5 || outer_area > 80000.0 {
+            continue;
+        }
+        for j in (i + 1)..n {
+            if suppressed[j] {
+                continue;
+            }
+            let inner = &boxes[j];
+            let inner_area = inner.width * inner.height;
+            // Only suppress if outer is substantially larger (>= 2x area).
+            if inner_area * 2.0 > outer_area {
+                continue;
+            }
+            if rect_contains(outer, inner, 4.0) {
+                suppressed[j] = true;
+            }
+        }
+    }
+    boxes
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !suppressed[*i])
+        .map(|(_, b)| b)
+        .collect()
+}
+
 fn is_immediately_nested(inner: &Bounds, outer: &Bounds) -> bool {
     if !rect_contains(outer, inner, 1.0) {
         return false;
@@ -2465,7 +2639,7 @@ mod tests {
                 height: 18.0,
             },
         ];
-        let merged = text_row_and_paragraph_boxes(&gray, width, height, &seed);
+        let (merged, _consumed) = text_row_and_paragraph_boxes(&gray, width, height, &seed);
         assert!(
             merged.iter().any(|b| b.width >= 240.0 && b.height <= 60.0),
             "expected at least one merged line/control-sized box"

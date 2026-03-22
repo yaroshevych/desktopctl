@@ -9,7 +9,7 @@ mod tokenize_boxes;
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use desktop_core::protocol::Bounds;
-use image::ImageReader;
+use image::{ImageReader, RgbaImage};
 use serde::Deserialize;
 
 // Path to the manifest relative to CARGO_MANIFEST_DIR.
@@ -268,4 +268,99 @@ fn golden_labels_per_category_recall() {
             gate
         );
     }
+}
+
+// ── overlay generation ──────────────────────────────────────────────────────
+
+fn draw_rect(img: &mut RgbaImage, b: &Bounds, color: [u8; 4], thickness: u32) {
+    let w = img.width();
+    let h = img.height();
+    let x1 = (b.x as u32).min(w.saturating_sub(1));
+    let y1 = (b.y as u32).min(h.saturating_sub(1));
+    let x2 = ((b.x + b.width) as u32).min(w.saturating_sub(1));
+    let y2 = ((b.y + b.height) as u32).min(h.saturating_sub(1));
+    for t in 0..thickness {
+        let x1t = x1.saturating_sub(t);
+        let y1t = y1.saturating_sub(t);
+        let x2t = (x2 + t).min(w - 1);
+        let y2t = (y2 + t).min(h - 1);
+        for x in x1t..=x2t {
+            img.put_pixel(x, y1t, image::Rgba(color));
+            img.put_pixel(x, y2t, image::Rgba(color));
+        }
+        for y in y1t..=y2t {
+            img.put_pixel(x1t, y, image::Rgba(color));
+            img.put_pixel(x2t, y, image::Rgba(color));
+        }
+    }
+}
+
+#[test]
+#[ignore] // Run with: cargo test -p desktopctld --test golden_labels -- --ignored generate_overlays
+fn generate_overlays() {
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL);
+    let raw = fs::read_to_string(&manifest_path).expect("read manifest");
+    let manifest: Manifest = serde_json::from_str(&raw).expect("parse manifest JSON");
+    let datasets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("eval/datasets");
+
+    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("tmp/golden_overlays");
+    fs::create_dir_all(&out_dir).expect("create output dir");
+
+    let green = [0u8, 220, 0, 255]; // predicted boxes
+    let red = [220u8, 0, 0, 255]; // GT boxes
+    let blue = [60u8, 120, 255, 255]; // predicted glyphs
+
+    // Filter to specific images if OVERLAY_FILTER env var is set (comma-separated substrings).
+    let filter = std::env::var("OVERLAY_FILTER").unwrap_or_default();
+    let filters: Vec<&str> = if filter.is_empty() {
+        Vec::new()
+    } else {
+        filter.split(',').collect()
+    };
+
+    for item in &manifest.items {
+        if !filters.is_empty() && !filters.iter().any(|f| item.id.contains(f)) {
+            continue;
+        }
+        let image_path = datasets_dir.join(&item.image_rel_path);
+        let image = ImageReader::open(&image_path)
+            .unwrap_or_else(|e| panic!("open image {}: {}", image_path.display(), e))
+            .decode()
+            .unwrap_or_else(|e| panic!("decode image {}: {}", image_path.display(), e))
+            .to_rgba8();
+
+        let predicted = tokenize_boxes::detect_ui_boxes(&image);
+        let glyph_text_bounds: Vec<Bounds> = Vec::new();
+        let predicted_glyphs = tokenize_boxes::detect_glyphs(&image, &glyph_text_bounds);
+
+        let mut overlay = image.clone();
+        for p in &predicted {
+            draw_rect(&mut overlay, p, green, 1);
+        }
+        for p in &predicted_glyphs {
+            draw_rect(&mut overlay, p, blue, 1);
+        }
+        for ann in &item.annotations {
+            if let Some(gt) = to_bounds(ann.bbox) {
+                draw_rect(&mut overlay, &gt, red, 2);
+            }
+        }
+
+        eprintln!(
+            "  {} → {} boxes, {} glyphs",
+            item.id,
+            predicted.len(),
+            predicted_glyphs.len()
+        );
+
+        // Use short filename from id
+        let short_id: String = item.id.chars().take(60).collect();
+        let out_path = out_dir.join(format!("{short_id}.png"));
+        overlay.save(&out_path).expect("save overlay");
+    }
+    println!("Overlays written to: {}", out_dir.display());
 }
