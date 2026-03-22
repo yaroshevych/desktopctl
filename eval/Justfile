@@ -46,10 +46,16 @@ run-export project_id slug control="":
     uv run run/export_run.py --project-id {{project_id}} --slug {{slug}} \
       $([ -n "{{control}}" ] && echo "--control-type {{control}}" || true)
 
+# Export all tasks from a project (no verdict filter).
+# Usage: just run-export-all 6 golden_segmentation
+run-export-all project_id slug:
+    uv run run/export_run.py --project-id {{project_id}} --slug {{slug}} --all
+
 # Run tokenizer on artifacts.csv for an existing run_id and write overlays/labels.
 # Fast mode defaults to tokenize_dump with parallel workers and image dedupe.
 # Usage: just run-tokenize 20260321-185915-text_fields [dump|desktopctl] [jobs]
 run-tokenize RUN ENGINE="dump" JOBS="0":
+    cargo build --release -p desktopctld --bin tokenize_dump --manifest-path ../src/desktop/Cargo.toml
     python3 run/run_tokenizer_overlays.py --run-dir "datasets/runs/$(basename '{{RUN}}')" --overwrite --engine "{{ENGINE}}" --jobs "{{JOBS}}"
 
 # Incremental tokenize rerun: keep existing results and only fill missing labels.

@@ -21,6 +21,8 @@ use super::{
     state::with_state,
 };
 
+const FINAL_TEXT_CONFIDENCE: f32 = 1.0;
+
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub snapshot: SnapshotPayload,
@@ -271,22 +273,22 @@ fn build_window_elements(
     let rgba = image.to_rgba8();
     let width = rgba.width();
     let height = rgba.height();
-    let text_bounds: Vec<Bounds> = snapshot
-        .texts
-        .iter()
-        .map(|text| text.bounds.clone())
-        .collect();
     let frame = super::metal_pipeline::process_cpu(&rgba);
-    let detected_controls = super::tokenize_boxes::detect_controls(&frame, &text_bounds);
+    let words = super::text_group::build_words_from_ocr(&snapshot.texts, &frame);
+    let lines = super::text_group::group_words_into_lines(&words);
+    let paragraphs = super::text_group::group_lines_into_paragraphs(&lines);
+    let final_fields = super::text_group::final_text_fields(&lines, &paragraphs);
+    let line_bounds: Vec<Bounds> = lines.iter().map(|line| line.bounds.clone()).collect();
+    let detected_controls = super::tokenize_boxes::detect_controls(&frame, &line_bounds);
 
     let mut elements = Vec::new();
-    for (idx, text) in snapshot.texts.iter().enumerate() {
+    for (idx, text) in final_fields.iter().enumerate() {
         elements.push(TokenizeElement {
             id: format!("text_{:04}", idx + 1),
             kind: "text".to_string(),
             bbox: bounds_to_bbox(&text.bounds),
             text: Some(text.text.clone()),
-            confidence: Some(text.confidence),
+            confidence: Some(FINAL_TEXT_CONFIDENCE),
             source: "vision_ocr".to_string(),
         });
     }
@@ -570,7 +572,11 @@ mod tests {
         assert!(windows[0].os_bounds.is_some());
         let elements = &windows[0].elements;
         assert!(elements.iter().any(|e| e.kind == "text"));
-        assert!(elements.iter().any(|e| e.kind == "text_field" || e.kind == "button"));
+        assert!(
+            elements
+                .iter()
+                .any(|e| e.kind == "text_field" || e.kind == "button")
+        );
 
         let _ = std::fs::remove_file(&image_path);
     }

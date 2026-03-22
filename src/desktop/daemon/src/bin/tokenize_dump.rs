@@ -7,6 +7,7 @@ use serde_json::json;
 
 // Dev-only threshold for external label files used by tokenize_dump batch runs.
 const TEXT_LABEL_CONFIDENCE_MIN: f32 = 0.50;
+const FINAL_TEXT_CONFIDENCE: f32 = 1.0;
 
 #[path = "../vision/metal_pipeline.rs"]
 #[allow(dead_code)]
@@ -85,18 +86,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t_detect = std::time::Instant::now();
     let frame = metal_pipeline::process_cpu(&image);
 
-    // Text grouping pipeline: OCR words → split → tighten → lines → paragraphs.
-    let words: Vec<text_group::TextBox> = texts
-        .iter()
-        .map(|t| text_group::TextBox::from_bounds_with_text(t.bounds.clone(), t.text.clone()))
-        .flat_map(|tb| text_group::split_wide_textbox(tb, &frame))
-        .map(|tb| {
-            let tight = text_group::tighten_to_content(&tb.bounds, &frame);
-            text_group::TextBox::from_bounds_with_text(tight, tb.text)
-        })
-        .collect();
+    // Text grouping pipeline: OCR words -> split -> tighten -> lines -> paragraphs -> final fields.
+    let words: Vec<text_group::TextBox> = text_group::build_words_from_ocr(&texts, &frame);
     let lines = text_group::group_words_into_lines(&words);
     let paragraphs = text_group::group_lines_into_paragraphs(&lines);
+    let final_fields = text_group::final_text_fields(&lines, &paragraphs);
     let line_bounds: Vec<Bounds> = lines.iter().map(|l| l.bounds.clone()).collect();
 
     let controls = tokenize_boxes::detect_controls(&frame, &line_bounds);
@@ -112,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "id": "win_0001",
             "title": "screenshot",
             "bounds": {"x": 0.0, "y": 0.0, "width": width as f64, "height": height as f64},
-            "elements": build_elements_json(&texts, &controls)
+            "elements": build_elements_json(&final_fields, &controls)
         }]
     });
 
@@ -142,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Rgba([255, 255, 255, 255]),
             2,
         );
-        for text in &texts {
+        for text in &final_fields {
             draw_bounds_outline(&mut canvas, &text.bounds, Rgba([0, 190, 0, 255]), 1);
         }
         for para in &paragraphs {
@@ -164,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         json!({
             "image": input,
-            "text_count": texts.len(),
+            "text_count": final_fields.len(),
             "control_count": controls.len(),
             "timings_ms": {
                 "image_load": image_ms,
@@ -187,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_elements_json(
-    texts: &[SnapshotText],
+    texts: &[text_group::TextBox],
     controls: &[tokenize_boxes::DetectedControl],
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
@@ -197,7 +191,7 @@ fn build_elements_json(
             "type": "text",
             "bbox": [text.bounds.x, text.bounds.y, text.bounds.width, text.bounds.height],
             "text": text.text,
-            "confidence": text.confidence,
+            "confidence": FINAL_TEXT_CONFIDENCE,
             "source": "vision_ocr"
         }));
     }

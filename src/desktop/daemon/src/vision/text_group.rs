@@ -1,4 +1,4 @@
-use desktop_core::protocol::Bounds;
+use desktop_core::protocol::{Bounds, SnapshotText};
 
 use super::metal_pipeline::ProcessedFrame;
 use super::tokenize_boxes::{axis_gap, debug_enabled, overlap_1d, union_bounds};
@@ -59,6 +59,63 @@ impl TextBox {
             text,
         }
     }
+}
+
+/// Build tightened word boxes from OCR output.
+pub(crate) fn build_words_from_ocr(texts: &[SnapshotText], frame: &ProcessedFrame) -> Vec<TextBox> {
+    texts
+        .iter()
+        .map(|t| TextBox::from_bounds_with_text(t.bounds.clone(), t.text.clone()))
+        .flat_map(|tb| split_wide_textbox(tb, frame))
+        .map(|tb| {
+            let tight = tighten_to_content(&tb.bounds, frame);
+            TextBox::from_bounds_with_text(tight, tb.text)
+        })
+        .collect()
+}
+
+/// Merge grouped paragraphs with standalone lines into final text fields.
+pub(crate) fn final_text_fields(lines: &[TextBox], paragraphs: &[TextBox]) -> Vec<TextBox> {
+    let mut out: Vec<TextBox> = paragraphs.to_vec();
+
+    for line in lines {
+        let line_area = (line.bounds.width.max(0.0) * line.bounds.height.max(0.0)).max(1.0);
+        let grouped = paragraphs.iter().any(|p| {
+            let overlap = overlap_area(&line.bounds, &p.bounds);
+            overlap / line_area >= 0.85
+        });
+        if !grouped {
+            out.push(line.clone());
+        }
+    }
+
+    out.sort_by(|a, b| {
+        a.bounds
+            .y
+            .partial_cmp(&b.bounds.y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.bounds
+                    .x
+                    .partial_cmp(&b.bounds.x)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    out
+}
+
+fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    let ix1 = a.x.max(b.x);
+    let iy1 = a.y.max(b.y);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    let iw = (ix2 - ix1).max(0.0);
+    let ih = (iy2 - iy1).max(0.0);
+    iw * ih
 }
 
 // ── Tightening ──────────────────────────────────────────────────────────────

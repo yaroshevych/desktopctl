@@ -1,25 +1,24 @@
 #[path = "../src/vision/metal_pipeline.rs"]
 #[allow(dead_code)]
 mod metal_pipeline;
+#[path = "../src/vision/ocr.rs"]
+mod ocr;
 #[path = "../src/vision/text_group.rs"]
 #[allow(dead_code)]
 mod text_group;
 #[path = "../src/vision/tokenize_boxes.rs"]
 #[allow(dead_code)]
 mod tokenize_boxes;
-#[path = "../src/vision/ocr.rs"]
-mod ocr;
 #[path = "../src/trace.rs"]
 mod trace;
 
 use std::path::{Path, PathBuf};
 
 use image::ImageReader;
-use text_group::{
-    TextBox, group_lines_into_paragraphs, group_words_into_lines, split_wide_textbox,
-    tighten_to_content,
-};
 use std::collections::HashMap;
+use text_group::{
+    build_words_from_ocr, final_text_fields, group_lines_into_paragraphs, group_words_into_lines,
+};
 
 #[derive(Debug)]
 struct TextAnalysis {
@@ -37,7 +36,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixture_path(file: &str) -> PathBuf {
-    repo_root().join("src/desktop/daemon/tests/fixtures/golden").join(file)
+    repo_root()
+        .join("src/desktop/daemon/tests/fixtures/golden")
+        .join(file)
 }
 
 fn normalize(s: &str) -> String {
@@ -45,24 +46,6 @@ fn normalize(s: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn area(tb: &TextBox) -> f64 {
-    (tb.bounds.width.max(0.0)) * (tb.bounds.height.max(0.0))
-}
-
-fn overlap_area(a: &TextBox, b: &TextBox) -> f64 {
-    let ax2 = a.bounds.x + a.bounds.width;
-    let ay2 = a.bounds.y + a.bounds.height;
-    let bx2 = b.bounds.x + b.bounds.width;
-    let by2 = b.bounds.y + b.bounds.height;
-    let ix1 = a.bounds.x.max(b.bounds.x);
-    let iy1 = a.bounds.y.max(b.bounds.y);
-    let ix2 = ax2.min(bx2);
-    let iy2 = ay2.min(by2);
-    let iw = (ix2 - ix1).max(0.0);
-    let ih = (iy2 - iy1).max(0.0);
-    iw * ih
 }
 
 fn analyze_image(image_path: &Path) -> TextAnalysis {
@@ -76,29 +59,13 @@ fn analyze_image(image_path: &Path) -> TextAnalysis {
         .unwrap_or_else(|e| panic!("ocr failed for {}: {}", image_path.display(), e.message));
     let frame = metal_pipeline::process_cpu(&image);
 
-    let words: Vec<TextBox> = texts
-        .iter()
-        .map(|t| TextBox::from_bounds_with_text(t.bounds.clone(), t.text.clone()))
-        .flat_map(|tb| split_wide_textbox(tb, &frame))
-        .map(|tb| {
-            let tight = tighten_to_content(&tb.bounds, &frame);
-            TextBox::from_bounds_with_text(tight, tb.text)
-        })
-        .collect();
-
+    let words = build_words_from_ocr(&texts, &frame);
     let lines = group_words_into_lines(&words);
     let paragraphs = group_lines_into_paragraphs(&lines);
-    let mut final_fields: Vec<String> = paragraphs.iter().map(|t| normalize(&t.text)).collect();
-
-    for line in &lines {
-        let line_area = area(line).max(1.0);
-        let grouped = paragraphs
-            .iter()
-            .any(|p| overlap_area(line, p) / line_area >= 0.85);
-        if !grouped {
-            final_fields.push(normalize(&line.text));
-        }
-    }
+    let final_fields: Vec<String> = final_text_fields(&lines, &paragraphs)
+        .iter()
+        .map(|t| normalize(&t.text))
+        .collect();
 
     TextAnalysis { final_fields }
 }
