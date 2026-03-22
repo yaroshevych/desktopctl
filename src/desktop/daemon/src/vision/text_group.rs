@@ -236,20 +236,17 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
         128.0
     };
     let is_dark_bg = raw_bg_luma < 128.0;
-    let preprocess_luma = |raw: u8| -> u8 {
-        if is_dark_bg {
-            255u8.saturating_sub(raw)
-        } else {
-            raw
-        }
-    };
 
     let mut hist = [0u32; 256];
     let mut hist_total = 0u32;
     for y in y1..y2 {
         for x in x1..x2 {
             let raw = frame.gray[y * frame.width + x];
-            let prep = preprocess_luma(raw);
+            let prep = if is_dark_bg {
+                255u8.saturating_sub(raw)
+            } else {
+                raw
+            };
             hist[prep as usize] += 1;
             hist_total += 1;
         }
@@ -269,17 +266,25 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
         }
     }
     let stretch_range = (hi as f64 - lo as f64).max(1.0);
-    let to_scan_luma = |raw: u8| -> f64 {
-        let prep = preprocess_luma(raw) as f64;
-        ((prep - lo as f64) * (255.0 / stretch_range)).clamp(0.0, 255.0)
-    };
+    // Precompute OCR-aligned luma transform for all 256 grayscale values.
+    let mut scan_lut = [0.0f64; 256];
+    let scale = 255.0 / stretch_range;
+    for raw in 0u16..=255u16 {
+        let raw_u8 = raw as u8;
+        let prep = if is_dark_bg {
+            255u8.saturating_sub(raw_u8)
+        } else {
+            raw_u8
+        } as f64;
+        scan_lut[raw as usize] = ((prep - lo as f64) * scale).clamp(0.0, 255.0);
+    }
 
     // Background: top/bottom edge rows in OCR-aligned luminance.
     let mut bg_sum = 0.0f64;
     let mut bg_count = 0usize;
     for x in x1..x2 {
-        bg_sum += to_scan_luma(frame.gray[y1 * frame.width + x]);
-        bg_sum += to_scan_luma(frame.gray[(y2 - 1) * frame.width + x]);
+        bg_sum += scan_lut[frame.gray[y1 * frame.width + x] as usize];
+        bg_sum += scan_lut[frame.gray[(y2 - 1) * frame.width + x] as usize];
         bg_count += 2;
     }
     let bg_luma = if bg_count > 0 {
@@ -299,7 +304,7 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     let mut max_dev = 0.0f64;
     for x in x1..x2 {
         for y in scan_y1..scan_y2 {
-            let val = to_scan_luma(frame.gray[y * frame.width + x]);
+            let val = scan_lut[frame.gray[y * frame.width + x] as usize];
             // In OCR space, text is expected darker than background.
             let dev = (bg_luma - val).max(0.0);
             if dev > max_dev {
@@ -319,7 +324,7 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     for y in scan_y1..scan_y2 {
         let mut row_ink = 0usize;
         for x in x1..x2 {
-            let scan_luma = to_scan_luma(frame.gray[y * frame.width + x]);
+            let scan_luma = scan_lut[frame.gray[y * frame.width + x] as usize];
             let is_text = (bg_luma - scan_luma) > threshold;
             if is_text {
                 row_ink += 1;
@@ -346,7 +351,7 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
             if !keep_row[y - scan_y1] {
                 continue;
             }
-            let scan_luma = to_scan_luma(frame.gray[y * frame.width + x]);
+            let scan_luma = scan_lut[frame.gray[y * frame.width + x] as usize];
             let is_text = (bg_luma - scan_luma) > threshold;
             if is_text {
                 ink += 1;
@@ -765,36 +770,29 @@ where
         let root = find(&mut parent, idx);
         groups.entry(root).or_default().push(item.clone());
     }
-    let mut out: Vec<Vec<TextBox>> = groups.into_values().collect();
+    let mut keyed: Vec<(f64, f64, Vec<TextBox>)> = groups
+        .into_values()
+        .map(|group| {
+            let min_y = group
+                .iter()
+                .map(|tb| tb.bounds.y)
+                .fold(f64::INFINITY, f64::min);
+            let min_x = group
+                .iter()
+                .map(|tb| tb.bounds.x)
+                .fold(f64::INFINITY, f64::min);
+            (min_y, min_x, group)
+        })
+        .collect();
     // Reading order: top-to-bottom, then left-to-right.
-    out.sort_by(|a, b| {
-        let a_min_y = a
-            .iter()
-            .map(|tb| tb.bounds.y)
-            .fold(f64::INFINITY, f64::min);
-        let b_min_y = b
-            .iter()
-            .map(|tb| tb.bounds.y)
-            .fold(f64::INFINITY, f64::min);
-        let y_ord = a_min_y
-            .partial_cmp(&b_min_y)
-            .unwrap_or(std::cmp::Ordering::Equal);
+    keyed.sort_by(|(ay, ax, _), (by, bx, _)| {
+        let y_ord = ay.partial_cmp(by).unwrap_or(std::cmp::Ordering::Equal);
         if y_ord != std::cmp::Ordering::Equal {
             return y_ord;
         }
-        let a_min_x = a
-            .iter()
-            .map(|tb| tb.bounds.x)
-            .fold(f64::INFINITY, f64::min);
-        let b_min_x = b
-            .iter()
-            .map(|tb| tb.bounds.x)
-            .fold(f64::INFINITY, f64::min);
-        a_min_x
-            .partial_cmp(&b_min_x)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        ax.partial_cmp(bx).unwrap_or(std::cmp::Ordering::Equal)
     });
-    out
+    keyed.into_iter().map(|(_, _, group)| group).collect()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
