@@ -39,8 +39,10 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
                 snapshot_id: now_millis() as u64,
                 timestamp: now_millis().to_string(),
                 display_id: display.id,
-                width: image.width(),
-                height: image.height(),
+                // Keep logical display size in frame metadata; crop math uses
+                // this with window bounds (also logical units).
+                width: bounds.size.width.max(0.0) as u32,
+                height: bounds.size.height.max(0.0) as u32,
                 scale: 1.0,
                 image_path: None,
             },
@@ -84,8 +86,10 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
             snapshot_id: now_millis() as u64,
             timestamp: now_millis().to_string(),
             display_id: display.id,
-            width: image.width(),
-            height: image.height(),
+            // Keep logical display size in frame metadata; crop math uses
+            // this with window bounds (also logical units).
+            width: bounds.size.width.max(0.0) as u32,
+            height: bounds.size.height.max(0.0) as u32,
             scale: 1.0,
             image_path: Some(target_path),
         },
