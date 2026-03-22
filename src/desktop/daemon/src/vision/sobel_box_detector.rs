@@ -42,26 +42,33 @@ fn sobel_enclosed_candidate(
 
     let top_y = best_horizontal_level(frame, top_y, span_x1, span_x2, edge_thr, 4);
     let bottom_y = best_horizontal_level(frame, bottom_y, span_x1, span_x2, edge_thr, 4);
-    let top_cov = horizontal_edge_coverage(frame, top_y, span_x1, span_x2, edge_thr);
-    let bottom_cov = horizontal_edge_coverage(frame, bottom_y, span_x1, span_x2, edge_thr);
-    let top_ok = top_cov >= 0.999;
-    let bottom_ok = bottom_cov >= 0.999;
-    let loop_ok = sobel_edge_bucket_enclosed(frame, candidate, top_y, bottom_y, edge_thr, cs);
+    let top_cov = horizontal_edge_confidence(frame, top_y, span_x1, span_x2, edge_thr);
+    let bottom_cov = horizontal_edge_confidence(frame, bottom_y, span_x1, span_x2, edge_thr);
+    // Use a magnitude-weighted gate instead of strict binary coverage.
+    let min_cov = (0.82 + 0.10 * (edge_thr as f64 / 20.0)).clamp(0.82, 0.92);
+    let top_ok = top_cov >= min_cov;
+    let bottom_ok = bottom_cov >= min_cov;
+    let span_bounds = sobel_edge_bucket_span(frame, text, candidate, top_y, bottom_y, edge_thr, cs);
+    let loop_ok = span_bounds.is_some();
     if !(top_ok && bottom_ok && loop_ok) {
         if dbg {
             eprintln!(
-                "      sobel-loop miss: top={} ({:.2}) bottom={} ({:.2}) loop={} span=[{},{}] thr={}",
-                top_y, top_cov, bottom_y, bottom_cov, loop_ok, span_x1, span_x2, edge_thr
+                "      sobel-loop miss: top={} ({:.2}) bottom={} ({:.2}) loop={} span=[{},{}] thr={} min_cov={:.2}",
+                top_y, top_cov, bottom_y, bottom_cov, loop_ok, span_x1, span_x2, edge_thr, min_cov
             );
         }
+        return None;
+    }
+    let (sx1, sx2) = span_bounds?;
+    if sx2 - sx1 < 8 {
         return None;
     }
 
     let h = frame.height as i32;
     Some(Bounds {
-        x: candidate.x,
+        x: sx1 as f64,
         y: top_y.clamp(0, h - 1) as f64,
-        width: candidate.width,
+        width: (sx2 - sx1 + 1) as f64,
         height: (bottom_y - top_y + 1).max(1) as f64,
     })
 }
@@ -183,33 +190,40 @@ fn dominant_level(hits: &[i32], tol: i32, min_hits: usize) -> Option<i32> {
     }
 }
 
-fn horizontal_edge_coverage(frame: &ProcessedFrame, y: i32, x1: i32, x2: i32, edge_thr: u8) -> f64 {
+fn horizontal_edge_confidence(
+    frame: &ProcessedFrame,
+    y: i32,
+    x1: i32,
+    x2: i32,
+    edge_thr: u8,
+) -> f64 {
     let w = frame.width as i32;
     let h = frame.height as i32;
     let yy = y.clamp(0, h - 1);
-    let mut hits = 0usize;
+    let mut sum = 0.0f64;
     let mut total = 0usize;
+    let floor = (edge_thr as i32 / 2).max(2) as f64;
+    let denom = ((edge_thr as f64) - floor).max(1.0);
     for x in x1..=x2 {
         total += 1;
         let xx = x.clamp(0, w - 1);
-        let mut hit = false;
+        let mut max_e = 0u8;
         for dy in -1..=1 {
             let y2 = (yy + dy).clamp(0, h - 1) as usize;
             let x2 = xx as usize;
-            if frame.edge[y2 * frame.width + x2] >= edge_thr {
-                hit = true;
-                break;
-            }
+            max_e = max_e.max(frame.edge[y2 * frame.width + x2]);
         }
-        if hit {
-            hits += 1;
-        }
+        let e = max_e as f64;
+        let s = if e <= floor {
+            0.0
+        } else if e >= edge_thr as f64 {
+            1.0
+        } else {
+            (e - floor) / denom
+        };
+        sum += s;
     }
-    if total == 0 {
-        0.0
-    } else {
-        hits as f64 / total as f64
-    }
+    if total == 0 { 0.0 } else { sum / total as f64 }
 }
 
 fn best_horizontal_level(
@@ -224,7 +238,7 @@ fn best_horizontal_level(
     let mut best_cov = -1.0f64;
     for dy in -radius..=radius {
         let yy = y + dy;
-        let cov = horizontal_edge_coverage(frame, yy, x1, x2, edge_thr);
+        let cov = horizontal_edge_confidence(frame, yy, x1, x2, edge_thr);
         if cov > best_cov {
             best_cov = cov;
             best_y = yy;
@@ -233,29 +247,30 @@ fn best_horizontal_level(
     best_y
 }
 
-fn sobel_edge_bucket_enclosed(
+fn sobel_edge_bucket_span(
     frame: &ProcessedFrame,
+    text: &Bounds,
     candidate: &Bounds,
     top_y: i32,
     bottom_y: i32,
     edge_thr: u8,
     corner_skip: i32,
-) -> bool {
+) -> Option<(i32, i32)> {
     let w = frame.width as i32;
     let h = frame.height as i32;
     let x1 = candidate.x.floor() as i32;
     let x2 = (candidate.x + candidate.width).ceil() as i32 - 1;
     if x2 - x1 < 8 || bottom_y - top_y < 8 {
-        return false;
+        return None;
     }
-    let thr = edge_thr.saturating_sub(1).max(3);
+    let thr = edge_thr.saturating_sub(2).max(1);
     let outward = 12;
     let rx1 = (x1 - outward).clamp(0, w - 1);
     let rx2 = (x2 + outward).clamp(0, w - 1);
     let ry1 = (top_y - outward).clamp(0, h - 1);
     let ry2 = (bottom_y + outward).clamp(0, h - 1);
     if rx2 <= rx1 || ry2 <= ry1 {
-        return false;
+        return None;
     }
 
     let rw = (rx2 - rx1 + 1) as usize;
@@ -264,10 +279,14 @@ fn sobel_edge_bucket_enclosed(
     let mut seeds = Vec::<usize>::new();
     let top_band_y1 = (top_y - 2).clamp(0, h - 1);
     let top_band_y2 = (top_y + 2).clamp(0, h - 1);
-    let seed_x1 = (x1 + corner_skip).clamp(0, w - 1);
-    let seed_x2 = (x2 - corner_skip).clamp(0, w - 1);
+    let bottom_band_y1 = (bottom_y - 2).clamp(0, h - 1);
+    let bottom_band_y2 = (bottom_y + 2).clamp(0, h - 1);
+    // Seed around the anchor text, not around scanned left/right border.
+    let seed_pad = (text.height * 1.2).round() as i32 + corner_skip;
+    let seed_x1 = (text.x.floor() as i32 - seed_pad).clamp(rx1, rx2);
+    let seed_x2 = ((text.x + text.width).ceil() as i32 + seed_pad).clamp(rx1, rx2);
     if seed_x2 <= seed_x1 {
-        return false;
+        return None;
     }
     for y in top_band_y1..=top_band_y2 {
         for x in seed_x1..=seed_x2 {
@@ -284,32 +303,41 @@ fn sobel_edge_bucket_enclosed(
         }
     }
     if seeds.is_empty() {
-        return false;
+        return None;
     }
 
     let mut seen = vec![false; n];
-    let mut parent = vec![usize::MAX; n];
     let mut q = VecDeque::<usize>::new();
-    let min_cycle_component = ((x2 - x1 + 1 + bottom_y - top_y + 2) as usize / 4).max(24);
+    let min_component = ((x2 - x1 + 1 + bottom_y - top_y + 2) as usize / 4).max(24);
 
     for seed in seeds {
         if seen[seed] {
             continue;
         }
         seen[seed] = true;
-        parent[seed] = seed;
         q.push_back(seed);
 
-        let mut has_cycle = false;
-        let mut escaped = false;
         let mut component_size = 0usize;
+        let mut touches_top = false;
+        let mut touches_bottom = false;
+        let mut comp_min_x = i32::MAX;
+        let mut comp_max_x = i32::MIN;
+        let mut comp_points = Vec::<(i32, i32)>::new();
 
         while let Some(idx) = q.pop_front() {
             component_size += 1;
             let x = idx % rw;
             let y = idx / rw;
-            if x == 0 || x + 1 == rw || y == 0 || y + 1 == rh {
-                escaped = true;
+            let x_abs = rx1 + x as i32;
+            let y_abs = ry1 + y as i32;
+            comp_min_x = comp_min_x.min(x_abs);
+            comp_max_x = comp_max_x.max(x_abs);
+            comp_points.push((x_abs, y_abs));
+            if y_abs >= top_band_y1 && y_abs <= top_band_y2 {
+                touches_top = true;
+            }
+            if y_abs >= bottom_band_y1 && y_abs <= bottom_band_y2 {
+                touches_bottom = true;
             }
 
             let y0 = y.saturating_sub(1);
@@ -330,24 +358,58 @@ fn sobel_edge_bucket_enclosed(
 
                     if !seen[nidx] {
                         seen[nidx] = true;
-                        parent[nidx] = idx;
                         q.push_back(nidx);
-                        continue;
-                    }
-                    if parent[idx] != nidx {
-                        has_cycle = true;
                     }
                 }
             }
-
-            if has_cycle && !escaped && component_size >= min_cycle_component {
-                return true;
-            }
         }
 
-        if has_cycle && !escaped && component_size >= min_cycle_component {
-            return true;
+        let side_support =
+            has_mid_side_support(&comp_points, comp_min_x, comp_max_x, top_y, bottom_y, h);
+        if component_size >= min_component && touches_top && touches_bottom && side_support {
+            return Some((comp_min_x, comp_max_x));
         }
     }
-    false
+    None
+}
+
+fn has_mid_side_support(
+    points: &[(i32, i32)],
+    min_x: i32,
+    max_x: i32,
+    top_y: i32,
+    bottom_y: i32,
+    img_h: i32,
+) -> bool {
+    if points.is_empty() || max_x <= min_x || bottom_y <= top_y {
+        return false;
+    }
+    let h = (bottom_y - top_y + 1).max(1);
+    let mid_y1 = (top_y + h / 4).clamp(0, img_h - 1);
+    let mid_y2 = (bottom_y - h / 4).clamp(0, img_h - 1);
+    if mid_y2 < mid_y1 {
+        return false;
+    }
+    let rows = (mid_y2 - mid_y1 + 1) as usize;
+    let mut left_rows = vec![false; rows];
+    let mut right_rows = vec![false; rows];
+    let side_tol = ((h as f64) * 0.12).round().clamp(2.0, 7.0) as i32;
+
+    for &(x, y) in points {
+        if y < mid_y1 || y > mid_y2 {
+            continue;
+        }
+        let row = (y - mid_y1) as usize;
+        if x <= min_x + side_tol {
+            left_rows[row] = true;
+        }
+        if x >= max_x - side_tol {
+            right_rows[row] = true;
+        }
+    }
+
+    let left_hits = left_rows.into_iter().filter(|v| *v).count();
+    let right_hits = right_rows.into_iter().filter(|v| *v).count();
+    let need = (rows / 5).max(3);
+    left_hits >= need && right_hits >= need
 }

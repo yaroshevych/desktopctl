@@ -269,8 +269,10 @@ fn contrast_stretch_gray(gray: &mut [u8]) {
         hist[v as usize] += 1;
     }
     let total = gray.len();
-    let low_target = ((total as f64) * 0.01).round() as usize;
-    let high_target = ((total as f64) * 0.99).round() as usize;
+    // Slightly tighter percentile window boosts subtle UI borders without
+    // overreacting to outliers.
+    let low_target = ((total as f64) * 0.005).round() as usize;
+    let high_target = ((total as f64) * 0.995).round() as usize;
 
     let mut acc = 0usize;
     let mut lo = 0usize;
@@ -292,7 +294,7 @@ fn contrast_stretch_gray(gray: &mut [u8]) {
         }
     }
 
-    if hi <= lo + 8 {
+    if hi <= lo + 6 {
         return;
     }
     let scale = 255.0f32 / (hi - lo) as f32;
