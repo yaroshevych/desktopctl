@@ -1053,3 +1053,26 @@ mod tests {
         assert!(iou(&kept[0], &inner) > 0.95);
     }
 }
+
+// ── control detection (stub) ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ControlKind {
+    TextField,
+    Button,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetectedControl {
+    pub bounds: Bounds,
+    pub kind: ControlKind,
+}
+
+/// Detect text fields and buttons by expanding from text anchors until a border
+/// or contrast boundary is found. Stub — returns empty vec.
+pub fn detect_controls(
+    _frame: &ProcessedFrame,
+    _text_lines: &[Bounds],
+) -> Vec<DetectedControl> {
+    Vec::new()
+}

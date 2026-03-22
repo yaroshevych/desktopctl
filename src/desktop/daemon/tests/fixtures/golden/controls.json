@@ -1,0 +1,168 @@
+[
+  {
+    "file": "dictionary_default_dark.png",
+    "text_fields": [
+      {
+        "bbox": [
+          841.0,
+          23.3,
+          519.4,
+          58.1
+        ],
+        "text": "Q Search"
+      }
+    ],
+    "buttons": []
+  },
+  {
+    "file": "dictionary_default_light.png",
+    "text_fields": [
+      {
+        "bbox": [
+          844.9,
+          23.3,
+          511.6,
+          58.1
+        ],
+        "text": "Q Search"
+      }
+    ],
+    "buttons": []
+  },
+  {
+    "file": "facetime_default_dark.png",
+    "text_fields": [
+      {
+        "bbox": [
+          430.5,
+          576.0,
+          418.7,
+          49.1
+        ],
+        "text": "Email or Phone Number"
+      }
+    ],
+    "buttons": [
+      {
+        "bbox": [
+          969.2,
+          1177.5,
+          125.8,
+          59.0
+        ],
+        "text": "Cancel"
+      },
+      {
+        "bbox": [
+          1118.6,
+          1179.5,
+          119.9,
+          51.1
+        ],
+        "text": "Sign In"
+      }
+    ]
+  },
+  {
+    "file": "facetime_default_light.png",
+    "text_fields": [
+      {
+        "bbox": [
+          422.7,
+          568.1,
+          432.5,
+          60.9
+        ],
+        "text": "Email or Phone Number"
+      }
+    ],
+    "buttons": [
+      {
+        "bbox": [
+          967.2,
+          1177.5,
+          121.9,
+          55.0
+        ],
+        "text": "Cancel"
+      },
+      {
+        "bbox": [
+          1116.6,
+          1179.5,
+          119.9,
+          53.1
+        ],
+        "text": "Sign In"
+      }
+    ]
+  },
+  {
+    "file": "messages_default_dark.png",
+    "text_fields": [
+      {
+        "bbox": [
+          431.3,
+          602.6,
+          417.2,
+          54.4
+        ],
+        "text": "Email or Phone Number"
+      }
+    ],
+    "buttons": [
+      {
+        "bbox": [
+          969.5,
+          1211.3,
+          118.9,
+          54.4
+        ],
+        "text": "Cancel"
+      },
+      {
+        "bbox": [
+          1114.6,
+          1211.3,
+          127.0,
+          52.4
+        ],
+        "text": "Sign In"
+      }
+    ]
+  },
+  {
+    "file": "messages_default_light.png",
+    "text_fields": [
+      {
+        "bbox": [
+          427.3,
+          604.7,
+          425.3,
+          52.4
+        ],
+        "text": "Email or Phone Number-"
+      }
+    ],
+    "buttons": [
+      {
+        "bbox": [
+          965.4,
+          1207.3,
+          129.0,
+          60.5
+        ],
+        "text": "Cancel"
+      },
+      {
+        "bbox": [
+          1112.6,
+          1203.3,
+          131.0,
+          64.5
+        ],
+        "text": "Sign In"
+      }
+    ]
+  }
+]
