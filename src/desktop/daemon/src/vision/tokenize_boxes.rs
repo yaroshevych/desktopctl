@@ -113,6 +113,23 @@ pub fn detect_controls(frame: &ProcessedFrame, text_lines: &[Bounds]) -> Vec<Det
             continue;
         }
 
+        if has_intervening_text(idx, text, &enclosing, text_lines) {
+            if dbg {
+                eprintln!(
+                    "  detect_control: BLOCKED_BY_TEXT [{:.0},{:.0},{:.0},{:.0}] text=[{:.0},{:.0},{:.0},{:.0}]",
+                    enclosing.x,
+                    enclosing.y,
+                    enclosing.width,
+                    enclosing.height,
+                    text.x,
+                    text.y,
+                    text.width,
+                    text.height,
+                );
+            }
+            continue;
+        }
+
         let kind = classify_control(&enclosing, text);
 
         if dbg {
@@ -242,10 +259,7 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
         height: ch.min(img_h),
     };
 
-    // Validate: border energy should exceed interior — unless the scanner
-    // found clear borders in most directions (expansion stopped before max).
-    // Rounded buttons have low average border energy because corners break
-    // the straight-line assumption of border_energy().
+    // Validate border-vs-interior evidence.
     let directions_found = [expanded_left, expanded_right, expanded_top, expanded_bottom]
         .iter()
         .filter(|e| **e < max_limit * 0.90)
@@ -258,10 +272,8 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
 
     let effective_border = border_e + glow_e * 0.5;
     let noise_floor = interior_e.max(0.5);
-
-    // If scanner found borders in >=3 directions, trust the expansion even with
-    // low border energy (handles rounded corners and subtle button styles).
-    let energy_ok = effective_border / noise_floor >= 1.3 || border_e >= 4.0;
+    let ratio = effective_border / noise_floor;
+    let energy_ok = ratio >= 1.15 || border_e >= 3.0 || (glow_e >= 1.2 && ratio >= 0.95);
     if !energy_ok && directions_found < 3 {
         if dbg {
             eprintln!(
@@ -273,7 +285,7 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
                 border_e,
                 interior_e,
                 glow_e,
-                effective_border / noise_floor,
+                ratio,
                 directions_found,
             );
         }
@@ -486,31 +498,72 @@ fn scan_peak_edge_v(
     }
 }
 
+fn has_intervening_text(
+    anchor_idx: usize,
+    anchor: &Bounds,
+    candidate: &Bounds,
+    text_lines: &[Bounds],
+) -> bool {
+    let font_h = anchor.height.max(1.0);
+    let right_gap = (candidate.x + candidate.width) - (anchor.x + anchor.width);
+    let left_gap = anchor.x - candidate.x;
+    let top_gap = anchor.y - candidate.y;
+    let bottom_gap = (candidate.y + candidate.height) - (anchor.y + anchor.height);
+
+    for (j, other) in text_lines.iter().enumerate() {
+        if j == anchor_idx {
+            continue;
+        }
+
+        let v_overlap = overlap_1d(
+            anchor.y,
+            anchor.y + anchor.height,
+            other.y,
+            other.y + other.height,
+        );
+        let h_overlap = overlap_1d(
+            anchor.x,
+            anchor.x + anchor.width,
+            other.x,
+            other.x + other.width,
+        );
+        let v_ratio = v_overlap / anchor.height.max(1.0);
+        let h_ratio = h_overlap / anchor.width.max(1.0);
+
+        if right_gap > font_h * 0.2 && v_ratio >= 0.35 {
+            let gap = other.x - (anchor.x + anchor.width);
+            if gap >= 0.0 && gap <= right_gap + 1.0 {
+                return true;
+            }
+        }
+        if left_gap > font_h * 0.2 && v_ratio >= 0.35 {
+            let gap = anchor.x - (other.x + other.width);
+            if gap >= 0.0 && gap <= left_gap + 1.0 {
+                return true;
+            }
+        }
+        if top_gap > font_h * 0.2 && h_ratio >= 0.30 {
+            let gap = anchor.y - (other.y + other.height);
+            if gap >= 0.0 && gap <= top_gap + 1.0 {
+                return true;
+            }
+        }
+        if bottom_gap > font_h * 0.2 && h_ratio >= 0.30 {
+            let gap = other.y - (anchor.y + anchor.height);
+            if gap >= 0.0 && gap <= bottom_gap + 1.0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // ── Classification ──────────────────────────────────────────────────────────
 
 /// Classify an enclosing control as TextField or Button based on geometry.
-fn classify_control(enclosing: &Bounds, text: &Bounds) -> ControlKind {
-    let aspect = enclosing.width / enclosing.height.max(1.0);
-    let text_fill_x = text.width / enclosing.width.max(1.0);
-
-    // Text fields: wide (aspect > 4), text doesn't fill most of the width
-    // (placeholder text is typically short relative to field width).
-    // Also: text fields are usually a single line height.
-    if aspect >= 4.0 && text_fill_x < 0.85 && enclosing.height < text.height * 3.5 {
-        return ControlKind::TextField;
-    }
-
-    // Buttons: compact, text fills most of the width, height is close to text height.
-    if enclosing.height < text.height * 4.0 && enclosing.width < text.width * 4.0 {
-        return ControlKind::Button;
-    }
-
-    // Default: if it's wider, lean toward text field; otherwise button.
-    if aspect >= 3.0 {
-        ControlKind::TextField
-    } else {
-        ControlKind::Button
-    }
+fn classify_control(_enclosing: &Bounds, _text: &Bounds) -> ControlKind {
+    // Temporary simplification: treat all detected enclosed controls uniformly.
+    ControlKind::Button
 }
 
 fn dedupe_controls(controls: Vec<DetectedControl>, frame: &ProcessedFrame) -> Vec<DetectedControl> {

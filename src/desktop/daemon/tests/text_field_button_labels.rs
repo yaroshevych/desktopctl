@@ -22,20 +22,16 @@ use desktop_core::protocol::Bounds;
 use image::ImageReader;
 use serde::Deserialize;
 use text_group::{TextBox, group_words_into_lines, split_wide_textbox, tighten_to_content};
-use tokenize_boxes::{ControlKind, DetectedControl};
+use tokenize_boxes::DetectedControl;
 
 /// Per-dimension pixel tolerance for bbox matching.
 const BBOX_TOLERANCE: f64 = 20.0;
 
-/// Minimum recall to pass (fraction of expected controls matched).
-const MIN_TEXT_FIELD_RECALL: f64 = 1.0;
-const MIN_BUTTON_RECALL: f64 = 1.0;
+/// Minimum recall to pass (fraction of expected controls matched), ignoring kind.
+const MIN_CONTROL_RECALL: f64 = 1.0;
 
-/// Maximum allowed false positives per category (across all images).
-/// Current FPs are mostly unlabeled toolbar controls — will decrease as
-/// ground-truth labels become more comprehensive.
-const MAX_TEXT_FIELD_FP: usize = 10;
-const MAX_BUTTON_FP: usize = 14;
+/// Maximum allowed false positives across all images, ignoring kind.
+const MAX_CONTROL_FP: usize = 14;
 
 // ── JSON schema ─────────────────────────────────────────────────────────────
 
@@ -52,6 +48,12 @@ struct ImageControls {
     buttons: Vec<ControlLabel>,
     #[serde(default)]
     not_controls: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ExpectedControl {
+    bounds: Bounds,
+    text: String,
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -76,12 +78,11 @@ fn bbox_matches(predicted: &Bounds, expected: &Bounds) -> bool {
         && (predicted.height - expected.height).abs() < BBOX_TOLERANCE
 }
 
-fn closest_distance(predicted: &[DetectedControl], expected: &Bounds, kind: ControlKind) -> String {
-    let relevant: Vec<&DetectedControl> = predicted.iter().filter(|c| c.kind == kind).collect();
-    if relevant.is_empty() {
+fn closest_distance(predicted: &[DetectedControl], expected: &Bounds) -> String {
+    if predicted.is_empty() {
         return "no predictions".to_string();
     }
-    let (best, dist) = relevant
+    let (best, dist) = predicted
         .iter()
         .map(|c| {
             let d = (c.bounds.x - expected.x).abs()
@@ -101,17 +102,15 @@ fn closest_distance(predicted: &[DetectedControl], expected: &Bounds, kind: Cont
 /// 1:1 greedy matching: for each expected label, find the closest unmatched
 /// prediction within tolerance. Returns (matched_count, false_positive_count).
 fn match_controls(
-    predictions: &[&DetectedControl],
-    labels: &[ControlLabel],
+    predictions: &[DetectedControl],
+    labels: &[ExpectedControl],
     file: &str,
-    kind_name: &str,
-    all_predicted: &[DetectedControl],
 ) -> (usize, usize) {
     let mut used = vec![false; predictions.len()];
     let mut matched = 0usize;
 
     for label in labels {
-        let expected = to_bounds(&label.bbox);
+        let expected = &label.bounds;
         // Find closest unused prediction within tolerance.
         let best = predictions
             .iter()
@@ -128,22 +127,10 @@ fn match_controls(
             used[i] = true;
             matched += 1;
         } else {
-            let kind = if kind_name == "text_field" {
-                ControlKind::TextField
-            } else {
-                ControlKind::Button
-            };
-            let hint = closest_distance(all_predicted, &expected, kind);
+            let hint = closest_distance(predictions, expected);
             eprintln!(
-                "  MISS {} in {}: expected [{:.0},{:.0},{:.0},{:.0}] {:?}  {}",
-                kind_name,
-                file,
-                expected.x,
-                expected.y,
-                expected.width,
-                expected.height,
-                label.text,
-                hint,
+                "  MISS control in {}: expected [{:.0},{:.0},{:.0},{:.0}] {:?}  {}",
+                file, expected.x, expected.y, expected.width, expected.height, label.text, hint,
             );
         }
     }
@@ -190,7 +177,7 @@ fn enforce_dictionary_control_uniqueness(
     let consumed_idx = predicted
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.kind == ControlKind::Button && overlaps_dict_line(c))
+        .filter(|(_, c)| overlaps_dict_line(c))
         .find(|(_, c)| bbox_matches(&c.bounds, &expected))
         .map(|(i, _)| i);
 
@@ -205,17 +192,15 @@ fn enforce_dictionary_control_uniqueness(
     );
 
     // After consuming the expected one, there must be no additional
-    // Dictionary-related controls (button or text field).
+    // Dictionary-related controls.
     for (i, c) in predicted.iter().enumerate() {
         if Some(i) == consumed_idx {
             continue;
         }
-        if overlaps_dict_line(c)
-            && (c.kind == ControlKind::Button || c.kind == ControlKind::TextField)
-        {
+        if overlaps_dict_line(c) {
             panic!(
-                "Dictionary control conflict in {}: extra {:?} at [{:.0},{:.0},{:.0},{:.0}]",
-                entry.file, c.kind, c.bounds.x, c.bounds.y, c.bounds.width, c.bounds.height
+                "Dictionary control conflict in {}: extra control at [{:.0},{:.0},{:.0},{:.0}]",
+                entry.file, c.bounds.x, c.bounds.y, c.bounds.width, c.bounds.height
             );
         }
     }
@@ -276,12 +261,9 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
     let fixtures: Vec<ImageControls> = serde_json::from_str(&raw).expect("parse controls.json");
     assert!(!fixtures.is_empty(), "controls.json has no entries");
 
-    let mut tf_total = 0usize;
-    let mut tf_matched = 0usize;
-    let mut tf_fp = 0usize;
-    let mut btn_total = 0usize;
-    let mut btn_matched = 0usize;
-    let mut btn_fp = 0usize;
+    let mut control_total = 0usize;
+    let mut control_matched = 0usize;
+    let mut control_fp = 0usize;
 
     for entry in &fixtures {
         let image_path = dir.join(&entry.file);
@@ -294,33 +276,21 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
         let line_bounds: Vec<Bounds> = text_lines.iter().map(|l| l.bounds.clone()).collect();
         let predicted = tokenize_boxes::detect_controls(&frame, &line_bounds);
 
-        // Split predictions by kind.
-        let pred_tf: Vec<&DetectedControl> = predicted
+        let expected_controls: Vec<ExpectedControl> = entry
+            .text_fields
             .iter()
-            .filter(|c| c.kind == ControlKind::TextField)
-            .collect();
-        let pred_btn: Vec<&DetectedControl> = predicted
-            .iter()
-            .filter(|c| c.kind == ControlKind::Button)
+            .chain(entry.buttons.iter())
+            .map(|label| ExpectedControl {
+                bounds: to_bounds(&label.bbox),
+                text: label.text.clone(),
+            })
             .collect();
 
         // 1:1 greedy matching: each expected consumes at most one prediction.
-        let (matched, fp) = match_controls(
-            &pred_tf,
-            &entry.text_fields,
-            &entry.file,
-            "text_field",
-            &predicted,
-        );
-        tf_total += entry.text_fields.len();
-        tf_matched += matched;
-        tf_fp += fp;
-
-        let (matched, fp) =
-            match_controls(&pred_btn, &entry.buttons, &entry.file, "button", &predicted);
-        btn_total += entry.buttons.len();
-        btn_matched += matched;
-        btn_fp += fp;
+        let (matched, fp) = match_controls(&predicted, &expected_controls, &entry.file);
+        control_total += expected_controls.len();
+        control_matched += matched;
+        control_fp += fp;
 
         // Negative assertions: text lines matching these strings must NOT
         // produce a detected control.
@@ -352,44 +322,27 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
         enforce_dictionary_control_uniqueness(entry, &text_lines, &predicted);
     }
 
-    let tf_recall = if tf_total == 0 {
+    let control_recall = if control_total == 0 {
         1.0
     } else {
-        tf_matched as f64 / tf_total as f64
-    };
-    let btn_recall = if btn_total == 0 {
-        1.0
-    } else {
-        btn_matched as f64 / btn_total as f64
+        control_matched as f64 / control_total as f64
     };
 
     println!(
-        "controls: text_field recall={:.3} ({}/{}) fp={}  button recall={:.3} ({}/{}) fp={}",
-        tf_recall, tf_matched, tf_total, tf_fp, btn_recall, btn_matched, btn_total, btn_fp,
+        "controls: recall={:.3} ({}/{}) fp={}",
+        control_recall, control_matched, control_total, control_fp,
     );
 
     assert!(
-        tf_recall >= MIN_TEXT_FIELD_RECALL,
-        "text_field recall too low: {:.3} (threshold {:.3})",
-        tf_recall,
-        MIN_TEXT_FIELD_RECALL,
+        control_recall >= MIN_CONTROL_RECALL,
+        "control recall too low: {:.3} (threshold {:.3})",
+        control_recall,
+        MIN_CONTROL_RECALL,
     );
     assert!(
-        btn_recall >= MIN_BUTTON_RECALL,
-        "button recall too low: {:.3} (threshold {:.3})",
-        btn_recall,
-        MIN_BUTTON_RECALL,
-    );
-    assert!(
-        tf_fp <= MAX_TEXT_FIELD_FP,
-        "text_field false positives too high: {} (max {})",
-        tf_fp,
-        MAX_TEXT_FIELD_FP,
-    );
-    assert!(
-        btn_fp <= MAX_BUTTON_FP,
-        "button false positives too high: {} (max {})",
-        btn_fp,
-        MAX_BUTTON_FP,
+        control_fp <= MAX_CONTROL_FP,
+        "control false positives too high: {} (max {})",
+        control_fp,
+        MAX_CONTROL_FP,
     );
 }
