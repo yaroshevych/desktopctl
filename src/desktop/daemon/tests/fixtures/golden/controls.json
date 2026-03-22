@@ -52,6 +52,36 @@
     "not_controls": ["Wikipedia", "Dictionary","Thesaurus","All"]
   },
   {
+    "file": "dictionary_unfocused_dark.png",
+    "text_fields": [
+      {
+        "bbox": [
+          841.0,
+          23.3,
+          519.4,
+          58.1
+        ],
+        "text": "Q Search"
+      }
+    ],
+    "buttons": []
+  },
+  {
+    "file": "dictionary_unfocused_light.png",
+    "text_fields": [
+      {
+        "bbox": [
+          844.9,
+          23.3,
+          511.6,
+          58.1
+        ],
+        "text": "Q Search"
+      }
+    ],
+    "buttons": []
+  },
+  {
     "file": "facetime_default_dark.png",
     "text_fields": [
       {

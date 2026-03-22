@@ -1,6 +1,8 @@
 use desktop_core::protocol::Bounds;
 
 use super::metal_pipeline::ProcessedFrame;
+#[path = "background_fill_detector.rs"]
+mod background_fill_detector;
 #[path = "sobel_box_detector.rs"]
 mod sobel_box_detector;
 
@@ -263,14 +265,38 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
 
     let corner_skip = (font_h * 0.3) as usize;
     let pre_border_e = frame.border_energy(&candidate, strip_thick, corner_skip);
-    let Some(candidate) = sobel_box_detector::refine_enclosed_candidate(
+    let mut used_bg_fallback = false;
+    let mut bg_delta = 0.0f64;
+    let candidate = if let Some(refined) = sobel_box_detector::refine_enclosed_candidate(
         frame,
         text,
         &candidate,
         pre_border_e,
         corner_skip,
         dbg,
-    ) else {
+    ) {
+        refined
+    } else if let Some(delta) =
+        background_fill_detector::distinct_background_delta(frame, &candidate, text, font_h)
+    {
+        used_bg_fallback = true;
+        bg_delta = delta;
+        if dbg {
+            eprintln!(
+                "    find_enclosing BG-FALLBACK(delta={:.1}): text=[{:.0},{:.0},{:.0},{:.0}] box=[{:.0},{:.0},{:.0},{:.0}]",
+                delta,
+                text.x,
+                text.y,
+                text.width,
+                text.height,
+                candidate.x,
+                candidate.y,
+                candidate.width,
+                candidate.height,
+            );
+        }
+        candidate
+    } else {
         if dbg {
             eprintln!(
                 "    find_enclosing REJECT(open-border): text=[{:.0},{:.0},{:.0},{:.0}] box=[{:.0},{:.0},{:.0},{:.0}]",
@@ -300,7 +326,10 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
     let effective_border = border_e + glow_e * 0.5;
     let noise_floor = interior_e.max(0.5);
     let ratio = effective_border / noise_floor;
-    let energy_ok = ratio >= 1.15 || border_e >= 3.0 || (glow_e >= 1.2 && ratio >= 0.95);
+    let energy_ok = ratio >= 1.15
+        || border_e >= 3.0
+        || (glow_e >= 1.2 && ratio >= 0.95)
+        || (used_bg_fallback && bg_delta >= 7.0);
     if !energy_ok && directions_found < 3 {
         if dbg {
             eprintln!(
