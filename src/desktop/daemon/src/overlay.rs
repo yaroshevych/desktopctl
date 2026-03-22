@@ -1,18 +1,26 @@
 use std::{
     cell::RefCell,
+    f64::consts::PI,
+    ffi::c_void,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
+use core_graphics::{
+    geometry::{CGPoint as CGPointF, CGRect as CGRectF, CGSize as CGSizeF},
+    path::CGPath,
+};
 use desktop_core::{
     error::AppError,
-    protocol::{TokenEntry, TokenizePayload, TokenizeWindow},
+    protocol::{Bounds, TokenEntry, TokenizePayload, TokenizeWindow},
 };
 use dispatch2::DispatchQueue;
-use objc2::{MainThreadMarker, MainThreadOnly, msg_send, rc::Retained};
+use objc2::{MainThreadMarker, MainThreadOnly, class, msg_send, rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{
     NSBackingStoreType, NSBox, NSBoxType, NSColor, NSFloatingWindowLevel, NSScreen,
     NSTitlePosition, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
@@ -24,6 +32,23 @@ use crate::trace;
 const MAX_OVERLAY_RECTS: usize = 900;
 const PROBE_WIDTH: f64 = 120.0;
 const PROBE_HEIGHT: f64 = 80.0;
+
+const BRAND_R: f64 = 124.0 / 255.0;
+const BRAND_G: f64 = 58.0 / 255.0;
+const BRAND_B: f64 = 1.0;
+const GLOW_BORDER_WIDTH: f64 = 2.0;
+const GLOW_WINDOW_CORNER_RADIUS: f64 = 10.0;
+const MODE_CROSSFADE_SECS: f64 = 0.30;
+const WINDOW_TRACKING_SECS: f64 = 0.15;
+const GLOW_TICK_MS: u64 = 16;
+const LOW_CONFIDENCE_THRESHOLD: f32 = 0.60;
+const GLOW_POST_ACTIVE_SECS: f64 = 2.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchMode {
+    WindowMode,
+    DesktopMode,
+}
 
 #[derive(Debug, Clone)]
 struct OverlayRect {
@@ -41,12 +66,43 @@ enum OverlayKind {
     Glyph,
 }
 
+#[derive(Debug, Clone)]
+struct GlowModel {
+    mode: WatchMode,
+    window_bounds: Option<Bounds>,
+    agent_active: bool,
+    glow_hold_until: Option<Instant>,
+    confidence: f32,
+    transition_from: Option<WatchMode>,
+    transition_started_at: Option<Instant>,
+}
+
+impl Default for GlowModel {
+    fn default() -> Self {
+        Self {
+            mode: WatchMode::DesktopMode,
+            window_bounds: None,
+            agent_active: false,
+            glow_hold_until: None,
+            confidence: 1.0,
+            transition_from: None,
+            transition_started_at: None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct OverlayUiState {
     window: Option<Retained<NSWindow>>,
     content_view: Option<Retained<NSView>>,
+    window_glow_box: Option<Retained<NSBox>>,
+    desktop_glow_box: Option<Retained<NSBox>>,
     token_views: Vec<Retained<NSBox>>,
     screen_frame: Option<NSRect>,
+    window_frame_current: Option<NSRect>,
+    window_frame_target: Option<NSRect>,
+    window_frame_anim_from: Option<NSRect>,
+    window_frame_anim_started_at: Option<Instant>,
 }
 
 thread_local! {
@@ -54,6 +110,23 @@ thread_local! {
 }
 
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static GLOW_LOOP_SEQ: AtomicU64 = AtomicU64::new(0);
+static GLOW_START_AT: OnceLock<Instant> = OnceLock::new();
+static GLOW_MODEL: OnceLock<Mutex<GlowModel>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy)]
+struct GlowParams {
+    period: f64,
+    border_min: f64,
+    border_max: f64,
+    bloom_min: f64,
+    bloom_max: f64,
+    blur_min: f64,
+    blur_max: f64,
+    spread_min: f64,
+    spread_max: f64,
+    corner_radius: f64,
+}
 
 pub fn is_active() -> bool {
     OVERLAY_ACTIVE.load(Ordering::SeqCst)
@@ -73,6 +146,7 @@ pub fn start_overlay() -> Result<bool, AppError> {
         trace::log(format!("overlay:start failed {err}"));
         return Err(err);
     }
+    start_glow_loop();
     trace::log("overlay:start ok");
     Ok(true)
 }
@@ -85,16 +159,75 @@ pub fn stop_overlay() -> Result<bool, AppError> {
         trace::log("overlay:stop already_stopped");
         return Ok(false);
     }
+    stop_glow_loop();
     trace::log("overlay:stop requested");
     run_on_main_sync(stop_overlay_on_main)?;
     trace::log("overlay:stop ok");
     Ok(true)
 }
 
+pub fn watch_mode_changed(mode: WatchMode, window_bounds: Option<Bounds>) -> Result<(), AppError> {
+    {
+        let mut model = lock_glow_model();
+        if model.mode != mode {
+            model.transition_from = Some(model.mode);
+            model.transition_started_at = Some(Instant::now());
+            model.mode = mode;
+        }
+        model.window_bounds = window_bounds;
+    }
+    request_glow_refresh();
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn agent_active_changed(active: bool) -> Result<(), AppError> {
+    {
+        let mut model = lock_glow_model();
+        model.agent_active = active;
+        model.glow_hold_until =
+            Some(Instant::now() + Duration::from_secs_f64(GLOW_POST_ACTIVE_SECS));
+    }
+    request_glow_refresh();
+    Ok(())
+}
+
+pub fn confidence_changed(confidence: f32) -> Result<(), AppError> {
+    {
+        let mut model = lock_glow_model();
+        model.confidence = confidence.clamp(0.0, 1.0);
+    }
+    request_glow_refresh();
+    Ok(())
+}
+
 pub fn update_from_tokenize(payload: &TokenizePayload) -> Result<(), AppError> {
     if !OVERLAY_ACTIVE.load(Ordering::SeqCst) {
         return Ok(());
     }
+
+    if let Some(window) = payload.windows.first() {
+        if let Some(os_bounds) = window.os_bounds.as_ref() {
+            let _ = watch_mode_changed(WatchMode::WindowMode, Some(os_bounds.clone()));
+        } else {
+            let _ = watch_mode_changed(WatchMode::DesktopMode, None);
+        }
+    } else {
+        let _ = watch_mode_changed(WatchMode::DesktopMode, None);
+    }
+
+    if !payload.tokens.is_empty() {
+        let avg = payload
+            .tokens
+            .iter()
+            .map(|t| t.confidence as f64)
+            .sum::<f64>()
+            / payload.tokens.len() as f64;
+        let _ = confidence_changed(avg as f32);
+    } else {
+        let _ = confidence_changed(1.0);
+    }
+
     let rects = overlay_rects_from_payload(payload);
     trace::log(format!(
         "overlay:update windows={} tokens={} rects={}",
@@ -148,10 +281,30 @@ fn start_overlay_on_main() -> Result<(), String> {
         window.setContentView(Some(&content_view));
         window.orderFrontRegardless();
 
+        let desktop_glow_box: Retained<NSBox> =
+            unsafe { msg_send![NSBox::alloc(mtm), initWithFrame: full_overlay_frame(frame)] };
+        configure_glow_box_base(&desktop_glow_box);
+        set_view_hidden(&desktop_glow_box, false);
+        set_layer_z(&desktop_glow_box, 0.0);
+        content_view.addSubview(&desktop_glow_box);
+
+        let window_glow_box: Retained<NSBox> =
+            unsafe { msg_send![NSBox::alloc(mtm), initWithFrame: full_overlay_frame(frame)] };
+        configure_glow_box_base(&window_glow_box);
+        set_view_hidden(&window_glow_box, true);
+        set_layer_z(&window_glow_box, 0.0);
+        content_view.addSubview(&window_glow_box);
+
         state.window = Some(window);
         state.content_view = Some(content_view);
+        state.window_glow_box = Some(window_glow_box);
+        state.desktop_glow_box = Some(desktop_glow_box);
         state.token_views.clear();
         state.screen_frame = Some(frame);
+        state.window_frame_current = None;
+        state.window_frame_target = None;
+        state.window_frame_anim_from = None;
+        state.window_frame_anim_started_at = None;
         Ok(())
     })
 }
@@ -162,12 +315,22 @@ fn stop_overlay_on_main() -> Result<(), String> {
         for view in state.token_views.drain(..) {
             view.removeFromSuperview();
         }
+        if let Some(window_box) = state.window_glow_box.take() {
+            window_box.removeFromSuperview();
+        }
+        if let Some(desktop_box) = state.desktop_glow_box.take() {
+            desktop_box.removeFromSuperview();
+        }
         if let Some(window) = state.window.take() {
             window.orderOut(None);
             window.close();
         }
         state.content_view = None;
         state.screen_frame = None;
+        state.window_frame_current = None;
+        state.window_frame_target = None;
+        state.window_frame_anim_from = None;
+        state.window_frame_anim_started_at = None;
         Ok(())
     })
 }
@@ -205,6 +368,7 @@ fn apply_overlay_update_on_main(rects: Vec<OverlayRect>) {
             token_box.setTransparent(false);
             token_box.setFillColor(&NSColor::clearColor());
             token_box.setBorderColor(&overlay_color(rect.kind));
+            set_layer_z(&token_box, 1.0);
             content.addSubview(&token_box);
             state.token_views.push(token_box);
             drawn += 1;
@@ -225,6 +389,7 @@ fn apply_overlay_update_on_main(rects: Vec<OverlayRect>) {
             probe_box.setTransparent(false);
             probe_box.setFillColor(&NSColor::clearColor());
             probe_box.setBorderColor(&NSColor::systemRedColor());
+            set_layer_z(&probe_box, 1.0);
             content.addSubview(&probe_box);
             state.token_views.push(probe_box);
             drawn += 1;
@@ -234,6 +399,441 @@ fn apply_overlay_update_on_main(rects: Vec<OverlayRect>) {
         content.setNeedsDisplay(true);
         trace::log(format!("overlay:apply_on_main drawn={drawn}"));
     });
+}
+
+fn start_glow_loop() {
+    let seq = GLOW_LOOP_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    thread::spawn(move || {
+        while OVERLAY_ACTIVE.load(Ordering::SeqCst) && GLOW_LOOP_SEQ.load(Ordering::SeqCst) == seq {
+            dispatch_main(move || {
+                apply_glow_frame_on_main(seq);
+            });
+            thread::sleep(Duration::from_millis(GLOW_TICK_MS));
+        }
+    });
+}
+
+fn stop_glow_loop() {
+    GLOW_LOOP_SEQ.fetch_add(1, Ordering::SeqCst);
+}
+
+fn request_glow_refresh() {
+    if !OVERLAY_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    let seq = GLOW_LOOP_SEQ.load(Ordering::SeqCst);
+    dispatch_main(move || {
+        apply_glow_frame_on_main(seq);
+    });
+}
+
+fn apply_glow_frame_on_main(seq: u64) {
+    if !OVERLAY_ACTIVE.load(Ordering::SeqCst) || GLOW_LOOP_SEQ.load(Ordering::SeqCst) != seq {
+        return;
+    }
+
+    OVERLAY_UI.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(screen_frame) = state.screen_frame else {
+            return;
+        };
+        let Some(window_glow_box) = state.window_glow_box.as_ref().cloned() else {
+            return;
+        };
+        let Some(desktop_glow_box) = state.desktop_glow_box.as_ref().cloned() else {
+            return;
+        };
+
+        let mut model = lock_glow_model();
+        let (window_weight, desktop_weight) = mode_weights(&mut model);
+        let now = Instant::now();
+        let hold_alpha = if model.agent_active {
+            1.0
+        } else if let Some(until) = model.glow_hold_until {
+            let remain = until.saturating_duration_since(now).as_secs_f64();
+            (remain / GLOW_POST_ACTIVE_SECS).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if hold_alpha <= 0.001 {
+            set_view_hidden(&desktop_glow_box, true);
+            set_view_hidden(&window_glow_box, true);
+            return;
+        }
+        let low_confidence = model.confidence < LOW_CONFIDENCE_THRESHOLD;
+        let alpha_scale = hold_alpha * if low_confidence { 0.4 } else { 1.0 };
+
+        let window_params = params_for_mode(WatchMode::WindowMode, model.agent_active);
+        let desktop_params = params_for_mode(WatchMode::DesktopMode, model.agent_active);
+
+        let window_wave = pulse_wave(window_params.period, low_confidence);
+        let desktop_wave = pulse_wave(desktop_params.period, low_confidence);
+
+        let desktop_frame = full_overlay_frame(screen_frame);
+        apply_glow_style(
+            &desktop_glow_box,
+            desktop_frame,
+            desktop_params,
+            desktop_wave,
+            desktop_weight,
+            alpha_scale,
+        );
+
+        let target_window_frame = model
+            .window_bounds
+            .as_ref()
+            .and_then(|b| rect_to_overlay_frame(&bounds_to_overlay_rect(b), screen_frame));
+        update_window_frame_animation(&mut state, target_window_frame);
+        let current_window_frame = animated_window_frame(&mut state);
+        if let Some(window_frame) = current_window_frame {
+            let window_glow_frame = outset_rect(window_frame, 2.0, 2.0, screen_frame);
+            apply_glow_style(
+                &window_glow_box,
+                window_glow_frame,
+                window_params,
+                window_wave,
+                window_weight,
+                alpha_scale,
+            );
+        } else {
+            set_view_hidden(&window_glow_box, true);
+        }
+    });
+}
+
+fn update_window_frame_animation(state: &mut OverlayUiState, target: Option<NSRect>) {
+    let changed = match (state.window_frame_target, target) {
+        (Some(a), Some(b)) => rect_distance(a, b) > 0.5,
+        (None, None) => false,
+        _ => true,
+    };
+    if !changed {
+        return;
+    }
+    state.window_frame_anim_from = state.window_frame_current.or(state.window_frame_target);
+    state.window_frame_target = target;
+    state.window_frame_anim_started_at = Some(Instant::now());
+}
+
+fn animated_window_frame(state: &mut OverlayUiState) -> Option<NSRect> {
+    let target = state.window_frame_target?;
+    let Some(started_at) = state.window_frame_anim_started_at else {
+        state.window_frame_current = Some(target);
+        return Some(target);
+    };
+    let from = state.window_frame_anim_from.unwrap_or(target);
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if elapsed >= WINDOW_TRACKING_SECS {
+        state.window_frame_current = Some(target);
+        state.window_frame_anim_started_at = None;
+        state.window_frame_anim_from = Some(target);
+        return Some(target);
+    }
+    let t = (elapsed / WINDOW_TRACKING_SECS).clamp(0.0, 1.0);
+    let eased = 0.5 - 0.5 * (PI * t).cos();
+    let frame = lerp_rect(from, target, eased);
+    state.window_frame_current = Some(frame);
+    Some(frame)
+}
+
+fn apply_glow_style(
+    box_view: &NSBox,
+    frame: NSRect,
+    params: GlowParams,
+    wave: f64,
+    mode_weight: f64,
+    alpha_scale: f64,
+) {
+    if mode_weight <= 0.001 {
+        set_view_hidden(box_view, true);
+        return;
+    }
+
+    set_view_hidden(box_view, false);
+    set_view_frame(box_view, frame);
+
+    let border_alpha = lerp(params.border_min, params.border_max, wave) * mode_weight * alpha_scale;
+    let bloom_alpha = lerp(params.bloom_min, params.bloom_max, wave) * mode_weight * alpha_scale;
+    let blur = lerp(params.blur_min, params.blur_max, wave);
+    let spread = lerp(params.spread_min, params.spread_max, wave);
+    let mut shadow_radius = (blur + spread * 0.6).max(0.0);
+    if params.corner_radius > 0.5 {
+        shadow_radius = shadow_radius.min(24.0);
+    }
+
+    set_layer_border(box_view, GLOW_BORDER_WIDTH, border_alpha);
+    set_layer_background_clear(box_view);
+
+    set_layer_corner_radius(box_view, params.corner_radius);
+    set_layer_shadow(box_view, bloom_alpha.clamp(0.0, 1.0), shadow_radius);
+    set_layer_shadow_path(box_view, frame, params.corner_radius, shadow_radius, spread);
+}
+
+fn mode_weights(model: &mut GlowModel) -> (f64, f64) {
+    let (mut window_weight, mut desktop_weight) = match model.mode {
+        WatchMode::WindowMode => (1.0, 0.0),
+        WatchMode::DesktopMode => (0.0, 1.0),
+    };
+
+    let Some(from_mode) = model.transition_from else {
+        return (window_weight, desktop_weight);
+    };
+    let Some(started_at) = model.transition_started_at else {
+        model.transition_from = None;
+        return (window_weight, desktop_weight);
+    };
+
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if elapsed >= MODE_CROSSFADE_SECS {
+        model.transition_from = None;
+        model.transition_started_at = None;
+        return (window_weight, desktop_weight);
+    }
+
+    let t = (elapsed / MODE_CROSSFADE_SECS).clamp(0.0, 1.0);
+    let eased = 0.5 - 0.5 * (PI * t).cos();
+    let from_weight = 1.0 - eased;
+    let to_weight = eased;
+
+    match (from_mode, model.mode) {
+        (WatchMode::WindowMode, WatchMode::DesktopMode) => {
+            window_weight = from_weight;
+            desktop_weight = to_weight;
+        }
+        (WatchMode::DesktopMode, WatchMode::WindowMode) => {
+            desktop_weight = from_weight;
+            window_weight = to_weight;
+        }
+        _ => {}
+    }
+    (window_weight, desktop_weight)
+}
+
+fn params_for_mode(mode: WatchMode, agent_active: bool) -> GlowParams {
+    match mode {
+        WatchMode::WindowMode => {
+            let mut out = GlowParams {
+                period: 2.8,
+                border_min: 0.65,
+                border_max: 1.0,
+                bloom_min: 0.24,
+                bloom_max: 0.46,
+                blur_min: 10.0,
+                blur_max: 20.0,
+                spread_min: 1.0,
+                spread_max: 5.0,
+                corner_radius: GLOW_WINDOW_CORNER_RADIUS,
+            };
+            if agent_active {
+                out.period = 1.6;
+                out.blur_max *= 2.0;
+                out.spread_max *= 2.0;
+                out.border_max = 1.0;
+            }
+            out
+        }
+        WatchMode::DesktopMode => {
+            let mut out = GlowParams {
+                period: 3.2,
+                border_min: 0.30,
+                border_max: 0.60,
+                bloom_min: 0.0,
+                bloom_max: 0.06,
+                blur_min: 20.0,
+                blur_max: 42.0,
+                spread_min: 0.0,
+                spread_max: 12.0,
+                corner_radius: 0.0,
+            };
+            if agent_active {
+                out.period = 1.6;
+                out.blur_max *= 2.0;
+                out.spread_max *= 2.0;
+                out.border_max = 1.0;
+            }
+            out
+        }
+    }
+}
+
+fn pulse_wave(period_secs: f64, low_confidence: bool) -> f64 {
+    if low_confidence {
+        return 0.0;
+    }
+    let start = GLOW_START_AT.get_or_init(Instant::now);
+    let elapsed = start.elapsed().as_secs_f64();
+    let period = period_secs.max(0.01);
+    let phase = (elapsed / period).fract();
+    0.5 - 0.5 * (2.0 * PI * phase).cos()
+}
+
+fn configure_glow_box_base(box_view: &NSBox) {
+    box_view.setBoxType(NSBoxType::Custom);
+    box_view.setTitlePosition(NSTitlePosition::NoTitle);
+    box_view.setTransparent(true);
+    box_view.setFillColor(&NSColor::clearColor());
+    box_view.setBorderWidth(0.0);
+    box_view.setWantsLayer(true);
+    set_layer_background_clear(box_view);
+    set_layer_shadow(box_view, 0.0, 0.0);
+}
+
+fn full_overlay_frame(screen_frame: NSRect) -> NSRect {
+    NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(screen_frame.size.width, screen_frame.size.height),
+    )
+}
+
+fn set_layer_z(view: &NSBox, z: f64) {
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![layer, setZPosition: z];
+    }
+}
+
+fn set_layer_corner_radius(view: &NSBox, corner_radius: f64) {
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![layer, setCornerRadius: corner_radius.max(0.0)];
+    }
+}
+
+fn set_layer_background_clear(view: &NSBox) {
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    let clear = NSColor::clearColor();
+    let cg_color: *mut AnyObject = unsafe { msg_send![&*clear, CGColor] };
+    unsafe {
+        let _: () = msg_send![layer, setBackgroundColor: cg_color];
+    }
+}
+
+fn set_layer_border(view: &NSBox, width: f64, alpha: f64) {
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    let color = plasma_violet(alpha);
+    let cg_color: *mut AnyObject = unsafe { msg_send![&*color, CGColor] };
+    unsafe {
+        let _: () = msg_send![layer, setBorderWidth: width.max(0.0)];
+        let _: () = msg_send![layer, setBorderColor: cg_color];
+    }
+}
+
+fn set_layer_shadow(view: &NSBox, opacity: f64, radius: f64) {
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    let color = plasma_violet(1.0);
+    let cg_color: *mut AnyObject = unsafe { msg_send![&*color, CGColor] };
+    unsafe {
+        let _: () = msg_send![layer, setMasksToBounds: false];
+        let _: () = msg_send![layer, setShadowOffset: NSSize::new(0.0, 0.0)];
+        let _: () = msg_send![layer, setShadowOpacity: opacity.clamp(0.0, 1.0) as f32];
+        let _: () = msg_send![layer, setShadowRadius: radius.max(0.0)];
+        let _: () = msg_send![layer, setShadowColor: cg_color];
+    }
+}
+
+fn set_layer_shadow_path(
+    view: &NSBox,
+    frame: NSRect,
+    _corner_radius: f64,
+    _shadow_radius: f64,
+    _spread: f64,
+) {
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    let origin = CGPointF::new(0.0, 0.0);
+    let size = CGSizeF::new(frame.size.width.max(1.0), frame.size.height.max(1.0));
+    let rect = CGRectF::new(&origin, &size);
+    let path = CGPath::from_rect(rect, None);
+    let path_ref = (&*path as *const _) as *const c_void;
+    unsafe {
+        let _: () = msg_send![layer, setShadowPath: path_ref];
+    }
+}
+
+fn set_view_frame(view: &NSBox, frame: NSRect) {
+    unsafe {
+        let _: () = msg_send![view, setFrame: frame];
+    }
+}
+
+fn set_view_hidden(view: &NSBox, hidden: bool) {
+    unsafe {
+        let _: () = msg_send![view, setHidden: hidden];
+    }
+}
+
+fn plasma_violet(alpha: f64) -> Retained<NSColor> {
+    let a = alpha.clamp(0.0, 1.0);
+    unsafe {
+        msg_send![
+            class!(NSColor),
+            colorWithSRGBRed: BRAND_R,
+            green: BRAND_G,
+            blue: BRAND_B,
+            alpha: a
+        ]
+    }
+}
+
+fn bounds_to_overlay_rect(bounds: &Bounds) -> OverlayRect {
+    OverlayRect {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        kind: OverlayKind::Box,
+    }
+}
+
+fn rect_distance(a: NSRect, b: NSRect) -> f64 {
+    (a.origin.x - b.origin.x).abs()
+        + (a.origin.y - b.origin.y).abs()
+        + (a.size.width - b.size.width).abs()
+        + (a.size.height - b.size.height).abs()
+}
+
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+fn lerp_rect(a: NSRect, b: NSRect, t: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(
+            lerp(a.origin.x, b.origin.x, t),
+            lerp(a.origin.y, b.origin.y, t),
+        ),
+        NSSize::new(
+            lerp(a.size.width, b.size.width, t),
+            lerp(a.size.height, b.size.height, t),
+        ),
+    )
+}
+
+fn outset_rect(rect: NSRect, dx: f64, dy: f64, clamp_to: NSRect) -> NSRect {
+    let x = (rect.origin.x - dx).max(clamp_to.origin.x);
+    let y = (rect.origin.y - dy).max(clamp_to.origin.y);
+    let right = (rect.origin.x + rect.size.width + dx).min(clamp_to.origin.x + clamp_to.size.width);
+    let top = (rect.origin.y + rect.size.height + dy).min(clamp_to.origin.y + clamp_to.size.height);
+    let width = (right - x).max(1.0);
+    let height = (top - y).max(1.0);
+    NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
 }
 
 fn overlay_color(kind: OverlayKind) -> Retained<NSColor> {
@@ -349,6 +949,14 @@ fn append_token_rects(
         if out.len() >= MAX_OVERLAY_RECTS {
             break;
         }
+    }
+}
+
+fn lock_glow_model() -> std::sync::MutexGuard<'static, GlowModel> {
+    let lock = GLOW_MODEL.get_or_init(|| Mutex::new(GlowModel::default()));
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 

@@ -6,7 +6,7 @@ use std::{
     process::Command as ProcessCommand,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -31,6 +31,11 @@ mod settings_flow;
 
 use self::settings_flow::*;
 
+#[cfg(target_os = "macos")]
+const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 120;
+#[cfg(target_os = "macos")]
+static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
+
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
     pub idle_timeout: Option<Duration>,
@@ -49,6 +54,8 @@ impl DaemonConfig {
 }
 
 pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    bootstrap_overlay_glow();
     let listener = bind_listener()?;
     thread::spawn(move || {
         if let Err(err) = accept_loop(listener, config) {
@@ -59,8 +66,54 @@ pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
 }
 
 pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    bootstrap_overlay_glow();
     let listener = bind_listener()?;
     accept_loop(listener, config)
+}
+
+#[cfg(target_os = "macos")]
+fn bootstrap_overlay_glow() {
+    match overlay::start_overlay() {
+        Ok(started) => trace::log(format!("overlay:bootstrap start started={started}")),
+        Err(err) => trace::log(format!("overlay:bootstrap start_warn {err}")),
+    }
+    start_overlay_watch_tracker();
+    let (mode, bounds) = if let Some(bounds) = frontmost_window_bounds() {
+        (overlay::WatchMode::WindowMode, Some(bounds))
+    } else {
+        (overlay::WatchMode::DesktopMode, None)
+    };
+    if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
+        trace::log(format!("overlay:bootstrap mode_warn {err}"));
+    }
+    if let Err(err) = overlay::confidence_changed(1.0) {
+        trace::log(format!("overlay:bootstrap confidence_warn {err}"));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_overlay_watch_tracker() {
+    if OVERLAY_WATCH_TRACK_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    thread::spawn(|| {
+        trace::log("overlay:watch_tracker start");
+        loop {
+            if overlay::is_active() {
+                if let Some(bounds) = frontmost_window_bounds() {
+                    let _ =
+                        overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
+                } else {
+                    let _ = overlay::watch_mode_changed(overlay::WatchMode::DesktopMode, None);
+                }
+            }
+            thread::sleep(Duration::from_millis(OVERLAY_WATCH_TRACK_INTERVAL_MS));
+        }
+    });
 }
 
 fn bind_listener() -> Result<UnixListener, AppError> {
@@ -142,6 +195,12 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
         "client:request_start request_id={} command={}",
         request_id, command_name
     ));
+    #[cfg(target_os = "macos")]
+    if let Some(bounds) = frontmost_window_bounds() {
+        let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
+    }
+    #[cfg(target_os = "macos")]
+    let _ = overlay::agent_active_changed(true);
     let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(command)))
     {
         Ok(Ok(result)) => {
@@ -170,6 +229,8 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             ResponseEnvelope::from_error(request_id, command_name, err)
         }
     };
+    #[cfg(target_os = "macos")]
+    let _ = overlay::agent_active_changed(false);
     if let Err(err) = recording::record_command(&request, &response) {
         eprintln!("recorder write failed: {err}");
         trace::log(format!("client:record_err {err}"));
