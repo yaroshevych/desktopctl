@@ -11,10 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use core_graphics::{
-    geometry::{CGPoint as CGPointF, CGRect as CGRectF, CGSize as CGSizeF},
-    path::CGPath,
-};
 use desktop_core::{
     error::AppError,
     protocol::{Bounds, TokenEntry, TokenizePayload, TokenizeWindow},
@@ -38,6 +34,8 @@ const BRAND_G: f64 = 58.0 / 255.0;
 const BRAND_B: f64 = 1.0;
 const GLOW_BORDER_WIDTH: f64 = 2.0;
 const GLOW_WINDOW_CORNER_RADIUS: f64 = 10.0;
+const GLOW_SHADOW_RADIUS_SCALE: f64 = 1.35;
+const GLOW_WINDOW_SHADOW_RADIUS_MAX: f64 = 32.0;
 const MODE_CROSSFADE_SECS: f64 = 0.30;
 const WINDOW_TRACKING_SECS: f64 = 0.15;
 const GLOW_TICK_MS: u64 = 16;
@@ -72,6 +70,7 @@ struct GlowModel {
     window_bounds: Option<Bounds>,
     agent_active: bool,
     glow_hold_until: Option<Instant>,
+    watch_mode_lock_until: Option<Instant>,
     confidence: f32,
     transition_from: Option<WatchMode>,
     transition_started_at: Option<Instant>,
@@ -84,6 +83,7 @@ impl Default for GlowModel {
             window_bounds: None,
             agent_active: false,
             glow_hold_until: None,
+            watch_mode_lock_until: None,
             confidence: 1.0,
             transition_from: None,
             transition_started_at: None,
@@ -132,6 +132,38 @@ pub fn is_active() -> bool {
     OVERLAY_ACTIVE.load(Ordering::SeqCst)
 }
 
+pub fn is_agent_active() -> bool {
+    let model = lock_glow_model();
+    model.agent_active
+}
+
+pub fn is_watch_mode_locked() -> bool {
+    let model = lock_glow_model();
+    model
+        .watch_mode_lock_until
+        .map(|until| until > Instant::now())
+        .unwrap_or(false)
+}
+
+pub fn lock_watch_mode(
+    mode: WatchMode,
+    window_bounds: Option<Bounds>,
+    duration: Duration,
+) -> Result<(), AppError> {
+    {
+        let mut model = lock_glow_model();
+        if model.mode != mode {
+            model.transition_from = Some(model.mode);
+            model.transition_started_at = Some(Instant::now());
+            model.mode = mode;
+        }
+        model.window_bounds = window_bounds;
+        model.watch_mode_lock_until = Some(Instant::now() + duration);
+    }
+    request_glow_refresh();
+    Ok(())
+}
+
 pub fn start_overlay() -> Result<bool, AppError> {
     if OVERLAY_ACTIVE
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -175,6 +207,7 @@ pub fn watch_mode_changed(mode: WatchMode, window_bounds: Option<Bounds>) -> Res
             model.mode = mode;
         }
         model.window_bounds = window_bounds;
+        model.watch_mode_lock_until = None;
     }
     request_glow_refresh();
     Ok(())
@@ -556,9 +589,9 @@ fn apply_glow_style(
     let bloom_alpha = lerp(params.bloom_min, params.bloom_max, wave) * mode_weight * alpha_scale;
     let blur = lerp(params.blur_min, params.blur_max, wave);
     let spread = lerp(params.spread_min, params.spread_max, wave);
-    let mut shadow_radius = (blur + spread * 0.6).max(0.0);
+    let mut shadow_radius = (blur + spread * 0.6).max(0.0) * GLOW_SHADOW_RADIUS_SCALE;
     if params.corner_radius > 0.5 {
-        shadow_radius = shadow_radius.min(24.0);
+        shadow_radius = shadow_radius.min(GLOW_WINDOW_SHADOW_RADIUS_MAX);
     }
 
     set_layer_border(box_view, GLOW_BORDER_WIDTH, border_alpha);
@@ -748,7 +781,7 @@ fn set_layer_shadow(view: &NSBox, opacity: f64, radius: f64) {
 
 fn set_layer_shadow_path(
     view: &NSBox,
-    frame: NSRect,
+    _frame: NSRect,
     _corner_radius: f64,
     _shadow_radius: f64,
     _spread: f64,
@@ -757,13 +790,9 @@ fn set_layer_shadow_path(
     if layer.is_null() {
         return;
     }
-    let origin = CGPointF::new(0.0, 0.0);
-    let size = CGSizeF::new(frame.size.width.max(1.0), frame.size.height.max(1.0));
-    let rect = CGRectF::new(&origin, &size);
-    let path = CGPath::from_rect(rect, None);
-    let path_ref = (&*path as *const _) as *const c_void;
     unsafe {
-        let _: () = msg_send![layer, setShadowPath: path_ref];
+        // Let CoreAnimation derive the shadow from composited alpha (border-only content).
+        let _: () = msg_send![layer, setShadowPath: std::ptr::null::<c_void>()];
     }
 }
 

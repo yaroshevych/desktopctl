@@ -34,6 +34,8 @@ use self::settings_flow::*;
 #[cfg(target_os = "macos")]
 const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 120;
 #[cfg(target_os = "macos")]
+const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
+#[cfg(target_os = "macos")]
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
@@ -104,11 +106,15 @@ fn start_overlay_watch_tracker() {
         trace::log("overlay:watch_tracker start");
         loop {
             if overlay::is_active() {
-                if let Some(bounds) = frontmost_window_bounds() {
-                    let _ =
-                        overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
-                } else {
-                    let _ = overlay::watch_mode_changed(overlay::WatchMode::DesktopMode, None);
+                if !overlay::is_agent_active() && !overlay::is_watch_mode_locked() {
+                    if let Some(bounds) = frontmost_window_bounds() {
+                        let _ = overlay::watch_mode_changed(
+                            overlay::WatchMode::WindowMode,
+                            Some(bounds),
+                        );
+                    } else {
+                        let _ = overlay::watch_mode_changed(overlay::WatchMode::DesktopMode, None);
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(OVERLAY_WATCH_TRACK_INTERVAL_MS));
@@ -196,7 +202,19 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
         request_id, command_name
     ));
     #[cfg(target_os = "macos")]
-    if let Some(bounds) = frontmost_window_bounds() {
+    if matches!(
+        command,
+        Command::ScreenCapture {
+            active_window: false,
+            ..
+        }
+    ) {
+        let _ = overlay::lock_watch_mode(
+            overlay::WatchMode::DesktopMode,
+            None,
+            Duration::from_millis(OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS),
+        );
+    } else if let Some(bounds) = frontmost_window_bounds() {
         let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
     }
     #[cfg(target_os = "macos")]
