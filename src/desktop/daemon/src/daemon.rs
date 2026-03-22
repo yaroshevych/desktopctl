@@ -470,7 +470,9 @@ fn execute(command: Command) -> Result<Value, AppError> {
             } else {
                 None
             };
-            let capture_out_path: Option<PathBuf> = out_path.map(Into::into);
+            let capture_out_path: Option<PathBuf> = out_path
+                .map(Into::into)
+                .or_else(|| Some(vision::capture::default_capture_path()));
             let capture = if let Some(bounds) = window_bounds.clone() {
                 vision::pipeline::capture_and_update_active_window(
                     capture_out_path.clone(),
@@ -493,7 +495,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
             Ok(json!({
                 "snapshot_id": capture.snapshot.snapshot_id,
                 "timestamp": capture.snapshot.timestamp,
-                "path": capture.image_path,
+                "path": capture
+                    .image_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
                 "overlay_path": overlay_path,
                 "capture_scope": if active_window { "active_window" } else { "display" },
                 "window_bounds": window_bounds,
@@ -1283,12 +1288,7 @@ fn infer_panels_from_texts(
 }
 
 fn write_capture_overlay(capture: &vision::pipeline::CaptureResult) -> Result<PathBuf, AppError> {
-    let mut image = load_rgba_image(&capture.image_path).ok_or_else(|| {
-        AppError::backend_unavailable(format!(
-            "failed to load capture image for overlay: {}",
-            capture.image_path.display()
-        ))
-    })?;
+    let mut image = capture.image.clone();
     let image_width = image.width();
     let image_height = image.height();
     if image_width == 0 || image_height == 0 {
@@ -1501,7 +1501,16 @@ fn write_capture_overlay(capture: &vision::pipeline::CaptureResult) -> Result<Pa
         }
     }
 
-    let overlay_path = overlay_path_for_capture(&capture.image_path);
+    let overlay_path = capture
+        .image_path
+        .as_ref()
+        .map(|path| overlay_path_for_capture(path))
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "capture-{}.overlay.png",
+                capture.snapshot.snapshot_id
+            ))
+        });
     image
         .save_with_format(&overlay_path, ImageFormat::Png)
         .map_err(|err| {

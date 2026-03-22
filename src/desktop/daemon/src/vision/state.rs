@@ -106,9 +106,11 @@ impl VisionState {
         };
 
         self.latest_snapshot = Some(snapshot.clone());
-        self.latest_frame_path = Some(capture.image_path.clone());
+        self.latest_frame_path = capture.image_path.clone();
         self.latest_thumbnail = Some(thumbnail);
-        self.frames.push_back(capture.image_path);
+        if let Some(path) = capture.image_path {
+            self.frames.push_back(path);
+        }
         while self.frames.len() > MAX_FRAMES {
             self.frames.pop_front();
         }
@@ -164,7 +166,7 @@ mod tests {
             width: 100,
             height: 100,
             scale: 2.0,
-            image_path: PathBuf::from("/tmp/a.png"),
+            image_path: Some(PathBuf::from("/tmp/a.png")),
         };
         let capture2 = CapturedFrame {
             snapshot_id: 2,
@@ -173,7 +175,7 @@ mod tests {
             width: 100,
             height: 100,
             scale: 2.0,
-            image_path: PathBuf::from("/tmp/b.png"),
+            image_path: Some(PathBuf::from("/tmp/b.png")),
         };
         let first = state.record_capture(capture1, thumb.clone(), None, Vec::new(), None);
         let second = state.record_capture(capture2, thumb, None, Vec::new(), None);
@@ -195,7 +197,7 @@ mod tests {
             width: 100,
             height: 100,
             scale: 2.0,
-            image_path: PathBuf::from("/tmp/a.png"),
+            image_path: Some(PathBuf::from("/tmp/a.png")),
         };
         let first =
             state.record_capture(base_capture.clone(), thumb.clone(), None, Vec::new(), None);

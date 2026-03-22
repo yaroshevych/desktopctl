@@ -19,9 +19,9 @@ use objc2_screen_capture_kit::{
 
 use crate::trace;
 
-use super::types::CapturedFrame;
+use super::types::{CapturedFrame, CapturedImage};
 
-pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, AppError> {
+pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, AppError> {
     trace::log("capture:screen_png:start");
     let display = CGDisplay::main();
     let bounds = display.bounds();
@@ -30,28 +30,84 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, Ap
         CGSize::new(bounds.size.width, bounds.size.height),
     );
 
-    let target_path = out_path.unwrap_or_else(default_capture_path);
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            AppError::backend_unavailable(format!("failed to create capture directory: {err}"))
-        })?;
-    }
-
-    if !screencapturekit_screenshot_api_available() {
-        trace::log("capture:screen_png:fallback=coregraphics");
-        capture_with_coregraphics(&display, &target_path)?;
-        return Ok(CapturedFrame {
-            snapshot_id: now_millis() as u64,
-            timestamp: now_millis().to_string(),
-            display_id: display.id,
-            width: bounds.size.width.max(0.0) as u32,
-            height: bounds.size.height.max(0.0) as u32,
-            scale: 1.0,
-            image_path: target_path,
+    // In-memory-by-default path (no out_path) avoids disk I/O.
+    if out_path.is_none() {
+        let image = capture_with_coregraphics(&display)?;
+        trace::log("capture:screen_png:ok path=<memory>");
+        return Ok(CapturedImage {
+            frame: CapturedFrame {
+                snapshot_id: now_millis() as u64,
+                timestamp: now_millis().to_string(),
+                display_id: display.id,
+                width: image.width(),
+                height: image.height(),
+                scale: 1.0,
+                image_path: None,
+            },
+            image,
         });
     }
 
-    let file_url = NSURL::from_file_path(&target_path).ok_or_else(|| {
+    let target_path = out_path.expect("checked is_some");
+    let image = if screencapturekit_screenshot_api_available() {
+        match capture_with_screencapturekit_to_path(rect, &target_path) {
+            Ok(()) => image::open(&target_path)
+                .map_err(|err| {
+                    AppError::backend_unavailable(format!(
+                        "failed to open capture image after ScreenCaptureKit write: {err}"
+                    ))
+                })?
+                .to_rgba8(),
+            Err(err) => {
+                trace::log(format!(
+                    "capture:screen_png:sck_error fallback=coregraphics err={}",
+                    err.message
+                ));
+                let image = capture_with_coregraphics(&display)?;
+                save_capture_png(&image, &target_path)?;
+                image
+            }
+        }
+    } else {
+        trace::log("capture:screen_png:fallback=coregraphics");
+        let image = capture_with_coregraphics(&display)?;
+        save_capture_png(&image, &target_path)?;
+        image
+    };
+    trace::log(format!(
+        "capture:screen_png:ok path={}",
+        target_path.display()
+    ));
+
+    Ok(CapturedImage {
+        frame: CapturedFrame {
+            snapshot_id: now_millis() as u64,
+            timestamp: now_millis().to_string(),
+            display_id: display.id,
+            width: image.width(),
+            height: image.height(),
+            scale: 1.0,
+            image_path: Some(target_path),
+        },
+        image,
+    })
+}
+
+pub(crate) fn default_capture_path() -> PathBuf {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    PathBuf::from(format!("/tmp/desktopctl-captures/capture-{ts}.png"))
+}
+
+fn screencapturekit_screenshot_api_available() -> bool {
+    let manager = CString::new("SCScreenshotManager").expect("valid class name");
+    AnyClass::get(&manager).is_some()
+}
+
+fn capture_with_screencapturekit_to_path(rect: CGRect, target_path: &PathBuf) -> Result<(), AppError> {
+    let file_url = NSURL::from_file_path(target_path).ok_or_else(|| {
         AppError::invalid_argument(format!(
             "invalid capture output path: {}",
             target_path.display()
@@ -88,13 +144,11 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, Ap
     match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(())) => {}
         Ok(Err(message)) => {
-            trace::log(format!("capture:screen_png:sck_error {message}"));
             return Err(AppError::backend_unavailable(format!(
                 "screencapturekit screenshot failed: {message}"
             )));
         }
         Err(_) => {
-            trace::log("capture:screen_png:sck_timeout");
             return Err(AppError::timeout(
                 "timed out waiting for ScreenCaptureKit screenshot callback",
             ));
@@ -102,43 +156,15 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedFrame, Ap
     }
 
     if !target_path.exists() {
-        trace::log("capture:screen_png:no_file_written");
         return Err(AppError::backend_unavailable(format!(
             "ScreenCaptureKit completed but no file was written at {}",
             target_path.display()
         )));
     }
-    trace::log(format!(
-        "capture:screen_png:ok path={}",
-        target_path.display()
-    ));
-
-    Ok(CapturedFrame {
-        snapshot_id: now_millis() as u64,
-        timestamp: now_millis().to_string(),
-        display_id: display.id,
-        width: bounds.size.width.max(0.0) as u32,
-        height: bounds.size.height.max(0.0) as u32,
-        scale: 1.0,
-        image_path: target_path,
-    })
+    Ok(())
 }
 
-fn default_capture_path() -> PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    PathBuf::from(format!("/tmp/desktopctl-captures/capture-{ts}.png"))
-}
-
-fn screencapturekit_screenshot_api_available() -> bool {
-    let config = CString::new("SCScreenshotConfiguration").expect("valid class name");
-    let manager = CString::new("SCScreenshotManager").expect("valid class name");
-    AnyClass::get(&config).is_some() && AnyClass::get(&manager).is_some()
-}
-
-fn capture_with_coregraphics(display: &CGDisplay, target_path: &PathBuf) -> Result<(), AppError> {
+fn capture_with_coregraphics(display: &CGDisplay) -> Result<RgbaImage, AppError> {
     let cg_image = display.image().ok_or_else(|| {
         AppError::backend_unavailable("CoreGraphics fallback failed to capture display image")
     })?;
@@ -182,12 +208,34 @@ fn capture_with_coregraphics(display: &CGDisplay, target_path: &PathBuf) -> Resu
     let image = RgbaImage::from_vec(width as u32, height as u32, rgba).ok_or_else(|| {
         AppError::backend_unavailable("failed to build RGBA image from CoreGraphics buffer")
     })?;
+    Ok(image)
+}
+
+fn save_capture_png(image: &RgbaImage, target_path: &PathBuf) -> Result<(), AppError> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::backend_unavailable(format!("failed to create capture directory: {err}"))
+        })?;
+    }
     image
         .save_with_format(target_path, ImageFormat::Png)
         .map_err(|err| {
             AppError::backend_unavailable(format!(
-                "failed to write PNG from CoreGraphics fallback: {err}"
+                "failed to write PNG capture {}: {err}",
+                target_path.display()
             ))
-        })?;
-    Ok(())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_capture_path;
+
+    #[test]
+    fn default_capture_path_points_to_tmp_png() {
+        let path = default_capture_path();
+        let path_s = path.display().to_string();
+        assert!(path_s.starts_with("/tmp/desktopctl-captures/capture-"));
+        assert!(path_s.ends_with(".png"));
+    }
 }

@@ -16,15 +16,16 @@ use crate::trace;
 
 use super::{
     capture::capture_screen_png,
-    diff::{diff_region, thumbnail_from_png, upscale_region},
-    ocr::recognize_text_from_image,
+    diff::{diff_region, thumbnail_from_image, upscale_region},
+    ocr::recognize_text,
     state::with_state,
 };
 
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub snapshot: SnapshotPayload,
-    pub image_path: PathBuf,
+    pub image_path: Option<PathBuf>,
+    pub image: image::RgbaImage,
     pub event_ids: Vec<u64>,
 }
 
@@ -52,29 +53,41 @@ fn capture_and_update_internal(
     crop_bounds: Option<Bounds>,
 ) -> Result<CaptureResult, AppError> {
     trace::log("pipeline:capture_and_update:start");
-    let mut capture = capture_screen_png(out_path)?;
+    let mut captured = capture_screen_png(out_path)?;
     if let Some(bounds) = crop_bounds.as_ref() {
-        crop_capture_to_bounds(&mut capture, bounds)?;
+        crop_capture_to_bounds(&mut captured, bounds)?;
         trace::log(format!(
             "pipeline:capture_and_update:active_window_crop_ok size={}x{}",
-            capture.width, capture.height
+            captured.frame.width, captured.frame.height
         ));
     }
-    trace::log(format!(
-        "pipeline:capture_and_update:capture_ok path={} size={}x{}",
-        capture.image_path.display(),
-        capture.width,
-        capture.height
-    ));
-    let thumb = thumbnail_from_png(&capture.image_path, 96, 54)?;
+    if let Some(path) = captured.frame.image_path.as_ref() {
+        trace::log(format!(
+            "pipeline:capture_and_update:capture_ok path={} size={}x{}",
+            path.display(),
+            captured.frame.width,
+            captured.frame.height
+        ));
+    } else {
+        trace::log(format!(
+            "pipeline:capture_and_update:capture_ok path=<memory> size={}x{}",
+            captured.frame.width, captured.frame.height
+        ));
+    }
+    let thumb = thumbnail_from_image(
+        &image::DynamicImage::ImageRgba8(captured.image.clone()),
+        96,
+        54,
+    );
     trace::log("pipeline:capture_and_update:thumb_ok");
-    let texts = recognize_text_from_image(&capture.image_path, capture.width, capture.height)?;
+    let texts = recognize_text(&captured.image)?;
     trace::log(format!(
         "pipeline:capture_and_update:ocr_ok texts={}",
         texts.len()
     ));
     let focused_app = focused_app_name();
-    let image_path = capture.image_path.clone();
+    let image_path = captured.frame.image_path.clone();
+    let image = captured.image.clone();
 
     with_state(move |state| {
         let roi = state
@@ -83,14 +96,14 @@ fn capture_and_update_internal(
             .map(|region| {
                 upscale_region(
                     region,
-                    capture.width,
-                    capture.height,
+                    captured.frame.width,
+                    captured.frame.height,
                     thumb.width,
                     thumb.height,
                 )
             });
 
-        let update = state.record_capture(capture, thumb, focused_app, texts, roi);
+        let update = state.record_capture(captured.frame, thumb, focused_app, texts, roi);
         trace::log(format!(
             "pipeline:capture_and_update:recorded snapshot_id={} event_id={}",
             update.snapshot.snapshot_id, update.event_id
@@ -100,43 +113,42 @@ fn capture_and_update_internal(
         CaptureResult {
             snapshot: update.snapshot,
             image_path,
+            image,
             event_ids,
         }
     })
 }
 
 fn crop_capture_to_bounds(
-    capture: &mut super::types::CapturedFrame,
+    captured: &mut super::types::CapturedImage,
     bounds: &Bounds,
 ) -> Result<(), AppError> {
-    let image = image::open(&capture.image_path).map_err(|err| {
-        AppError::backend_unavailable(format!(
-            "failed to open capture image for active-window crop: {err}"
-        ))
-    })?;
-    let rgba = image.to_rgba8();
-    let image_width = rgba.width();
-    let image_height = rgba.height();
+    let image_width = captured.image.width();
+    let image_height = captured.image.height();
     let (x, y, width, height) = window_crop_rect(
         image_width,
         image_height,
-        capture.width,
-        capture.height,
+        captured.frame.width,
+        captured.frame.height,
         bounds,
     )
     .ok_or_else(|| {
         AppError::target_not_found("active window bounds are outside the captured display area")
     })?;
-    let cropped = crop_imm(&rgba, x, y, width, height).to_image();
-    cropped
-        .save_with_format(&capture.image_path, ImageFormat::Png)
-        .map_err(|err| {
-            AppError::backend_unavailable(format!(
-                "failed to write active-window capture image: {err}"
-            ))
-        })?;
-    capture.width = width;
-    capture.height = height;
+    let cropped = crop_imm(&captured.image, x, y, width, height).to_image();
+    captured.image = cropped;
+    captured.frame.width = width;
+    captured.frame.height = height;
+    if let Some(path) = captured.frame.image_path.as_ref() {
+        captured
+            .image
+            .save_with_format(path, ImageFormat::Png)
+            .map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "failed to write active-window capture image: {err}"
+                ))
+            })?;
+    }
     Ok(())
 }
 
@@ -191,7 +203,8 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let capture = capture_and_update_active_window(None, window_meta.bounds.clone())?;
     tokenize_from_snapshot(
         capture.snapshot,
-        capture.image_path.as_path(),
+        &capture.image,
+        capture.image_path.as_deref(),
         Some(window_meta),
     )
 }
@@ -200,15 +213,17 @@ pub fn tokenize_screenshot(
     screenshot_path: &Path,
     window_meta: Option<TokenizeWindowMeta>,
 ) -> Result<TokenizePayload, AppError> {
-    let image = image::open(screenshot_path).map_err(|err| {
-        AppError::invalid_argument(format!(
-            "failed to open screenshot {}: {err}",
-            screenshot_path.display()
-        ))
-    })?;
-    let width = image.width();
-    let height = image.height();
-    let texts = recognize_text_from_image(screenshot_path, width, height)?;
+    let rgba = image::open(screenshot_path)
+        .map_err(|err| {
+            AppError::invalid_argument(format!(
+                "failed to open screenshot {}: {err}",
+                screenshot_path.display()
+            ))
+        })?
+        .to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    let texts = recognize_text(&rgba)?;
     let snapshot = SnapshotPayload {
         snapshot_id: now_millis() as u64,
         timestamp: now_millis().to_string(),
@@ -221,12 +236,13 @@ pub fn tokenize_screenshot(
         focused_app: window_meta.as_ref().and_then(|meta| meta.app.clone()),
         texts,
     };
-    tokenize_from_snapshot(snapshot, screenshot_path, window_meta)
+    tokenize_from_snapshot(snapshot, &rgba, Some(screenshot_path), window_meta)
 }
 
 fn tokenize_from_snapshot(
     snapshot: SnapshotPayload,
-    image_path: &Path,
+    rgba: &image::RgbaImage,
+    image_path: Option<&Path>,
     window_meta: Option<TokenizeWindowMeta>,
 ) -> Result<TokenizePayload, AppError> {
     let raw_tokens: Vec<TokenEntry> = snapshot
@@ -242,7 +258,7 @@ fn tokenize_from_snapshot(
         .collect();
     let snapshot_id = snapshot.snapshot_id;
     let timestamp = snapshot.timestamp.clone();
-    let (image_meta, windows) = build_window_elements(&snapshot, image_path, window_meta)?;
+    let (image_meta, windows) = build_window_elements(&snapshot, rgba, image_path, window_meta)?;
     with_state(|state| state.replace_token_map(raw_tokens.clone()))?;
     trace::log(format!(
         "pipeline:tokenize:ok snapshot_id={} tokens={}",
@@ -260,15 +276,10 @@ fn tokenize_from_snapshot(
 
 fn build_window_elements(
     snapshot: &SnapshotPayload,
-    image_path: &Path,
+    rgba: &image::RgbaImage,
+    image_path: Option<&Path>,
     window_meta: Option<TokenizeWindowMeta>,
 ) -> Result<(TokenizeImage, Vec<TokenizeWindow>), AppError> {
-    let image = image::open(image_path).map_err(|err| {
-        AppError::backend_unavailable(format!(
-            "failed to load capture image for tokenize boxes: {err}"
-        ))
-    })?;
-    let rgba = image.to_rgba8();
     let width = rgba.width();
     let height = rgba.height();
     let frame = super::metal_pipeline::process_cpu(&rgba);
@@ -314,7 +325,9 @@ fn build_window_elements(
         elements,
     };
     let image_meta = TokenizeImage {
-        path: image_path.display().to_string(),
+        path: image_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<memory>".to_string()),
         width,
         height,
     };
@@ -444,6 +457,11 @@ pub fn write_tokenize_overlay(
     let image_meta = payload.image.as_ref().ok_or_else(|| {
         AppError::invalid_argument("token payload does not include image metadata")
     })?;
+    if image_meta.path == "<memory>" {
+        return Err(AppError::invalid_argument(
+            "token payload image is in-memory; re-run with --screenshot or --overlay source path",
+        ));
+    }
     let source_path = std::path::Path::new(&image_meta.path);
     let base = image::open(source_path).map_err(|err| {
         AppError::backend_unavailable(format!(
@@ -672,8 +690,9 @@ mod tests {
                 height: 140.0,
             },
         };
-        let (meta, windows) = build_window_elements(&snapshot, &image_path, Some(window_meta))
-            .expect("build windows");
+        let (meta, windows) =
+            build_window_elements(&snapshot, &image, Some(&image_path), Some(window_meta))
+                .expect("build windows");
         assert_eq!(meta.width, 220);
         assert_eq!(meta.height, 140);
         assert_eq!(windows.len(), 1);
@@ -740,10 +759,16 @@ mod tests {
                 height: 150.0,
             },
         };
-        let (_, run_a) = build_window_elements(&snapshot, &image_path, Some(window_meta.clone()))
-            .expect("run a");
+        let (_, run_a) = build_window_elements(
+            &snapshot,
+            &image,
+            Some(&image_path),
+            Some(window_meta.clone()),
+        )
+        .expect("run a");
         let (_, run_b) =
-            build_window_elements(&snapshot, &image_path, Some(window_meta)).expect("run b");
+            build_window_elements(&snapshot, &image, Some(&image_path), Some(window_meta))
+                .expect("run b");
         let a = serde_json::to_value(&run_a).expect("json a");
         let b = serde_json::to_value(&run_b).expect("json b");
         assert_eq!(a, b, "window elements must be deterministic across runs");
@@ -897,10 +922,13 @@ mod tests {
     #[test]
     fn golden_dictionary_dark_emits_bordered_dictionary_tab() {
         let image_path = golden_fixture_path("dictionary_default_dark.png");
-        let image = image::open(&image_path).expect("open golden image");
+        let image = image::open(&image_path)
+            .expect("open golden image")
+            .to_rgba8();
         let width = image.width();
         let height = image.height();
-        let texts = super::recognize_text_from_image(&image_path, width, height).expect("ocr");
+        let texts =
+            crate::vision::ocr::recognize_text_from_image(&image_path, width, height).expect("ocr");
         let snapshot = SnapshotPayload {
             snapshot_id: 1,
             timestamp: "1".to_string(),
@@ -913,7 +941,8 @@ mod tests {
             focused_app: Some("Dictionary".to_string()),
             texts,
         };
-        let (_, windows) = build_window_elements(&snapshot, &image_path, None).expect("tokenize");
+        let (_, windows) =
+            build_window_elements(&snapshot, &image, Some(&image_path), None).expect("tokenize");
         let elements = &windows[0].elements;
         assert!(elements.iter().all(|e| e.text.is_some()));
         let tab: Vec<_> = elements
@@ -929,10 +958,13 @@ mod tests {
     #[test]
     fn golden_dictionary_light_emits_bordered_q_search() {
         let image_path = golden_fixture_path("dictionary_default_light.png");
-        let image = image::open(&image_path).expect("open golden image");
+        let image = image::open(&image_path)
+            .expect("open golden image")
+            .to_rgba8();
         let width = image.width();
         let height = image.height();
-        let texts = super::recognize_text_from_image(&image_path, width, height).expect("ocr");
+        let texts =
+            crate::vision::ocr::recognize_text_from_image(&image_path, width, height).expect("ocr");
         let snapshot = SnapshotPayload {
             snapshot_id: 1,
             timestamp: "1".to_string(),
@@ -945,7 +977,8 @@ mod tests {
             focused_app: Some("Dictionary".to_string()),
             texts,
         };
-        let (_, windows) = build_window_elements(&snapshot, &image_path, None).expect("tokenize");
+        let (_, windows) =
+            build_window_elements(&snapshot, &image, Some(&image_path), None).expect("tokenize");
         let elements = &windows[0].elements;
         let search = elements
             .iter()

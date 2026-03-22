@@ -7,7 +7,7 @@ use super::{pipeline, state::with_state};
 
 pub fn write_debug_snapshot() -> Result<serde_json::Value, AppError> {
     if pipeline::latest_snapshot()?.is_none() {
-        let _ = pipeline::capture_and_update(None)?;
+        let _ = pipeline::capture_and_update(Some(super::capture::default_capture_path()))?;
     }
 
     let (snapshot, frame_path, tokens) = with_state(|state| {
@@ -20,8 +20,14 @@ pub fn write_debug_snapshot() -> Result<serde_json::Value, AppError> {
 
     let snapshot =
         snapshot.ok_or_else(|| AppError::internal("no snapshot available for debug output"))?;
-    let frame_path = frame_path
-        .ok_or_else(|| AppError::internal("no captured frame available for debug output"))?;
+    let frame_path = if let Some(path) = frame_path {
+        path
+    } else {
+        let capture = pipeline::capture_and_update(Some(super::capture::default_capture_path()))?;
+        capture
+            .image_path
+            .ok_or_else(|| AppError::internal("no captured frame available for debug output"))?
+    };
 
     let base_dir = PathBuf::from("/tmp/desktopctl-debug");
     fs::create_dir_all(&base_dir).map_err(|err| {

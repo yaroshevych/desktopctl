@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn screen_settings_map() -> Result<Value, AppError> {
     let capture = vision::pipeline::capture_and_update(None)?;
-    let frame_image = load_rgba_image(&capture.image_path);
+    let frame_image = Some(capture.image.clone());
     let detected_regions_raw = frame_image
         .as_ref()
         .map(vision::regions::detect_settings_regions)
