@@ -4,7 +4,7 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug dictionary",
+      "name": "Debug dictionary dark",
       "cargo": {
         "args": [
           "test",
@@ -18,7 +18,7 @@
           "name": "golden_labels"
         }
       },
-      "args": ["debug_dictionary", "--nocapture"],
+      "args": ["debug_dictionary_dark", "--nocapture"],
       "env": {
         "HIDE_GT": "1",
         "TOKENIZE_DEBUG": "1"
@@ -28,7 +28,7 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug messages",
+      "name": "Debug dictionary light",
       "cargo": {
         "args": [
           "test",
@@ -42,7 +42,103 @@
           "name": "golden_labels"
         }
       },
-      "args": ["debug_messages", "--nocapture"],
+      "args": ["debug_dictionary_light", "--nocapture"],
+      "env": {
+        "HIDE_GT": "1",
+        "TOKENIZE_DEBUG": "1"
+      },
+      "cwd": "${workspaceFolder}/src/desktop"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug messages dark",
+      "cargo": {
+        "args": [
+          "test",
+          "-p", "desktopctld",
+          "--test", "golden_labels",
+          "--no-run",
+          "--manifest-path", "${workspaceFolder}/src/desktop/Cargo.toml"
+        ],
+        "filter": {
+          "kind": "test",
+          "name": "golden_labels"
+        }
+      },
+      "args": ["debug_messages_dark", "--nocapture"],
+      "env": {
+        "HIDE_GT": "1",
+        "TOKENIZE_DEBUG": "1"
+      },
+      "cwd": "${workspaceFolder}/src/desktop"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug messages light",
+      "cargo": {
+        "args": [
+          "test",
+          "-p", "desktopctld",
+          "--test", "golden_labels",
+          "--no-run",
+          "--manifest-path", "${workspaceFolder}/src/desktop/Cargo.toml"
+        ],
+        "filter": {
+          "kind": "test",
+          "name": "golden_labels"
+        }
+      },
+      "args": ["debug_messages_light", "--nocapture"],
+      "env": {
+        "HIDE_GT": "1",
+        "TOKENIZE_DEBUG": "1"
+      },
+      "cwd": "${workspaceFolder}/src/desktop"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug facetime dark",
+      "cargo": {
+        "args": [
+          "test",
+          "-p", "desktopctld",
+          "--test", "golden_labels",
+          "--no-run",
+          "--manifest-path", "${workspaceFolder}/src/desktop/Cargo.toml"
+        ],
+        "filter": {
+          "kind": "test",
+          "name": "golden_labels"
+        }
+      },
+      "args": ["debug_facetime_dark", "--nocapture"],
+      "env": {
+        "HIDE_GT": "1",
+        "TOKENIZE_DEBUG": "1"
+      },
+      "cwd": "${workspaceFolder}/src/desktop"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug facetime light",
+      "cargo": {
+        "args": [
+          "test",
+          "-p", "desktopctld",
+          "--test", "golden_labels",
+          "--no-run",
+          "--manifest-path", "${workspaceFolder}/src/desktop/Cargo.toml"
+        ],
+        "filter": {
+          "kind": "test",
+          "name": "golden_labels"
+        }
+      },
+      "args": ["debug_facetime_light", "--nocapture"],
       "env": {
         "HIDE_GT": "1",
         "TOKENIZE_DEBUG": "1"

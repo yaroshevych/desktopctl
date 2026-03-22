@@ -13,6 +13,9 @@ const TEXT_LABEL_CONFIDENCE_MIN: f32 = 0.50;
 mod metal_pipeline;
 #[path = "../vision/ocr.rs"]
 mod ocr;
+#[path = "../vision/text_group.rs"]
+#[allow(dead_code)]
+mod text_group;
 #[path = "../vision/tokenize_boxes.rs"]
 mod tokenize_boxes;
 #[path = "../trace.rs"]

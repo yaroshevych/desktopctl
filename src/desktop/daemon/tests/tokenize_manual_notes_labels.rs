@@ -1,3 +1,9 @@
+#[path = "../src/vision/metal_pipeline.rs"]
+#[allow(dead_code)]
+mod metal_pipeline;
+#[path = "../src/vision/text_group.rs"]
+#[allow(dead_code)]
+mod text_group;
 #[path = "../src/vision/tokenize_boxes.rs"]
 #[allow(dead_code)]
 mod tokenize_boxes;

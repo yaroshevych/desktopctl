@@ -6,6 +6,10 @@
 #[allow(dead_code)]
 mod metal_pipeline;
 
+#[path = "../src/vision/text_group.rs"]
+#[allow(dead_code)]
+mod text_group;
+
 #[path = "../src/vision/tokenize_boxes.rs"]
 #[allow(dead_code)]
 mod tokenize_boxes;
@@ -282,35 +286,22 @@ fn golden_labels_per_category_recall() {
 
 // ── single-image debug tests ────────────────────────────────────────────────
 
-fn debug_single_image(id_substr: &str) {
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL);
-    let raw = fs::read_to_string(&manifest_path).expect("read manifest");
-    let manifest: Manifest = serde_json::from_str(&raw).expect("parse manifest JSON");
-    let datasets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join("eval/datasets");
+/// Raw image path relative to repo root (tmp/tokenize-20260317-phase1/raw/vm/).
+const RAW_DIR: &str = "tmp/tokenize-20260317-phase1/raw/vm";
 
-    let configs = category_configs();
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
 
-    let item = manifest
-        .items
-        .iter()
-        .find(|i| i.id.contains(id_substr))
-        .unwrap_or_else(|| panic!("{} not found in manifest", id_substr));
-
-    let image_path = datasets_dir.join(&item.image_rel_path);
-    let image = ImageReader::open(&image_path)
+fn debug_from_path(label: &str, image_path: &std::path::Path) {
+    let image = ImageReader::open(image_path)
         .unwrap_or_else(|e| panic!("open image {}: {}", image_path.display(), e))
         .decode()
         .unwrap_or_else(|e| panic!("decode image {}: {}", image_path.display(), e))
         .to_rgba8();
 
-    // Run OCR (same as production path).
-    let texts = match ocr::recognize_text_from_image(
-        &image_path,
-        image.width(),
-        image.height(),
-    ) {
+    // Run OCR with preprocessing (dark-mode inversion, contrast boost).
+    let texts = match ocr::recognize_text(&image) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("warn: OCR failed: {} — falling back to no-text path", e.message);
@@ -319,7 +310,7 @@ fn debug_single_image(id_substr: &str) {
     };
     let text_bounds: Vec<Bounds> = texts.iter().map(|t| t.bounds.clone()).collect();
 
-    println!("\n=== {}: {} OCR texts ===", id_substr, texts.len());
+    println!("\n=== {}: {} OCR texts ===", label, texts.len());
     for (i, t) in texts.iter().enumerate() {
         println!(
             "  text {:3}: x={:6.1} y={:6.1} w={:6.1} h={:6.1} conf={:.2} {:?}",
@@ -341,80 +332,139 @@ fn debug_single_image(id_substr: &str) {
     }
     println!("=== {} predicted glyphs ===", predicted_glyphs.len());
 
-    println!("\n=== GT annotations ===");
-    for ann in &item.annotations {
-        let gt = to_bounds(ann.bbox);
-        let gt = match gt {
-            Some(g) => g,
-            None => continue,
-        };
+    // Try to match against manifest GT if available.
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL);
+    if let Ok(raw) = fs::read_to_string(&manifest_path) {
+        if let Ok(manifest) = serde_json::from_str::<Manifest>(&raw) {
+            let configs = category_configs();
+            // Match by image filename substring.
+            let fname = image_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Some(item) = manifest.items.iter().find(|i| i.id.contains(fname) || fname.contains(&i.id)) {
+                println!("\n=== GT annotations ({}) ===", item.id);
+                for ann in &item.annotations {
+                    let gt = match to_bounds(ann.bbox) {
+                        Some(g) => g,
+                        None => continue,
+                    };
+                    let best_iou = predicted.iter().map(|p| iou(p, &gt)).fold(0.0_f64, f64::max);
+                    let best_glyph_iou = predicted_glyphs.iter().map(|p| iou(p, &gt)).fold(0.0_f64, f64::max);
+                    let cfg = &configs[ann.category.as_str()];
+                    let hit = best_iou >= cfg.iou_threshold
+                        || (cfg.match_glyphs && best_glyph_iou >= cfg.iou_threshold);
+                    println!(
+                        "  {} {:<22} bbox=[{:6.1},{:6.1},{:6.1},{:6.1}] best_iou={:.3} glyph_iou={:.3} {}",
+                        if hit { "HIT " } else { "MISS" },
+                        ann.category,
+                        gt.x, gt.y, gt.width, gt.height,
+                        best_iou, best_glyph_iou,
+                        ann.id
+                    );
+                }
 
-        let best_iou = predicted
-            .iter()
-            .map(|p| iou(p, &gt))
-            .fold(0.0_f64, f64::max);
-        let best_glyph_iou = predicted_glyphs
-            .iter()
-            .map(|p| iou(p, &gt))
-            .fold(0.0_f64, f64::max);
-
-        let cfg = &configs[ann.category.as_str()];
-        let hit = best_iou >= cfg.iou_threshold
-            || (cfg.match_glyphs && best_glyph_iou >= cfg.iou_threshold);
-
-        println!(
-            "  {} {:<22} bbox=[{:6.1},{:6.1},{:6.1},{:6.1}] best_iou={:.3} glyph_iou={:.3} {}",
-            if hit { "HIT " } else { "MISS" },
-            ann.category,
-            gt.x, gt.y, gt.width, gt.height,
-            best_iou, best_glyph_iou,
-            ann.id
-        );
-    }
-
-    // Generate overlay
-    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join("tmp/golden_overlays");
-    fs::create_dir_all(&out_dir).expect("create output dir");
-
-    let green = [0u8, 220, 0, 255];  // predicted boxes
-    let red = [220u8, 0, 0, 255];    // GT boxes
-    let blue = [60u8, 120, 255, 255]; // predicted glyphs
-    let cyan = [0u8, 220, 220, 255];  // OCR texts
-
-    let mut overlay = image.clone();
-    for t in &texts {
-        draw_rect(&mut overlay, &t.bounds, cyan, 1);
-    }
-    for p in &predicted {
-        draw_rect(&mut overlay, p, green, 2);
-    }
-    for p in &predicted_glyphs {
-        draw_rect(&mut overlay, p, blue, 1);
-    }
-    let hide_gt = std::env::var("HIDE_GT").is_ok();
-    if !hide_gt {
-        for ann in &item.annotations {
-            if let Some(gt) = to_bounds(ann.bbox) {
-                draw_rect(&mut overlay, &gt, red, 2);
+                // Draw GT on overlay if not hidden.
+                let hide_gt = std::env::var("HIDE_GT").is_ok();
+                if !hide_gt {
+                    let red = [220u8, 0, 0, 255];
+                    let mut overlay = generate_overlay(&image, &texts, &predicted, &predicted_glyphs);
+                    for ann in &item.annotations {
+                        if let Some(gt) = to_bounds(ann.bbox) {
+                            draw_rect(&mut overlay, &gt, red, 2);
+                        }
+                    }
+                    save_overlay(&overlay, label);
+                    return;
+                }
+            } else {
+                println!("\n(no manifest entry matching '{}')", fname);
             }
         }
     }
 
-    let out_path = out_dir.join(format!("debug_{}.png", id_substr));
+    let overlay = generate_overlay(&image, &texts, &predicted, &predicted_glyphs);
+    save_overlay(&overlay, label);
+}
+
+fn generate_overlay(
+    image: &RgbaImage,
+    texts: &[desktop_core::protocol::SnapshotText],
+    predicted: &[Bounds],
+    predicted_glyphs: &[Bounds],
+) -> RgbaImage {
+    let green = [0u8, 220, 0, 255];
+    let blue = [60u8, 120, 255, 255];
+    let cyan = [0u8, 220, 220, 255];
+
+    let mut overlay = image.clone();
+    for t in texts {
+        draw_rect(&mut overlay, &t.bounds, cyan, 1);
+    }
+    for p in predicted {
+        draw_rect(&mut overlay, p, green, 2);
+    }
+    for p in predicted_glyphs {
+        draw_rect(&mut overlay, p, blue, 1);
+    }
+    overlay
+}
+
+fn save_overlay(overlay: &RgbaImage, label: &str) {
+    let out_dir = repo_root().join("tmp/golden_overlays");
+    fs::create_dir_all(&out_dir).expect("create output dir");
+    let out_path = out_dir.join(format!("debug_{}.png", label));
     overlay.save(&out_path).expect("save overlay");
     println!("\nOverlay: {}", out_path.display());
 }
 
-#[test]
-fn debug_dictionary() {
-    debug_single_image("dictionary");
+fn raw_image(app: &str, filename: &str) -> PathBuf {
+    repo_root().join(RAW_DIR).join(app).join(filename)
 }
 
 #[test]
-fn debug_messages() {
-    debug_single_image("messages");
+fn debug_dictionary_dark() {
+    debug_from_path(
+        "dictionary_dark",
+        &raw_image("dictionary", "dictionary_default_dark_0050.png"),
+    );
+}
+
+#[test]
+fn debug_dictionary_light() {
+    debug_from_path(
+        "dictionary_light",
+        &raw_image("dictionary", "dictionary_default_light_0022.png"),
+    );
+}
+
+#[test]
+fn debug_messages_dark() {
+    debug_from_path(
+        "messages_dark",
+        &raw_image("messages", "messages_default_dark_0035.png"),
+    );
+}
+
+#[test]
+fn debug_messages_light() {
+    debug_from_path(
+        "messages_light",
+        &raw_image("messages", "messages_default_light_0007.png"),
+    );
+}
+
+#[test]
+fn debug_facetime_dark() {
+    debug_from_path(
+        "facetime_dark",
+        &raw_image("facetime", "facetime_default_dark_0045.png"),
+    );
+}
+
+#[test]
+fn debug_facetime_light() {
+    debug_from_path(
+        "facetime_light",
+        &raw_image("facetime", "facetime_default_light_0017.png"),
+    );
 }
 
 // ── overlay generation ──────────────────────────────────────────────────────

@@ -2,53 +2,10 @@ use desktop_core::protocol::Bounds;
 use image::RgbaImage;
 
 use super::metal_pipeline::{self, ProcessedFrame};
-
-/// Internal box representation that carries optional text through the pipeline.
-#[derive(Debug, Clone)]
-struct TextBox {
-    bounds: Bounds,
-    text: String,
-}
-
-impl TextBox {
-    fn from_bounds(b: Bounds) -> Self {
-        Self {
-            bounds: b,
-            text: String::new(),
-        }
-    }
-
-    fn from_bounds_with_text(b: Bounds, text: String) -> Self {
-        Self { bounds: b, text }
-    }
-
-    fn merge(items: &[TextBox]) -> TextBox {
-        let merged_bounds = items
-            .iter()
-            .skip(1)
-            .fold(items[0].bounds.clone(), |acc, tb| {
-                union_bounds(&acc, &tb.bounds)
-            });
-        // Sort by x position and join texts with space.
-        let mut sorted: Vec<&TextBox> = items.iter().collect();
-        sorted.sort_by(|a, b| {
-            a.bounds
-                .x
-                .partial_cmp(&b.bounds.x)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let text = sorted
-            .iter()
-            .map(|tb| tb.text.as_str())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        TextBox {
-            bounds: merged_bounds,
-            text,
-        }
-    }
-}
+use super::text_group::{
+    self, TextBox, group_lines_into_paragraphs, group_words_into_lines, split_wide_textbox,
+    tighten_to_content,
+};
 
 const GLYPH_MIN_W: usize = 6;
 const GLYPH_MIN_H: usize = 6;
@@ -62,7 +19,7 @@ const GLYPH_DEDUPE_IOU: f64 = 0.72;
 const GLYPH_CAP: usize = 140;
 const BOX_CAP: usize = 200;
 
-fn debug_enabled() -> bool {
+pub(super) fn debug_enabled() -> bool {
     std::env::var("TOKENIZE_DEBUG").is_ok()
 }
 
@@ -154,6 +111,12 @@ pub fn detect_ui_boxes_with_labels(
             .collect()
     };
 
+    // Step 1b: Split overly wide OCR results at horizontal gaps.
+    let words: Vec<TextBox> = words
+        .into_iter()
+        .flat_map(|tb| split_wide_textbox(tb, &frame))
+        .collect();
+
     // Step 2: Group words → lines → paragraphs.
     let lines = group_words_into_lines(&words);
     let paragraphs = group_lines_into_paragraphs(&lines);
@@ -201,86 +164,11 @@ pub fn detect_ui_boxes_with_labels(
 // ── Step 1: Text detection ──────────────────────────────────────────────────
 
 /// Shrink an OCR bounding box to tightly fit actual text content.
-/// Uses the edge image (Sobel magnitude) which works for any text contrast.
-/// A row/column is considered "has content" if any pixel exceeds the threshold.
-fn tighten_to_content(bounds: &Bounds, frame: &ProcessedFrame) -> Bounds {
-    let x1 = (bounds.x as usize).min(frame.width.saturating_sub(1));
-    let y1 = (bounds.y as usize).min(frame.height.saturating_sub(1));
-    let x2 = ((bounds.x + bounds.width) as usize).min(frame.width);
-    let y2 = ((bounds.y + bounds.height) as usize).min(frame.height);
-    if x2 <= x1 + 2 || y2 <= y1 + 2 {
-        return bounds.clone();
-    }
-
-    // Edge threshold: pixel has content if edge magnitude > this.
-    const EDGE_THRESH: u8 = 12;
-
-    let has_content = |x: usize, y: usize| -> bool {
-        frame.edge[y * frame.width + x] > EDGE_THRESH
-    };
-
-    // Scan from top.
-    let mut top = y1;
-    'top: for y in y1..y2 {
-        for x in x1..x2 {
-            if has_content(x, y) {
-                top = y;
-                break 'top;
-            }
-        }
-    }
-
-    // Scan from bottom.
-    let mut bottom = y2;
-    'bottom: for y in (y1..y2).rev() {
-        for x in x1..x2 {
-            if has_content(x, y) {
-                bottom = y + 1;
-                break 'bottom;
-            }
-        }
-    }
-
-    // Scan from left.
-    let mut left = x1;
-    'left: for x in x1..x2 {
-        for y in top..bottom {
-            if has_content(x, y) {
-                left = x;
-                break 'left;
-            }
-        }
-    }
-
-    // Scan from right.
-    let mut right = x2;
-    'right: for x in (x1..x2).rev() {
-        for y in top..bottom {
-            if has_content(x, y) {
-                right = x + 1;
-                break 'right;
-            }
-        }
-    }
-
-    // Don't tighten if result is too small (< 50% of original in either dimension).
-    if right <= left || bottom <= top {
-        return bounds.clone();
-    }
-    let new_w = (right - left) as f64;
-    let new_h = (bottom - top) as f64;
-    if new_w < bounds.width * 0.5 || new_h < bounds.height * 0.5 {
-        return bounds.clone();
-    }
-
-    Bounds {
-        x: left as f64,
-        y: top as f64,
-        width: new_w,
-        height: new_h,
-    }
-}
-
+///
+/// Two-pass approach:
+/// 1. Try text_mask first (binary threshold of dark/light text) — this excludes
+///    UI borders like pill backgrounds, rounded corners, etc.
+/// 2. Fall back to edge image if text_mask gives nothing (e.g. low-contrast text).
 fn sanitize_text_seeds(text_bounds: &[Bounds], img_w: f64, img_h: f64) -> Vec<Bounds> {
     let image_area = (img_w * img_h).max(1.0);
     let mut out: Vec<Bounds> = text_bounds
@@ -310,138 +198,6 @@ fn text_component_boxes(frame: &ProcessedFrame) -> Vec<Bounds> {
         0.2,
         30.0,
     )
-}
-
-// ── Step 2: Grouping ────────────────────────────────────────────────────────
-
-/// Group word boxes into text lines based on vertical overlap and horizontal proximity.
-/// All thresholds are relative to text height (font size proxy).
-fn group_words_into_lines(words: &[TextBox]) -> Vec<TextBox> {
-    let dbg = debug_enabled();
-    if dbg {
-        eprintln!("\n--- group_words_into_lines: {} words ---", words.len());
-    }
-
-    let clusters = cluster_textboxes(words, |a, b| {
-        let min_h = a.bounds.height.min(b.bounds.height).max(1.0);
-        let max_h = a.bounds.height.max(b.bounds.height);
-        // Same font size: height ratio ≤ 1.6.
-        if max_h > min_h * 1.6 {
-            return false;
-        }
-        let vertical_overlap = overlap_1d(a.bounds.y, a.bounds.y + a.bounds.height, b.bounds.y, b.bounds.y + b.bounds.height);
-        let vertical_ratio = vertical_overlap / min_h;
-        let hgap = axis_gap(a.bounds.x, a.bounds.x + a.bounds.width, b.bounds.x, b.bounds.x + b.bounds.width);
-        // Horizontal gap relative to font height.
-        // Tight threshold to avoid merging tab-bar-style spaced items.
-        vertical_ratio >= 0.40 && hgap <= min_h * 1.05
-    });
-
-    let mut lines = Vec::new();
-    for (ci, cluster) in clusters.iter().enumerate() {
-        if cluster.is_empty() {
-            continue;
-        }
-        let merged = TextBox::merge(cluster);
-        // Skip very tiny isolated blobs (single glyph-sized).
-        let font_h = cluster.iter().map(|w| w.bounds.height).sum::<f64>() / cluster.len() as f64;
-        if cluster.len() == 1 && merged.bounds.width < font_h * 1.2 {
-            if dbg {
-                eprintln!(
-                    "  line {:2}: SKIP (tiny) [{:.0},{:.0},{:.0},{:.0}]  {:?}",
-                    ci, merged.bounds.x, merged.bounds.y, merged.bounds.width, merged.bounds.height,
-                    merged.text
-                );
-            }
-            continue;
-        }
-        if dbg {
-            eprintln!(
-                "  line {:2}: {} words  [{:.0},{:.0},{:.0},{:.0}]  font_h={:.0}  {:?}",
-                ci, cluster.len(), merged.bounds.x, merged.bounds.y,
-                merged.bounds.width, merged.bounds.height, font_h,
-                merged.text
-            );
-        }
-        lines.push(merged);
-    }
-    if dbg {
-        eprintln!("  => {} lines", lines.len());
-    }
-    lines
-}
-
-/// Group text lines into paragraphs — lines with similar font size, small vertical
-/// gap relative to font size, and horizontal overlap or left-alignment.
-fn group_lines_into_paragraphs(lines: &[TextBox]) -> Vec<TextBox> {
-    let dbg = debug_enabled();
-    if dbg {
-        eprintln!("\n--- group_lines_into_paragraphs: {} lines ---", lines.len());
-    }
-
-    let clusters = cluster_textboxes(lines, |a, b| {
-        let min_h = a.bounds.height.min(b.bounds.height).max(1.0);
-        let max_h = a.bounds.height.max(b.bounds.height);
-        // Same font size.
-        if max_h > min_h * 1.6 {
-            return false;
-        }
-        let vgap = axis_gap(a.bounds.y, a.bounds.y + a.bounds.height, b.bounds.y, b.bounds.y + b.bounds.height);
-        // Gap relative to font height.
-        if vgap > min_h * 2.2 {
-            return false;
-        }
-        let hoverlap = overlap_1d(a.bounds.x, a.bounds.x + a.bounds.width, b.bounds.x, b.bounds.x + b.bounds.width);
-        let min_w = a.bounds.width.min(b.bounds.width).max(1.0);
-        let hoverlap_ratio = hoverlap / min_w;
-        // Left-alignment relative to font height.
-        let left_align = (a.bounds.x - b.bounds.x).abs() <= min_h * 1.8;
-        // Center-alignment: centers of both lines are close horizontally.
-        let center_a = a.bounds.x + a.bounds.width / 2.0;
-        let center_b = b.bounds.x + b.bounds.width / 2.0;
-        let center_align = (center_a - center_b).abs() <= min_h * 2.0;
-        hoverlap_ratio >= 0.22 || left_align || center_align
-    });
-
-    let mut paragraphs = Vec::new();
-    for (ci, cluster) in clusters.iter().enumerate() {
-        if cluster.len() < 2 {
-            if dbg && !cluster.is_empty() {
-                eprintln!(
-                    "  para {:2}: SKIP (single line)  [{:.0},{:.0},{:.0},{:.0}]  {:?}",
-                    ci, cluster[0].bounds.x, cluster[0].bounds.y,
-                    cluster[0].bounds.width, cluster[0].bounds.height,
-                    cluster[0].text
-                );
-            }
-            continue;
-        }
-        let merged = TextBox::merge(cluster);
-        let font_h = cluster.iter().map(|l| l.bounds.height).sum::<f64>() / cluster.len() as f64;
-        // Min dimensions relative to font size.
-        if merged.bounds.width < font_h * 3.0 || merged.bounds.height < font_h * 1.2 {
-            if dbg {
-                eprintln!(
-                    "  para {:2}: SKIP (too small) {} lines  [{:.0},{:.0},{:.0},{:.0}]  font_h={:.0}  {:?}",
-                    ci, cluster.len(), merged.bounds.x, merged.bounds.y,
-                    merged.bounds.width, merged.bounds.height, font_h, merged.text
-                );
-            }
-            continue;
-        }
-        if dbg {
-            eprintln!(
-                "  para {:2}: {} lines  [{:.0},{:.0},{:.0},{:.0}]  font_h={:.0}  {:?}",
-                ci, cluster.len(), merged.bounds.x, merged.bounds.y,
-                merged.bounds.width, merged.bounds.height, font_h, merged.text
-            );
-        }
-        paragraphs.push(merged);
-    }
-    if dbg {
-        eprintln!("  => {} paragraphs", paragraphs.len());
-    }
-    paragraphs
 }
 
 // ── Step 3: SAT-based enclosing control detection ───────────────────────────
@@ -1067,88 +823,11 @@ fn compress_indices(indices: &[usize], max_gap: usize) -> Vec<usize> {
     out
 }
 
-fn cluster_textboxes<F>(items: &[TextBox], mut connected: F) -> Vec<Vec<TextBox>>
-where
-    F: FnMut(&TextBox, &TextBox) -> bool,
-{
-    if items.is_empty() {
-        return Vec::new();
-    }
-    let n = items.len();
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn find(parent: &mut [usize], idx: usize) -> usize {
-        if parent[idx] != idx {
-            let root = find(parent, parent[idx]);
-            parent[idx] = root;
-        }
-        parent[idx]
-    }
-    fn union(parent: &mut [usize], a: usize, b: usize) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra != rb {
-            parent[rb] = ra;
-        }
-    }
-
-    // Sort by Y midpoint for sweep-line prefiltering.
-    let mut sorted: Vec<usize> = (0..n).collect();
-    sorted.sort_by(|&a, &b| {
-        let ya = items[a].bounds.y + items[a].bounds.height / 2.0;
-        let yb = items[b].bounds.y + items[b].bounds.height / 2.0;
-        ya.partial_cmp(&yb).unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let dbg = debug_enabled();
-    // Only compare items within a vertical band. Max band = 3× the larger height.
-    for si in 0..n {
-        let i = sorted[si];
-        let yi_mid = items[i].bounds.y + items[i].bounds.height / 2.0;
-        for sj in (si + 1)..n {
-            let j = sorted[sj];
-            let yj_mid = items[j].bounds.y + items[j].bounds.height / 2.0;
-            let max_h = items[i].bounds.height.max(items[j].bounds.height);
-            // Items sorted by Y — once gap exceeds band, no more matches possible.
-            if yj_mid - yi_mid > max_h * 3.0 {
-                break;
-            }
-            if connected(&items[i], &items[j]) {
-                if dbg {
-                    eprintln!(
-                        "    cluster: merge {:?} + {:?}",
-                        items[i].text, items[j].text
-                    );
-                }
-                union(&mut parent, i, j);
-            }
-        }
-    }
-    let mut groups = std::collections::HashMap::<usize, Vec<TextBox>>::new();
-    for (idx, item) in items.iter().enumerate() {
-        let root = find(&mut parent, idx);
-        groups.entry(root).or_default().push(item.clone());
-    }
-    let mut out: Vec<Vec<TextBox>> = groups.into_values().collect();
-    out.sort_by_key(|group| group.len());
-    out
-}
-
-fn cluster_bounds<F>(items: &[Bounds], mut connected: F) -> Vec<Vec<Bounds>>
-where
-    F: FnMut(&Bounds, &Bounds) -> bool,
-{
-    let tbs: Vec<TextBox> = items.iter().map(|b| TextBox::from_bounds(b.clone())).collect();
-    cluster_textboxes(&tbs, |a, b| connected(&a.bounds, &b.bounds))
-        .into_iter()
-        .map(|group| group.into_iter().map(|tb| tb.bounds).collect())
-        .collect()
-}
-
-fn overlap_1d(a1: f64, a2: f64, b1: f64, b2: f64) -> f64 {
+pub(super) fn overlap_1d(a1: f64, a2: f64, b1: f64, b2: f64) -> f64 {
     (a2.min(b2) - a1.max(b1)).max(0.0)
 }
 
-fn axis_gap(a1: f64, a2: f64, b1: f64, b2: f64) -> f64 {
+pub(super) fn axis_gap(a1: f64, a2: f64, b1: f64, b2: f64) -> f64 {
     if a2 < b1 {
         b1 - a2
     } else if b2 < a1 {
@@ -1158,7 +837,7 @@ fn axis_gap(a1: f64, a2: f64, b1: f64, b2: f64) -> f64 {
     }
 }
 
-fn union_bounds(a: &Bounds, b: &Bounds) -> Bounds {
+pub(super) fn union_bounds(a: &Bounds, b: &Bounds) -> Bounds {
     let x = a.x.min(b.x);
     let y = a.y.min(b.y);
     let x2 = (a.x + a.width).max(b.x + b.width);
@@ -1339,39 +1018,6 @@ fn mask_fill_density(mask: &[bool], width: usize, bounds: &Bounds) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn group_words_merges_same_line() {
-        let words: Vec<TextBox> = vec![
-            Bounds { x: 40.0, y: 48.0, width: 56.0, height: 18.0 },
-            Bounds { x: 122.0, y: 49.0, width: 72.0, height: 18.0 },
-            Bounds { x: 220.0, y: 47.0, width: 65.0, height: 19.0 },
-        ].into_iter().map(TextBox::from_bounds).collect();
-        let lines = group_words_into_lines(&words);
-        assert_eq!(lines.len(), 1, "same-line words should merge");
-        assert!(lines[0].bounds.width >= 240.0);
-    }
-
-    #[test]
-    fn group_words_separates_distant_lines() {
-        let words: Vec<TextBox> = vec![
-            Bounds { x: 100.0, y: 100.0, width: 80.0, height: 16.0 },
-            Bounds { x: 184.0, y: 101.0, width: 64.0, height: 16.0 },
-            Bounds { x: 102.0, y: 300.0, width: 92.0, height: 16.0 },
-        ].into_iter().map(TextBox::from_bounds).collect();
-        let lines = group_words_into_lines(&words);
-        assert_eq!(lines.len(), 2, "distant lines should stay separate");
-    }
-
-    #[test]
-    fn paragraph_groups_nearby_lines() {
-        let lines: Vec<TextBox> = vec![
-            Bounds { x: 60.0, y: 90.0, width: 220.0, height: 20.0 },
-            Bounds { x: 68.0, y: 123.0, width: 240.0, height: 21.0 },
-        ].into_iter().map(TextBox::from_bounds).collect();
-        let paras = group_lines_into_paragraphs(&lines);
-        assert_eq!(paras.len(), 1, "nearby lines should form paragraph");
-    }
 
     #[test]
     fn prune_nested_glitch_boxes_works() {
