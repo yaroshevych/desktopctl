@@ -12,7 +12,17 @@
         "text": "Q Search"
       }
     ],
-    "buttons": [],
+    "buttons": [
+      {
+        "bbox": [
+          79.5,
+          114.3,
+          141.5,
+          32.9
+        ],
+        "text": "Dictionary"
+      }
+    ],
     "not_controls": ["Wikipedia"]
   },
   {
@@ -28,7 +38,17 @@
         "text": "Q Search"
       }
     ],
-    "buttons": [],
+    "buttons": [
+      {
+        "bbox": [
+          79.5,
+          114.3,
+          139.5,
+          36.8
+        ],
+        "text": "Dictionary"
+      }
+    ],
     "not_controls": ["Wikipedia"]
   },
   {
