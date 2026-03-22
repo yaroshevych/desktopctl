@@ -45,11 +45,7 @@ impl TextBox {
         Self::merge_refs_with_separator(items, "\n", SortOrder::TopToBottomThenLeft)
     }
 
-    fn merge_refs_with_separator(
-        items: &[&TextBox],
-        separator: &str,
-        order: SortOrder,
-    ) -> TextBox {
+    fn merge_refs_with_separator(items: &[&TextBox], separator: &str, order: SortOrder) -> TextBox {
         let merged_bounds = items
             .iter()
             .skip(1)

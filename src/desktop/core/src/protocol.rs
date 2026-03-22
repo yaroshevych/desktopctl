@@ -349,11 +349,7 @@ pub struct TokenizeWindow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizeElement {
     pub id: String,
-    #[serde(
-        rename = "type",
-        default,
-        skip_serializing_if = "String::is_empty"
-    )]
+    #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
     pub bbox: [f64; 4],
     #[serde(skip_serializing_if = "Option::is_none")]

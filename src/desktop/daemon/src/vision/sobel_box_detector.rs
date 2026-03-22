@@ -94,7 +94,14 @@ fn sobel_enclosed_candidate(
     let mut top_cov = top_cov_anchor;
     let mut bottom_cov = bottom_cov_anchor;
     let mut span_bounds = sobel_edge_bucket_span(
-        frame, text, candidate_px, top_y, bottom_y, edge_thr, cs, scratch,
+        frame,
+        text,
+        candidate_px,
+        top_y,
+        bottom_y,
+        edge_thr,
+        cs,
+        scratch,
     );
     if span_bounds.is_none() {
         if let Some((alt_top, alt_bottom, alt_span, alt_top_cov, alt_bottom_cov)) =
@@ -178,26 +185,32 @@ fn find_best_closed_span(
         top_seed_levels,
         top_probe_hits,
     );
-    let bottom_candidates =
-        horizontal_candidates(
-            frame,
-            bottom_anchor,
-            span_x1,
-            span_x2,
-            edge_thr,
-            8,
-            bottom_seed_levels,
-            bottom_probe_hits,
-        );
+    let bottom_candidates = horizontal_candidates(
+        frame,
+        bottom_anchor,
+        span_x1,
+        span_x2,
+        edge_thr,
+        8,
+        bottom_seed_levels,
+        bottom_probe_hits,
+    );
     let mut best: Option<(i32, i32, (i32, i32), f64, f64, f64)> = None;
     for &(ty, tcov) in &top_candidates {
         for &(by, bcov) in &bottom_candidates {
             if by - ty < 8 {
                 continue;
             }
-            if let Some(span) =
-                sobel_edge_bucket_span(frame, text, candidate, ty, by, edge_thr, corner_skip, scratch)
-            {
+            if let Some(span) = sobel_edge_bucket_span(
+                frame,
+                text,
+                candidate,
+                ty,
+                by,
+                edge_thr,
+                corner_skip,
+                scratch,
+            ) {
                 let score = tcov.min(bcov) * 2.0 + (tcov + bcov) * 0.5;
                 match best {
                     Some((_, _, _, _, _, best_score)) if score <= best_score => {}
@@ -221,9 +234,8 @@ fn horizontal_candidates(
     seed_levels: &[i32],
     probe_hits: &[i32],
 ) -> Vec<(i32, f64)> {
-    let mut ys = Vec::with_capacity(
-        seed_levels.len() + probe_hits.len() + (radius as usize) * 2 + 1,
-    );
+    let mut ys =
+        Vec::with_capacity(seed_levels.len() + probe_hits.len() + (radius as usize) * 2 + 1);
     ys.extend_from_slice(seed_levels);
     ys.extend_from_slice(probe_hits);
     for dy in -radius..=radius {
@@ -575,7 +587,8 @@ fn sobel_edge_bucket_span(
         }
 
         let span = comp_max_x - comp_min_x + 1;
-        if component_size >= min_component && top_hits >= 3 && bottom_hits >= 3 && span >= min_span {
+        if component_size >= min_component && top_hits >= 3 && bottom_hits >= 3 && span >= min_span
+        {
             return Some((comp_min_x, comp_max_x));
         }
     }
