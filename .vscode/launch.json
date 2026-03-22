@@ -1,0 +1,53 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug dictionary",
+      "cargo": {
+        "args": [
+          "test",
+          "-p", "desktopctld",
+          "--test", "golden_labels",
+          "--no-run",
+          "--manifest-path", "${workspaceFolder}/src/desktop/Cargo.toml"
+        ],
+        "filter": {
+          "kind": "test",
+          "name": "golden_labels"
+        }
+      },
+      "args": ["debug_dictionary", "--nocapture"],
+      "env": {
+        "HIDE_GT": "1",
+        "TOKENIZE_DEBUG": "1"
+      },
+      "cwd": "${workspaceFolder}/src/desktop"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug messages",
+      "cargo": {
+        "args": [
+          "test",
+          "-p", "desktopctld",
+          "--test", "golden_labels",
+          "--no-run",
+          "--manifest-path", "${workspaceFolder}/src/desktop/Cargo.toml"
+        ],
+        "filter": {
+          "kind": "test",
+          "name": "golden_labels"
+        }
+      },
+      "args": ["debug_messages", "--nocapture"],
+      "env": {
+        "HIDE_GT": "1",
+        "TOKENIZE_DEBUG": "1"
+      },
+      "cwd": "${workspaceFolder}/src/desktop"
+    }
+  ]
+}

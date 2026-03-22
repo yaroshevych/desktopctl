@@ -10,6 +10,12 @@ mod metal_pipeline;
 #[allow(dead_code)]
 mod tokenize_boxes;
 
+#[path = "../src/vision/ocr.rs"]
+mod ocr;
+
+#[path = "../src/trace.rs"]
+mod trace;
+
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use desktop_core::protocol::Bounds;
@@ -274,6 +280,143 @@ fn golden_labels_per_category_recall() {
     }
 }
 
+// ── single-image debug tests ────────────────────────────────────────────────
+
+fn debug_single_image(id_substr: &str) {
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL);
+    let raw = fs::read_to_string(&manifest_path).expect("read manifest");
+    let manifest: Manifest = serde_json::from_str(&raw).expect("parse manifest JSON");
+    let datasets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("eval/datasets");
+
+    let configs = category_configs();
+
+    let item = manifest
+        .items
+        .iter()
+        .find(|i| i.id.contains(id_substr))
+        .unwrap_or_else(|| panic!("{} not found in manifest", id_substr));
+
+    let image_path = datasets_dir.join(&item.image_rel_path);
+    let image = ImageReader::open(&image_path)
+        .unwrap_or_else(|e| panic!("open image {}: {}", image_path.display(), e))
+        .decode()
+        .unwrap_or_else(|e| panic!("decode image {}: {}", image_path.display(), e))
+        .to_rgba8();
+
+    // Run OCR (same as production path).
+    let texts = match ocr::recognize_text_from_image(
+        &image_path,
+        image.width(),
+        image.height(),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("warn: OCR failed: {} — falling back to no-text path", e.message);
+            Vec::new()
+        }
+    };
+    let text_bounds: Vec<Bounds> = texts.iter().map(|t| t.bounds.clone()).collect();
+
+    println!("\n=== {}: {} OCR texts ===", id_substr, texts.len());
+    for (i, t) in texts.iter().enumerate() {
+        println!(
+            "  text {:3}: x={:6.1} y={:6.1} w={:6.1} h={:6.1} conf={:.2} {:?}",
+            i, t.bounds.x, t.bounds.y, t.bounds.width, t.bounds.height,
+            t.confidence, t.text
+        );
+    }
+
+    let text_labels: Vec<&str> = texts.iter().map(|t| t.text.as_str()).collect();
+    let predicted = tokenize_boxes::detect_ui_boxes_with_labels(&image, &text_bounds, &text_labels);
+    let predicted_glyphs = tokenize_boxes::detect_glyphs(&image, &text_bounds);
+
+    println!("\n=== {} predicted boxes ===", predicted.len());
+    for (i, p) in predicted.iter().enumerate() {
+        println!(
+            "  box {:3}: x={:6.1} y={:6.1} w={:6.1} h={:6.1}",
+            i, p.x, p.y, p.width, p.height
+        );
+    }
+    println!("=== {} predicted glyphs ===", predicted_glyphs.len());
+
+    println!("\n=== GT annotations ===");
+    for ann in &item.annotations {
+        let gt = to_bounds(ann.bbox);
+        let gt = match gt {
+            Some(g) => g,
+            None => continue,
+        };
+
+        let best_iou = predicted
+            .iter()
+            .map(|p| iou(p, &gt))
+            .fold(0.0_f64, f64::max);
+        let best_glyph_iou = predicted_glyphs
+            .iter()
+            .map(|p| iou(p, &gt))
+            .fold(0.0_f64, f64::max);
+
+        let cfg = &configs[ann.category.as_str()];
+        let hit = best_iou >= cfg.iou_threshold
+            || (cfg.match_glyphs && best_glyph_iou >= cfg.iou_threshold);
+
+        println!(
+            "  {} {:<22} bbox=[{:6.1},{:6.1},{:6.1},{:6.1}] best_iou={:.3} glyph_iou={:.3} {}",
+            if hit { "HIT " } else { "MISS" },
+            ann.category,
+            gt.x, gt.y, gt.width, gt.height,
+            best_iou, best_glyph_iou,
+            ann.id
+        );
+    }
+
+    // Generate overlay
+    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("tmp/golden_overlays");
+    fs::create_dir_all(&out_dir).expect("create output dir");
+
+    let green = [0u8, 220, 0, 255];  // predicted boxes
+    let red = [220u8, 0, 0, 255];    // GT boxes
+    let blue = [60u8, 120, 255, 255]; // predicted glyphs
+    let cyan = [0u8, 220, 220, 255];  // OCR texts
+
+    let mut overlay = image.clone();
+    for t in &texts {
+        draw_rect(&mut overlay, &t.bounds, cyan, 1);
+    }
+    for p in &predicted {
+        draw_rect(&mut overlay, p, green, 2);
+    }
+    for p in &predicted_glyphs {
+        draw_rect(&mut overlay, p, blue, 1);
+    }
+    let hide_gt = std::env::var("HIDE_GT").is_ok();
+    if !hide_gt {
+        for ann in &item.annotations {
+            if let Some(gt) = to_bounds(ann.bbox) {
+                draw_rect(&mut overlay, &gt, red, 2);
+            }
+        }
+    }
+
+    let out_path = out_dir.join(format!("debug_{}.png", id_substr));
+    overlay.save(&out_path).expect("save overlay");
+    println!("\nOverlay: {}", out_path.display());
+}
+
+#[test]
+fn debug_dictionary() {
+    debug_single_image("dictionary");
+}
+
+#[test]
+fn debug_messages() {
+    debug_single_image("messages");
+}
+
 // ── overlay generation ──────────────────────────────────────────────────────
 
 fn draw_rect(img: &mut RgbaImage, b: &Bounds, color: [u8; 4], thickness: u32) {
@@ -348,9 +491,12 @@ fn generate_overlays() {
         for p in &predicted_glyphs {
             draw_rect(&mut overlay, p, blue, 1);
         }
-        for ann in &item.annotations {
-            if let Some(gt) = to_bounds(ann.bbox) {
-                draw_rect(&mut overlay, &gt, red, 2);
+        let hide_gt = std::env::var("HIDE_GT").is_ok();
+        if !hide_gt {
+            for ann in &item.annotations {
+                if let Some(gt) = to_bounds(ann.bbox) {
+                    draw_rect(&mut overlay, &gt, red, 2);
+                }
             }
         }
 
