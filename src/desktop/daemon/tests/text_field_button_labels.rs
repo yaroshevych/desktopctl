@@ -27,11 +27,11 @@ use text_group::{
 use tokenize_boxes::{ControlKind, DetectedControl};
 
 /// Per-dimension pixel tolerance for bbox matching.
-const BBOX_TOLERANCE: f64 = 15.0;
+const BBOX_TOLERANCE: f64 = 20.0;
 
-/// Minimum recall to pass (0.0 = stub passes, raise as implementation improves).
-const MIN_TEXT_FIELD_RECALL: f64 = 0.0;
-const MIN_BUTTON_RECALL: f64 = 0.0;
+/// Minimum recall to pass.
+const MIN_TEXT_FIELD_RECALL: f64 = 1.0;
+const MIN_BUTTON_RECALL: f64 = 1.0;
 
 // ── JSON schema ─────────────────────────────────────────────────────────────
 

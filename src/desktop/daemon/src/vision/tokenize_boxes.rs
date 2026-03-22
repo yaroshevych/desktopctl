@@ -190,14 +190,16 @@ fn text_component_boxes(frame: &ProcessedFrame) -> Vec<Bounds> {
 /// For a text line, scan outward in each direction using SAT strip queries
 /// to find the border position with peak edge energy. Returns the enclosing box.
 fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bounds> {
+    let dbg = debug_enabled();
     let img_w = frame.width as f64;
     let img_h = frame.height as f64;
     let font_h = text.height.max(1.0);
-    let w = frame.width;
-    let h = frame.height;
+    let _w = frame.width;
+    let _h = frame.height;
 
     // Expansion limits relative to font size.
-    let max_x = (font_h * 10.0).min(img_w * 0.4);
+    // max_x is generous: text fields can be much wider than their text content.
+    let max_x = (font_h * 20.0).min(img_w * 0.5);
     let max_y = (font_h * 4.0).min(img_h * 0.2);
 
     // Strip thickness for edge detection (relative to font).
@@ -217,6 +219,12 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
 
     // Must have expanded meaningfully beyond text.
     if cw < text.width + font_h * 0.3 || ch < text.height + font_h * 0.15 {
+        if dbg {
+            eprintln!(
+                "    find_enclosing REJECT(too small): text=[{:.0},{:.0},{:.0},{:.0}] lrtb=[{:.0},{:.0},{:.0},{:.0}] cw={:.0} ch={:.0}",
+                text.x, text.y, text.width, text.height, left, right, top, bottom, cw, ch,
+            );
+        }
         return None;
     }
     // Don't accept if expansion hit max in all 4 directions (no border found).
@@ -230,6 +238,13 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
         .filter(|e| **e >= max_limit * 0.95)
         .count();
     if at_max_count >= 3 {
+        if dbg {
+            eprintln!(
+                "    find_enclosing REJECT(at_max={}): text=[{:.0},{:.0},{:.0},{:.0}] expand=[{:.0},{:.0},{:.0},{:.0}] max_limit={:.0}",
+                at_max_count, text.x, text.y, text.width, text.height,
+                expanded_left, expanded_right, expanded_top, expanded_bottom, max_limit,
+            );
+        }
         return None; // No border found in most directions.
     }
 
@@ -240,7 +255,15 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
         height: ch.min(img_h),
     };
 
-    // Validate: border energy should exceed interior.
+    // Validate: border energy should exceed interior — unless the scanner
+    // found clear borders in most directions (expansion stopped before max).
+    // Rounded buttons have low average border energy because corners break
+    // the straight-line assumption of border_energy().
+    let directions_found = [expanded_left, expanded_right, expanded_top, expanded_bottom]
+        .iter()
+        .filter(|e| **e < max_limit * 0.90)
+        .count();
+
     let corner_skip = (font_h * 0.3) as usize;
     let border_e = frame.border_energy(&candidate, strip_thick, corner_skip);
     let interior_e = frame.interior_edge_energy(&candidate);
@@ -249,7 +272,17 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
     let effective_border = border_e + glow_e * 0.5;
     let noise_floor = interior_e.max(0.5);
 
-    if effective_border / noise_floor < 1.3 && border_e < 4.0 {
+    // If scanner found borders in >=3 directions, trust the expansion even with
+    // low border energy (handles rounded corners, subtle button styles).
+    let energy_ok = effective_border / noise_floor >= 1.3 || border_e >= 4.0;
+    if !energy_ok && directions_found < 3 {
+        if dbg {
+            eprintln!(
+                "    find_enclosing REJECT(energy): text=[{:.0},{:.0},{:.0},{:.0}] border={:.1} interior={:.1} glow={:.1} ratio={:.2} dirs_found={}",
+                text.x, text.y, text.width, text.height, border_e, interior_e, glow_e,
+                effective_border / noise_floor, directions_found,
+            );
+        }
         return None;
     }
 
@@ -267,6 +300,7 @@ fn scan_peak_edge_h(
 ) -> f64 {
     let w = frame.width;
     let h = frame.height;
+    let font_h = text.height.max(1.0);
 
     // Vertical range: extend slightly beyond text to catch borders.
     let y1 = (text.y as usize).max(1).min(h - 2);
@@ -284,6 +318,10 @@ fn scan_peak_edge_h(
     } else {
         ((text.x + text.width) as usize).min(w - 2)
     };
+
+    // Skip past text content: anti-aliased text edges extend a few pixels
+    // and would trigger the border detector immediately.
+    let skip = (font_h * 0.3).max(3.0) as usize;
 
     // Compute rolling baseline: average edge energy in a window behind us.
     let limit = max_expand as usize;
@@ -318,6 +356,12 @@ fn scan_peak_edge_h(
         let pixels = (sx2 - sx1) as f64 * (y2 - y1) as f64;
         let mean_e = e / pixels.max(1.0);
 
+        // Skip initial zone near text to avoid triggering on text content edges.
+        // Don't accumulate text-edge energy into running average.
+        if step <= skip {
+            continue;
+        }
+
         running_sum += mean_e;
         running_count += 1;
         let running_avg = running_sum / running_count as f64;
@@ -346,6 +390,7 @@ fn scan_peak_edge_v(
 ) -> f64 {
     let w = frame.width;
     let h = frame.height;
+    let font_h = text.height.max(1.0);
 
     let x1 = (text.x as usize).max(1).min(w - 2);
     let x2 = ((text.x + text.width) as usize).min(w - 2);
@@ -362,6 +407,8 @@ fn scan_peak_edge_v(
     } else {
         ((text.y + text.height) as usize).min(h - 2)
     };
+
+    let skip = (font_h * 0.3).max(3.0) as usize;
 
     let limit = max_expand as usize;
     let mut running_sum = 0.0f64;
@@ -394,6 +441,10 @@ fn scan_peak_edge_v(
         let e = frame.rect_sum(&frame.edge_sat, x1, sy1, x2 - 1, sy2 - 1);
         let pixels = (x2 - x1) as f64 * (sy2 - sy1) as f64;
         let mean_e = e / pixels.max(1.0);
+
+        if step <= skip {
+            continue;
+        }
 
         running_sum += mean_e;
         running_count += 1;
@@ -1069,10 +1120,108 @@ pub struct DetectedControl {
 }
 
 /// Detect text fields and buttons by expanding from text anchors until a border
-/// or contrast boundary is found. Stub — returns empty vec.
+/// or contrast boundary is found.
+///
+/// For each text line, uses `find_enclosing_control` to expand outward via SAT
+/// edge strip queries. Then classifies: wide + single-line text = TextField,
+/// compact + short text = Button.
 pub fn detect_controls(
-    _frame: &ProcessedFrame,
-    _text_lines: &[Bounds],
+    frame: &ProcessedFrame,
+    text_lines: &[Bounds],
 ) -> Vec<DetectedControl> {
-    Vec::new()
+    let dbg = debug_enabled();
+    let mut controls = Vec::new();
+
+    for text in text_lines {
+        let Some(enclosing) = find_enclosing_control(frame, text) else {
+            if dbg {
+                eprintln!(
+                    "  detect_control: NONE for text=[{:.0},{:.0},{:.0},{:.0}]",
+                    text.x, text.y, text.width, text.height,
+                );
+            }
+            continue;
+        };
+
+        let kind = classify_control(&enclosing, text);
+
+        if dbg {
+            eprintln!(
+                "  detect_control: {:?} [{:.0},{:.0},{:.0},{:.0}] text=[{:.0},{:.0},{:.0},{:.0}]",
+                kind, enclosing.x, enclosing.y, enclosing.width, enclosing.height,
+                text.x, text.y, text.width, text.height,
+            );
+        }
+
+        controls.push(DetectedControl {
+            bounds: enclosing,
+            kind,
+        });
+    }
+
+    // Dedupe: if two controls overlap significantly, keep the one with better
+    // border energy.
+    controls = dedupe_controls(controls, frame);
+    controls
+}
+
+/// Classify an enclosing control as TextField or Button based on geometry.
+fn classify_control(enclosing: &Bounds, text: &Bounds) -> ControlKind {
+    let aspect = enclosing.width / enclosing.height.max(1.0);
+    let text_fill_x = text.width / enclosing.width.max(1.0);
+
+    // Text fields: wide (aspect > 4), text doesn't fill most of the width
+    // (placeholder text is typically short relative to field width).
+    // Also: text fields are usually a single line height.
+    if aspect >= 4.0 && text_fill_x < 0.85 && enclosing.height < text.height * 3.5 {
+        return ControlKind::TextField;
+    }
+
+    // Buttons: compact, text fills most of the width, height is close to text height.
+    if enclosing.height < text.height * 4.0 && enclosing.width < text.width * 4.0 {
+        return ControlKind::Button;
+    }
+
+    // Default: if it's wider, lean toward text field; otherwise button.
+    if aspect >= 3.0 {
+        ControlKind::TextField
+    } else {
+        ControlKind::Button
+    }
+}
+
+fn dedupe_controls(controls: Vec<DetectedControl>, frame: &ProcessedFrame) -> Vec<DetectedControl> {
+    if controls.len() <= 1 {
+        return controls;
+    }
+    let n = controls.len();
+    let mut keep = vec![true; n];
+    for i in 0..n {
+        if !keep[i] {
+            continue;
+        }
+        for j in (i + 1)..n {
+            if !keep[j] {
+                continue;
+            }
+            let ov = iou(&controls[i].bounds, &controls[j].bounds);
+            if ov >= 0.50 {
+                // Keep the one with better border energy.
+                let ei = frame.border_energy(&controls[i].bounds, 3, 4);
+                let ej = frame.border_energy(&controls[j].bounds, 3, 4);
+                if ei >= ej {
+                    keep[j] = false;
+                } else {
+                    keep[i] = false;
+                    break;
+                }
+            }
+        }
+    }
+    controls
+        .into_iter()
+        .zip(keep.iter())
+        .filter(|&(_, k)| *k)
+        .map(|(c, _)| c)
+        .collect()
 }
