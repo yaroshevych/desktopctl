@@ -79,6 +79,16 @@ run-log RUN:
 run-subset SOURCE VERDICT SLUG:
     uv run run/subset_run.py --source "{{SOURCE}}" --verdict "{{VERDICT}}" --slug "{{SLUG}}"
 
+# Add raw image(s) to a golden label dir and import into Label Studio.
+# Usage: just golden-add 6 datasets/labels/buttons img1.png img2.png
+# Control type defaults to "buttons"; override with CONTROL=links etc.
+golden-add PROJECT_ID DEST +IMAGES:
+    uv run import/golden_add.py \
+      --project-id {{PROJECT_ID}} \
+      --dest "{{DEST}}" \
+      --control-type "${CONTROL:-buttons}" \
+      --images {{IMAGES}}
+
 # Create focused label subset with image+overlay+label+metadata
 # for accepted/gold rows and text-field-boundary comments.
 # Usage: just run-focus-set 20260321-185915-text_fields
