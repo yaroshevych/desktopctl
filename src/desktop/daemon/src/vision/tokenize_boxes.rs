@@ -87,21 +87,7 @@ pub fn detect_ui_boxes_with_labels(
                     })
                     .and_then(|(i, _)| text_labels.get(i).map(|s| s.to_string()))
                     .unwrap_or_default();
-                let tight = tighten_to_content(&b, &frame);
-                if debug_enabled() {
-                    let dx = tight.x - b.x;
-                    let dy = tight.y - b.y;
-                    let dw = b.width - tight.width;
-                    let dh = b.height - tight.height;
-                    if dx.abs() > 1.0 || dy.abs() > 1.0 || dw.abs() > 1.0 || dh.abs() > 1.0 {
-                        eprintln!(
-                            "  tighten {:?}: [{:.0},{:.0},{:.0},{:.0}] -> [{:.0},{:.0},{:.0},{:.0}]",
-                            label, b.x, b.y, b.width, b.height,
-                            tight.x, tight.y, tight.width, tight.height
-                        );
-                    }
-                }
-                TextBox::from_bounds_with_text(tight, label)
+                TextBox::from_bounds_with_text(b, label)
             })
             .collect()
     } else {
@@ -115,6 +101,30 @@ pub fn detect_ui_boxes_with_labels(
     let words: Vec<TextBox> = words
         .into_iter()
         .flat_map(|tb| split_wide_textbox(tb, &frame))
+        .map(|tb| {
+            let tight = tighten_to_content(&tb.bounds, &frame);
+            if debug_enabled() {
+                let dx = tight.x - tb.bounds.x;
+                let dy = tight.y - tb.bounds.y;
+                let dw = tb.bounds.width - tight.width;
+                let dh = tb.bounds.height - tight.height;
+                if dx.abs() > 1.0 || dy.abs() > 1.0 || dw.abs() > 1.0 || dh.abs() > 1.0 {
+                    eprintln!(
+                        "  tighten {:?}: [{:.0},{:.0},{:.0},{:.0}] -> [{:.0},{:.0},{:.0},{:.0}]",
+                        tb.text,
+                        tb.bounds.x,
+                        tb.bounds.y,
+                        tb.bounds.width,
+                        tb.bounds.height,
+                        tight.x,
+                        tight.y,
+                        tight.width,
+                        tight.height
+                    );
+                }
+            }
+            TextBox::from_bounds_with_text(tight, tb.text)
+        })
         .collect();
 
     // Step 2: Group words → lines → paragraphs.

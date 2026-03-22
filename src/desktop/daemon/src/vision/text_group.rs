@@ -67,6 +67,14 @@ impl TextBox {
 /// First tries text_mask (excludes UI borders like pills), then falls back to
 /// edge image for low-contrast text.
 pub(crate) fn tighten_to_content(bounds: &Bounds, frame: &ProcessedFrame) -> Bounds {
+    tighten_to_content_with_min_ratio(bounds, frame, 0.5)
+}
+
+fn tighten_to_content_with_min_ratio(
+    bounds: &Bounds,
+    frame: &ProcessedFrame,
+    min_ratio: f64,
+) -> Bounds {
     let x1 = (bounds.x as usize).min(frame.width.saturating_sub(1));
     let y1 = (bounds.y as usize).min(frame.height.saturating_sub(1));
     let x2 = ((bounds.x + bounds.width) as usize).min(frame.width);
@@ -78,7 +86,7 @@ pub(crate) fn tighten_to_content(bounds: &Bounds, frame: &ProcessedFrame) -> Bou
     // Try text_mask first — it only marks actual text strokes, not UI borders.
     if let Some(tight) = tighten_with(bounds, x1, y1, x2, y2, |x, y| {
         frame.text_mask[y * frame.width + x]
-    }) {
+    }, min_ratio) {
         return tight;
     }
 
@@ -86,7 +94,7 @@ pub(crate) fn tighten_to_content(bounds: &Bounds, frame: &ProcessedFrame) -> Bou
     const EDGE_THRESH: u8 = 12;
     if let Some(tight) = tighten_with(bounds, x1, y1, x2, y2, |x, y| {
         frame.edge[y * frame.width + x] > EDGE_THRESH
-    }) {
+    }, min_ratio) {
         return tight;
     }
 
@@ -94,7 +102,7 @@ pub(crate) fn tighten_to_content(bounds: &Bounds, frame: &ProcessedFrame) -> Bou
 }
 
 /// Generic tighten: scan inward from each edge using a pixel predicate.
-/// Returns None if result is too small (< 50% of original in either dimension).
+/// Returns None if result is too small (below `min_ratio` of original in either dimension).
 fn tighten_with<F>(
     bounds: &Bounds,
     x1: usize,
@@ -102,6 +110,7 @@ fn tighten_with<F>(
     x2: usize,
     y2: usize,
     has_content: F,
+    min_ratio: f64,
 ) -> Option<Bounds>
 where
     F: Fn(usize, usize) -> bool,
@@ -155,8 +164,8 @@ where
     }
     let new_w = (right - left) as f64;
     let new_h = (bottom - top) as f64;
-    // Don't tighten if result is too small (< 50% of original in either dimension).
-    if new_w < bounds.width * 0.5 || new_h < bounds.height * 0.5 {
+    // Don't tighten if result is too small.
+    if new_w < bounds.width * min_ratio || new_h < bounds.height * min_ratio {
         return None;
     }
 
@@ -174,6 +183,7 @@ where
 /// the line height. This breaks apart OCR results like "Thesaurus Apple" where
 /// Vision merged two spatially separate words into one bounding box.
 pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<TextBox> {
+    let dbg = debug_enabled();
     let h = tb.bounds.height;
     if h < 4.0 || tb.bounds.width < h * 2.5 {
         return vec![tb];
@@ -183,10 +193,30 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     let tight = tighten_to_content(&tb.bounds, frame);
     let h = tight.height;
 
-    let x1 = (tight.x as usize).min(frame.width.saturating_sub(1));
-    let y1 = (tight.y as usize).min(frame.height.saturating_sub(1));
-    let x2 = ((tight.x + tight.width) as usize).min(frame.width);
-    let y2 = ((tight.y + tight.height) as usize).min(frame.height);
+    // If tightening shrinks too much, keep scan on the original OCR box.
+    // Thin symbols ("<", ">") can disappear during tighten, hiding real gaps.
+    let use_original_scan =
+        tight.width < tb.bounds.width * 0.72 || tight.height < tb.bounds.height * 0.72;
+    let scan = if use_original_scan { &tb.bounds } else { &tight };
+    if dbg && use_original_scan {
+        eprintln!(
+            "  split_scan_bounds {:?}: using original box [{:.0},{:.0},{:.0},{:.0}] over tight [{:.0},{:.0},{:.0},{:.0}]",
+            tb.text,
+            tb.bounds.x,
+            tb.bounds.y,
+            tb.bounds.width,
+            tb.bounds.height,
+            tight.x,
+            tight.y,
+            tight.width,
+            tight.height
+        );
+    }
+
+    let x1 = (scan.x as usize).min(frame.width.saturating_sub(1));
+    let y1 = (scan.y as usize).min(frame.height.saturating_sub(1));
+    let x2 = ((scan.x + scan.width) as usize).min(frame.width);
+    let y2 = ((scan.y + scan.height) as usize).min(frame.height);
 
     if x2 <= x1 || y2 <= y1 {
         return vec![tb];
@@ -208,11 +238,18 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
         128.0
     };
     let is_dark_bg = bg_luma < 128.0;
+    // Scan only the center band to avoid counting 1px UI separators that run
+    // across the entire box width (toolbar rules, field borders) as "text".
+    let region_h = y2 - y1;
+    let vpad = ((region_h as f64) * 0.18).round() as usize;
+    let scan_y1 = (y1 + vpad).min(y2.saturating_sub(1));
+    let scan_y2 = y2.saturating_sub(vpad).max(scan_y1 + 1);
+    let scan_h = scan_y2.saturating_sub(scan_y1).max(1);
 
     // Find peak text intensity (max deviation from bg).
     let mut max_dev = 0.0f64;
     for x in x1..x2 {
-        for y in y1..y2 {
+        for y in scan_y1..scan_y2 {
             let val = frame.gray[y * frame.width + x] as f64;
             let dev = if is_dark_bg {
                 val - bg_luma
@@ -229,18 +266,13 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     // but ignores anti-aliased edges and subtle gradients.
     let threshold = (max_dev * 0.40).max(20.0);
 
-    let dbg = debug_enabled();
-    if dbg {
-        eprintln!(
-            "  split_scan {:?}: bg_luma={:.0} dark_bg={} max_dev={:.0} thresh={:.0} min_gap={:.0}",
-            tb.text, bg_luma, is_dark_bg, max_dev, threshold, h * SPLIT_HGAP_FONT_RATIO
-        );
-    }
-
-    // Build column occupancy: for each x column, is there any text pixel?
-    let mut col_has_content = vec![false; x2 - x1];
-    for x in x1..x2 {
-        for y in y1..y2 {
+    // Drop rows that are too "full". They are usually horizontal UI rules and
+    // borders, which otherwise break long gaps between words.
+    let scan_w = x2 - x1;
+    let mut keep_row = vec![true; scan_h];
+    for y in scan_y1..scan_y2 {
+        let mut row_ink = 0usize;
+        for x in x1..x2 {
             let val = frame.gray[y * frame.width + x] as f64;
             let is_text = if is_dark_bg {
                 val - bg_luma > threshold
@@ -248,10 +280,61 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
                 bg_luma - val > threshold
             };
             if is_text {
-                col_has_content[x - x1] = true;
-                break;
+                row_ink += 1;
             }
         }
+        let fill_ratio = row_ink as f64 / scan_w.max(1) as f64;
+        if fill_ratio >= 0.72 {
+            keep_row[y - scan_y1] = false;
+        }
+    }
+    if !keep_row.iter().any(|&v| v) {
+        keep_row.fill(true);
+    }
+    let usable_rows = keep_row.iter().filter(|&&v| v).count().max(1);
+
+    // Build column occupancy: a column has text only if it has enough
+    // in-band text pixels, not just a single hot/noisy pixel.
+    let mut col_has_content = vec![false; x2 - x1];
+    let min_ink_px = ((usable_rows as f64) * 0.10).round() as usize;
+    let min_ink_px = min_ink_px.max(3).min(usable_rows);
+    for x in x1..x2 {
+        let mut ink = 0usize;
+        for y in scan_y1..scan_y2 {
+            if !keep_row[y - scan_y1] {
+                continue;
+            }
+            let val = frame.gray[y * frame.width + x] as f64;
+            let is_text = if is_dark_bg {
+                val - bg_luma > threshold
+            } else {
+                bg_luma - val > threshold
+            };
+            if is_text {
+                ink += 1;
+                if ink >= min_ink_px {
+                    col_has_content[x - x1] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if dbg {
+        let dropped_rows = keep_row.iter().filter(|&&v| !v).count();
+        eprintln!(
+            "  split_scan {:?}: bg_luma={:.0} dark_bg={} max_dev={:.0} thresh={:.0} min_gap={:.0} scan_y={}..{} min_ink={} dropped_rows={}",
+            tb.text,
+            bg_luma,
+            is_dark_bg,
+            max_dev,
+            threshold,
+            h * SPLIT_HGAP_FONT_RATIO,
+            scan_y1,
+            scan_y2,
+            min_ink_px,
+            dropped_rows
+        );
     }
 
     // Find gap runs (consecutive empty columns).
@@ -319,7 +402,7 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
     // Tighten each sub-box to actual content.
     let result: Vec<Bounds> = result
         .into_iter()
-        .map(|b| tighten_to_content(&b, frame))
+        .map(|b| tighten_to_content_with_min_ratio(&b, frame, 0.2))
         .collect();
 
     // Distribute words across sub-boxes by x-position.
@@ -335,6 +418,52 @@ pub(crate) fn split_wide_textbox(tb: TextBox, frame: &ProcessedFrame) -> Vec<Tex
                 textboxes[i].text = word.to_string();
             }
         } else if words.len() > textboxes.len() {
+            // Special-case leading symbol tokens ("<", ">", etc.): keep them
+            // grouped in the left-most split box instead of attaching to the
+            // next word group.
+            if textboxes.len() == 2 {
+                let lead_symbols = words
+                    .iter()
+                    .take_while(|w| {
+                        !w.is_empty() && w.chars().all(|c| !c.is_alphanumeric())
+                    })
+                    .count();
+                if lead_symbols > 0 && lead_symbols < words.len() {
+                    textboxes[0].text = words[..lead_symbols].join(" ");
+                    textboxes[1].text = words[lead_symbols..].join(" ");
+                    if dbg {
+                        eprintln!(
+                            "    split_assign symbols: left={:?} right={:?}",
+                            textboxes[0].text,
+                            textboxes[1].text
+                        );
+                    }
+                    if dbg {
+                        eprintln!(
+                            "  split_wide: {:?} [{:.0},{:.0},{:.0},{:.0}] → {} parts",
+                            tb.text,
+                            tb.bounds.x,
+                            tb.bounds.y,
+                            tb.bounds.width,
+                            tb.bounds.height,
+                            textboxes.len()
+                        );
+                        for (i, sub) in textboxes.iter().enumerate() {
+                            eprintln!(
+                                "    part {}: [{:.0},{:.0},{:.0},{:.0}] {:?}",
+                                i,
+                                sub.bounds.x,
+                                sub.bounds.y,
+                                sub.bounds.width,
+                                sub.bounds.height,
+                                sub.text
+                            );
+                        }
+                    }
+                    return textboxes;
+                }
+            }
+
             // More words than boxes: distribute proportionally by width.
             let total_w: f64 = textboxes.iter().map(|tb| tb.bounds.width).sum();
             let n_boxes = textboxes.len();
@@ -471,7 +600,8 @@ pub(crate) fn group_lines_into_paragraphs(lines: &[TextBox]) -> Vec<TextBox> {
             b.bounds.y + b.bounds.height,
         );
         // Gap relative to font height.
-        if vgap > min_h * 2.2 {
+        // Keep this fairly tight to avoid merging unrelated stacked UI labels.
+        if vgap > min_h * 1.4 {
             return false;
         }
         let hoverlap = overlap_1d(
