@@ -36,8 +36,16 @@ impl ProcessedFrame {
         let sw = w + 1;
         // Map to SAT coordinates (shifted by 1).
         let a = sat[(y2 + 1) * sw + (x2 + 1)];
-        let b = if y1 == 0 { 0.0 } else { sat[y1 * sw + (x2 + 1)] };
-        let c = if x1 == 0 { 0.0 } else { sat[(y2 + 1) * sw + x1] };
+        let b = if y1 == 0 {
+            0.0
+        } else {
+            sat[y1 * sw + (x2 + 1)]
+        };
+        let c = if x1 == 0 {
+            0.0
+        } else {
+            sat[(y2 + 1) * sw + x1]
+        };
         let d = if x1 == 0 || y1 == 0 {
             0.0
         } else {

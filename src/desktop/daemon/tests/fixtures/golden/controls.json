@@ -23,7 +23,7 @@
         "text": "Dictionary"
       }
     ],
-    "not_controls": ["Wikipedia"]
+    "not_controls": ["Wikipedia", "Dictionary","Thesaurus","All"]
   },
   {
     "file": "dictionary_default_light.png",
@@ -49,7 +49,7 @@
         "text": "Dictionary"
       }
     ],
-    "not_controls": ["Wikipedia"]
+    "not_controls": ["Wikipedia", "Dictionary","Thesaurus","All"]
   },
   {
     "file": "facetime_default_dark.png",
@@ -83,7 +83,8 @@
         ],
         "text": "Sign In"
       }
-    ]
+    ],
+    "not_controls": ["Create New Apple Account"]
   },
   {
     "file": "facetime_default_light.png",
@@ -117,7 +118,8 @@
         ],
         "text": "Sign In"
       }
-    ]
+    ],
+    "not_controls": ["Create New Apple Account"]
   },
   {
     "file": "messages_default_dark.png",
@@ -151,7 +153,8 @@
         ],
         "text": "Sign In"
       }
-    ]
+    ],
+    "not_controls": ["Create New Apple Account"]
   },
   {
     "file": "messages_default_light.png",
@@ -185,6 +188,7 @@
         ],
         "text": "Sign In"
       }
-    ]
+    ],
+    "not_controls": ["Create New Apple Account"]
   }
 ]

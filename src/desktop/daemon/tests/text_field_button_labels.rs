@@ -21,9 +21,7 @@ use std::{fs, path::PathBuf};
 use desktop_core::protocol::Bounds;
 use image::ImageReader;
 use serde::Deserialize;
-use text_group::{
-    TextBox, group_words_into_lines, split_wide_textbox, tighten_to_content,
-};
+use text_group::{TextBox, group_words_into_lines, split_wide_textbox, tighten_to_content};
 use tokenize_boxes::{ControlKind, DetectedControl};
 
 /// Per-dimension pixel tolerance for bbox matching.
@@ -138,9 +136,14 @@ fn match_controls(
             let hint = closest_distance(all_predicted, &expected, kind);
             eprintln!(
                 "  MISS {} in {}: expected [{:.0},{:.0},{:.0},{:.0}] {:?}  {}",
-                kind_name, file,
-                expected.x, expected.y, expected.width, expected.height,
-                label.text, hint,
+                kind_name,
+                file,
+                expected.x,
+                expected.y,
+                expected.width,
+                expected.height,
+                label.text,
+                hint,
             );
         }
     }
@@ -150,14 +153,72 @@ fn match_controls(
 }
 
 fn bbox_overlaps(a: &Bounds, b: &Bounds) -> bool {
-    a.x < b.x + b.width
-        && a.x + a.width > b.x
-        && a.y < b.y + b.height
-        && a.y + a.height > b.y
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
 }
 
 fn bbox_distance(a: &Bounds, b: &Bounds) -> f64 {
     (a.x - b.x).abs() + (a.y - b.y).abs() + (a.width - b.width).abs() + (a.height - b.height).abs()
+}
+
+fn enforce_dictionary_control_uniqueness(
+    entry: &ImageControls,
+    text_lines: &[TextLine],
+    predicted: &[DetectedControl],
+) {
+    let expected = entry.buttons.iter().find(|b| b.text == "Dictionary");
+    let Some(expected) = expected else {
+        return;
+    };
+    let expected = to_bounds(&expected.bbox);
+
+    // Any OCR line containing "Dictionary" is considered dictionary-related.
+    let dict_lines: Vec<&TextLine> = text_lines
+        .iter()
+        .filter(|l| l.text.contains("Dictionary"))
+        .collect();
+    if dict_lines.is_empty() {
+        return;
+    }
+
+    let overlaps_dict_line = |c: &DetectedControl| {
+        dict_lines
+            .iter()
+            .any(|l| bbox_overlaps(&c.bounds, &l.bounds))
+    };
+
+    // Consume the expected Dictionary button first.
+    let consumed_idx = predicted
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == ControlKind::Button && overlaps_dict_line(c))
+        .find(|(_, c)| bbox_matches(&c.bounds, &expected))
+        .map(|(i, _)| i);
+
+    assert!(
+        consumed_idx.is_some(),
+        "Expected Dictionary button not found in {} at [{:.0},{:.0},{:.0},{:.0}]",
+        entry.file,
+        expected.x,
+        expected.y,
+        expected.width,
+        expected.height
+    );
+
+    // After consuming the expected one, there must be no additional
+    // Dictionary-related controls (button or text field).
+    for (i, c) in predicted.iter().enumerate() {
+        if Some(i) == consumed_idx {
+            continue;
+        }
+        if overlaps_dict_line(c)
+            && (c.kind == ControlKind::Button || c.kind == ControlKind::TextField)
+        {
+            panic!(
+                "Dictionary control conflict in {}: extra {:?} at [{:.0},{:.0},{:.0},{:.0}]",
+                entry.file, c.kind, c.bounds.x, c.bounds.y, c.bounds.width, c.bounds.height
+            );
+        }
+    }
 }
 
 struct TextLine {
@@ -165,7 +226,9 @@ struct TextLine {
     text: String,
 }
 
-fn run_text_pipeline(image_path: &std::path::Path) -> (Vec<TextLine>, metal_pipeline::ProcessedFrame) {
+fn run_text_pipeline(
+    image_path: &std::path::Path,
+) -> (Vec<TextLine>, metal_pipeline::ProcessedFrame) {
     let image = ImageReader::open(image_path)
         .unwrap_or_else(|e| panic!("open image {}: {}", image_path.display(), e))
         .decode()
@@ -232,18 +295,29 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
         let predicted = tokenize_boxes::detect_controls(&frame, &line_bounds);
 
         // Split predictions by kind.
-        let pred_tf: Vec<&DetectedControl> =
-            predicted.iter().filter(|c| c.kind == ControlKind::TextField).collect();
-        let pred_btn: Vec<&DetectedControl> =
-            predicted.iter().filter(|c| c.kind == ControlKind::Button).collect();
+        let pred_tf: Vec<&DetectedControl> = predicted
+            .iter()
+            .filter(|c| c.kind == ControlKind::TextField)
+            .collect();
+        let pred_btn: Vec<&DetectedControl> = predicted
+            .iter()
+            .filter(|c| c.kind == ControlKind::Button)
+            .collect();
 
         // 1:1 greedy matching: each expected consumes at most one prediction.
-        let (matched, fp) = match_controls(&pred_tf, &entry.text_fields, &entry.file, "text_field", &predicted);
+        let (matched, fp) = match_controls(
+            &pred_tf,
+            &entry.text_fields,
+            &entry.file,
+            "text_field",
+            &predicted,
+        );
         tf_total += entry.text_fields.len();
         tf_matched += matched;
         tf_fp += fp;
 
-        let (matched, fp) = match_controls(&pred_btn, &entry.buttons, &entry.file, "button", &predicted);
+        let (matched, fp) =
+            match_controls(&pred_btn, &entry.buttons, &entry.file, "button", &predicted);
         btn_total += entry.buttons.len();
         btn_matched += matched;
         btn_fp += fp;
@@ -251,10 +325,19 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
         // Negative assertions: text lines matching these strings must NOT
         // produce a detected control.
         for neg_text in &entry.not_controls {
+            // "Dictionary" is handled by a dedicated consume-and-uniqueness
+            // rule below (one expected button allowed, no extras).
+            if neg_text == "Dictionary" {
+                continue;
+            }
             // Find the text line containing this string.
-            let neg_line = text_lines.iter().find(|l| l.text.contains(neg_text.as_str()));
+            let neg_line = text_lines
+                .iter()
+                .find(|l| l.text.contains(neg_text.as_str()));
             if let Some(line) = neg_line {
-                let bad = predicted.iter().any(|c| bbox_overlaps(&c.bounds, &line.bounds));
+                let bad = predicted
+                    .iter()
+                    .any(|c| bbox_overlaps(&c.bounds, &line.bounds));
                 assert!(
                     !bad,
                     "NEGATIVE: {:?} in {} was detected as a control but should not be",
@@ -262,10 +345,23 @@ fn golden_controls_have_expected_text_fields_and_buttons() {
                 );
             }
         }
+
+        // Dictionary-specific guard:
+        // consume the expected "Dictionary" button, then ensure no additional
+        // Dictionary-related control (button/text_field) exists.
+        enforce_dictionary_control_uniqueness(entry, &text_lines, &predicted);
     }
 
-    let tf_recall = if tf_total == 0 { 1.0 } else { tf_matched as f64 / tf_total as f64 };
-    let btn_recall = if btn_total == 0 { 1.0 } else { btn_matched as f64 / btn_total as f64 };
+    let tf_recall = if tf_total == 0 {
+        1.0
+    } else {
+        tf_matched as f64 / tf_total as f64
+    };
+    let btn_recall = if btn_total == 0 {
+        1.0
+    } else {
+        btn_matched as f64 / btn_total as f64
+    };
 
     println!(
         "controls: text_field recall={:.3} ({}/{}) fp={}  button recall={:.3} ({}/{}) fp={}",

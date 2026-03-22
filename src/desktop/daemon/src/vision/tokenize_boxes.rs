@@ -20,16 +20,19 @@ pub struct DetectedControl {
     pub kind: ControlKind,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EdgeHit {
+    pos: f64,
+    found: bool,
+}
+
 /// Detect text fields and buttons by expanding from text anchors until a border
 /// or contrast boundary is found.
 ///
 /// For each text line, uses `find_enclosing_control` to expand outward via SAT
 /// edge strip queries. Then classifies: wide + single-line text = TextField,
 /// compact + short text = Button.
-pub fn detect_controls(
-    frame: &ProcessedFrame,
-    text_lines: &[Bounds],
-) -> Vec<DetectedControl> {
+pub fn detect_controls(frame: &ProcessedFrame, text_lines: &[Bounds]) -> Vec<DetectedControl> {
     let dbg = debug_enabled();
     let mut controls = Vec::new();
 
@@ -44,34 +47,67 @@ pub fn detect_controls(
             continue;
         };
 
-        // Reject if the enclosing box overlaps other text lines at a similar
-        // vertical position — that means we hit a container/toolbar border,
-        // not a single control's border. We check for horizontal overlap with
-        // any other text on the same row (within font-height vertical distance).
+        // Reject if the enclosing box encloses other text lines — that means
+        // expansion stopped at text edges or a container border, not a single
+        // control's border.
         let font_h = text.height.max(1.0);
         let contains_others = text_lines.iter().enumerate().any(|(j, other)| {
             if j == idx {
                 return false;
             }
-            // Same row: vertical centers within font_h of each other.
+            // Check 1: same-row text overlaps the enclosing box horizontally.
             let cy = text.y + text.height / 2.0;
             let oy = other.y + other.height / 2.0;
-            if (cy - oy).abs() > font_h * 1.5 {
-                return false;
+            let same_row = (cy - oy).abs() <= font_h * 1.5;
+            if same_row {
+                let ox1 = other.x;
+                let ox2 = other.x + other.width;
+                let ex1 = enclosing.x;
+                let ex2 = enclosing.x + enclosing.width;
+                if overlap_1d(ox1, ox2, ex1, ex2) > 0.0 {
+                    return true;
+                }
             }
-            // Other text overlaps the enclosing box horizontally.
-            let ox1 = other.x;
-            let ox2 = other.x + other.width;
-            let ex1 = enclosing.x;
-            let ex2 = enclosing.x + enclosing.width;
-            overlap_1d(ox1, ox2, ex1, ex2) > 0.0
+            // Check 2: any text center inside the enclosing box (cross-row).
+            let cx = other.x + other.width / 2.0;
+            let cy2 = other.y + other.height / 2.0;
+            if cx >= enclosing.x
+                && cx <= enclosing.x + enclosing.width
+                && cy2 >= enclosing.y
+                && cy2 <= enclosing.y + enclosing.height
+            {
+                return true;
+            }
+            // Check 3: any substantial overlap with another text line means
+            // this is likely a container/group boundary, not a single control.
+            let ov_x = overlap_1d(
+                other.x,
+                other.x + other.width,
+                enclosing.x,
+                enclosing.x + enclosing.width,
+            );
+            let ov_y = overlap_1d(
+                other.y,
+                other.y + other.height,
+                enclosing.y,
+                enclosing.y + enclosing.height,
+            );
+            let ov_area = ov_x * ov_y;
+            let other_area = (other.width * other.height).max(1.0);
+            ov_area / other_area >= 0.15
         });
         if contains_others {
             if dbg {
                 eprintln!(
                     "  detect_control: CONTAINER [{:.0},{:.0},{:.0},{:.0}] text=[{:.0},{:.0},{:.0},{:.0}]",
-                    enclosing.x, enclosing.y, enclosing.width, enclosing.height,
-                    text.x, text.y, text.width, text.height,
+                    enclosing.x,
+                    enclosing.y,
+                    enclosing.width,
+                    enclosing.height,
+                    text.x,
+                    text.y,
+                    text.width,
+                    text.height,
                 );
             }
             continue;
@@ -82,8 +118,15 @@ pub fn detect_controls(
         if dbg {
             eprintln!(
                 "  detect_control: {:?} [{:.0},{:.0},{:.0},{:.0}] text=[{:.0},{:.0},{:.0},{:.0}]",
-                kind, enclosing.x, enclosing.y, enclosing.width, enclosing.height,
-                text.x, text.y, text.width, text.height,
+                kind,
+                enclosing.x,
+                enclosing.y,
+                enclosing.width,
+                enclosing.height,
+                text.x,
+                text.y,
+                text.width,
+                text.height,
             );
         }
 
@@ -126,6 +169,30 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
     // Scan down.
     let bottom = scan_peak_edge_v(frame, text, 1, max_y, strip_thick);
 
+    // If any side failed to find a real edge (and fell back to max-expand),
+    // this is not an enclosed control box.
+    if !(left.found && right.found && (top.found || bottom.found)) {
+        if dbg {
+            eprintln!(
+                "    find_enclosing REJECT(non-enclosed): text=[{:.0},{:.0},{:.0},{:.0}] found=[L{} R{} T{} B{}]",
+                text.x,
+                text.y,
+                text.width,
+                text.height,
+                left.found as u8,
+                right.found as u8,
+                top.found as u8,
+                bottom.found as u8,
+            );
+        }
+        return None;
+    }
+
+    let left = left.pos;
+    let right = right.pos;
+    let top = top.pos;
+    let bottom = bottom.pos;
+
     let cw = right - left;
     let ch = bottom - top;
 
@@ -153,8 +220,16 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
         if dbg {
             eprintln!(
                 "    find_enclosing REJECT(at_max={}): text=[{:.0},{:.0},{:.0},{:.0}] expand=[{:.0},{:.0},{:.0},{:.0}] max_limit={:.0}",
-                at_max_count, text.x, text.y, text.width, text.height,
-                expanded_left, expanded_right, expanded_top, expanded_bottom, max_limit,
+                at_max_count,
+                text.x,
+                text.y,
+                text.width,
+                text.height,
+                expanded_left,
+                expanded_right,
+                expanded_top,
+                expanded_bottom,
+                max_limit,
             );
         }
         return None; // No border found in most directions.
@@ -185,14 +260,21 @@ fn find_enclosing_control(frame: &ProcessedFrame, text: &Bounds) -> Option<Bound
     let noise_floor = interior_e.max(0.5);
 
     // If scanner found borders in >=3 directions, trust the expansion even with
-    // low border energy (handles rounded corners, subtle button styles).
+    // low border energy (handles rounded corners and subtle button styles).
     let energy_ok = effective_border / noise_floor >= 1.3 || border_e >= 4.0;
     if !energy_ok && directions_found < 3 {
         if dbg {
             eprintln!(
                 "    find_enclosing REJECT(energy): text=[{:.0},{:.0},{:.0},{:.0}] border={:.1} interior={:.1} glow={:.1} ratio={:.2} dirs_found={}",
-                text.x, text.y, text.width, text.height, border_e, interior_e, glow_e,
-                effective_border / noise_floor, directions_found,
+                text.x,
+                text.y,
+                text.width,
+                text.height,
+                border_e,
+                interior_e,
+                glow_e,
+                effective_border / noise_floor,
+                directions_found,
             );
         }
         return None;
@@ -209,7 +291,7 @@ fn scan_peak_edge_h(
     direction: i32, // -1=left, +1=right
     max_expand: f64,
     strip_thick: usize,
-) -> f64 {
+) -> EdgeHit {
     let w = frame.width;
     let h = frame.height;
     let font_h = text.height.max(1.0);
@@ -219,9 +301,15 @@ fn scan_peak_edge_h(
     let y2 = ((text.y + text.height) as usize).min(h - 2);
     if y2 <= y1 {
         return if direction < 0 {
-            text.x
+            EdgeHit {
+                pos: text.x,
+                found: false,
+            }
         } else {
-            text.x + text.width
+            EdgeHit {
+                pos: text.x + text.width,
+                found: false,
+            }
         };
     }
 
@@ -280,15 +368,24 @@ fn scan_peak_edge_h(
 
         // First significant edge: either absolute threshold or Nx above running average.
         if mean_e >= 4.0 && (mean_e >= running_avg * 2.5 || mean_e >= 8.0) {
-            return x as f64;
+            return EdgeHit {
+                pos: x as f64,
+                found: true,
+            };
         }
     }
 
     // No clear edge found.
     if direction < 0 {
-        (text.x - max_expand).max(0.0)
+        EdgeHit {
+            pos: (text.x - max_expand).max(0.0),
+            found: false,
+        }
     } else {
-        (text.x + text.width + max_expand).min(w as f64)
+        EdgeHit {
+            pos: (text.x + text.width + max_expand).min(w as f64),
+            found: false,
+        }
     }
 }
 
@@ -299,7 +396,7 @@ fn scan_peak_edge_v(
     direction: i32,
     max_expand: f64,
     strip_thick: usize,
-) -> f64 {
+) -> EdgeHit {
     let w = frame.width;
     let h = frame.height;
     let font_h = text.height.max(1.0);
@@ -308,9 +405,15 @@ fn scan_peak_edge_v(
     let x2 = ((text.x + text.width) as usize).min(w - 2);
     if x2 <= x1 {
         return if direction < 0 {
-            text.y
+            EdgeHit {
+                pos: text.y,
+                found: false,
+            }
         } else {
-            text.y + text.height
+            EdgeHit {
+                pos: text.y + text.height,
+                found: false,
+            }
         };
     }
 
@@ -363,14 +466,23 @@ fn scan_peak_edge_v(
         let running_avg = running_sum / running_count as f64;
 
         if mean_e >= 4.0 && (mean_e >= running_avg * 2.5 || mean_e >= 8.0) {
-            return y as f64;
+            return EdgeHit {
+                pos: y as f64,
+                found: true,
+            };
         }
     }
 
     if direction < 0 {
-        (text.y - max_expand).max(0.0)
+        EdgeHit {
+            pos: (text.y - max_expand).max(0.0),
+            found: false,
+        }
     } else {
-        (text.y + text.height + max_expand).min(h as f64)
+        EdgeHit {
+            pos: (text.y + text.height + max_expand).min(h as f64),
+            found: false,
+        }
     }
 }
 
@@ -488,9 +600,5 @@ fn iou(a: &Bounds, b: &Bounds) -> f64 {
     let inter_h = overlap_1d(a.y, a.y + a.height, b.y, b.y + b.height);
     let inter = inter_w * inter_h;
     let union = a.width * a.height + b.width * b.height - inter;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter / union
-    }
+    if union <= 0.0 { 0.0 } else { inter / union }
 }

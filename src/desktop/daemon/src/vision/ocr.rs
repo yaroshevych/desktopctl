@@ -18,9 +18,7 @@ use crate::trace;
 
 /// Recognize text from an in-memory RGBA image.
 /// Preprocesses the image (dark-mode inversion, contrast boost) before OCR.
-pub fn recognize_text(
-    image: &RgbaImage,
-) -> Result<Vec<SnapshotText>, AppError> {
+pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> {
     let width = image.width();
     let height = image.height();
     trace::log(format!("ocr:start size={}x{}", width, height));
@@ -31,8 +29,11 @@ pub fn recognize_text(
     let ns_data = NSData::with_bytes(&png_bytes);
 
     let options = NSDictionary::<VNImageOption, AnyObject>::from_slices::<VNImageOption>(&[], &[]);
-    let handler =
-        VNImageRequestHandler::initWithData_options(VNImageRequestHandler::alloc(), &ns_data, &options);
+    let handler = VNImageRequestHandler::initWithData_options(
+        VNImageRequestHandler::alloc(),
+        &ns_data,
+        &options,
+    );
 
     let request = VNRecognizeTextRequest::new();
     request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
@@ -85,7 +86,9 @@ pub fn recognize_text_from_image(
 ) -> Result<Vec<SnapshotText>, AppError> {
     trace::log(format!("ocr:load path={}", path.display()));
     let img = image::open(path)
-        .map_err(|e| AppError::invalid_argument(format!("failed to open image {}: {}", path.display(), e)))?
+        .map_err(|e| {
+            AppError::invalid_argument(format!("failed to open image {}: {}", path.display(), e))
+        })?
         .to_rgba8();
     recognize_text(&img)
 }

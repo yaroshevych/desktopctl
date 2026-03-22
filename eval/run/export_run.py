@@ -53,6 +53,17 @@ def fetch_accepted(conn, project_id: int, verdict: str, control_type: str | None
     return rows
 
 
+def fetch_all(conn, project_id: int, control_type: str | None) -> list[dict]:
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM task WHERE project_id = %s ORDER BY id", (project_id,))
+    rows = []
+    for (data,) in cur.fetchall():
+        if control_type and data.get("control_type") != control_type:
+            continue
+        rows.append(data)
+    return rows
+
+
 def ls_url_to_path(url: str, data_dir: Path) -> Path:
     """Convert /data/local-files/?d=rel/path → absolute host path."""
     rel = url.replace("/data/local-files/?d=", "")
@@ -65,6 +76,7 @@ def main() -> None:
     ap.add_argument("--slug", required=True, help="Short name for this run, e.g. text_fields")
     ap.add_argument("--control-type", default=None, help="Filter by control_type (optional)")
     ap.add_argument("--verdict", default="accept")
+    ap.add_argument("--all", action="store_true", help="Export all tasks regardless of verdict")
     ap.add_argument("--pg-host", default="localhost")
     ap.add_argument("--pg-port", type=int, default=5432)
     ap.add_argument("--pg-user", default=os.getenv("POSTGRES_USER", "desktopctl"))
@@ -88,8 +100,12 @@ def main() -> None:
         user=args.pg_user, password=args.pg_password,
     )
 
-    print(f"fetching {args.verdict} labels from project #{args.project_id}...")
-    rows = fetch_accepted(conn, args.project_id, args.verdict, args.control_type)
+    if args.all:
+        print(f"fetching all tasks from project #{args.project_id}...")
+        rows = fetch_all(conn, args.project_id, args.control_type)
+    else:
+        print(f"fetching {args.verdict} labels from project #{args.project_id}...")
+        rows = fetch_accepted(conn, args.project_id, args.verdict, args.control_type)
     print(f"  found {len(rows)}")
 
     if not rows:
