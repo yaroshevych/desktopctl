@@ -191,13 +191,18 @@ pub fn process_cpu(image: &RgbaImage) -> ProcessedFrame {
         gray[i] = ((r * 77 + g * 150 + b * 29) >> 8) as u8;
     }
 
+    // Build a contrast-stretched grayscale for edge extraction so subtle
+    // borders survive Sobel, while keeping `gray` raw for other consumers.
+    let mut gray_for_edge = gray.clone();
+    contrast_stretch_gray(&mut gray_for_edge);
+
     // Sobel edge detection (|gx| + |gy|, clamped to 255).
     let mut edge = vec![0u8; n];
     for y in 1..height - 1 {
         for x in 1..width - 1 {
             let idx = y * width + x;
-            let gx = gray[idx + 1] as i32 - gray[idx - 1] as i32;
-            let gy = gray[idx + width] as i32 - gray[idx - width] as i32;
+            let gx = gray_for_edge[idx + 1] as i32 - gray_for_edge[idx - 1] as i32;
+            let gy = gray_for_edge[idx + width] as i32 - gray_for_edge[idx - width] as i32;
             edge[idx] = (gx.unsigned_abs() + gy.unsigned_abs()).min(255) as u8;
         }
     }
@@ -252,6 +257,48 @@ pub fn process_cpu(image: &RgbaImage) -> ProcessedFrame {
         text_mask,
         width,
         height,
+    }
+}
+
+fn contrast_stretch_gray(gray: &mut [u8]) {
+    if gray.is_empty() {
+        return;
+    }
+    let mut hist = [0usize; 256];
+    for &v in gray.iter() {
+        hist[v as usize] += 1;
+    }
+    let total = gray.len();
+    let low_target = ((total as f64) * 0.01).round() as usize;
+    let high_target = ((total as f64) * 0.99).round() as usize;
+
+    let mut acc = 0usize;
+    let mut lo = 0usize;
+    for (i, &h) in hist.iter().enumerate() {
+        acc += h;
+        if acc >= low_target {
+            lo = i;
+            break;
+        }
+    }
+
+    acc = 0;
+    let mut hi = 255usize;
+    for (i, &h) in hist.iter().enumerate() {
+        acc += h;
+        if acc >= high_target {
+            hi = i;
+            break;
+        }
+    }
+
+    if hi <= lo + 8 {
+        return;
+    }
+    let scale = 255.0f32 / (hi - lo) as f32;
+    for v in gray.iter_mut() {
+        let x = (*v as i32 - lo as i32).max(0) as f32;
+        *v = (x * scale).clamp(0.0, 255.0) as u8;
     }
 }
 
