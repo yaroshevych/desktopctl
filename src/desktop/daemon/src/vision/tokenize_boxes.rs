@@ -118,7 +118,11 @@ fn detect_ui_boxes_raw(image: &RgbaImage) -> Vec<Bounds> {
         &structural_panels,
     ));
     boxes.extend(text_row_and_paragraph_boxes(&gray, width, height, &boxes));
-    boxes.extend(toolbar_field_expansions(&boxes, width as f64, height as f64));
+    boxes.extend(toolbar_field_expansions(
+        &boxes,
+        width as f64,
+        height as f64,
+    ));
 
     let mut deduped = dedupe_boxes(boxes, 0.86);
     deduped = prune_nested_glitch_boxes(deduped);
@@ -133,64 +137,90 @@ fn toolbar_field_expansions(seed_boxes: &[Bounds], image_w: f64, image_h: f64) -
     if seed_boxes.is_empty() {
         return Vec::new();
     }
-    let mut scored: Vec<(f64, Bounds)> = Vec::new();
+    // Collect same-row seeds for boundary-aware expansion.
+    let toolbar_seeds: Vec<&Bounds> = seed_boxes
+        .iter()
+        .filter(|s| s.y < image_h * 0.25 && s.height >= 18.0 && s.height <= 80.0)
+        .collect();
+
+    let mut candidates: Vec<Bounds> = Vec::new();
     for seed in seed_boxes {
-        if seed.y > image_h * 0.20
+        if seed.y > image_h * 0.25
             || seed.height < 22.0
             || seed.height > 72.0
-            || seed.width < 110.0
+            || seed.width < 80.0
             || seed.width > image_w * 0.62
         {
             continue;
         }
         let aspect = seed.width / seed.height.max(1.0);
-        if aspect < 2.4 {
-            continue;
-        }
-        let left_space = seed.x.max(0.0);
-        let right_space = (image_w - (seed.x + seed.width)).max(0.0);
-        if left_space < seed.width * 0.18 && right_space < seed.width * 0.18 {
+        if aspect < 2.0 {
             continue;
         }
 
-        let mut left = (seed.x - (seed.height * 0.35).clamp(3.0, 14.0)).max(0.0);
-        if seed.x >= image_w * 0.22 {
-            left = (seed.x - (seed.width * 0.55).clamp(32.0, image_w * 0.30)).max(0.0);
+        let seed_right = seed.x + seed.width;
+        let top = (seed.y - (seed.height * 0.25).clamp(2.0, 8.0)).max(0.0);
+        let bottom = (seed.y + seed.height + (seed.height * 0.25).clamp(2.0, 8.0)).min(image_h);
+
+        // Find nearest same-row neighbor to the right (acts as right boundary).
+        let right_neighbor = toolbar_seeds
+            .iter()
+            .filter(|n| {
+                n.x > seed_right + 10.0
+                    && (n.y + n.height / 2.0 - seed.y - seed.height / 2.0).abs()
+                        < seed.height * 1.5
+            })
+            .min_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        let right_stop = right_neighbor
+            .map(|n| n.x - 4.0)
+            .unwrap_or(image_w);
+
+        // Find nearest same-row neighbor to the left.
+        let left_neighbor = toolbar_seeds
+            .iter()
+            .filter(|n| {
+                n.x + n.width < seed.x - 10.0
+                    && (n.y + n.height / 2.0 - seed.y - seed.height / 2.0).abs()
+                        < seed.height * 1.5
+            })
+            .max_by(|a, b| {
+                (a.x + a.width)
+                    .partial_cmp(&(b.x + b.width))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        let left_stop = left_neighbor
+            .map(|n| n.x + n.width + 4.0)
+            .unwrap_or(0.0);
+
+        // Generate a few expansion levels: modest, medium, bounded-by-neighbor.
+        let expansions: &[(f64, f64)] = &[
+            // (left_extend_frac, right_extend_frac) of seed width
+            (0.15, 0.6),
+            (0.3, 1.2),
+            (0.5, 2.0),
+        ];
+        for &(left_frac, right_frac) in expansions {
+            let left = (seed.x - seed.width * left_frac).max(left_stop).max(0.0);
+            let right = (seed_right + seed.width * right_frac)
+                .min(right_stop)
+                .min(image_w);
+            let w = right - left;
+            let h = bottom - top;
+            if w < seed.width * 1.3 || w > image_w * 0.85 || h < 22.0 || h > 90.0 {
+                continue;
+            }
+            if (w / h.max(1.0)) < 2.0 {
+                continue;
+            }
+            candidates.push(Bounds {
+                x: left,
+                y: top,
+                width: w,
+                height: h,
+            });
         }
-        let mut right = (seed.x + seed.width + (seed.width * 0.95).clamp(60.0, image_w * 0.48))
-            .min(image_w);
-        if right_space > seed.width * 0.30 {
-            right = (seed.x + seed.width + (right_space * 0.92)).min(image_w);
-        }
-        if seed.x > image_w * 0.45 {
-            right = (image_w - 2.0).max(right);
-        }
-        let top = (seed.y - (seed.height * 0.28).clamp(2.0, 10.0)).max(0.0);
-        let bottom = (seed.y + seed.height + (seed.height * 0.30).clamp(3.0, 14.0)).min(image_h);
-        let candidate = Bounds {
-            x: left,
-            y: top,
-            width: (right - left).max(0.0),
-            height: (bottom - top).max(0.0),
-        };
-        if candidate.width < seed.width + 80.0
-            || candidate.width > image_w * 0.93
-            || candidate.height < 24.0
-            || candidate.height > 96.0
-            || (candidate.width / candidate.height.max(1.0)) < 2.4
-            || !rect_contains(&candidate, seed, 1.0)
-        {
-            continue;
-        }
-        let growth = (candidate.width / seed.width.max(1.0)).clamp(1.0, 5.0);
-        let top_bonus = (1.0 - (seed.y / image_h.max(1.0))).clamp(0.0, 1.0);
-        let side_bonus = if seed.x > image_w * 0.25 { 0.35 } else { 0.0 };
-        let score = growth + top_bonus + side_bonus;
-        scored.push((score, candidate));
     }
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let top_k: Vec<Bounds> = scored.into_iter().take(60).map(|(_, b)| b).collect();
-    dedupe_boxes(top_k, 0.86)
+    dedupe_boxes(candidates, 0.80)
 }
 
 fn text_row_and_paragraph_boxes(
