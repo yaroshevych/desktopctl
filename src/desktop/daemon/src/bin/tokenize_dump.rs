@@ -7,7 +7,6 @@ use serde_json::json;
 
 // Dev-only threshold for external label files used by tokenize_dump batch runs.
 const TEXT_LABEL_CONFIDENCE_MIN: f32 = 0.50;
-const FINAL_TEXT_CONFIDENCE: f32 = 1.0;
 
 #[path = "../vision/metal_pipeline.rs"]
 #[allow(dead_code)]
@@ -106,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "id": "win_0001",
             "title": "screenshot",
             "bounds": {"x": 0.0, "y": 0.0, "width": width as f64, "height": height as f64},
-            "elements": build_elements_json(&final_fields, &controls)
+            "elements": build_elements_json(&lines, &final_fields, &controls)
         }]
     });
 
@@ -181,30 +180,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_elements_json(
+    lines: &[text_group::TextBox],
     texts: &[text_group::TextBox],
     controls: &[tokenize_boxes::DetectedControl],
 ) -> Vec<serde_json::Value> {
-    let mut out = Vec::new();
-    for (idx, text) in texts.iter().enumerate() {
+    let mut used_line = vec![false; lines.len()];
+    let mut out: Vec<serde_json::Value> = Vec::new();
+
+    for control in controls {
+        let mut best_idx: Option<usize> = None;
+        let mut best_score = 0.0f64;
+        for (idx, line) in lines.iter().enumerate() {
+            if used_line[idx] || line.text.trim().is_empty() {
+                continue;
+            }
+            let line_area = (line.bounds.width * line.bounds.height).max(1.0);
+            let overlap_ratio = overlap_area(&line.bounds, &control.bounds) / line_area;
+            let in_box = center_inside(&line.bounds, &control.bounds);
+            let score = overlap_ratio + if in_box { 0.35 } else { 0.0 };
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(idx);
+            }
+        }
+        if let Some(idx) = best_idx {
+            if best_score < 0.30 {
+                continue;
+            }
+            used_line[idx] = true;
+            let text = lines[idx].text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            out.push(json!({
+                "id": "",
+                "type": "text",
+                "bbox": [control.bounds.x, control.bounds.y, control.bounds.width, control.bounds.height],
+                "has_border": true,
+                "text": text,
+                "source": "sat_control_v1"
+            }));
+        }
+    }
+
+    for text in texts {
+        let mut overlaps_consumed = false;
+        for (idx, line) in lines.iter().enumerate() {
+            if !used_line[idx] {
+                continue;
+            }
+            let area = (line.bounds.width * line.bounds.height).max(1.0);
+            let ratio = overlap_area(&text.bounds, &line.bounds) / area;
+            if ratio >= 0.60 || center_inside(&line.bounds, &text.bounds) {
+                overlaps_consumed = true;
+                break;
+            }
+        }
+        if overlaps_consumed {
+            continue;
+        }
         out.push(json!({
-            "id": format!("text_{:04}", idx + 1),
+            "id": "",
             "type": "text",
             "bbox": [text.bounds.x, text.bounds.y, text.bounds.width, text.bounds.height],
             "text": text.text,
-            "confidence": FINAL_TEXT_CONFIDENCE,
             "source": "vision_ocr"
-        }));
-    }
-    for (idx, control) in controls.iter().enumerate() {
-        let control_type = match control.kind {
-            tokenize_boxes::ControlKind::TextField => "text_field",
-            tokenize_boxes::ControlKind::Button => "button",
-        };
-        out.push(json!({
-            "id": format!("ctrl_{:04}", idx + 1),
-            "type": control_type,
-            "bbox": [control.bounds.x, control.bounds.y, control.bounds.width, control.bounds.height],
-            "source": "sat_control_v1"
         }));
     }
     out.sort_by(|a, b| {
@@ -216,7 +256,35 @@ fn build_elements_json(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
     });
+    for (idx, entry) in out.iter_mut().enumerate() {
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "id".to_string(),
+                serde_json::Value::String(format!("text_{:04}", idx + 1)),
+            );
+        }
+    }
     out
+}
+
+fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    let ix1 = a.x.max(b.x);
+    let iy1 = a.y.max(b.y);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    let iw = (ix2 - ix1).max(0.0);
+    let ih = (iy2 - iy1).max(0.0);
+    iw * ih
+}
+
+fn center_inside(inner: &Bounds, outer: &Bounds) -> bool {
+    let cx = inner.x + inner.width * 0.5;
+    let cy = inner.y + inner.height * 0.5;
+    cx >= outer.x && cx <= outer.x + outer.width && cy >= outer.y && cy <= outer.y + outer.height
 }
 
 #[derive(Debug, Deserialize)]

@@ -60,6 +60,7 @@ struct OverlayRect {
 #[derive(Debug, Clone, Copy)]
 enum OverlayKind {
     Text,
+    BorderedText,
     Box,
     Glyph,
 }
@@ -868,6 +869,7 @@ fn outset_rect(rect: NSRect, dx: f64, dy: f64, clamp_to: NSRect) -> NSRect {
 fn overlay_color(kind: OverlayKind) -> Retained<NSColor> {
     match kind {
         OverlayKind::Text => NSColor::systemGreenColor(),
+        OverlayKind::BorderedText => NSColor::systemRedColor(),
         OverlayKind::Box => NSColor::systemBlueColor(),
         OverlayKind::Glyph => NSColor::yellowColor(),
     }
@@ -924,14 +926,30 @@ fn append_window_rects(
     let sx = (anchor_bounds.width / img_w).max(0.0001);
     let sy = (anchor_bounds.height / img_h).max(0.0001);
 
+    let bordered_boxes: Vec<[f64; 4]> = window
+        .elements
+        .iter()
+        .filter(|element| element.has_border.unwrap_or(false))
+        .map(|element| element.bbox)
+        .collect();
+
     for element in &window.elements {
+        let bbox = element.bbox;
         let kind = match element.kind.as_str() {
-            "text" => OverlayKind::Text,
+            "text" if element.has_border.unwrap_or(false) => OverlayKind::BorderedText,
+            "text" => {
+                if bordered_boxes
+                    .iter()
+                    .any(|outer| should_suppress_inner_text_overlay_bbox(&bbox, outer))
+                {
+                    continue;
+                }
+                OverlayKind::Text
+            }
             "box" => OverlayKind::Box,
             "glyph" => OverlayKind::Glyph,
             _ => continue,
         };
-        let bbox = element.bbox;
         let width = bbox[2] * sx;
         let height = bbox[3] * sy;
         if width < 2.0 || height < 2.0 {
@@ -948,6 +966,35 @@ fn append_window_rects(
             break;
         }
     }
+}
+
+fn bbox_overlap_area(a: &[f64; 4], b: &[f64; 4]) -> f64 {
+    let ax2 = a[0] + a[2];
+    let ay2 = a[1] + a[3];
+    let bx2 = b[0] + b[2];
+    let by2 = b[1] + b[3];
+    let ix1 = a[0].max(b[0]);
+    let iy1 = a[1].max(b[1]);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    let iw = (ix2 - ix1).max(0.0);
+    let ih = (iy2 - iy1).max(0.0);
+    iw * ih
+}
+
+fn bbox_center_inside(inner: &[f64; 4], outer: &[f64; 4]) -> bool {
+    let cx = inner[0] + inner[2] * 0.5;
+    let cy = inner[1] + inner[3] * 0.5;
+    cx >= outer[0] && cx <= outer[0] + outer[2] && cy >= outer[1] && cy <= outer[1] + outer[3]
+}
+
+fn should_suppress_inner_text_overlay_bbox(inner: &[f64; 4], outer: &[f64; 4]) -> bool {
+    let inner_area = (inner[2] * inner[3]).max(1.0);
+    let overlap = bbox_overlap_area(inner, outer);
+    let mostly_inside = overlap / inner_area >= 0.75;
+    let center_in = bbox_center_inside(inner, outer);
+    let clearly_smaller = outer[2] >= inner[2] + 8.0 && outer[3] >= inner[3] + 8.0;
+    center_in && mostly_inside && clearly_smaller
 }
 
 fn append_token_rects(
@@ -986,6 +1033,73 @@ fn lock_glow_model() -> std::sync::MutexGuard<'static, GlowModel> {
     match lock.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desktop_core::protocol::TokenizeElement;
+
+    #[test]
+    fn suppresses_inner_text_when_bordered_box_contains_it() {
+        let inner = [20.0, 20.0, 30.0, 10.0];
+        let outer = [10.0, 10.0, 100.0, 40.0];
+        assert!(should_suppress_inner_text_overlay_bbox(&inner, &outer));
+    }
+
+    #[test]
+    fn append_window_rects_marks_bordered_text_and_drops_inner_text() {
+        let window = TokenizeWindow {
+            id: "win_1".to_string(),
+            title: "t".to_string(),
+            app: None,
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 300.0,
+            },
+            os_bounds: None,
+            elements: vec![
+                TokenizeElement {
+                    id: "text_0001".to_string(),
+                    kind: "text".to_string(),
+                    bbox: [10.0, 10.0, 100.0, 40.0],
+                    has_border: Some(true),
+                    text: Some("Apple".to_string()),
+                    confidence: Some(1.0),
+                    source: "sat_control_v1".to_string(),
+                },
+                TokenizeElement {
+                    id: "text_0002".to_string(),
+                    kind: "text".to_string(),
+                    bbox: [20.0, 20.0, 30.0, 10.0],
+                    has_border: None,
+                    text: Some("Apple".to_string()),
+                    confidence: Some(1.0),
+                    source: "vision_ocr".to_string(),
+                },
+                TokenizeElement {
+                    id: "text_0003".to_string(),
+                    kind: "text".to_string(),
+                    bbox: [200.0, 200.0, 30.0, 10.0],
+                    has_border: None,
+                    text: Some("Outside".to_string()),
+                    confidence: Some(1.0),
+                    source: "vision_ocr".to_string(),
+                },
+            ],
+        };
+
+        let mut out = Vec::new();
+        append_window_rects(&window, Some(300.0), Some(300.0), &mut out);
+        assert_eq!(out.len(), 2);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r.kind, OverlayKind::BorderedText))
+        );
+        assert!(out.iter().any(|r| matches!(r.kind, OverlayKind::Text)));
     }
 }
 

@@ -21,8 +21,6 @@ use super::{
     state::with_state,
 };
 
-const FINAL_TEXT_CONFIDENCE: f32 = 1.0;
-
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
     pub snapshot: SnapshotPayload,
@@ -231,7 +229,7 @@ fn tokenize_from_snapshot(
     image_path: &Path,
     window_meta: Option<TokenizeWindowMeta>,
 ) -> Result<TokenizePayload, AppError> {
-    let tokens: Vec<TokenEntry> = snapshot
+    let raw_tokens: Vec<TokenEntry> = snapshot
         .texts
         .iter()
         .enumerate()
@@ -245,16 +243,16 @@ fn tokenize_from_snapshot(
     let snapshot_id = snapshot.snapshot_id;
     let timestamp = snapshot.timestamp.clone();
     let (image_meta, windows) = build_window_elements(&snapshot, image_path, window_meta)?;
-    with_state(|state| state.replace_token_map(tokens.clone()))?;
+    with_state(|state| state.replace_token_map(raw_tokens.clone()))?;
     trace::log(format!(
         "pipeline:tokenize:ok snapshot_id={} tokens={}",
         snapshot_id,
-        tokens.len()
+        raw_tokens.len()
     ));
     Ok(TokenizePayload {
         snapshot_id,
         timestamp,
-        tokens,
+        tokens: Vec::new(),
         image: Some(image_meta),
         windows,
     })
@@ -281,41 +279,7 @@ fn build_window_elements(
     let line_bounds: Vec<Bounds> = lines.iter().map(|line| line.bounds.clone()).collect();
     let detected_controls = super::tokenize_boxes::detect_controls(&frame, &line_bounds);
 
-    let mut elements = Vec::new();
-    for (idx, text) in final_fields.iter().enumerate() {
-        elements.push(TokenizeElement {
-            id: format!("text_{:04}", idx + 1),
-            kind: "text".to_string(),
-            bbox: bounds_to_bbox(&text.bounds),
-            text: Some(text.text.clone()),
-            confidence: Some(FINAL_TEXT_CONFIDENCE),
-            source: "vision_ocr".to_string(),
-        });
-    }
-    for (idx, control) in detected_controls.iter().enumerate() {
-        let kind = match control.kind {
-            super::tokenize_boxes::ControlKind::TextField => "text_field",
-            super::tokenize_boxes::ControlKind::Button => "button",
-        };
-        elements.push(TokenizeElement {
-            id: format!("ctrl_{:04}", idx + 1),
-            kind: kind.to_string(),
-            bbox: bounds_to_bbox(&control.bounds),
-            text: None,
-            confidence: None,
-            source: "sat_control_v1".to_string(),
-        });
-    }
-    elements.sort_by(|a, b| {
-        a.bbox[1]
-            .partial_cmp(&b.bbox[1])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(
-                a.bbox[0]
-                    .partial_cmp(&b.bbox[0])
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
-    });
+    let elements = build_unified_text_elements(&lines, &final_fields, &detected_controls);
 
     let title = window_meta
         .as_ref()
@@ -361,6 +325,114 @@ fn bounds_to_bbox(bounds: &Bounds) -> [f64; 4] {
     [bounds.x, bounds.y, bounds.width, bounds.height]
 }
 
+fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    let ix1 = a.x.max(b.x);
+    let iy1 = a.y.max(b.y);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    let iw = (ix2 - ix1).max(0.0);
+    let ih = (iy2 - iy1).max(0.0);
+    iw * ih
+}
+
+fn center_inside(inner: &Bounds, outer: &Bounds) -> bool {
+    let cx = inner.x + inner.width * 0.5;
+    let cy = inner.y + inner.height * 0.5;
+    cx >= outer.x && cx <= outer.x + outer.width && cy >= outer.y && cy <= outer.y + outer.height
+}
+
+fn build_unified_text_elements(
+    lines: &[super::text_group::TextBox],
+    final_fields: &[super::text_group::TextBox],
+    controls: &[super::tokenize_boxes::DetectedControl],
+) -> Vec<TokenizeElement> {
+    let mut used_line = vec![false; lines.len()];
+    let mut elements: Vec<TokenizeElement> = Vec::new();
+
+    for control in controls {
+        let mut best_idx: Option<usize> = None;
+        let mut best_score = 0.0f64;
+        for (idx, line) in lines.iter().enumerate() {
+            if used_line[idx] || line.text.trim().is_empty() {
+                continue;
+            }
+            let line_area = (line.bounds.width * line.bounds.height).max(1.0);
+            let overlap_ratio = overlap_area(&line.bounds, &control.bounds) / line_area;
+            let in_box = center_inside(&line.bounds, &control.bounds);
+            let score = overlap_ratio + if in_box { 0.35 } else { 0.0 };
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(idx);
+            }
+        }
+        if let Some(idx) = best_idx {
+            if best_score < 0.30 {
+                continue;
+            }
+            used_line[idx] = true;
+            let text = lines[idx].text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            elements.push(TokenizeElement {
+                id: String::new(),
+                kind: String::new(),
+                bbox: bounds_to_bbox(&control.bounds),
+                has_border: Some(true),
+                text: Some(text.to_string()),
+                confidence: None,
+                source: "sat_control_v1".to_string(),
+            });
+        }
+    }
+
+    for field in final_fields {
+        let mut overlaps_consumed = false;
+        for (idx, line) in lines.iter().enumerate() {
+            if !used_line[idx] {
+                continue;
+            }
+            let area = (line.bounds.width * line.bounds.height).max(1.0);
+            let ratio = overlap_area(&field.bounds, &line.bounds) / area;
+            if ratio >= 0.60 || center_inside(&line.bounds, &field.bounds) {
+                overlaps_consumed = true;
+                break;
+            }
+        }
+        if overlaps_consumed {
+            continue;
+        }
+        elements.push(TokenizeElement {
+            id: String::new(),
+            kind: String::new(),
+            bbox: bounds_to_bbox(&field.bounds),
+            has_border: None,
+            text: Some(field.text.clone()),
+            confidence: None,
+            source: "vision_ocr".to_string(),
+        });
+    }
+
+    elements.sort_by(|a, b| {
+        a.bbox[1]
+            .partial_cmp(&b.bbox[1])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.bbox[0]
+                    .partial_cmp(&b.bbox[0])
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    for (idx, element) in elements.iter_mut().enumerate() {
+        element.id = format!("text_{:04}", idx + 1);
+    }
+    elements
+}
+
 pub fn token(n: u32) -> Result<Option<TokenEntry>, AppError> {
     with_state(|state| state.token(n))
 }
@@ -383,20 +455,42 @@ pub fn write_tokenize_overlay(
 
     for window in &payload.windows {
         draw_bounds_outline(&mut canvas, &window.bounds, Rgba([255, 255, 255, 255]), 2);
+        let bordered: Vec<Bounds> = window
+            .elements
+            .iter()
+            .filter(|e| e.has_border.unwrap_or(false))
+            .map(|e| Bounds {
+                x: e.bbox[0],
+                y: e.bbox[1],
+                width: e.bbox[2],
+                height: e.bbox[3],
+            })
+            .collect();
         for element in &window.elements {
-            let color = match element.kind.as_str() {
-                "text" => Rgba([0, 190, 0, 255]),
-                "text_field" => Rgba([40, 120, 255, 255]),
-                "button" => Rgba([255, 100, 0, 255]),
-                "box" => Rgba([40, 120, 255, 255]),
-                "glyph" => Rgba([255, 220, 0, 255]),
-                _ => Rgba([220, 220, 220, 255]),
-            };
             let bounds = Bounds {
                 x: element.bbox[0],
                 y: element.bbox[1],
                 width: element.bbox[2],
                 height: element.bbox[3],
+            };
+            if !element.has_border.unwrap_or(false)
+                && (element.kind.is_empty() || element.kind == "text" || element.text.is_some())
+                && bordered
+                    .iter()
+                    .any(|outer| should_suppress_inner_text_overlay(&bounds, outer))
+            {
+                continue;
+            }
+            let color = if element.has_border.unwrap_or(false) {
+                Rgba([255, 0, 0, 255])
+            } else {
+                match element.kind.as_str() {
+                    "" | "text" => Rgba([0, 190, 0, 255]),
+                    "box" => Rgba([40, 120, 255, 255]),
+                    "glyph" => Rgba([255, 220, 0, 255]),
+                    _ if element.text.is_some() => Rgba([0, 190, 0, 255]),
+                    _ => Rgba([220, 220, 220, 255]),
+                }
             };
             draw_bounds_outline(&mut canvas, &bounds, color, 1);
         }
@@ -460,6 +554,15 @@ fn draw_bounds_outline(
     }
 }
 
+fn should_suppress_inner_text_overlay(inner: &Bounds, outer: &Bounds) -> bool {
+    let inner_area = (inner.width * inner.height).max(1.0);
+    let overlap = overlap_area(inner, outer);
+    let center_in = center_inside(inner, outer);
+    let mostly_inside = overlap / inner_area >= 0.75;
+    let clearly_smaller = outer.width >= inner.width + 8.0 && outer.height >= inner.height + 8.0;
+    center_in && mostly_inside && clearly_smaller
+}
+
 fn focused_app_name() -> Option<String> {
     let script =
         r#"tell application "System Events" to get name of first process whose frontmost is true"#;
@@ -477,6 +580,8 @@ fn focused_app_name() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use desktop_core::protocol::{
         Bounds, SnapshotDisplay, SnapshotPayload, SnapshotText, TokenizeElement, TokenizeImage,
         TokenizePayload, TokenizeWindow,
@@ -486,6 +591,12 @@ mod tests {
     use super::{
         TokenizeWindowMeta, build_window_elements, window_crop_rect, write_tokenize_overlay,
     };
+
+    fn golden_fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/golden")
+            .join(name)
+    }
 
     #[test]
     fn window_crop_rect_scales_from_logical_to_pixels() {
@@ -513,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn build_window_elements_emits_text_and_control_entries() {
+    fn build_window_elements_emits_bordered_text_entries() {
         let image_path = std::env::temp_dir().join(format!(
             "desktopctl-tokenize-test-{}.png",
             std::process::id()
@@ -571,11 +682,11 @@ mod tests {
         assert_eq!(windows[0].app.as_deref(), Some("TestApp"));
         assert!(windows[0].os_bounds.is_some());
         let elements = &windows[0].elements;
-        assert!(elements.iter().any(|e| e.kind == "text"));
+        assert!(elements.iter().any(|e| e.text.is_some()));
         assert!(
             elements
                 .iter()
-                .any(|e| e.kind == "text_field" || e.kind == "button")
+                .any(|e| e.has_border == Some(true) && e.text.is_some())
         );
 
         let _ = std::fs::remove_file(&image_path);
@@ -686,16 +797,18 @@ mod tests {
                         id: "text_0001".to_string(),
                         kind: "text".to_string(),
                         bbox: [40.0, 40.0, 40.0, 16.0],
+                        has_border: None,
                         text: Some("Hello".to_string()),
                         confidence: Some(0.99),
                         source: "vision_ocr".to_string(),
                     },
                     TokenizeElement {
-                        id: "ctrl_0001".to_string(),
-                        kind: "button".to_string(),
+                        id: "text_0002".to_string(),
+                        kind: "text".to_string(),
                         bbox: [30.0, 34.0, 120.0, 56.0],
-                        text: None,
-                        confidence: None,
+                        has_border: Some(true),
+                        text: Some("Allow".to_string()),
+                        confidence: Some(1.0),
                         source: "sat_control_v1".to_string(),
                     },
                 ],
@@ -710,5 +823,134 @@ mod tests {
 
         let _ = std::fs::remove_file(&source_path);
         let _ = std::fs::remove_file(&overlay_path);
+    }
+
+    #[test]
+    fn write_tokenize_overlay_suppresses_inner_text_box_when_bordered_box_exists() {
+        let source_path = std::env::temp_dir().join(format!(
+            "desktopctl-tokenize-overlay-suppress-source-{}.png",
+            std::process::id()
+        ));
+        let overlay_path = std::env::temp_dir().join(format!(
+            "desktopctl-tokenize-overlay-suppress-out-{}.png",
+            std::process::id()
+        ));
+        let image = RgbaImage::from_pixel(180, 120, Rgba([240, 240, 240, 255]));
+        image.save(&source_path).expect("write source");
+
+        let payload = TokenizePayload {
+            snapshot_id: 1,
+            timestamp: "1".to_string(),
+            tokens: vec![],
+            image: Some(TokenizeImage {
+                path: source_path.display().to_string(),
+                width: 180,
+                height: 120,
+            }),
+            windows: vec![TokenizeWindow {
+                id: "win_0001".to_string(),
+                title: "Sample".to_string(),
+                app: Some("Sample".to_string()),
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 180.0,
+                    height: 120.0,
+                },
+                os_bounds: None,
+                elements: vec![
+                    TokenizeElement {
+                        id: "text_0001".to_string(),
+                        kind: "text".to_string(),
+                        bbox: [30.0, 34.0, 120.0, 56.0],
+                        has_border: Some(true),
+                        text: Some("Allow".to_string()),
+                        confidence: Some(1.0),
+                        source: "sat_control_v1".to_string(),
+                    },
+                    TokenizeElement {
+                        id: "text_0002".to_string(),
+                        kind: "text".to_string(),
+                        bbox: [40.0, 40.0, 40.0, 16.0],
+                        has_border: None,
+                        text: Some("Allow".to_string()),
+                        confidence: Some(1.0),
+                        source: "vision_ocr".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        write_tokenize_overlay(&payload, &overlay_path).expect("write overlay");
+        let overlay = image::open(&overlay_path).expect("open overlay").to_rgba8();
+        // Inner OCR box top-left would be green if drawn. It should stay background.
+        let px = overlay.get_pixel(40, 40);
+        assert_eq!(*px, Rgba([240, 240, 240, 255]));
+        // Bordered element should be red at its top-left corner.
+        let red = overlay.get_pixel(30, 34);
+        assert_eq!(*red, Rgba([255, 0, 0, 255]));
+
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&overlay_path);
+    }
+
+    #[test]
+    fn golden_dictionary_dark_emits_bordered_dictionary_tab() {
+        let image_path = golden_fixture_path("dictionary_default_dark.png");
+        let image = image::open(&image_path).expect("open golden image");
+        let width = image.width();
+        let height = image.height();
+        let texts = super::recognize_text_from_image(&image_path, width, height).expect("ocr");
+        let snapshot = SnapshotPayload {
+            snapshot_id: 1,
+            timestamp: "1".to_string(),
+            display: SnapshotDisplay {
+                id: 1,
+                width,
+                height,
+                scale: 1.0,
+            },
+            focused_app: Some("Dictionary".to_string()),
+            texts,
+        };
+        let (_, windows) = build_window_elements(&snapshot, &image_path, None).expect("tokenize");
+        let elements = &windows[0].elements;
+        assert!(elements.iter().all(|e| e.text.is_some()));
+        let tab: Vec<_> = elements
+            .iter()
+            .filter(|e| e.text.as_deref() == Some("Dictionary"))
+            .collect();
+        assert!(
+            tab.iter().any(|e| e.has_border == Some(true)),
+            "Dictionary tab should be bordered"
+        );
+    }
+
+    #[test]
+    fn golden_dictionary_light_emits_bordered_q_search() {
+        let image_path = golden_fixture_path("dictionary_default_light.png");
+        let image = image::open(&image_path).expect("open golden image");
+        let width = image.width();
+        let height = image.height();
+        let texts = super::recognize_text_from_image(&image_path, width, height).expect("ocr");
+        let snapshot = SnapshotPayload {
+            snapshot_id: 1,
+            timestamp: "1".to_string(),
+            display: SnapshotDisplay {
+                id: 1,
+                width,
+                height,
+                scale: 1.0,
+            },
+            focused_app: Some("Dictionary".to_string()),
+            texts,
+        };
+        let (_, windows) = build_window_elements(&snapshot, &image_path, None).expect("tokenize");
+        let elements = &windows[0].elements;
+        let search = elements
+            .iter()
+            .find(|e| e.text.as_deref() == Some("Q Search"))
+            .expect("Q Search element");
+        assert_eq!(search.has_border, Some(true), "Q Search should be bordered");
     }
 }

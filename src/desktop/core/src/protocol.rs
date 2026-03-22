@@ -319,6 +319,7 @@ pub struct TokenEntry {
 pub struct TokenizePayload {
     pub snapshot_id: u64,
     pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tokens: Vec<TokenEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<TokenizeImage>,
@@ -348,9 +349,15 @@ pub struct TokenizeWindow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizeElement {
     pub id: String,
-    #[serde(rename = "type")]
+    #[serde(
+        rename = "type",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub kind: String,
     pub bbox: [f64; 4],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_border: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
