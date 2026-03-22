@@ -276,8 +276,8 @@ fn build_window_elements(
         .iter()
         .map(|text| text.bounds.clone())
         .collect();
-    let box_bounds = super::tokenize_boxes::detect_ui_boxes_with_text(&rgba, &text_bounds);
-    let glyph_bounds = super::tokenize_boxes::detect_glyphs(&rgba, &text_bounds);
+    let frame = super::metal_pipeline::process_cpu(&rgba);
+    let detected_controls = super::tokenize_boxes::detect_controls(&frame, &text_bounds);
 
     let mut elements = Vec::new();
     for (idx, text) in snapshot.texts.iter().enumerate() {
@@ -290,24 +290,18 @@ fn build_window_elements(
             source: "vision_ocr".to_string(),
         });
     }
-    for (idx, bounds) in box_bounds.iter().enumerate() {
+    for (idx, control) in detected_controls.iter().enumerate() {
+        let kind = match control.kind {
+            super::tokenize_boxes::ControlKind::TextField => "text_field",
+            super::tokenize_boxes::ControlKind::Button => "button",
+        };
         elements.push(TokenizeElement {
-            id: format!("box_{:04}", idx + 1),
-            kind: "box".to_string(),
-            bbox: bounds_to_bbox(bounds),
+            id: format!("ctrl_{:04}", idx + 1),
+            kind: kind.to_string(),
+            bbox: bounds_to_bbox(&control.bounds),
             text: None,
             confidence: None,
-            source: "rust_text_anchor_v2".to_string(),
-        });
-    }
-    for (idx, bounds) in glyph_bounds.iter().enumerate() {
-        elements.push(TokenizeElement {
-            id: format!("glyph_{:04}", idx + 1),
-            kind: "glyph".to_string(),
-            bbox: bounds_to_bbox(bounds),
-            text: None,
-            confidence: None,
-            source: "rust_cc_glyph_v1".to_string(),
+            source: "sat_control_v1".to_string(),
         });
     }
     elements.sort_by(|a, b| {
@@ -390,6 +384,8 @@ pub fn write_tokenize_overlay(
         for element in &window.elements {
             let color = match element.kind.as_str() {
                 "text" => Rgba([0, 190, 0, 255]),
+                "text_field" => Rgba([40, 120, 255, 255]),
+                "button" => Rgba([255, 100, 0, 255]),
                 "box" => Rgba([40, 120, 255, 255]),
                 "glyph" => Rgba([255, 220, 0, 255]),
                 _ => Rgba([220, 220, 220, 255]),
@@ -515,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn build_window_elements_emits_text_and_box_entries() {
+    fn build_window_elements_emits_text_and_control_entries() {
         let image_path = std::env::temp_dir().join(format!(
             "desktopctl-tokenize-test-{}.png",
             std::process::id()
@@ -574,7 +570,7 @@ mod tests {
         assert!(windows[0].os_bounds.is_some());
         let elements = &windows[0].elements;
         assert!(elements.iter().any(|e| e.kind == "text"));
-        assert!(elements.iter().any(|e| e.kind == "box"));
+        assert!(elements.iter().any(|e| e.kind == "text_field" || e.kind == "button"));
 
         let _ = std::fs::remove_file(&image_path);
     }
@@ -689,12 +685,12 @@ mod tests {
                         source: "vision_ocr".to_string(),
                     },
                     TokenizeElement {
-                        id: "box_0001".to_string(),
-                        kind: "box".to_string(),
+                        id: "ctrl_0001".to_string(),
+                        kind: "button".to_string(),
                         bbox: [30.0, 34.0, 120.0, 56.0],
                         text: None,
                         confidence: None,
-                        source: "rust_text_anchor_v2".to_string(),
+                        source: "sat_control_v1".to_string(),
                     },
                 ],
             }],

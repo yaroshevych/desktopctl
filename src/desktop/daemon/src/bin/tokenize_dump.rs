@@ -83,9 +83,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ocr_ms = t_ocr.elapsed().as_secs_f64() * 1000.0;
 
     let t_detect = std::time::Instant::now();
-    let text_bounds: Vec<Bounds> = texts.iter().map(|t| t.bounds.clone()).collect();
-    let boxes = tokenize_boxes::detect_ui_boxes_with_text(&image, &text_bounds);
-    let glyphs = tokenize_boxes::detect_glyphs(&image, &text_bounds);
+    let frame = metal_pipeline::process_cpu(&image);
+
+    // Text grouping pipeline: OCR words → split → tighten → lines → paragraphs.
+    let words: Vec<text_group::TextBox> = texts
+        .iter()
+        .map(|t| text_group::TextBox::from_bounds_with_text(t.bounds.clone(), t.text.clone()))
+        .flat_map(|tb| text_group::split_wide_textbox(tb, &frame))
+        .map(|tb| {
+            let tight = text_group::tighten_to_content(&tb.bounds, &frame);
+            text_group::TextBox::from_bounds_with_text(tight, tb.text)
+        })
+        .collect();
+    let lines = text_group::group_words_into_lines(&words);
+    let paragraphs = text_group::group_lines_into_paragraphs(&lines);
+    let line_bounds: Vec<Bounds> = lines.iter().map(|l| l.bounds.clone()).collect();
+
+    let controls = tokenize_boxes::detect_controls(&frame, &line_bounds);
     let detect_ms = t_detect.elapsed().as_secs_f64() * 1000.0;
 
     let payload = json!({
@@ -98,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "id": "win_0001",
             "title": "screenshot",
             "bounds": {"x": 0.0, "y": 0.0, "width": width as f64, "height": height as f64},
-            "elements": build_elements_json(&texts, &boxes, &glyphs)
+            "elements": build_elements_json(&texts, &controls)
         }]
     });
 
@@ -131,11 +145,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for text in &texts {
             draw_bounds_outline(&mut canvas, &text.bounds, Rgba([0, 190, 0, 255]), 1);
         }
-        for bounds in &boxes {
-            draw_bounds_outline(&mut canvas, bounds, Rgba([40, 120, 255, 255]), 1);
+        for para in &paragraphs {
+            draw_bounds_outline(&mut canvas, &para.bounds, Rgba([180, 80, 255, 255]), 2);
         }
-        for bounds in &glyphs {
-            draw_bounds_outline(&mut canvas, bounds, Rgba([255, 220, 0, 255]), 1);
+        for control in &controls {
+            let color = match control.kind {
+                tokenize_boxes::ControlKind::TextField => Rgba([40, 120, 255, 255]),
+                tokenize_boxes::ControlKind::Button => Rgba([255, 220, 0, 255]),
+            };
+            draw_bounds_outline(&mut canvas, &control.bounds, color, 1);
         }
         canvas.save(path)?;
     }
@@ -147,12 +165,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({
             "image": input,
             "text_count": texts.len(),
-            "box_count": boxes.len(),
-            "glyph_count": glyphs.len(),
+            "control_count": controls.len(),
             "timings_ms": {
                 "image_load": image_ms,
                 "ocr": ocr_ms,
-                "detect_boxes_and_glyphs": detect_ms,
+                "detect_controls": detect_ms,
                 "write_json": json_ms,
                 "write_overlay": overlay_ms,
                 "total": total_ms
@@ -171,8 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn build_elements_json(
     texts: &[SnapshotText],
-    boxes: &[Bounds],
-    glyphs: &[Bounds],
+    controls: &[tokenize_boxes::DetectedControl],
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for (idx, text) in texts.iter().enumerate() {
@@ -185,20 +201,16 @@ fn build_elements_json(
             "source": "vision_ocr"
         }));
     }
-    for (idx, bounds) in boxes.iter().enumerate() {
+    for (idx, control) in controls.iter().enumerate() {
+        let control_type = match control.kind {
+            tokenize_boxes::ControlKind::TextField => "text_field",
+            tokenize_boxes::ControlKind::Button => "button",
+        };
         out.push(json!({
-            "id": format!("box_{:04}", idx + 1),
-            "type": "box",
-            "bbox": [bounds.x, bounds.y, bounds.width, bounds.height],
-            "source": "rust_text_anchor_v2"
-        }));
-    }
-    for (idx, bounds) in glyphs.iter().enumerate() {
-        out.push(json!({
-            "id": format!("glyph_{:04}", idx + 1),
-            "type": "glyph",
-            "bbox": [bounds.x, bounds.y, bounds.width, bounds.height],
-            "source": "rust_cc_glyph_v1"
+            "id": format!("ctrl_{:04}", idx + 1),
+            "type": control_type,
+            "bbox": [control.bounds.x, control.bounds.y, control.bounds.width, control.bounds.height],
+            "source": "sat_control_v1"
         }));
     }
     out.sort_by(|a, b| {
