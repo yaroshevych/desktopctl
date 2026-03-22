@@ -7,6 +7,10 @@ use super::tokenize_boxes::{axis_gap, debug_enabled, overlap_1d, union_bounds};
 /// Tight to avoid merging tab-bar-style spaced items.
 const WORD_HGAP_FONT_RATIO: f64 = 1.05;
 
+/// Max allowed ratio between larger and smaller text heights when grouping.
+/// Lower value keeps grouping conservative across mixed font sizes.
+const HEIGHT_SIMILARITY_RATIO: f64 = 1.2;
+
 /// Min horizontal gap (as multiple of font height) to split an OCR result.
 /// Higher than WORD_HGAP_FONT_RATIO: only split at clearly separate groups,
 /// not at normal inter-word spacing.
@@ -34,31 +38,67 @@ impl TextBox {
     }
 
     pub fn merge_refs(items: &[&TextBox]) -> TextBox {
+        Self::merge_refs_with_separator(items, " ", SortOrder::LeftToRight)
+    }
+
+    pub fn merge_refs_as_paragraph(items: &[&TextBox]) -> TextBox {
+        Self::merge_refs_with_separator(items, "\n", SortOrder::TopToBottomThenLeft)
+    }
+
+    fn merge_refs_with_separator(
+        items: &[&TextBox],
+        separator: &str,
+        order: SortOrder,
+    ) -> TextBox {
         let merged_bounds = items
             .iter()
             .skip(1)
             .fold(items[0].bounds.clone(), |acc, tb| {
                 union_bounds(&acc, &tb.bounds)
             });
-        // Sort by x position and join texts with space.
+
         let mut sorted: Vec<&TextBox> = items.to_vec();
-        sorted.sort_by(|a, b| {
-            a.bounds
-                .x
-                .partial_cmp(&b.bounds.x)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        match order {
+            SortOrder::LeftToRight => {
+                sorted.sort_by(|a, b| {
+                    a.bounds
+                        .x
+                        .partial_cmp(&b.bounds.x)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::TopToBottomThenLeft => {
+                sorted.sort_by(|a, b| {
+                    a.bounds
+                        .y
+                        .partial_cmp(&b.bounds.y)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(
+                            a.bounds
+                                .x
+                                .partial_cmp(&b.bounds.x)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
+                });
+            }
+        }
         let text = sorted
             .iter()
             .map(|tb| tb.text.as_str())
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(separator);
         TextBox {
             bounds: merged_bounds,
             text,
         }
     }
+}
+
+#[derive(Copy, Clone)]
+enum SortOrder {
+    LeftToRight,
+    TopToBottomThenLeft,
 }
 
 /// Build tightened word boxes from OCR output.
@@ -696,8 +736,8 @@ pub(crate) fn group_words_into_lines(words: &[TextBox]) -> Vec<TextBox> {
     let clusters = cluster_textboxes(words, |a, b| {
         let min_h = a.bounds.height.min(b.bounds.height).max(1.0);
         let max_h = a.bounds.height.max(b.bounds.height);
-        // Same font size: height ratio ≤ 1.6.
-        if max_h > min_h * 1.6 {
+        // Same font size.
+        if max_h > min_h * HEIGHT_SIMILARITY_RATIO {
             return false;
         }
         let vertical_overlap = overlap_1d(
@@ -792,7 +832,7 @@ pub(crate) fn group_lines_into_paragraphs(lines: &[TextBox]) -> Vec<TextBox> {
         let min_h = a.bounds.height.min(b.bounds.height).max(1.0);
         let max_h = a.bounds.height.max(b.bounds.height);
         // Same font size.
-        if max_h > min_h * 1.6 {
+        if max_h > min_h * HEIGHT_SIMILARITY_RATIO {
             return false;
         }
         let vgap = axis_gap(
@@ -839,7 +879,7 @@ pub(crate) fn group_lines_into_paragraphs(lines: &[TextBox]) -> Vec<TextBox> {
             }
             continue;
         }
-        let merged = TextBox::merge_refs(cluster);
+        let merged = TextBox::merge_refs_as_paragraph(cluster);
         let font_h = cluster.iter().map(|l| l.bounds.height).sum::<f64>() / cluster.len() as f64;
         // Min dimensions relative to font size.
         if merged.bounds.width < font_h * 3.0 || merged.bounds.height < font_h * 1.2 {
