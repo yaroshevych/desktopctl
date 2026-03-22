@@ -91,7 +91,11 @@ fn sobel_enclosed_candidate(
         scratch,
     );
     let loop_ok = span_bounds.is_some();
-    if !(top_ok && bottom_ok && loop_ok) {
+    // Focused controls can have anti-aliased/colored borders where horizontal
+    // coverage drops despite a closed Sobel loop. Treat loop closure as the
+    // primary enclosure signal and keep a lighter fallback gate for top/bottom.
+    let weak_horizontal_ok = top_cov >= 0.40 && bottom_cov >= 0.40;
+    if !(loop_ok && ((top_ok && bottom_ok) || weak_horizontal_ok)) {
         if dbg {
             eprintln!(
                 "      sobel-loop miss: top={} ({:.2}) bottom={} ({:.2}) loop={} span=[{},{}] thr={} min_cov={:.2}",

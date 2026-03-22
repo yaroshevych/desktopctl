@@ -935,6 +935,11 @@ fn append_window_rects(
 
     for element in &window.elements {
         let bbox = element.bbox;
+        let has_text = element
+            .text
+            .as_ref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
         let kind = match element.kind.as_str() {
             "text" if element.has_border.unwrap_or(false) => OverlayKind::BorderedText,
             "text" => {
@@ -948,6 +953,29 @@ fn append_window_rects(
             }
             "box" => OverlayKind::Box,
             "glyph" => OverlayKind::Glyph,
+            "" if element.has_border.unwrap_or(false) && has_text => OverlayKind::BorderedText,
+            "" if has_text => {
+                if bordered_boxes
+                    .iter()
+                    .any(|outer| should_suppress_inner_text_overlay_bbox(&bbox, outer))
+                {
+                    continue;
+                }
+                OverlayKind::Text
+            }
+            _ if has_text => {
+                if element.has_border.unwrap_or(false) {
+                    OverlayKind::BorderedText
+                } else {
+                    if bordered_boxes
+                        .iter()
+                        .any(|outer| should_suppress_inner_text_overlay_bbox(&bbox, outer))
+                    {
+                        continue;
+                    }
+                    OverlayKind::Text
+                }
+            }
             _ => continue,
         };
         let width = bbox[2] * sx;
