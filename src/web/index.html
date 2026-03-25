@@ -22,8 +22,8 @@
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
 
-    <nav class="topbar" role="navigation" aria-label="Site navigation">
-      <div class="container topbar-inner">
+    <nav class="topbar" aria-label="Site navigation">
+      <div class="container">
         <a href="#" class="topbar-logo" aria-label="DesktopCtl home">desktop<span>ctl</span></a>
         <div class="topbar-links">
           <a href="https://github.com/yourname/desktopctl" aria-label="GitHub repository">GitHub</a>
@@ -34,47 +34,37 @@
     <main id="main">
       <section id="hero">
         <div class="container">
-          <h1 class="hero-title">Desktop Control</h1>
-          <p class="hero-tagline">
+          <h1>Desktop Control</h1>
+          <p>
             Computer Vision and mouse/keyboard control for local AI agents. Bring your own AI, observe UI,
             and perform complex operations with mouse, keyboard, and GPU-accelerated text recognition.
           </p>
-          <p class="hero-tagline">
-            Privacy-first, free open source license, written in Rust.
+          <p>
+            Privacy-first, free & open source, written in Rust.
           </p>
           <div class="hero-ctas">
             <a class="btn-primary" href="https://github.com/yourname/desktopctl">View on GitHub</a>
             <a class="btn-ghost" href="/spec">Read the spec</a>
-            <div class="brew-snippet" role="group" aria-label="Install command">
-              <code>desktopctl ui click --text "Send"</code>
-            </div>
+            <code class="brew-snippet">desktopctl ui click --text "Send"</code>
           </div>
         </div>
       </section>
 
-      <section id="what">
+      <section>
         <div class="container">
           <h2>
             What is this
           </h2>
-          <div class="what-list">
-            <p>
-              AI agents already work with local files, system applications, and web services.
-            </p>
-            <p>
-              DesktopCtl brings eyes and hands, which control OS and any UI app.
-            </p>
-            <p>
-              GPU-accelerated text recognition and computer vision, on your local machine.
-            </p>
-            <p>
-              Bring your own AI: integrate with any local agent, using standard CLI interface.
-            </p>
-          </div>
+          <ul class="what-list">
+            <li>AI agents already work with local files, system applications, and web services.</li>
+            <li>DesktopCtl brings eyes and hands, which control OS and any UI app.</li>
+            <li>GPU-accelerated text recognition and computer vision, on your local machine.</li>
+            <li>Bring your own AI: integrate with any local agent, using standard CLI interface.</li>
+          </ul>
         </div>
       </section>
 
-      <section id="commands">
+      <section>
         <div class="container">
           <h2>CLI interface</h2>
           <div class="code-block-wrap">
@@ -102,7 +92,7 @@
         </div>
       </section>
 
-      <section id="how">
+      <section>
         <div class="container">
           <h2>How it works</h2>
           <div class="steps">
@@ -128,37 +118,29 @@
         </div>
       </section>
 
-      <section id="control">
+      <section>
         <div class="container">
           <h2>
             Stay in control
           </h2>
-          <div class="what-list">
-            <p>
-              Comptuter Vision and Text Recognition work locally on your machine.
-            </p>
-            <p>
-              By default, DesktopCtrl does not share sensitive screenshots with AI agents.
-            </p>
-            <p>
-              Visual effect, when AI agent is accessing screen, mouse, or keyboard.
-            </p>
-            <p>
-              Stay in control with OS-level permissions, granted to DesktopCtl only.
-            </p>
-          </div>
+          <ul class="what-list">
+            <li>Comptuter Vision and Text Recognition work locally on your machine.</li>
+            <li>By default, DesktopCtrl does not share sensitive screenshots with AI agents.</li>
+            <li>Visual effect, when AI agent is accessing screen, mouse, or keyboard.</li>
+            <li>Stay in control with OS-level permissions, granted to DesktopCtl only.</li>
+          </ul>
         </div>
       </section>
 
     </main>
 
     <footer>
-      <div class="container footer-inner">
+      <div class="container">
         <div class="footer-left">
-          <strong>desktopctl</strong> · MIT License · Cross-platform roadmap
+          <strong>desktopctl</strong> · MIT License
         </div>
         <div class="footer-right">
-          <a href="https://github.com/yourname/desktopctl" aria-label="GitHub">GitHub</a>
+          <a href="https://github.com/yourname/desktopctl">GitHub</a>
         </div>
       </div>
     </footer>
