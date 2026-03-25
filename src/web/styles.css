@@ -8,7 +8,6 @@
 
 :root {
   --bg: #0d0e10;
-  --bg-raised: #13151a;
   --bg-code: #0a0b0d;
   --border: #1e2128;
   --border-hi: #2e3240;
@@ -18,7 +17,6 @@
   --accent: #a78bfa;
   --accent-dim: #5f4aa8;
   --green: #4caf7d;
-  --red: #e05c5c;
   --mono: "IBM Plex Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
   --display: "Rajdhani", "Segoe UI", sans-serif;
@@ -181,26 +179,6 @@ pre {
   border-top: none;
 }
 
-.hero-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  margin-bottom: 1.5rem;
-}
-
-.hero-eyebrow::before {
-  content: "";
-  display: block;
-  width: 1.5rem;
-  height: 1px;
-  background: var(--accent-dim);
-}
-
 .hero-title {
   margin-bottom: 1.5rem;
 }
@@ -271,7 +249,7 @@ pre {
   user-select: all;
 }
 
-#what .what-list {
+.what-list {
   list-style: none;
   display: grid;
   gap: 0.85rem;
@@ -285,32 +263,8 @@ pre {
   color: var(--text);
 }
 
-#what .what-list p {
-  line-height: 3  rem;
-}
-
-#what .what-list li {
-  position: relative;
-  padding: 0.1rem 0 0.1rem 1.15rem;
-  color: inherit;
-  line-height: inherit;
-}
-
-#what .what-list li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.62rem;
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.2);
-}
-
-#what .what-list strong {
-  color: var(--text-hi);
-  font-weight: 600;
+.what-list p {
+  color: var(--text);
 }
 
 #commands .code-block-wrap {
@@ -419,81 +373,7 @@ pre {
 
 .step p {
   font-size: 20px;
-  /* font-size: 0.9rem; */
-  /* color: var(--text-dim); */
   max-width: 30ch;
-}
-
-.step-arrow {
-  position: absolute;
-  right: -1.1rem;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--border-hi);
-  font-size: 1rem;
-  z-index: 1;
-  font-family: var(--mono);
-}
-
-#principles .grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1px;
-  background: var(--border);
-  border: 1px solid var(--border);
-  margin-top: 2rem;
-}
-
-.principle {
-  background: var(--bg);
-  padding: 1.75rem;
-  transition: background 0.15s;
-}
-
-.principle:hover {
-  background: var(--bg-raised);
-}
-
-.principle-tag {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  margin-bottom: 0.75rem;
-}
-
-.principle h3 {
-  font-family: var(--display);
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text-hi);
-  text-transform: none;
-  letter-spacing: -0.01em;
-  margin-bottom: 0.5rem;
-}
-
-.principle p {
-  font-size: 0.875rem;
-  color: var(--text-dim);
-  line-height: 1.6;
-  max-width: 42ch;
-}
-
-.error-codes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-top: 0.75rem;
-}
-
-.error-code {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--red);
-  background: rgba(224, 92, 92, 0.08);
-  padding: 0.2rem 0.5rem;
-  border: 1px solid rgba(224, 92, 92, 0.2);
 }
 
 footer {
@@ -538,55 +418,6 @@ footer {
   text-decoration: none;
 }
 
-.reveal {
-  opacity: 0;
-  transform: translateY(16px);
-  transition: opacity 0.5s ease, transform 0.5s ease;
-}
-
-.reveal.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.reveal-delay-1 {
-  transition-delay: 0.08s;
-}
-
-.reveal-delay-2 {
-  transition-delay: 0.16s;
-}
-
-.reveal-delay-3 {
-  transition-delay: 0.24s;
-}
-
-.reveal-delay-4 {
-  transition-delay: 0.32s;
-}
-
-.reveal-delay-5 {
-  transition-delay: 0.4s;
-}
-
-.section-label {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.15em;
-  margin-bottom: 1rem;
-}
-
-.divider-line {
-  display: inline-block;
-  width: 2rem;
-  height: 1px;
-  background: var(--accent);
-  vertical-align: middle;
-  margin-right: 0.5rem;
-}
-
 @media (max-width: 760px) {
   .topbar-links {
     display: none;
@@ -605,13 +436,6 @@ footer {
     border-bottom: none;
   }
 
-  .step-arrow {
-    display: none;
-  }
-
-  #principles .grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
