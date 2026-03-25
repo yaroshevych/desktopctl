@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(target_os = "macos")]
@@ -316,6 +316,7 @@ fn start_overlay_live_loop() {
     thread::spawn(|| {
         let mut consecutive_errors: usize = 0;
         while OVERLAY_LIVE_ENABLED.load(Ordering::SeqCst) {
+            let tick_start = Instant::now();
             let request_id = format!(
                 "overlay-live-{}-{}",
                 now_millis(),
@@ -329,6 +330,7 @@ fn start_overlay_live_loop() {
                     screenshot_path: None,
                 },
             );
+            let mut tick_status = "ok";
             match ipc::send_request(&request) {
                 Ok(ResponseEnvelope::Success(_)) => {
                     if consecutive_errors > 0 {
@@ -337,6 +339,7 @@ fn start_overlay_live_loop() {
                     }
                 }
                 Ok(ResponseEnvelope::Error(err)) => {
+                    tick_status = "tick_error";
                     consecutive_errors += 1;
                     if consecutive_errors == 1 || consecutive_errors % 25 == 0 {
                         trace::log(format!(
@@ -346,12 +349,18 @@ fn start_overlay_live_loop() {
                     }
                 }
                 Err(err) => {
+                    tick_status = "ipc_error";
                     consecutive_errors += 1;
                     if consecutive_errors == 1 || consecutive_errors % 25 == 0 {
                         trace::log(format!("overlay:live_loop ipc_error {err}"));
                     }
                 }
             }
+            trace::log(format!(
+                "overlay:live_loop timing_ms={} status={}",
+                tick_start.elapsed().as_millis(),
+                tick_status
+            ));
             thread::sleep(Duration::from_millis(OVERLAY_LIVE_INTERVAL_MS));
         }
         trace::log("overlay:live_loop stop");

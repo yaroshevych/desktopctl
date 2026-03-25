@@ -16,7 +16,7 @@ use crate::trace;
 
 use super::{
     capture::capture_screen_png,
-    diff::{diff_region, thumbnail_from_image, upscale_region},
+    diff::{diff_region, thumbnail_from_rgba, upscale_region},
     ocr::recognize_text,
     state::with_state,
 };
@@ -38,19 +38,28 @@ pub struct TokenizeWindowMeta {
 }
 
 pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, AppError> {
-    capture_and_update_internal(out_path, None)
+    capture_and_update_internal(out_path, None, None, true)
 }
 
 pub fn capture_and_update_active_window(
     out_path: Option<PathBuf>,
     bounds: Bounds,
+    focused_app_override: Option<String>,
+    lookup_focused_app: bool,
 ) -> Result<CaptureResult, AppError> {
-    capture_and_update_internal(out_path, Some(bounds))
+    capture_and_update_internal(
+        out_path,
+        Some(bounds),
+        focused_app_override,
+        lookup_focused_app,
+    )
 }
 
 fn capture_and_update_internal(
     out_path: Option<PathBuf>,
     crop_bounds: Option<Bounds>,
+    focused_app_override: Option<String>,
+    lookup_focused_app: bool,
 ) -> Result<CaptureResult, AppError> {
     trace::log("pipeline:capture_and_update:start");
     let mut captured = capture_screen_png(out_path)?;
@@ -74,36 +83,31 @@ fn capture_and_update_internal(
             captured.frame.width, captured.frame.height
         ));
     }
-    let thumb = thumbnail_from_image(
-        &image::DynamicImage::ImageRgba8(captured.image.clone()),
-        96,
-        54,
-    );
+    let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
     trace::log("pipeline:capture_and_update:thumb_ok");
     let texts = recognize_text(&captured.image)?;
     trace::log(format!(
         "pipeline:capture_and_update:ocr_ok texts={}",
         texts.len()
     ));
-    let focused_app = focused_app_name();
-    let image_path = captured.frame.image_path.clone();
-    let image = captured.image.clone();
+    let focused_app = if lookup_focused_app {
+        focused_app_override.or_else(focused_app_name)
+    } else {
+        focused_app_override
+    };
+    let frame = captured.frame;
+    let image_path = frame.image_path.clone();
+    let image = captured.image;
 
     with_state(move |state| {
         let roi = state
             .latest_thumbnail()
             .and_then(|prev| diff_region(prev, &thumb, 8))
             .map(|region| {
-                upscale_region(
-                    region,
-                    captured.frame.width,
-                    captured.frame.height,
-                    thumb.width,
-                    thumb.height,
-                )
+                upscale_region(region, frame.width, frame.height, thumb.width, thumb.height)
             });
 
-        let update = state.record_capture(captured.frame, thumb, focused_app, texts, roi);
+        let update = state.record_capture(frame, thumb, focused_app, texts, roi);
         trace::log(format!(
             "pipeline:capture_and_update:recorded snapshot_id={} event_id={}",
             update.snapshot.snapshot_id, update.event_id
@@ -200,7 +204,12 @@ pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
 
 pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayload, AppError> {
     trace::log("pipeline:tokenize:window_mode");
-    let capture = capture_and_update_active_window(None, window_meta.bounds.clone())?;
+    let capture = capture_and_update_active_window(
+        None,
+        window_meta.bounds.clone(),
+        window_meta.app.clone(),
+        false,
+    )?;
     tokenize_from_snapshot(
         capture.snapshot,
         &capture.image,

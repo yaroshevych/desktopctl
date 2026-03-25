@@ -133,6 +133,15 @@ pub fn is_active() -> bool {
     OVERLAY_ACTIVE.load(Ordering::SeqCst)
 }
 
+pub fn tracked_window_bounds() -> Option<Bounds> {
+    let model = lock_glow_model();
+    if model.mode == WatchMode::WindowMode {
+        model.window_bounds.clone()
+    } else {
+        None
+    }
+}
+
 pub fn is_agent_active() -> bool {
     let model = lock_glow_model();
     model.agent_active

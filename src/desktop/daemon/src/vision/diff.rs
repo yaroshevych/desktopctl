@@ -1,5 +1,5 @@
 use desktop_core::protocol::Bounds;
-use image::{DynamicImage, GrayImage, imageops::FilterType};
+use image::{DynamicImage, GrayImage, RgbaImage, imageops::FilterType};
 
 #[derive(Debug, Clone)]
 pub struct GrayThumbnail {
@@ -16,11 +16,9 @@ pub struct ThumbRegion {
     pub height: u32,
 }
 
-pub fn thumbnail_from_image(image: &DynamicImage, width: u32, height: u32) -> GrayThumbnail {
-    let gray: GrayImage = image
-        .resize_exact(width, height, FilterType::Triangle)
-        .grayscale()
-        .to_luma8();
+pub fn thumbnail_from_rgba(image: &RgbaImage, width: u32, height: u32) -> GrayThumbnail {
+    let resized = image::imageops::resize(image, width, height, FilterType::Triangle);
+    let gray: GrayImage = DynamicImage::ImageRgba8(resized).to_luma8();
     GrayThumbnail {
         width,
         height,

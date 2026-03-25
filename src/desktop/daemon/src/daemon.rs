@@ -142,6 +142,11 @@ fn bind_listener() -> Result<UnixListener, AppError> {
 }
 
 fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppError> {
+    if config.idle_timeout.is_none() {
+        listener.set_nonblocking(false).map_err(|err| {
+            AppError::backend_unavailable(format!("set listener blocking mode failed: {err}"))
+        })?;
+    }
     let mut last_activity = Instant::now();
     let active_clients = Arc::new(AtomicUsize::new(0));
 
@@ -214,8 +219,10 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             None,
             Duration::from_millis(OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS),
         );
-    } else if let Some(bounds) = frontmost_window_bounds() {
-        let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
+    } else if !matches!(command, Command::ScreenTokenize { .. }) {
+        if let Some(bounds) = frontmost_window_bounds() {
+            let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
+        }
     }
     #[cfg(target_os = "macos")]
     let _ = overlay::agent_active_changed(true);
@@ -477,6 +484,8 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 vision::pipeline::capture_and_update_active_window(
                     capture_out_path.clone(),
                     bounds,
+                    None,
+                    true,
                 )?
             } else {
                 vision::pipeline::capture_and_update(capture_out_path)?
@@ -589,8 +598,32 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 let backend = new_backend()?;
                 backend.check_accessibility_permission()?;
                 if window_id.is_none() {
-                    if let Some(bounds) = frontmost_window_bounds() {
-                        let app = frontmost_app_name();
+                    let overlay_window_bounds = {
+                        #[cfg(target_os = "macos")]
+                        {
+                            if overlay::is_active() {
+                                overlay::tracked_window_bounds()
+                            } else {
+                                None
+                            }
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            None
+                        }
+                    };
+                    if let Some(bounds) = overlay_window_bounds {
+                        let window_meta = vision::pipeline::TokenizeWindowMeta {
+                            id: "frontmost:1".to_string(),
+                            title: "active_window".to_string(),
+                            app: None,
+                            bounds,
+                        };
+                        vision::pipeline::tokenize_window(window_meta)?
+                    } else if let Some(frontmost) = frontmost_window_context()
+                        .and_then(|ctx| ctx.bounds.map(|bounds| (bounds, ctx.app)))
+                    {
+                        let (bounds, app) = frontmost;
                         let title = app.clone().unwrap_or_else(|| "active_window".to_string());
                         let window_meta = vision::pipeline::TokenizeWindowMeta {
                             id: "frontmost:1".to_string(),
@@ -1651,16 +1684,23 @@ fn logical_point_to_image_point(
     Some((ix, iy))
 }
 
-fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {
+#[derive(Debug, Clone)]
+struct FrontmostWindowContext {
+    app: Option<String>,
+    bounds: Option<desktop_core::protocol::Bounds>,
+}
+
+fn frontmost_window_context() -> Option<FrontmostWindowContext> {
     let script = r#"tell application "System Events"
-set frontProc to first application process whose frontmost is true
-if (count of windows of frontProc) is 0 then
-    return ""
-end if
-set winPos to position of front window of frontProc
-set winSize to size of front window of frontProc
-return (item 1 of winPos as string) & "," & (item 2 of winPos as string) & "," & (item 1 of winSize as string) & "," & (item 2 of winSize as string)
-end tell"#;
+	set frontProc to first application process whose frontmost is true
+	set appName to name of frontProc
+	if (count of windows of frontProc) is 0 then
+	    return appName
+	end if
+	set winPos to position of front window of frontProc
+	set winSize to size of front window of frontProc
+	return appName & tab & (item 1 of winPos as string) & tab & (item 2 of winPos as string) & tab & (item 1 of winSize as string) & tab & (item 2 of winSize as string)
+	end tell"#;
     let output = ProcessCommand::new("osascript")
         .arg("-e")
         .arg(script)
@@ -1673,34 +1713,38 @@ end tell"#;
     if raw.is_empty() {
         return None;
     }
-    let parts: Vec<f64> = raw
-        .split(',')
-        .filter_map(|v| v.trim().parse::<f64>().ok())
-        .collect();
-    if parts.len() != 4 {
-        return None;
-    }
-    Some(desktop_core::protocol::Bounds {
-        x: parts[0].max(0.0),
-        y: parts[1].max(0.0),
-        width: parts[2].max(0.0),
-        height: parts[3].max(0.0),
-    })
+    let parts: Vec<&str> = raw.split('\t').map(str::trim).collect();
+    let app = parts
+        .first()
+        .map(|v| v.to_string())
+        .filter(|v| !v.is_empty());
+    let bounds = if parts.len() >= 5 {
+        let parsed: Vec<f64> = parts[1..5]
+            .iter()
+            .filter_map(|v| v.parse::<f64>().ok())
+            .collect();
+        if parsed.len() == 4 {
+            Some(desktop_core::protocol::Bounds {
+                x: parsed[0].max(0.0),
+                y: parsed[1].max(0.0),
+                width: parsed[2].max(0.0),
+                height: parsed[3].max(0.0),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Some(FrontmostWindowContext { app, bounds })
+}
+
+fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {
+    frontmost_window_context().and_then(|ctx| ctx.bounds)
 }
 
 fn frontmost_app_name() -> Option<String> {
-    let script =
-        r#"tell application "System Events" to get name of first process whose frontmost is true"#;
-    let output = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() { None } else { Some(value) }
+    frontmost_window_context().and_then(|ctx| ctx.app)
 }
 
 #[derive(Debug, Clone)]

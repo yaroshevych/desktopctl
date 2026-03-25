@@ -110,7 +110,10 @@ fn screencapturekit_screenshot_api_available() -> bool {
     AnyClass::get(&manager).is_some()
 }
 
-fn capture_with_screencapturekit_to_path(rect: CGRect, target_path: &PathBuf) -> Result<(), AppError> {
+fn capture_with_screencapturekit_to_path(
+    rect: CGRect,
+    target_path: &PathBuf,
+) -> Result<(), AppError> {
     let file_url = NSURL::from_file_path(target_path).ok_or_else(|| {
         AppError::invalid_argument(format!(
             "invalid capture output path: {}",
