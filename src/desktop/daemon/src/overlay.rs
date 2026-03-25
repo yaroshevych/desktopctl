@@ -394,29 +394,31 @@ fn apply_overlay_update_on_main(rects: Vec<OverlayRect>) {
             return;
         };
 
-        for view in state.token_views.drain(..) {
-            view.removeFromSuperview();
+        let mut drawable_rects: Vec<(NSRect, OverlayKind)> = Vec::with_capacity(rects.len());
+        for rect in rects {
+            if let Some(frame) = rect_to_overlay_frame(&rect, screen_frame) {
+                drawable_rects.push((frame, rect.kind));
+            }
+        }
+
+        let needs_probe = drawable_rects.is_empty();
+        let required_views = if needs_probe { 1 } else { drawable_rects.len() };
+        while state.token_views.len() < required_views {
+            let token_box: Retained<NSBox> = unsafe {
+                msg_send![NSBox::alloc(mtm), initWithFrame: full_overlay_frame(screen_frame)]
+            };
+            token_box.setBoxType(NSBoxType::Custom);
+            token_box.setTitlePosition(NSTitlePosition::NoTitle);
+            token_box.setTransparent(false);
+            token_box.setFillColor(&NSColor::clearColor());
+            set_layer_z(&token_box, 1.0);
+            set_view_hidden(&token_box, true);
+            content.addSubview(&token_box);
+            state.token_views.push(token_box);
         }
 
         let mut drawn = 0usize;
-        for rect in rects {
-            let Some(frame) = rect_to_overlay_frame(&rect, screen_frame) else {
-                continue;
-            };
-            let token_box: Retained<NSBox> =
-                unsafe { msg_send![NSBox::alloc(mtm), initWithFrame: frame] };
-            token_box.setBoxType(NSBoxType::Custom);
-            token_box.setTitlePosition(NSTitlePosition::NoTitle);
-            token_box.setBorderWidth(1.3);
-            token_box.setTransparent(false);
-            token_box.setFillColor(&NSColor::clearColor());
-            token_box.setBorderColor(&overlay_color(rect.kind));
-            set_layer_z(&token_box, 1.0);
-            content.addSubview(&token_box);
-            state.token_views.push(token_box);
-            drawn += 1;
-        }
-        if drawn == 0 {
+        if needs_probe {
             // Probe marker helps verify overlay rendering when tokenization yielded no drawables.
             let probe_x = (screen_frame.size.width - PROBE_WIDTH) / 2.0;
             let probe_y = (screen_frame.size.height - PROBE_HEIGHT) / 2.0;
@@ -424,19 +426,30 @@ fn apply_overlay_update_on_main(rects: Vec<OverlayRect>) {
                 NSPoint::new(probe_x.max(0.0), probe_y.max(0.0)),
                 NSSize::new(PROBE_WIDTH, PROBE_HEIGHT),
             );
-            let probe_box: Retained<NSBox> =
-                unsafe { msg_send![NSBox::alloc(mtm), initWithFrame: probe_frame] };
-            probe_box.setBoxType(NSBoxType::Custom);
-            probe_box.setTitlePosition(NSTitlePosition::NoTitle);
-            probe_box.setBorderWidth(2.2);
-            probe_box.setTransparent(false);
-            probe_box.setFillColor(&NSColor::clearColor());
-            probe_box.setBorderColor(&NSColor::systemRedColor());
-            set_layer_z(&probe_box, 1.0);
-            content.addSubview(&probe_box);
-            state.token_views.push(probe_box);
+            if let Some(probe_box) = state.token_views.first() {
+                set_view_frame(probe_box, probe_frame);
+                probe_box.setBorderWidth(2.2);
+                probe_box.setBorderColor(&NSColor::systemRedColor());
+                set_view_hidden(probe_box, false);
+            }
             drawn += 1;
             trace::log("overlay:apply_on_main probe_drawn");
+        } else {
+            for (idx, (frame, kind)) in drawable_rects.iter().enumerate() {
+                if let Some(token_box) = state.token_views.get(idx) {
+                    set_view_frame(token_box, *frame);
+                    token_box.setBorderWidth(1.3);
+                    token_box.setBorderColor(&overlay_color(*kind));
+                    set_view_hidden(token_box, false);
+                    drawn += 1;
+                }
+            }
+        }
+
+        for idx in drawn..state.token_views.len() {
+            if let Some(view) = state.token_views.get(idx) {
+                set_view_hidden(view, true);
+            }
         }
 
         content.setNeedsDisplay(true);

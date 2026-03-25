@@ -6,7 +6,7 @@ use std::{
 
 use desktop_core::{
     error::AppError,
-    protocol::{Bounds, SnapshotDisplay, SnapshotPayload, TokenEntry},
+    protocol::{Bounds, SnapshotDisplay, SnapshotPayload, TokenEntry, TokenizePayload},
 };
 
 use super::{diff::GrayThumbnail, types::CapturedFrame};
@@ -33,6 +33,9 @@ pub struct VisionState {
     latest_snapshot: Option<SnapshotPayload>,
     latest_frame_path: Option<PathBuf>,
     latest_thumbnail: Option<GrayThumbnail>,
+    latest_tokenize_cache_key: Option<String>,
+    latest_tokenize_thumbnail: Option<GrayThumbnail>,
+    latest_tokenize_payload: Option<TokenizePayload>,
     events: VecDeque<VisionEvent>,
     frames: VecDeque<PathBuf>,
     token_map: HashMap<u32, TokenEntry>,
@@ -46,6 +49,9 @@ impl VisionState {
             latest_snapshot: None,
             latest_frame_path: None,
             latest_thumbnail: None,
+            latest_tokenize_cache_key: None,
+            latest_tokenize_thumbnail: None,
+            latest_tokenize_payload: None,
             events: VecDeque::new(),
             frames: VecDeque::new(),
             token_map: HashMap::new(),
@@ -62,6 +68,34 @@ impl VisionState {
 
     pub fn latest_frame_path(&self) -> Option<PathBuf> {
         self.latest_frame_path.clone()
+    }
+
+    pub fn cached_tokenize_payload(
+        &self,
+        cache_key: &str,
+    ) -> Option<(GrayThumbnail, TokenizePayload)> {
+        let key_matches = self
+            .latest_tokenize_cache_key
+            .as_ref()
+            .map(|key| key == cache_key)
+            .unwrap_or(false);
+        if !key_matches {
+            return None;
+        }
+        let thumb = self.latest_tokenize_thumbnail.as_ref()?.clone();
+        let payload = self.latest_tokenize_payload.as_ref()?.clone();
+        Some((thumb, payload))
+    }
+
+    pub fn update_tokenize_cache(
+        &mut self,
+        cache_key: String,
+        thumbnail: GrayThumbnail,
+        payload: TokenizePayload,
+    ) {
+        self.latest_tokenize_cache_key = Some(cache_key);
+        self.latest_tokenize_thumbnail = Some(thumbnail);
+        self.latest_tokenize_payload = Some(payload);
     }
 
     pub fn token_map(&self) -> &HashMap<u32, TokenEntry> {
@@ -235,5 +269,28 @@ mod tests {
 
         let token = state.token(1).expect("token should exist");
         assert_eq!(token.text, "New");
+    }
+
+    #[test]
+    fn tokenize_cache_requires_key_match() {
+        let mut state = VisionState::new();
+        state.update_tokenize_cache(
+            "window:dictionary".to_string(),
+            GrayThumbnail {
+                width: 2,
+                height: 2,
+                pixels: vec![1, 2, 3, 4],
+            },
+            desktop_core::protocol::TokenizePayload {
+                snapshot_id: 42,
+                timestamp: "ts".to_string(),
+                tokens: Vec::new(),
+                image: None,
+                windows: Vec::new(),
+            },
+        );
+
+        assert!(state.cached_tokenize_payload("window:other").is_none());
+        assert!(state.cached_tokenize_payload("window:dictionary").is_some());
     }
 }

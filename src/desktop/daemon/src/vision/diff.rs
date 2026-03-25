@@ -76,6 +76,23 @@ pub fn diff_region(
     }
 }
 
+pub fn changed_pixel_count(prev: &GrayThumbnail, curr: &GrayThumbnail, threshold: u8) -> usize {
+    if prev.width != curr.width
+        || prev.height != curr.height
+        || prev.pixels.len() != curr.pixels.len()
+    {
+        return curr.pixels.len();
+    }
+
+    let mut changed = 0usize;
+    for idx in 0..curr.pixels.len() {
+        if prev.pixels[idx].abs_diff(curr.pixels[idx]) > threshold {
+            changed += 1;
+        }
+    }
+    changed
+}
+
 pub fn upscale_region(
     region: ThumbRegion,
     full_width: u32,
@@ -95,7 +112,7 @@ pub fn upscale_region(
 
 #[cfg(test)]
 mod tests {
-    use super::{GrayThumbnail, ThumbRegion, diff_region};
+    use super::{GrayThumbnail, ThumbRegion, changed_pixel_count, diff_region};
 
     #[test]
     fn detects_changed_region() {
@@ -136,5 +153,23 @@ mod tests {
             pixels: vec![12; 16],
         };
         assert!(diff_region(&prev, &curr, 3).is_none());
+    }
+
+    #[test]
+    fn changed_pixel_count_reports_sparse_changes() {
+        let prev = GrayThumbnail {
+            width: 4,
+            height: 4,
+            pixels: vec![0; 16],
+        };
+        let mut curr_pixels = vec![0; 16];
+        curr_pixels[0] = 12;
+        curr_pixels[15] = 20;
+        let curr = GrayThumbnail {
+            width: 4,
+            height: 4,
+            pixels: curr_pixels,
+        };
+        assert_eq!(changed_pixel_count(&prev, &curr, 8), 2);
     }
 }

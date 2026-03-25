@@ -16,10 +16,13 @@ use crate::trace;
 
 use super::{
     capture::capture_screen_png,
-    diff::{diff_region, thumbnail_from_rgba, upscale_region},
+    diff::{changed_pixel_count, diff_region, thumbnail_from_rgba, upscale_region},
     ocr::recognize_text,
     state::with_state,
 };
+
+const TOKENIZE_FASTPATH_DIFF_THRESHOLD: u8 = 8;
+const TOKENIZE_FASTPATH_MAX_CHANGED_PIXELS: usize = 6;
 
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
@@ -204,17 +207,81 @@ pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
 
 pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayload, AppError> {
     trace::log("pipeline:tokenize:window_mode");
-    let capture = capture_and_update_active_window(
-        None,
-        window_meta.bounds.clone(),
-        window_meta.app.clone(),
-        false,
-    )?;
-    tokenize_from_snapshot(
+    let cache_key = tokenize_cache_key(&window_meta);
+    let mut captured = capture_screen_png(None)?;
+    crop_capture_to_bounds(&mut captured, &window_meta.bounds)?;
+    let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
+
+    if let Some((prev_thumb, cached_payload)) =
+        with_state(|state| state.cached_tokenize_payload(&cache_key))?
+    {
+        let changed = changed_pixel_count(&prev_thumb, &thumb, TOKENIZE_FASTPATH_DIFF_THRESHOLD);
+        if changed <= TOKENIZE_FASTPATH_MAX_CHANGED_PIXELS {
+            trace::log(format!(
+                "pipeline:tokenize:window_fastpath cache_hit changed_pixels={changed}"
+            ));
+            return Ok(cached_payload);
+        }
+        trace::log(format!(
+            "pipeline:tokenize:window_fastpath cache_miss changed_pixels={changed}"
+        ));
+    }
+
+    let texts = recognize_text(&captured.image)?;
+    let frame = captured.frame;
+    let image = captured.image;
+    let image_path = frame.image_path.clone();
+    let focused_app = window_meta.app.clone();
+    let thumb_for_record = thumb.clone();
+    let capture = with_state(move |state| {
+        let roi = state
+            .latest_thumbnail()
+            .and_then(|prev| diff_region(prev, &thumb_for_record, 8))
+            .map(|region| {
+                upscale_region(
+                    region,
+                    frame.width,
+                    frame.height,
+                    thumb_for_record.width,
+                    thumb_for_record.height,
+                )
+            });
+
+        let update = state.record_capture(frame, thumb_for_record, focused_app, texts, roi);
+        trace::log(format!(
+            "pipeline:tokenize:window_recorded snapshot_id={} event_id={}",
+            update.snapshot.snapshot_id, update.event_id
+        ));
+        let event_ids = state.event_ids(update.snapshot.snapshot_id);
+
+        CaptureResult {
+            snapshot: update.snapshot,
+            image_path,
+            image,
+            event_ids,
+        }
+    })?;
+
+    let payload = tokenize_from_snapshot(
         capture.snapshot,
         &capture.image,
         capture.image_path.as_deref(),
         Some(window_meta),
+    )?;
+    with_state(|state| state.update_tokenize_cache(cache_key, thumb, payload.clone()))?;
+    Ok(payload)
+}
+
+fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
+    format!(
+        "{}|{}|{}|{:.0}:{:.0}:{:.0}:{:.0}",
+        meta.id,
+        meta.title,
+        meta.app.as_deref().unwrap_or_default(),
+        meta.bounds.x,
+        meta.bounds.y,
+        meta.bounds.width,
+        meta.bounds.height
     )
 }
 

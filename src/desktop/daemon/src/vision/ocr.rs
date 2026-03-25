@@ -9,8 +9,8 @@ use image::RgbaImage;
 use objc2::{AnyThread, ClassType, runtime::AnyObject};
 use objc2_core_foundation::CGRect;
 use objc2_core_graphics::{
-    CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage,
-    CGImageAlphaInfo, CGImageByteOrderInfo,
+    CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
+    CGImageByteOrderInfo,
 };
 use objc2_foundation::{NSArray, NSDictionary};
 use objc2_vision::{
@@ -33,9 +33,9 @@ pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> 
     let options = NSDictionary::<VNImageOption, AnyObject>::from_slices::<VNImageOption>(&[], &[]);
     let handler = unsafe {
         VNImageRequestHandler::initWithCGImage_options(
-        VNImageRequestHandler::alloc(),
-        cg_image.as_ref(),
-        &options,
+            VNImageRequestHandler::alloc(),
+            cg_image.as_ref(),
+            &options,
         )
     };
 
@@ -209,7 +209,9 @@ unsafe extern "C-unwind" fn release_provider_bytes(
     }
 }
 
-fn build_cgimage_from_rgba(image: RgbaImage) -> Result<objc2_core_foundation::CFRetained<CGImage>, AppError> {
+fn build_cgimage_from_rgba(
+    image: RgbaImage,
+) -> Result<objc2_core_foundation::CFRetained<CGImage>, AppError> {
     let width = image.width() as usize;
     let height = image.height() as usize;
     if width == 0 || height == 0 {
