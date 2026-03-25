@@ -1,0 +1,2 @@
+deploy:
+    npx wrangler deploy

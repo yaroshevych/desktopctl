@@ -12,7 +12,6 @@ src/desktop/runtime-stable/
 src/desktop/.env
 
 tmp
-Justfile
 .claude/settings.local.json
 kb/20260311*
 src/desktop/daemon/tests/fixtures/settings-screenshots/out/
