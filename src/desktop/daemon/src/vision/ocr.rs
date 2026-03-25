@@ -1,14 +1,18 @@
-use std::io::Cursor;
+use std::ffi::c_void;
 use std::path::Path;
 
 use desktop_core::{
     error::AppError,
     protocol::{Bounds, SnapshotText},
 };
-use image::{ImageFormat, RgbaImage};
+use image::RgbaImage;
 use objc2::{AnyThread, ClassType, runtime::AnyObject};
 use objc2_core_foundation::CGRect;
-use objc2_foundation::{NSArray, NSData, NSDictionary};
+use objc2_core_graphics::{
+    CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage,
+    CGImageAlphaInfo, CGImageByteOrderInfo,
+};
+use objc2_foundation::{NSArray, NSDictionary};
 use objc2_vision::{
     VNImageOption, VNImageRequestHandler, VNRecognizeTextRequest, VNRequest,
     VNRequestTextRecognitionLevel,
@@ -24,16 +28,16 @@ pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> 
     trace::log(format!("ocr:start size={}x{}", width, height));
 
     let preprocessed = preprocess_for_ocr(image);
-
-    let png_bytes = encode_png(&preprocessed)?;
-    let ns_data = NSData::with_bytes(&png_bytes);
+    let cg_image = build_cgimage_from_rgba(preprocessed)?;
 
     let options = NSDictionary::<VNImageOption, AnyObject>::from_slices::<VNImageOption>(&[], &[]);
-    let handler = VNImageRequestHandler::initWithData_options(
+    let handler = unsafe {
+        VNImageRequestHandler::initWithCGImage_options(
         VNImageRequestHandler::alloc(),
-        &ns_data,
+        cg_image.as_ref(),
         &options,
-    );
+        )
+    };
 
     let request = VNRecognizeTextRequest::new();
     request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
@@ -191,14 +195,53 @@ fn contrast_stretch(image: &mut RgbaImage) {
     }
 }
 
-// ── encoding ────────────────────────────────────────────────────────────────
+// ── image bridge ────────────────────────────────────────────────────────────
 
-fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, AppError> {
-    let mut buf = Cursor::new(Vec::new());
-    image.write_to(&mut buf, ImageFormat::Png).map_err(|e| {
-        AppError::backend_unavailable(format!("failed to encode PNG for OCR: {}", e))
-    })?;
-    Ok(buf.into_inner())
+unsafe extern "C-unwind" fn release_provider_bytes(
+    info: *mut c_void,
+    _data: std::ptr::NonNull<c_void>,
+    _size: usize,
+) {
+    if !info.is_null() {
+        unsafe {
+            drop(Box::<Vec<u8>>::from_raw(info as *mut Vec<u8>));
+        }
+    }
+}
+
+fn build_cgimage_from_rgba(image: RgbaImage) -> Result<objc2_core_foundation::CFRetained<CGImage>, AppError> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    if width == 0 || height == 0 {
+        return Err(AppError::invalid_argument("ocr image must be non-empty"));
+    }
+    let bytes = Box::new(image.into_raw());
+    let data_ptr = bytes.as_ptr() as *const c_void;
+    let byte_len = bytes.len();
+    let info_ptr = Box::into_raw(bytes) as *mut c_void;
+    let provider = unsafe {
+        CGDataProvider::with_data(info_ptr, data_ptr, byte_len, Some(release_provider_bytes))
+    }
+    .ok_or_else(|| AppError::backend_unavailable("failed to build CGDataProvider for OCR image"))?;
+    let color_space = CGColorSpace::new_device_rgb()
+        .ok_or_else(|| AppError::backend_unavailable("failed to create device RGB color space"))?;
+    let bitmap_info = CGBitmapInfo(CGImageAlphaInfo::Last.0 | CGImageByteOrderInfo::OrderDefault.0);
+    unsafe {
+        CGImage::new(
+            width,
+            height,
+            8,
+            32,
+            width * 4,
+            Some(color_space.as_ref()),
+            bitmap_info,
+            Some(provider.as_ref()),
+            std::ptr::null(),
+            false,
+            CGColorRenderingIntent::RenderingIntentDefault,
+        )
+    }
+    .ok_or_else(|| AppError::backend_unavailable("failed to build CGImage for OCR"))
 }
 
 // ── coordinate conversion ───────────────────────────────────────────────────
