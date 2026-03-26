@@ -1,47 +1,65 @@
 # DesktopCtl
 
-`desktopctl` lets agents and developers control desktop applications through a deterministic CLI interface.
+Computer Vision and mouse/keyboard control for local AI agents. Bring your own AI, observe UI, and perform complex operations with mouse, keyboard, and GPU-accelerated text recognition.
 
-The desktop automation split into two binaries:
+Stay in control with local runtime. Your AI agent should not take screenshots, and upload them to cloud.
 
-- `DesktopCtl.app` (`desktopctld`): long-running menubar daemon (owns permissions, executes actions)
-- `desktopctl`: CLI client (sends commands to daemon over local IPC)
+Learn more at https://desktopctl.com
 
-## Structure
+## Why DesktopCtl
 
-- `src/desktop/core` — shared protocol, IPC, automation backend
-- `src/desktop/daemon` — `DesktopCtl.app`
-- `src/desktop/cli` — `desktopctl`
+- Local-first runtime, blazing fast with no cloud dependency in the core loop
+- Bring your own AI: works with any desktop AI agent
+- GPU-accelerated text recognition and computer vision
+- Selector-first automation (`--text`, `--token`) with coordinate fallback
+- Agent-friendly explicit waits and post-action verification
+- Stable JSON contracts for agent integrations
 
-## Build / Run
+## Architecture
+
+DesktopCtl is split into two binaries:
+
+- `DesktopCtl.app` (`desktopctld`): daemon that owns perception, state, execution, and verification
+- `desktopctl`: stateless CLI surface for actions and queries over local IPC
+
+Repository layout:
+
+- `src/desktop/core` - shared protocol and types
+- `src/desktop/daemon` - daemon runtime
+- `src/desktop/cli` - CLI client
+
+## Current Scope
+
+- macOS-first
+- OCR-first perception pipeline
+- Tokenized screen output for agent grounding
+- Deterministic CLI primitives for click/type/wait flows
+
+## Prerequisites
+
+- macOS (current support target)
+- Rust toolchain (`cargo`)
+- `just` command runner
+- Accessibility permission for `DesktopCtl.app`
+- Screen Recording permission for `DesktopCtl.app`
+
+## Quick Start
 
 ```bash
-just build
-just run
-```
-
-## Examples
-
-```bash
-desktopctl open Mail && sleep 1 && desktopctl key press opt+cmd+f && sleep 0.2 && desktopctl type "shane" && desktopctl key press enter
+just build run
 ```
 
 ```bash
-desktopctl open launchpad && sleep 1 && desktopctl type "Calculator" && sleep 0.5 && desktopctl key press enter
+desktopctl open Calculator --wait
+desktopctl screen tokenize --json
+desktopctl ui click --text "7"
+desktopctl wait --text "7"
 ```
 
-```bash
-desktopctl open Calculator && sleep 1 && desktopctl type "2+2" && desktopctl key press enter
-```
+## Status / Roadmap
 
-```bash
-desktopctl open Preview -- ~/Downloads/test.jpeg && \
-  sleep 1 && \
-  desktopctl key press ctrl+cmd+f && \
-  sleep 1 && \
-  desktopctl pointer drag 656 391 856 591 120 && \
-  sleep 0.2 && \
-  desktopctl key press cmd+k && \
-  sleep 0.2 && \
-  desktopctl key press cmd+s
-```
+- Status: active development, with macOS-first CLI and daemon workflows already usable.
+- Reliability for text/token-driven actions and verification loops. Stable machine-readable error codes.
+- Upcoming CLI: `doctor`, richer `window/app` introspection, and `--explain` failure output.
+- Better local computer vision and semantic UI tokenization.
+- Multi-platform support.
