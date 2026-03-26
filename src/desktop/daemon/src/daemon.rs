@@ -776,16 +776,38 @@ fn execute(command: Command) -> Result<Value, AppError> {
 fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let capture = vision::pipeline::capture_and_update(None)?;
-    trace::log(format!(
-        "ui_click_text:candidates snapshot_id={} query=\"{}\" texts={} display={}x{} focused_app={}",
-        capture.snapshot.snapshot_id,
-        query,
-        capture.snapshot.texts.len(),
+    let normalized_texts = normalize_snapshot_texts_to_display(
+        &capture.snapshot.texts,
+        capture.image.width(),
+        capture.image.height(),
         capture.snapshot.display.width,
         capture.snapshot.display.height,
-        capture.snapshot.focused_app.as_deref().unwrap_or("<none>")
+    );
+    let window_bounds = frontmost_window_bounds();
+    let window_filtered = window_bounds
+        .as_ref()
+        .map(|bounds| filter_texts_to_window(&normalized_texts, bounds))
+        .unwrap_or_else(|| normalized_texts.clone());
+    trace::log(format!(
+        "ui_click_text:candidates snapshot_id={} query=\"{}\" texts={} window_filtered={} display={}x{} focused_app={} frontmost_window={}",
+        capture.snapshot.snapshot_id,
+        query,
+        normalized_texts.len(),
+        window_filtered.len(),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+        capture.snapshot.focused_app.as_deref().unwrap_or("<none>"),
+        window_bounds
+            .as_ref()
+            .map(|b| format!("({:.1},{:.1},{:.1},{:.1})", b.x, b.y, b.width, b.height))
+            .unwrap_or_else(|| "null".to_string())
     ));
-    let target = select_text_candidate(&capture.snapshot.texts, query)?;
+    if window_bounds.is_some() && window_filtered.is_empty() {
+        return Err(AppError::target_not_found(
+            "no OCR text detected in frontmost window; cannot click target safely",
+        ));
+    }
+    let target = select_text_candidate(&window_filtered, query)?;
     trace::log(format!(
         "ui_click_text:selected text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
         compact_for_log(&target.text),
@@ -813,7 +835,24 @@ fn click_text_offset_target(
 ) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let capture = vision::pipeline::capture_and_update(None)?;
-    let target = select_text_candidate(&capture.snapshot.texts, query)?;
+    let normalized_texts = normalize_snapshot_texts_to_display(
+        &capture.snapshot.texts,
+        capture.image.width(),
+        capture.image.height(),
+        capture.snapshot.display.width,
+        capture.snapshot.display.height,
+    );
+    let window_bounds = frontmost_window_bounds();
+    let window_filtered = window_bounds
+        .as_ref()
+        .map(|bounds| filter_texts_to_window(&normalized_texts, bounds))
+        .unwrap_or_else(|| normalized_texts.clone());
+    if window_bounds.is_some() && window_filtered.is_empty() {
+        return Err(AppError::target_not_found(
+            "no OCR text detected in frontmost window; cannot click target safely",
+        ));
+    }
+    let target = select_text_candidate(&window_filtered, query)?;
     let base_x = (target.bounds.x + target.bounds.width / 2.0).round() as i64;
     let base_y = (target.bounds.y + target.bounds.height / 2.0).round() as i64;
     let click_x = (base_x + dx as i64).max(0) as u32;
@@ -1125,7 +1164,14 @@ fn verify_click_postcondition(
     let start = Instant::now();
     while start.elapsed().as_millis() as u64 <= timeout_ms {
         let capture = vision::pipeline::capture_and_update(None)?;
-        let still_present = capture.snapshot.texts.iter().any(|text| {
+        let texts = normalize_snapshot_texts_to_display(
+            &capture.snapshot.texts,
+            capture.image.width(),
+            capture.image.height(),
+            capture.snapshot.display.width,
+            capture.snapshot.display.height,
+        );
+        let still_present = texts.iter().any(|text| {
             text_matches_query(&text.text, query)
                 && iou(&inflate_bounds(original_bounds, 6.0), &text.bounds) > 0.35
         });
@@ -1680,6 +1726,55 @@ fn logical_point_to_image_point(
     let ix = ix.clamp(0, image_width.saturating_sub(1) as i64) as u32;
     let iy = iy.clamp(0, image_height.saturating_sub(1) as i64) as u32;
     Some((ix, iy))
+}
+
+fn normalize_snapshot_texts_to_display(
+    texts: &[desktop_core::protocol::SnapshotText],
+    image_width: u32,
+    image_height: u32,
+    display_width: u32,
+    display_height: u32,
+) -> Vec<desktop_core::protocol::SnapshotText> {
+    if image_width == 0 || image_height == 0 || display_width == 0 || display_height == 0 {
+        return texts.to_vec();
+    }
+    let sx = image_width as f64 / display_width as f64;
+    let sy = image_height as f64 / display_height as f64;
+    if (sx - 1.0).abs() < 0.0001 && (sy - 1.0).abs() < 0.0001 {
+        return texts.to_vec();
+    }
+    texts
+        .iter()
+        .cloned()
+        .map(|mut text| {
+            text.bounds = desktop_core::protocol::Bounds {
+                x: (text.bounds.x / sx).max(0.0),
+                y: (text.bounds.y / sy).max(0.0),
+                width: (text.bounds.width / sx).max(0.0),
+                height: (text.bounds.height / sy).max(0.0),
+            };
+            text
+        })
+        .collect()
+}
+
+fn filter_texts_to_window(
+    texts: &[desktop_core::protocol::SnapshotText],
+    window_bounds: &desktop_core::protocol::Bounds,
+) -> Vec<desktop_core::protocol::SnapshotText> {
+    let padded = inflate_bounds(window_bounds, 4.0);
+    texts
+        .iter()
+        .filter(|text| {
+            let cx = text.bounds.x + text.bounds.width / 2.0;
+            let cy = text.bounds.y + text.bounds.height / 2.0;
+            cx >= padded.x
+                && cx <= padded.x + padded.width
+                && cy >= padded.y
+                && cy <= padded.y + padded.height
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone)]
