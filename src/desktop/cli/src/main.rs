@@ -62,7 +62,6 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "app" => parse_app(&args[1..]),
         "window" => parse_window(&args[1..]),
         "screen" => parse_screen(&args[1..]),
-        "permissions" => parse_permissions(&args[1..]),
         "clipboard" => parse_clipboard(&args[1..]),
         "debug" => parse_debug(&args[1..]),
         "replay" => parse_replay(&args[1..]),
@@ -156,13 +155,6 @@ fn parse_window(args: &[String]) -> Result<Command, AppError> {
     }
 }
 
-fn parse_permissions(args: &[String]) -> Result<Command, AppError> {
-    if args.len() == 1 && args[0] == "check" {
-        return Ok(Command::PermissionsCheck);
-    }
-    Err(AppError::invalid_argument(usage()))
-}
-
 fn parse_debug(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(usage()));
@@ -170,6 +162,7 @@ fn parse_debug(args: &[String]) -> Result<Command, AppError> {
     match args[0].as_str() {
         "snapshot" if args.len() == 1 => Ok(Command::DebugSnapshot),
         "ping" if args.len() == 1 => Ok(Command::Ping),
+        "permissions" if args.len() == 1 => Ok(Command::PermissionsCheck),
         "overlay" => {
             if args.len() < 2 {
                 return Err(AppError::invalid_argument(
@@ -621,9 +614,9 @@ fn usage() -> &'static str {
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
-  desktopctl permissions check
   desktopctl clipboard read
   desktopctl clipboard write <text>
+  desktopctl debug permissions
   desktopctl debug ping
   desktopctl debug overlay start [--duration <ms>]
   desktopctl debug overlay stop
