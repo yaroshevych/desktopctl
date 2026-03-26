@@ -783,10 +783,10 @@ fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
         capture.snapshot.display.width,
         capture.snapshot.display.height,
     );
-    let window_bounds = frontmost_window_bounds();
+    let window_bounds = click_scope_window_bounds();
     let window_filtered = window_bounds
         .as_ref()
-        .map(|bounds| filter_texts_to_window(&normalized_texts, bounds))
+        .map(|bounds| filter_texts_to_window_progressive(&normalized_texts, bounds))
         .unwrap_or_else(|| normalized_texts.clone());
     trace::log(format!(
         "ui_click_text:candidates snapshot_id={} query=\"{}\" texts={} window_filtered={} display={}x{} focused_app={} frontmost_window={}",
@@ -842,10 +842,10 @@ fn click_text_offset_target(
         capture.snapshot.display.width,
         capture.snapshot.display.height,
     );
-    let window_bounds = frontmost_window_bounds();
+    let window_bounds = click_scope_window_bounds();
     let window_filtered = window_bounds
         .as_ref()
-        .map(|bounds| filter_texts_to_window(&normalized_texts, bounds))
+        .map(|bounds| filter_texts_to_window_progressive(&normalized_texts, bounds))
         .unwrap_or_else(|| normalized_texts.clone());
     if window_bounds.is_some() && window_filtered.is_empty() {
         return Err(AppError::target_not_found(
@@ -1762,19 +1762,61 @@ fn filter_texts_to_window(
     texts: &[desktop_core::protocol::SnapshotText],
     window_bounds: &desktop_core::protocol::Bounds,
 ) -> Vec<desktop_core::protocol::SnapshotText> {
-    let padded = inflate_bounds(window_bounds, 4.0);
     texts
         .iter()
         .filter(|text| {
             let cx = text.bounds.x + text.bounds.width / 2.0;
             let cy = text.bounds.y + text.bounds.height / 2.0;
-            cx >= padded.x
-                && cx <= padded.x + padded.width
-                && cy >= padded.y
-                && cy <= padded.y + padded.height
+            cx >= window_bounds.x
+                && cx <= window_bounds.x + window_bounds.width
+                && cy >= window_bounds.y
+                && cy <= window_bounds.y + window_bounds.height
         })
         .cloned()
         .collect()
+}
+
+fn filter_texts_to_window_progressive(
+    texts: &[desktop_core::protocol::SnapshotText],
+    window_bounds: &desktop_core::protocol::Bounds,
+) -> Vec<desktop_core::protocol::SnapshotText> {
+    const PAD_LEVELS: [f64; 4] = [4.0, 40.0, 96.0, 180.0];
+    for pad in PAD_LEVELS {
+        let filtered = filter_texts_to_window(texts, &inflate_bounds(window_bounds, pad));
+        if !filtered.is_empty() {
+            trace::log(format!(
+                "ui_click_text:window_filter pad={pad:.1} hits={}",
+                filtered.len()
+            ));
+            return filtered;
+        }
+    }
+    Vec::new()
+}
+
+fn click_scope_window_bounds() -> Option<desktop_core::protocol::Bounds> {
+    #[cfg(target_os = "macos")]
+    {
+        if overlay::is_active() {
+            if let Some(bounds) = overlay::tracked_window_bounds() {
+                trace::log(format!(
+                    "ui_click_text:window_scope source=overlay bounds=({:.1},{:.1},{:.1},{:.1})",
+                    bounds.x, bounds.y, bounds.width, bounds.height
+                ));
+                return Some(bounds);
+            }
+        }
+    }
+    let bounds = frontmost_window_bounds();
+    if let Some(b) = bounds.as_ref() {
+        trace::log(format!(
+            "ui_click_text:window_scope source=frontmost bounds=({:.1},{:.1},{:.1},{:.1})",
+            b.x, b.y, b.width, b.height
+        ));
+    } else {
+        trace::log("ui_click_text:window_scope source=none");
+    }
+    bounds
 }
 
 #[derive(Debug, Clone)]

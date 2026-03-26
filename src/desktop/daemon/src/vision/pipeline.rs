@@ -344,7 +344,7 @@ fn tokenize_from_snapshot(
     Ok(TokenizePayload {
         snapshot_id,
         timestamp,
-        tokens: Vec::new(),
+        tokens: raw_tokens,
         image: Some(image_meta),
         windows,
     })
