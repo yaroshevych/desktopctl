@@ -62,7 +62,6 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "ping" => Ok(Command::Ping),
         "app" => parse_app(&args[1..]),
         "window" => parse_window(&args[1..]),
-        "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
         "overlay" => parse_overlay(&args[1..]),
         "permissions" => parse_permissions(&args[1..]),
@@ -79,11 +78,15 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
 fn parse_app(args: &[String]) -> Result<Command, AppError> {
     if args.len() < 2 {
         return Err(AppError::invalid_argument(
-            "usage: desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
+            "usage: desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>] | desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
         ));
     }
 
     let action = args[0].as_str();
+    if action == "open" {
+        return parse_open(&args[1..]);
+    }
+
     let name = args[1..].join(" ").trim().to_string();
     if name.is_empty() {
         return Err(AppError::invalid_argument(
@@ -96,7 +99,7 @@ fn parse_app(args: &[String]) -> Result<Command, AppError> {
         "show" => Ok(Command::AppShow { name }),
         "isolate" => Ok(Command::AppIsolate { name }),
         _ => Err(AppError::invalid_argument(
-            "usage: desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
+            "usage: desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>] | desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
         )),
     }
 }
@@ -466,7 +469,7 @@ fn parse_open(args: &[String]) -> Result<Command, AppError> {
 
     if app_name_parts.is_empty() {
         return Err(AppError::invalid_argument(
-            "missing app name: desktopctl open <application> [-- <open-args...>]",
+            "missing app name: desktopctl app open <application> [-- <open-args...>]",
         ));
     }
 
@@ -596,13 +599,13 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
 fn usage() -> &'static str {
     "usage:
   desktopctl ping
+  desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl app hide <application>
   desktopctl app show <application>
   desktopctl app isolate <application>
   desktopctl window list [--json]
   desktopctl window bounds --title <text> [--json]
   desktopctl window focus --title <text>
-  desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl screen capture [--out <path>] [--overlay] [--active-window]
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
@@ -977,6 +980,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_app_open_with_wait() {
+        let args = vec![
+            "app".to_string(),
+            "open".to_string(),
+            "Calculator".to_string(),
+            "--wait".to_string(),
+            "--timeout".to_string(),
+            "1500".to_string(),
+        ];
+        let command = parse_command(&args).expect("app open should parse");
+        match command {
+            Command::OpenApp {
+                name,
+                wait,
+                timeout_ms,
+                ..
+            } => {
+                assert_eq!(name, "Calculator");
+                assert!(wait);
+                assert_eq!(timeout_ms, Some(1500));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_replay_record_duration_over_30m() {
         let err = parse_command(
             &["replay", "record", "--duration", "1800001"].map(str::to_string),
@@ -993,6 +1022,13 @@ mod tests {
             "Ready".to_string(),
         ];
         let err = parse_command(&args).expect_err("top-level wait should be invalid");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn rejects_top_level_open_command() {
+        let args = vec!["open".to_string(), "Calculator".to_string()];
+        let err = parse_command(&args).expect_err("top-level open should be invalid");
         assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 

@@ -294,7 +294,7 @@ main() {
       fi
 
       run_step "$i" "permissions_check" run_vm_cli "permissions check" || iter_status="fail"
-      run_step "$i" "open_textedit_wait" run_vm_cli "open TextEdit --wait" || iter_status="fail"
+      run_step "$i" "open_textedit_wait" run_vm_cli "app open TextEdit --wait" || iter_status="fail"
       run_step "$i" "screen_capture" run_vm_cli "screen capture --out /tmp/dctl-smoke-cap.png" || iter_status="fail"
       run_step "$i" "screen_snapshot_json" run_vm_cli "screen snapshot --json" || iter_status="fail"
       run_step "$i" "screen_tokenize_json" run_vm_cli "screen tokenize --json" || iter_status="fail"

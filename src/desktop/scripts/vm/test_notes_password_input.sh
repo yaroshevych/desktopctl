@@ -70,7 +70,7 @@ main() {
   ssh "$VM_HOST" "open -a Notes"
 
   echo "[2/4] Focus VM window on host"
-  run_host_dctl_direct open "$VM_WINDOW_APP" --wait
+  run_host_dctl_direct app open "$VM_WINDOW_APP" --wait
   run_host_dctl_direct app isolate "$VM_WINDOW_APP" >/dev/null
   run_host_dctl_direct wait 500
 
