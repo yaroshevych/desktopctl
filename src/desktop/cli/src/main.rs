@@ -67,8 +67,7 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "debug" => parse_debug(&args[1..]),
         "replay" => parse_replay(&args[1..]),
         "pointer" => parse_pointer(&args[1..]),
-        "type" => parse_type(&args[1..]),
-        "key" => parse_key(&args[1..]),
+        "keyboard" => parse_keyboard(&args[1..]),
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -571,23 +570,21 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
     }
 }
 
-fn parse_type(args: &[String]) -> Result<Command, AppError> {
-    let text = args
-        .first()
-        .cloned()
-        .ok_or_else(|| AppError::invalid_argument("missing text: desktopctl type \"text\""))?;
-    Ok(Command::UiType { text })
-}
-
-fn parse_key(args: &[String]) -> Result<Command, AppError> {
+fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(usage()));
     }
 
     match args[0].as_str() {
+        "type" => {
+            let text = args.get(1).cloned().ok_or_else(|| {
+                AppError::invalid_argument("missing text: desktopctl keyboard type \"text\"")
+            })?;
+            Ok(Command::UiType { text })
+        }
         "press" => {
             let key = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument("missing key: desktopctl key press enter")
+                AppError::invalid_argument("missing key: desktopctl keyboard press enter")
             })?;
             if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
                 Ok(Command::KeyEnter)
@@ -641,8 +638,8 @@ fn usage() -> &'static str {
   desktopctl pointer click --text <text>
   desktopctl pointer click --token <n>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
-  desktopctl type \"text\"
-  desktopctl key press <key-or-hotkey>"
+  desktopctl keyboard type \"text\"
+  desktopctl keyboard press <key-or-hotkey>"
 }
 
 fn send_request_with_autostart(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
@@ -1076,6 +1073,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_top_level_type_command() {
+        let args = vec!["type".to_string(), "hello".to_string()];
+        let err = parse_command(&args).expect_err("top-level type should be invalid");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn rejects_top_level_key_command() {
+        let args = vec!["key".to_string(), "press".to_string(), "enter".to_string()];
+        let err = parse_command(&args).expect_err("top-level key should be invalid");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
     fn parses_screen_screenshot_with_overlay() {
         let args = vec![
             "screen".to_string(),
@@ -1209,6 +1220,23 @@ mod tests {
             Command::PointerClickText { text } => {
                 assert_eq!(text, "DesktopCtl");
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_keyboard_type_and_press() {
+        let typed = parse_command(&["keyboard", "type", "hello"].map(str::to_string))
+            .expect("keyboard type should parse");
+        match typed {
+            Command::UiType { text } => assert_eq!(text, "hello"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let pressed = parse_command(&["keyboard", "press", "cmd+shift+p"].map(str::to_string))
+            .expect("keyboard press should parse");
+        match pressed {
+            Command::KeyHotkey { hotkey } => assert_eq!(hotkey, "cmd+shift+p"),
             other => panic!("unexpected command: {other:?}"),
         }
     }

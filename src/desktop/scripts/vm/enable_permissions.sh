@@ -155,9 +155,9 @@ press_hotkey() {
   local combo="$1"
   log_action "press_hotkey: $combo"
   if [[ "$combo" == cmd+* ]]; then
-    run_host_dctl key press "$combo" || run_host_dctl key press "command+${combo#cmd+}"
+    run_host_dctl keyboard press "$combo" || run_host_dctl keyboard press "command+${combo#cmd+}"
   else
-    run_host_dctl key press "$combo"
+    run_host_dctl keyboard press "$combo"
   fi
 }
 
@@ -165,9 +165,9 @@ press_hotkey_direct() {
   local combo="$1"
   log_action "press_hotkey_direct: $combo"
   if [[ "$combo" == cmd+* ]]; then
-    run_host_dctl_direct key press "$combo" || run_host_dctl_direct key press "command+${combo#cmd+}"
+    run_host_dctl_direct keyboard press "$combo" || run_host_dctl_direct keyboard press "command+${combo#cmd+}"
   else
-    run_host_dctl_direct key press "$combo"
+    run_host_dctl_direct keyboard press "$combo"
   fi
 }
 
@@ -199,7 +199,7 @@ type_text_slowly() {
   for ((i = 0; i < ${#text}; i++)); do
     ch="${text:i:1}"
     printf "info: typing char[%d]='%s'\n" "$((i + 1))" "$ch"
-    run_host_dctl_direct type "$ch"
+    run_host_dctl_direct keyboard type "$ch"
     run_host_dctl_direct wait "$delay_ms"
   done
 }
@@ -489,7 +489,7 @@ add_entry_in_current_pane() {
     log_action "add_entry_in_current_pane: fallback — type full path in Go To Folder"
     press_hotkey cmd+shift+g
     run_host_dctl wait 60
-    run_host_dctl type "$VM_DIALOG_APP_PATH"
+    run_host_dctl keyboard type "$VM_DIALOG_APP_PATH"
     press_hotkey enter
     run_host_dctl wait 80
   fi

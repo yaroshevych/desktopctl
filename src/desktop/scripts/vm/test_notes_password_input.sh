@@ -40,9 +40,9 @@ run_host_dctl_direct() {
 press_hotkey_direct() {
   local combo="$1"
   if [[ "$combo" == cmd+* ]]; then
-    run_host_dctl_direct key press "$combo" || run_host_dctl_direct key press "command+${combo#cmd+}"
+    run_host_dctl_direct keyboard press "$combo" || run_host_dctl_direct keyboard press "command+${combo#cmd+}"
   else
-    run_host_dctl_direct key press "$combo"
+    run_host_dctl_direct keyboard press "$combo"
   fi
 }
 
@@ -53,7 +53,7 @@ type_text_slowly() {
   for ((i = 0; i < ${#text}; i++)); do
     ch="${text:i:1}"
     printf "info: typing char[%d]='%s'\n" "$((i + 1))" "$ch"
-    run_host_dctl_direct type "$ch"
+    run_host_dctl_direct keyboard type "$ch"
     run_host_dctl_direct wait "$delay_ms"
   done
 }
