@@ -378,7 +378,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
 fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
     if args.first().map(String::as_str) != Some("--text") {
         return Err(AppError::invalid_argument(
-            "usage: desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>]",
+            "usage: desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]",
         ));
     }
 
@@ -387,6 +387,7 @@ fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
     })?;
     let mut timeout_ms = 8_000_u64;
     let mut interval_ms = 200_u64;
+    let mut disappear = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -397,6 +398,10 @@ fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
             "--interval" => {
                 interval_ms = parse_u64(args.get(i + 1), "interval_ms")?;
                 i += 2;
+            }
+            "--disappear" => {
+                disappear = true;
+                i += 1;
             }
             flag => {
                 return Err(AppError::invalid_argument(format!(
@@ -409,6 +414,7 @@ fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
         text,
         timeout_ms,
         interval_ms,
+        disappear,
     })
 }
 
@@ -600,7 +606,7 @@ fn usage() -> &'static str {
   desktopctl screen capture [--out <path>] [--overlay] [--active-window]
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
-  desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>]
+  desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl overlay start
   desktopctl overlay stop
   desktopctl permissions check
@@ -938,10 +944,31 @@ mod tests {
                 text,
                 timeout_ms,
                 interval_ms,
+                disappear,
             } => {
                 assert_eq!(text, "Ready");
                 assert_eq!(timeout_ms, 3000);
                 assert_eq!(interval_ms, 120);
+                assert!(!disappear);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_wait_disappear() {
+        let args = vec![
+            "screen".to_string(),
+            "wait".to_string(),
+            "--text".to_string(),
+            "Loading".to_string(),
+            "--disappear".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen wait --disappear should parse");
+        match command {
+            Command::WaitText { text, disappear, .. } => {
+                assert_eq!(text, "Loading");
+                assert!(disappear);
             }
             other => panic!("unexpected command: {other:?}"),
         }

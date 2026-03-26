@@ -89,6 +89,7 @@ pub enum Command {
         text: String,
         timeout_ms: u64,
         interval_ms: u64,
+        disappear: bool,
     },
     ScreenCapture {
         out_path: Option<String>,

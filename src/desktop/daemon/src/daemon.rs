@@ -627,7 +627,8 @@ fn execute(command: Command) -> Result<Value, AppError> {
             text,
             timeout_ms,
             interval_ms,
-        } => wait_for_text(&text, timeout_ms, interval_ms),
+            disappear,
+        } => wait_for_text(&text, timeout_ms, interval_ms, disappear),
         Command::PointerClickText { text } => click_text_target(&text),
         Command::PointerClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
@@ -816,12 +817,26 @@ fn click_token_target(token_id: u32) -> Result<Value, AppError> {
     }))
 }
 
-fn wait_for_text(query: &str, timeout_ms: u64, interval_ms: u64) -> Result<Value, AppError> {
+fn wait_for_text(
+    query: &str,
+    timeout_ms: u64,
+    interval_ms: u64,
+    disappear: bool,
+) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let start = Instant::now();
     loop {
         let capture = vision::pipeline::capture_and_update(None)?;
-        if let Ok(candidate) = select_text_candidate(&capture.snapshot.texts, query) {
+        if disappear {
+            let matches = ranked_text_candidates(&capture.snapshot.texts, query)?;
+            if matches.is_empty() {
+                return Ok(json!({
+                    "snapshot_id": capture.snapshot.snapshot_id,
+                    "timestamp": capture.snapshot.timestamp,
+                    "disappeared": true
+                }));
+            }
+        } else if let Ok(candidate) = select_text_candidate(&capture.snapshot.texts, query) {
             return Ok(json!({
                 "snapshot_id": capture.snapshot.snapshot_id,
                 "timestamp": capture.snapshot.timestamp,
@@ -830,10 +845,12 @@ fn wait_for_text(query: &str, timeout_ms: u64, interval_ms: u64) -> Result<Value
             }));
         }
         if start.elapsed().as_millis() as u64 >= timeout_ms {
-            return Err(
-                AppError::timeout(format!("timed out waiting for text \"{query}\""))
-                    .with_details(json!({ "timeout_ms": timeout_ms })),
-            );
+            let message = if disappear {
+                format!("timed out waiting for text \"{query}\" to disappear")
+            } else {
+                format!("timed out waiting for text \"{query}\"")
+            };
+            return Err(AppError::timeout(message).with_details(json!({ "timeout_ms": timeout_ms })));
         }
         thread::sleep(Duration::from_millis(interval_ms.max(30)));
     }
