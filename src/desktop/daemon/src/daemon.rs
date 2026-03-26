@@ -1740,10 +1740,23 @@ fn frontmost_window_context() -> Option<FrontmostWindowContext> {
 fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {
     let context = frontmost_window_context();
     let direct = context.as_ref().and_then(|ctx| ctx.bounds.clone());
+    if let Some(direct) = direct.as_ref() {
+        if !is_tiny_window_bounds(direct) {
+            return Some(direct.clone());
+        }
+    }
+
     let app_hint = context.as_ref().and_then(|ctx| ctx.app.as_deref());
-    let listed = list_windows().ok().and_then(|windows| {
-        preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
-    });
+    let listed = list_frontmost_app_windows()
+        .ok()
+        .and_then(|windows| {
+            preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
+        })
+        .or_else(|| {
+            list_windows().ok().and_then(|windows| {
+                preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
+            })
+        });
 
     match (direct, listed) {
         (Some(direct), Some(listed))
@@ -1953,6 +1966,56 @@ end tell"#;
             .then_with(|| a.app.to_lowercase().cmp(&b.app.to_lowercase()))
             .then_with(|| a.index.cmp(&b.index))
     });
+    Ok(windows)
+}
+
+fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
+    let script = r#"tell application "System Events"
+set resultRows to {}
+set frontProc to first application process whose frontmost is true
+set pname to (name of frontProc) as text
+set pvisible to (visible of frontProc) as string
+set ppid to unix id of frontProc
+set widx to 0
+repeat with w in (windows of frontProc)
+    set widx to widx + 1
+    try
+        set wname to (name of w) as text
+    on error
+        set wname to ""
+    end try
+    try
+        set winPos to position of w
+        set winSize to size of w
+        set wx to item 1 of winPos
+        set wy to item 2 of winPos
+        set ww to item 1 of winSize
+        set wh to item 2 of winSize
+        set end of resultRows to (ppid as string) & tab & (widx as string) & tab & pname & tab & wname & tab & (wx as string) & tab & (wy as string) & tab & (ww as string) & tab & (wh as string) & tab & "true" & tab & pvisible
+    end try
+end repeat
+set AppleScript's text item delimiters to linefeed
+set outputText to resultRows as text
+set AppleScript's text item delimiters to ""
+return outputText
+end tell"#;
+
+    let output = ProcessCommand::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AppError::backend_unavailable(format!(
+            "failed to enumerate frontmost app windows: {stderr}"
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut windows: Vec<WindowInfo> = raw.lines().filter_map(parse_window_line).collect();
+    windows.sort_by_key(|window| std::cmp::Reverse(window_area(&window.bounds)));
     Ok(windows)
 }
 
