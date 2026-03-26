@@ -28,6 +28,7 @@ use crate::trace;
 const MAX_OVERLAY_RECTS: usize = 900;
 const PROBE_WIDTH: f64 = 120.0;
 const PROBE_HEIGHT: f64 = 80.0;
+const NS_WINDOW_SHARING_NONE: isize = 0;
 
 const BRAND_R: f64 = 124.0 / 255.0;
 const BRAND_G: f64 = 58.0 / 255.0;
@@ -312,6 +313,11 @@ fn start_overlay_on_main() -> Result<(), String> {
         window.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::Stationary,
         );
+        // Exclude overlay window from screen capture to avoid self-induced
+        // diffs in tokenize/capture loops.
+        unsafe {
+            let _: () = msg_send![&window, setSharingType: NS_WINDOW_SHARING_NONE];
+        }
         unsafe {
             window.setReleasedWhenClosed(false);
         }
