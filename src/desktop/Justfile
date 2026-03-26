@@ -13,11 +13,12 @@ stable_cli_path := stable_runtime_dir + "/desktopctl"
 build:
   cd {{workspace_dir}} && cargo build --release -p desktopctld -p desktopctl
   rm -rf {{app_dir}}
-  mkdir -p {{macos_dir}} {{dist_dir}}
+  mkdir -p {{macos_dir}} {{contents_dir}}/Resources {{dist_dir}}
   cp {{workspace_dir}}/target/release/desktopctld {{macos_dir}}/desktopctld
   cp {{workspace_dir}}/target/release/desktopctl {{cli_path}}
   cp {{workspace_dir}}/daemon/packaging/macos/Info.plist {{contents_dir}}/Info.plist
   printf 'APPL????' > {{contents_dir}}/PkgInfo
+  swift {{workspace_dir}}/scripts/gen_icns.swift {{contents_dir}}/Resources/AppIcon.icns
   chmod +x {{macos_dir}}/desktopctld {{cli_path}}
   codesign --force --sign - {{cli_path}} >/dev/null 2>&1 || true
   codesign --force --deep --sign - {{app_dir}} >/dev/null 2>&1 || true
