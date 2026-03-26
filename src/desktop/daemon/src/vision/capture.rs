@@ -52,18 +52,36 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
 
     let target_path = out_path.expect("checked is_some");
     let image = if screencapturekit_screenshot_api_available() {
-        match capture_with_screencapturekit_to_path(rect, &target_path) {
-            Ok(()) => image::open(&target_path)
+        let sck_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_with_screencapturekit_to_path(rect, &target_path)
+        }));
+        match sck_result {
+            Ok(Ok(())) => image::open(&target_path)
                 .map_err(|err| {
                     AppError::backend_unavailable(format!(
                         "failed to open capture image after ScreenCaptureKit write: {err}"
                     ))
                 })?
                 .to_rgba8(),
-            Err(err) => {
+            Ok(Err(err)) => {
                 trace::log(format!(
                     "capture:screen_png:sck_error fallback=coregraphics err={}",
                     err.message
+                ));
+                let image = capture_with_coregraphics(&display)?;
+                save_capture_png(&image, &target_path)?;
+                image
+            }
+            Err(payload) => {
+                let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    (*msg).to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                trace::log(format!(
+                    "capture:screen_png:sck_panic fallback=coregraphics panic={panic_message}"
                 ));
                 let image = capture_with_coregraphics(&display)?;
                 save_capture_png(&image, &target_path)?;
@@ -106,8 +124,12 @@ pub(crate) fn default_capture_path() -> PathBuf {
 }
 
 fn screencapturekit_screenshot_api_available() -> bool {
+    // Some systems expose ScreenCaptureKit partially (for example, manager
+    // class present but screenshot configuration class unavailable). Require
+    // both classes before attempting the API.
     let manager = CString::new("SCScreenshotManager").expect("valid class name");
-    AnyClass::get(&manager).is_some()
+    let config = CString::new("SCScreenshotConfiguration").expect("valid class name");
+    AnyClass::get(&manager).is_some() && AnyClass::get(&config).is_some()
 }
 
 fn capture_with_screencapturekit_to_path(
