@@ -355,25 +355,6 @@ fn execute(command: Command) -> Result<Value, AppError> {
             }
             Ok(json!({}))
         }
-        Command::OpenSpotlight => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            backend.press_hotkey("cmd+space")?;
-            Ok(json!({}))
-        }
-        Command::OpenLaunchpad => {
-            let output = ProcessCommand::new("open")
-                .args(["-a", "Launchpad"])
-                .output()
-                .map_err(|err| {
-                    AppError::backend_unavailable(format!("failed to invoke open: {err}"))
-                })?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return Err(AppError::internal(stderr));
-            }
-            Ok(json!({}))
-        }
         Command::PointerMove { x, y } => {
             trace::log(format!("pointer_move:start x={x} y={y}"));
             let backend = new_backend()?;

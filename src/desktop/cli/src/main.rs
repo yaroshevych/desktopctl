@@ -625,15 +625,6 @@ fn parse_open(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(usage()));
     }
-
-    if args.len() == 1 {
-        match args[0].as_str() {
-            "spotlight" => return Ok(Command::OpenSpotlight),
-            "launchpad" => return Ok(Command::OpenLaunchpad),
-            _ => {}
-        }
-    }
-
     let mut wait = false;
     let mut timeout_ms: Option<u64> = None;
     let mut app_name_parts: Vec<String> = Vec::new();
@@ -788,8 +779,6 @@ fn usage() -> &'static str {
   desktopctl window bounds --title <text> [--json]
   desktopctl window focus --title <text>
   desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
-  desktopctl open spotlight
-  desktopctl open launchpad
   desktopctl screen capture [--out <path>] [--overlay] [--active-window]
   desktopctl screen snapshot [--json] [--screenshot <path>]
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]

@@ -49,8 +49,6 @@ pub enum Command {
         wait: bool,
         timeout_ms: Option<u64>,
     },
-    OpenSpotlight,
-    OpenLaunchpad,
     PointerMove {
         x: u32,
         y: u32,
@@ -165,8 +163,6 @@ impl Command {
             Command::WindowBounds { .. } => "window_bounds",
             Command::WindowFocus { .. } => "window_focus",
             Command::OpenApp { .. } => "open",
-            Command::OpenSpotlight => "open_spotlight",
-            Command::OpenLaunchpad => "open_launchpad",
             Command::PointerMove { .. } => "pointer_move",
             Command::PointerDown { .. } => "pointer_down",
             Command::PointerUp { .. } => "pointer_up",
