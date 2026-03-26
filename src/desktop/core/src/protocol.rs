@@ -115,7 +115,6 @@ pub enum Command {
     },
     OverlayStart,
     OverlayStop,
-    UiRead,
     ClipboardRead,
     ClipboardWrite {
         text: String,
@@ -155,7 +154,6 @@ impl Command {
             Command::ScreenFindText { .. } => "screen_find_text",
             Command::OverlayStart => "overlay_start",
             Command::OverlayStop => "overlay_stop",
-            Command::UiRead => "ui_read",
             Command::ClipboardRead => "clipboard_read",
             Command::ClipboardWrite { .. } => "clipboard_write",
             Command::PermissionsCheck => "permissions_check",

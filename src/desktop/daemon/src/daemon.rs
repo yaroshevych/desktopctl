@@ -643,7 +643,6 @@ fn execute(command: Command) -> Result<Value, AppError> {
             clipboard::write_clipboard(&text)?;
             Ok(json!({ "written": true }))
         }
-        Command::UiRead => ui_read_with_clipboard_restore(),
         Command::PermissionsCheck => {
             let payload = desktop_core::protocol::PermissionsPayload {
                 accessibility: desktop_core::protocol::PermissionState {
@@ -2149,30 +2148,6 @@ tell application "{escaped_app}" to activate"#,
         )));
     }
     Ok(())
-}
-
-fn ui_read_with_clipboard_restore() -> Result<Value, AppError> {
-    let backend = new_backend()?;
-    backend.check_accessibility_permission()?;
-
-    let clipboard_before = clipboard::read_clipboard().ok();
-    backend.press_hotkey("cmd+a")?;
-    thread::sleep(Duration::from_millis(70));
-    backend.press_hotkey("cmd+c")?;
-    thread::sleep(Duration::from_millis(120));
-    let captured = clipboard::read_clipboard()?;
-
-    let mut restore_ok = true;
-    if let Some(previous) = clipboard_before {
-        if clipboard::write_clipboard(&previous).is_err() {
-            restore_ok = false;
-        }
-    }
-
-    Ok(json!({
-        "text": captured,
-        "clipboard_restored": restore_ok
-    }))
 }
 
 fn hide_application(name: &str) -> Result<&'static str, AppError> {

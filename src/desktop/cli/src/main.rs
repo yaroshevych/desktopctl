@@ -65,7 +65,6 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "open" => parse_open(&args[1..]),
         "screen" => parse_screen(&args[1..]),
         "overlay" => parse_overlay(&args[1..]),
-        "ui" => parse_ui(&args[1..]),
         "permissions" => parse_permissions(&args[1..]),
         "clipboard" => parse_clipboard(&args[1..]),
         "debug" => parse_debug(&args[1..]),
@@ -385,17 +384,6 @@ fn parse_overlay(args: &[String]) -> Result<Command, AppError> {
     }
 }
 
-fn parse_ui(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-
-    match args[0].as_str() {
-        "read" => Ok(Command::UiRead),
-        _ => Err(AppError::invalid_argument(usage())),
-    }
-}
-
 fn parse_open(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(usage()));
@@ -580,7 +568,6 @@ fn usage() -> &'static str {
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl overlay start
   desktopctl overlay stop
-  desktopctl ui read
   desktopctl permissions check
   desktopctl clipboard read
   desktopctl clipboard write <text>
