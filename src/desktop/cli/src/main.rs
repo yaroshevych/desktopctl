@@ -400,14 +400,6 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             }
             Ok(Command::ScreenLayout)
         }
-        "settings" => {
-            if args.get(1).is_some() && args.get(1).map(String::as_str) != Some("--json") {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl screen settings [--json]",
-                ));
-            }
-            Ok(Command::ScreenSettingsMap)
-        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -544,75 +536,6 @@ fn parse_ui(args: &[String]) -> Result<Command, AppError> {
                 }
                 _ => Err(AppError::invalid_argument(
                     "usage: desktopctl ui click --text <text> [--timeout <ms>] | --text-offset <text> --dx <px> --dy <px> [--timeout <ms>] | --settings-add | --settings-remove | --settings-toggle <text> [--timeout <ms>] | --token <n>",
-                )),
-            }
-        }
-        "settings" => {
-            if args.len() < 2 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl ui settings enable <text> [--timeout <ms>] | unlock --password <password> [--timeout <ms>]",
-                ));
-            }
-            match args[1].as_str() {
-                "enable" => {
-                    if args.len() < 3 {
-                        return Err(AppError::invalid_argument(
-                            "usage: desktopctl ui settings enable <text> [--timeout <ms>]",
-                        ));
-                    }
-                    let text = args[2].clone();
-                    let mut timeout_ms = 1_500_u64;
-                    let mut i = 3;
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--timeout" => {
-                                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                                i += 2;
-                            }
-                            flag => {
-                                return Err(AppError::invalid_argument(format!(
-                                    "unknown flag for ui settings enable: {flag}"
-                                )));
-                            }
-                        }
-                    }
-                    Ok(Command::UiSettingsEnsureEnabled { text, timeout_ms })
-                }
-                "unlock" => {
-                    let mut password: Option<String> = None;
-                    let mut timeout_ms = 2_000_u64;
-                    let mut i = 2;
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--password" => {
-                                password = Some(args.get(i + 1).cloned().ok_or_else(|| {
-                                    AppError::invalid_argument("missing password for --password")
-                                })?);
-                                i += 2;
-                            }
-                            "--timeout" => {
-                                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                                i += 2;
-                            }
-                            flag => {
-                                return Err(AppError::invalid_argument(format!(
-                                    "unknown flag for ui settings unlock: {flag}"
-                                )));
-                            }
-                        }
-                    }
-                    let password = password.ok_or_else(|| {
-                        AppError::invalid_argument(
-                            "usage: desktopctl ui settings unlock --password <password> [--timeout <ms>]",
-                        )
-                    })?;
-                    Ok(Command::UiSettingsUnlock {
-                        password,
-                        timeout_ms,
-                    })
-                }
-                _ => Err(AppError::invalid_argument(
-                    "usage: desktopctl ui settings enable <text> [--timeout <ms>] | unlock --password <password> [--timeout <ms>]",
                 )),
             }
         }
@@ -784,7 +707,6 @@ fn usage() -> &'static str {
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen layout [--json]
-  desktopctl screen settings [--json]
   desktopctl overlay start
   desktopctl overlay stop
   desktopctl ui click --text <text> [--timeout <ms>]
@@ -792,8 +714,6 @@ fn usage() -> &'static str {
   desktopctl ui click --settings-add
   desktopctl ui click --settings-remove
   desktopctl ui click --settings-toggle <text> [--timeout <ms>]
-  desktopctl ui settings enable <text> [--timeout <ms>]
-  desktopctl ui settings unlock --password <password> [--timeout <ms>]
   desktopctl ui click --token <n>
   desktopctl ui read
   desktopctl permissions check
@@ -1280,20 +1200,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_screen_settings_map() {
-        let args = vec![
-            "screen".to_string(),
-            "settings".to_string(),
-            "--json".to_string(),
-        ];
-        let command = parse_command(&args).expect("screen settings should parse");
-        match command {
-            Command::ScreenSettingsMap => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
     fn parses_screen_snapshot_with_optional_screenshot() {
         let base = parse_command(&["screen", "snapshot", "--json"].map(str::to_string))
             .expect("screen snapshot should parse");
@@ -1349,53 +1255,6 @@ mod tests {
             Command::UiClickSettingsToggle { text, timeout_ms } => {
                 assert_eq!(text, "DesktopCtl");
                 assert_eq!(timeout_ms, 1800);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_ui_settings_commands() {
-        let enable = parse_command(
-            &[
-                "ui",
-                "settings",
-                "enable",
-                "DesktopCtl",
-                "--timeout",
-                "1700",
-            ]
-            .map(str::to_string),
-        )
-        .expect("ui settings enable should parse");
-        match enable {
-            Command::UiSettingsEnsureEnabled { text, timeout_ms } => {
-                assert_eq!(text, "DesktopCtl");
-                assert_eq!(timeout_ms, 1700);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let unlock = parse_command(
-            &[
-                "ui",
-                "settings",
-                "unlock",
-                "--password",
-                "s3cr3t",
-                "--timeout",
-                "2400",
-            ]
-            .map(str::to_string),
-        )
-        .expect("ui settings unlock should parse");
-        match unlock {
-            Command::UiSettingsUnlock {
-                password,
-                timeout_ms,
-            } => {
-                assert_eq!(password, "s3cr3t");
-                assert_eq!(timeout_ms, 2400);
             }
             other => panic!("unexpected command: {other:?}"),
         }

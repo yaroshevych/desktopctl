@@ -110,7 +110,6 @@ pub enum Command {
         all: bool,
     },
     ScreenLayout,
-    ScreenSettingsMap,
     OverlayStart,
     OverlayStop,
     UiClickText {
@@ -127,14 +126,6 @@ pub enum Command {
     UiClickSettingsRemove,
     UiClickSettingsToggle {
         text: String,
-        timeout_ms: u64,
-    },
-    UiSettingsEnsureEnabled {
-        text: String,
-        timeout_ms: u64,
-    },
-    UiSettingsUnlock {
-        password: String,
         timeout_ms: u64,
     },
     UiClickToken {
@@ -178,7 +169,6 @@ impl Command {
             Command::ScreenTokenize { .. } => "screen_tokenize",
             Command::ScreenFindText { .. } => "screen_find_text",
             Command::ScreenLayout => "screen_layout",
-            Command::ScreenSettingsMap => "screen_settings_map",
             Command::OverlayStart => "overlay_start",
             Command::OverlayStop => "overlay_stop",
             Command::UiClickText { .. } => "ui_click_text",
@@ -186,8 +176,6 @@ impl Command {
             Command::UiClickSettingsAdd => "ui_click_settings_add",
             Command::UiClickSettingsRemove => "ui_click_settings_remove",
             Command::UiClickSettingsToggle { .. } => "ui_click_settings_toggle",
-            Command::UiSettingsEnsureEnabled { .. } => "ui_settings_ensure_enabled",
-            Command::UiSettingsUnlock { .. } => "ui_settings_unlock",
             Command::UiClickToken { .. } => "ui_click_token",
             Command::UiRead => "ui_read",
             Command::ClipboardRead => "clipboard_read",

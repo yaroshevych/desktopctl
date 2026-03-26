@@ -663,10 +663,6 @@ fn execute(command: Command) -> Result<Value, AppError> {
             permissions::ensure_screen_recording_permission()?;
             screen_layout_summary()
         }
-        Command::ScreenSettingsMap => {
-            permissions::ensure_screen_recording_permission()?;
-            screen_settings_map()
-        }
         Command::OverlayStart => {
             #[cfg(target_os = "macos")]
             {
@@ -712,13 +708,6 @@ fn execute(command: Command) -> Result<Value, AppError> {
         Command::UiClickSettingsToggle { text, timeout_ms } => {
             click_settings_control("toggle", Some(&text), timeout_ms)
         }
-        Command::UiSettingsEnsureEnabled { text, timeout_ms } => {
-            settings_ensure_enabled(&text, timeout_ms)
-        }
-        Command::UiSettingsUnlock {
-            password,
-            timeout_ms,
-        } => settings_unlock(&password, timeout_ms),
         Command::UiClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
