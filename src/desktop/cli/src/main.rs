@@ -15,13 +15,14 @@ use std::{
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let (json_output, args) = strip_global_json_flag(raw_args);
-    match run(&args, json_output) {
+    let request_id = next_request_id();
+    match run(&args, json_output, &request_id) {
         Ok(code) => std::process::exit(code),
         Err(err) => {
             if json_output {
                 let payload = serde_json::json!({
                     "ok": false,
-                    "request_id": serde_json::Value::Null,
+                    "request_id": request_id,
                     "error": {
                         "code": err.code,
                         "message": err.message,
@@ -42,9 +43,9 @@ fn main() {
     }
 }
 
-fn run(args: &[String], json_output: bool) -> Result<i32, AppError> {
+fn run(args: &[String], json_output: bool, request_id: &str) -> Result<i32, AppError> {
     let command = parse_command(args)?;
-    let request = RequestEnvelope::new(next_request_id(), command);
+    let request = RequestEnvelope::new(request_id.to_string(), command);
     trace_log(format!(
         "run:request_start request_id={} command={}",
         request.request_id,
@@ -701,6 +702,7 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
 
 fn usage() -> &'static str {
     "usage:
+  desktopctl --json <command...>
   desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl app hide <application>
   desktopctl app show <application>
@@ -710,6 +712,8 @@ fn usage() -> &'static str {
   desktopctl window focus --title <text>
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
   desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>]
+    note: --window cannot be combined with --screenshot
+    note: --active-window cannot be combined with --window or --screenshot
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read
