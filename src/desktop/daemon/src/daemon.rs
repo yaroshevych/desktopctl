@@ -656,6 +656,13 @@ fn execute(command: Command) -> Result<Value, AppError> {
             })?)
         }
         Command::DebugSnapshot => vision::debug::write_debug_snapshot(),
+        Command::ReplayRecord { duration_ms, stop } => {
+            if stop {
+                recording::stop_recording()
+            } else {
+                recording::start_recording(duration_ms)
+            }
+        }
         Command::ReplayLoad { session_dir } => {
             let session_dir = replay::parse_session_dir(&session_dir)?;
             replay::load_session(&session_dir)

@@ -118,6 +118,10 @@ pub enum Command {
     },
     PermissionsCheck,
     DebugSnapshot,
+    ReplayRecord {
+        duration_ms: u64,
+        stop: bool,
+    },
     ReplayLoad {
         session_dir: String,
     },
@@ -154,6 +158,8 @@ impl Command {
             Command::ClipboardWrite { .. } => "clipboard_write",
             Command::PermissionsCheck => "permissions_check",
             Command::DebugSnapshot => "debug_snapshot",
+            Command::ReplayRecord { stop: true, .. } => "replay_record_stop",
+            Command::ReplayRecord { stop: false, .. } => "replay_record_start",
             Command::ReplayLoad { .. } => "replay_load",
         }
     }

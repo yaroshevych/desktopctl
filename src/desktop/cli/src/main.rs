@@ -171,12 +171,56 @@ fn parse_debug(args: &[String]) -> Result<Command, AppError> {
 }
 
 fn parse_replay(args: &[String]) -> Result<Command, AppError> {
-    if args.len() == 2 && args[0] == "load" {
-        return Ok(Command::ReplayLoad {
-            session_dir: args[1].clone(),
-        });
+    const MAX_REPLAY_DURATION_MS: u64 = 30 * 60 * 1000;
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(usage()));
     }
-    Err(AppError::invalid_argument(usage()))
+    match args[0].as_str() {
+        "load" => {
+            if args.len() != 2 {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl replay load <session_dir>",
+                ));
+            }
+            Ok(Command::ReplayLoad {
+                session_dir: args[1].clone(),
+            })
+        }
+        "record" => {
+            let mut duration_ms = 3_000_u64;
+            let mut stop = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--duration" => {
+                        duration_ms = parse_u64(args.get(i + 1), "duration_ms")?;
+                        i += 2;
+                    }
+                    "--stop" => {
+                        stop = true;
+                        i += 1;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for replay record: {flag}"
+                        )));
+                    }
+                }
+            }
+            if stop && args.len() > 2 {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl replay record [--duration <ms>] | desktopctl replay record --stop",
+                ));
+            }
+            if !stop && duration_ms > MAX_REPLAY_DURATION_MS {
+                return Err(AppError::invalid_argument(format!(
+                    "duration_ms exceeds max of {MAX_REPLAY_DURATION_MS}"
+                )));
+            }
+            Ok(Command::ReplayRecord { duration_ms, stop })
+        }
+        _ => Err(AppError::invalid_argument(usage())),
+    }
 }
 
 fn parse_clipboard(args: &[String]) -> Result<Command, AppError> {
@@ -569,6 +613,8 @@ fn usage() -> &'static str {
   desktopctl clipboard read
   desktopctl clipboard write <text>
   desktopctl debug snapshot
+  desktopctl replay record [--duration <ms>]
+  desktopctl replay record --stop
   desktopctl replay load <session_dir>
   desktopctl pointer move <x> <y>
   desktopctl pointer down <x> <y>
@@ -905,6 +951,38 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_replay_record_default_duration() {
+        let command = parse_command(&["replay", "record"].map(str::to_string))
+            .expect("replay record should parse");
+        match command {
+            Command::ReplayRecord { duration_ms, stop } => {
+                assert_eq!(duration_ms, 3_000);
+                assert!(!stop);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_replay_record_stop() {
+        let command = parse_command(&["replay", "record", "--stop"].map(str::to_string))
+            .expect("replay record --stop should parse");
+        match command {
+            Command::ReplayRecord { stop, .. } => assert!(stop),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_replay_record_duration_over_30m() {
+        let err = parse_command(
+            &["replay", "record", "--duration", "1800001"].map(str::to_string),
+        )
+        .expect_err("duration over max should fail");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 
     #[test]
