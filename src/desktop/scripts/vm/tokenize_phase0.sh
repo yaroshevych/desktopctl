@@ -224,8 +224,8 @@ main() {
     run_step "vm_cleanup_verify" verify_vm_apps_closed_for_ocr || true
   fi
 
-  run_step "host_baseline_capture" "$HOST_DCTL" screen capture --out "$RUN_DIR/raw/host-baseline.png" --overlay || true
-  run_step "vm_baseline_capture" run_vm_cli "screen capture --out /tmp/dctl-tokenize-phase0-baseline.png" || true
+  run_step "host_baseline_capture" "$HOST_DCTL" screen screenshot --out "$RUN_DIR/raw/host-baseline.png" --overlay || true
+  run_step "vm_baseline_capture" run_vm_cli "screen screenshot --out /tmp/dctl-tokenize-phase0-baseline.png" || true
   run_step "vm_baseline_copy" run_scp "$VM_HOST:/tmp/dctl-tokenize-phase0-baseline.png" "$RUN_DIR/raw/vm-baseline.png" || true
 
   run_step "host_snapshot_json" "$HOST_DCTL" screen snapshot --json || true

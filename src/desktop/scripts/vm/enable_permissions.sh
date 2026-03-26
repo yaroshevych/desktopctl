@@ -605,7 +605,7 @@ verify_vm_permissions_and_capture() {
   echo "[7/7] Verify in VM over SSH"
   log_action "verify_vm_permissions_and_capture: start"
   run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' permissions check"
-  run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen capture --out /tmp/dctl-cap.png"
+  run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen screenshot --out /tmp/dctl-cap.png"
   run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen snapshot --json"
   run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen tokenize --json"
   log_action "verify_vm_permissions_and_capture: done"

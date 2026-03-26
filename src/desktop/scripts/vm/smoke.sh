@@ -140,7 +140,7 @@ run_host_capture() {
   local output_png="$RUN_DIR/host/iter-${iteration}-${step_name}.png"
   local output_json="$RUN_DIR/host/iter-${iteration}-${step_name}-debug.json"
 
-  run_step "$iteration" "host_capture_${step_name}" "$HOST_DCTL" screen capture --out "$output_png" --overlay || true
+  run_step "$iteration" "host_capture_${step_name}" "$HOST_DCTL" screen screenshot --out "$output_png" --overlay || true
   run_step "$iteration" "host_debug_${step_name}" "$HOST_DCTL" debug snapshot || true
   if [[ -f "$RUN_DIR/vm/iter-${iteration}-host_debug_${step_name}.stdout" ]]; then
     cp "$RUN_DIR/vm/iter-${iteration}-host_debug_${step_name}.stdout" "$output_json" || true
@@ -295,7 +295,7 @@ main() {
 
       run_step "$i" "permissions_check" run_vm_cli "permissions check" || iter_status="fail"
       run_step "$i" "open_textedit_wait" run_vm_cli "app open TextEdit --wait" || iter_status="fail"
-      run_step "$i" "screen_capture" run_vm_cli "screen capture --out /tmp/dctl-smoke-cap.png" || iter_status="fail"
+      run_step "$i" "screen_capture" run_vm_cli "screen screenshot --out /tmp/dctl-smoke-cap.png" || iter_status="fail"
       run_step "$i" "screen_snapshot_json" run_vm_cli "screen snapshot --json" || iter_status="fail"
       run_step "$i" "screen_tokenize_json" run_vm_cli "screen tokenize --json" || iter_status="fail"
       run_step "$i" "debug_snapshot" run_vm_cli "debug snapshot" || iter_status="fail"

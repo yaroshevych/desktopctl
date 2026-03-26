@@ -248,7 +248,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
     }
 
     match args[0].as_str() {
-        "capture" => {
+        "screenshot" => {
             let mut out_path: Option<String> = None;
             let mut overlay = false;
             let mut active_window = false;
@@ -258,7 +258,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--out" => {
                         let path = args.get(i + 1).ok_or_else(|| {
                             AppError::invalid_argument(
-                                "missing value for --out: desktopctl screen capture --out <path>",
+                                "missing value for --out: desktopctl screen screenshot --out <path>",
                             )
                         })?;
                         out_path = Some(path.clone());
@@ -274,7 +274,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     }
                     flag => {
                         return Err(AppError::invalid_argument(format!(
-                            "unknown flag for screen capture: {flag}"
+                            "unknown flag for screen screenshot: {flag}"
                         )));
                     }
                 }
@@ -603,7 +603,7 @@ fn usage() -> &'static str {
   desktopctl window list [--json]
   desktopctl window bounds --title <text> [--json]
   desktopctl window focus --title <text>
-  desktopctl screen capture [--out <path>] [--overlay] [--active-window]
+  desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
@@ -1051,16 +1051,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_screen_capture_with_overlay() {
+    fn parses_screen_screenshot_with_overlay() {
         let args = vec![
             "screen".to_string(),
-            "capture".to_string(),
+            "screenshot".to_string(),
             "--out".to_string(),
             "/tmp/cap.png".to_string(),
             "--overlay".to_string(),
             "--active-window".to_string(),
         ];
-        let command = parse_command(&args).expect("screen capture should parse");
+        let command = parse_command(&args).expect("screen screenshot should parse");
         match command {
             Command::ScreenCapture {
                 out_path,

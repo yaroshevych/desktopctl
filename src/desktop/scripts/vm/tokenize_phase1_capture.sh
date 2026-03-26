@@ -258,7 +258,7 @@ capture_case() {
 
   run_step "${capture_prefix}_wait" run_ssh "sleep $wait_secs" || true
 
-  run_step "${capture_prefix}_screen_capture" run_vm_cli "screen capture --out '$remote_png' --active-window" || true
+  run_step "${capture_prefix}_screen_capture" run_vm_cli "screen screenshot --out '$remote_png' --active-window" || true
   if [[ "$LAST_STEP_EXIT_CODE" -ne 0 ]]; then
     case_status="fail"
     reason="screen_capture_failed"
