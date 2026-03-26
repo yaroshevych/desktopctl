@@ -633,19 +633,8 @@ fn execute(command: Command) -> Result<Value, AppError> {
             timeout_ms,
             interval_ms,
         } => wait_for_text(&text, timeout_ms, interval_ms),
-        Command::UiClickText { text, timeout_ms } => click_text_target(&text, timeout_ms),
-        Command::UiClickTextOffset {
-            text,
-            dx,
-            dy,
-            timeout_ms,
-        } => click_text_offset_target(&text, dx, dy, timeout_ms),
-        Command::UiClickSettingsAdd => click_settings_control("add", None, 800),
-        Command::UiClickSettingsRemove => click_settings_control("remove", None, 800),
-        Command::UiClickSettingsToggle { text, timeout_ms } => {
-            click_settings_control("toggle", Some(&text), timeout_ms)
-        }
-        Command::UiClickToken { token } => click_token_target(token),
+        Command::PointerClickText { text, timeout_ms } => click_text_target(&text, timeout_ms),
+        Command::PointerClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
             Ok(json!({ "text": text }))
@@ -731,59 +720,6 @@ fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
         "snapshot_id": capture.snapshot.snapshot_id,
         "text": target.text,
         "bounds": target.bounds
-    }))
-}
-
-fn click_text_offset_target(
-    query: &str,
-    dx: i32,
-    dy: i32,
-    timeout_ms: u64,
-) -> Result<Value, AppError> {
-    permissions::ensure_screen_recording_permission()?;
-    let capture = vision::pipeline::capture_and_update(None)?;
-    let normalized_texts = normalize_snapshot_texts_to_display(
-        &capture.snapshot.texts,
-        capture.image.width(),
-        capture.image.height(),
-        capture.snapshot.display.width,
-        capture.snapshot.display.height,
-    );
-    let window_bounds = click_scope_window_bounds();
-    let window_filtered = window_bounds
-        .as_ref()
-        .map(|bounds| filter_texts_to_window_progressive(&normalized_texts, bounds))
-        .unwrap_or_else(|| normalized_texts.clone());
-    if window_bounds.is_some() && window_filtered.is_empty() {
-        return Err(AppError::target_not_found(
-            "no OCR text detected in frontmost window; cannot click target safely",
-        ));
-    }
-    let target = select_text_candidate(&window_filtered, query)?;
-    let base_x = (target.bounds.x + target.bounds.width / 2.0).round() as i64;
-    let base_y = (target.bounds.y + target.bounds.height / 2.0).round() as i64;
-    let click_x = (base_x + dx as i64).max(0) as u32;
-    let click_y = (base_y + dy as i64).max(0) as u32;
-    trace::log(format!(
-        "ui_click_text_offset:selected query=\"{}\" target=\"{}\" base=({}, {}) offset=({}, {}) click=({}, {})",
-        compact_for_log(query),
-        compact_for_log(&target.text),
-        base_x,
-        base_y,
-        dx,
-        dy,
-        click_x,
-        click_y
-    ));
-    perform_click_at(click_x, click_y)?;
-    // Offset-based clicks are often for unlabeled controls (+/-/toggles), so we don't enforce a strict text-disappears postcondition.
-    thread::sleep(Duration::from_millis(timeout_ms.min(400).max(40)));
-    Ok(json!({
-        "snapshot_id": capture.snapshot.snapshot_id,
-        "anchor_text": target.text,
-        "anchor_bounds": target.bounds,
-        "offset": { "dx": dx, "dy": dy },
-        "click_point": { "x": click_x, "y": click_y }
     }))
 }
 
@@ -2486,7 +2422,7 @@ mod tests {
     fn ranked_text_candidates_filters_long_noise_lines() {
         let texts = vec![
             SnapshotText {
-                text: r#"./dist/desktopctl ui click --text "New Document" --timeout 2000"#
+                text: r#"./dist/desktopctl pointer click --text "New Document" --timeout 2000"#
                     .to_string(),
                 bounds: Bounds {
                     x: 250.0,

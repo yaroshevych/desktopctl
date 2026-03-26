@@ -65,6 +65,13 @@ pub enum Command {
         x: u32,
         y: u32,
     },
+    PointerClickText {
+        text: String,
+        timeout_ms: u64,
+    },
+    PointerClickToken {
+        token: u32,
+    },
     PointerDrag {
         x1: u32,
         y1: u32,
@@ -108,25 +115,6 @@ pub enum Command {
     },
     OverlayStart,
     OverlayStop,
-    UiClickText {
-        text: String,
-        timeout_ms: u64,
-    },
-    UiClickTextOffset {
-        text: String,
-        dx: i32,
-        dy: i32,
-        timeout_ms: u64,
-    },
-    UiClickSettingsAdd,
-    UiClickSettingsRemove,
-    UiClickSettingsToggle {
-        text: String,
-        timeout_ms: u64,
-    },
-    UiClickToken {
-        token: u32,
-    },
     UiRead,
     ClipboardRead,
     ClipboardWrite {
@@ -154,6 +142,8 @@ impl Command {
             Command::PointerDown { .. } => "pointer_down",
             Command::PointerUp { .. } => "pointer_up",
             Command::PointerClick { .. } => "pointer_click",
+            Command::PointerClickText { .. } => "pointer_click_text",
+            Command::PointerClickToken { .. } => "pointer_click_token",
             Command::PointerDrag { .. } => "pointer_drag",
             Command::UiType { .. } => "type",
             Command::KeyHotkey { .. } => "key_hotkey",
@@ -165,12 +155,6 @@ impl Command {
             Command::ScreenFindText { .. } => "screen_find_text",
             Command::OverlayStart => "overlay_start",
             Command::OverlayStop => "overlay_stop",
-            Command::UiClickText { .. } => "ui_click_text",
-            Command::UiClickTextOffset { .. } => "ui_click_text_offset",
-            Command::UiClickSettingsAdd => "ui_click_settings_add",
-            Command::UiClickSettingsRemove => "ui_click_settings_remove",
-            Command::UiClickSettingsToggle { .. } => "ui_click_settings_toggle",
-            Command::UiClickToken { .. } => "ui_click_token",
             Command::UiRead => "ui_read",
             Command::ClipboardRead => "clipboard_read",
             Command::ClipboardWrite { .. } => "clipboard_write",

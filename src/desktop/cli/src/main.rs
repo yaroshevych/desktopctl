@@ -391,120 +391,6 @@ fn parse_ui(args: &[String]) -> Result<Command, AppError> {
     }
 
     match args[0].as_str() {
-        "click" => {
-            if args.len() < 2 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --text-offset <text> --dx <px> --dy <px> [--timeout <ms>] | --settings-add | --settings-remove | --settings-toggle <text> [--timeout <ms>] | --token <n>",
-                ));
-            }
-            match args[1].as_str() {
-                "--text" => {
-                    if args.len() < 3 {
-                        return Err(AppError::invalid_argument(
-                            "usage: desktopctl ui click --text <text> [--timeout <ms>]",
-                        ));
-                    }
-                    let text = args[2].clone();
-                    let mut timeout_ms = 2_000_u64;
-                    let mut i = 3;
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--timeout" => {
-                                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                                i += 2;
-                            }
-                            flag => {
-                                return Err(AppError::invalid_argument(format!(
-                                    "unknown flag for ui click --text: {flag}"
-                                )));
-                            }
-                        }
-                    }
-                    Ok(Command::UiClickText { text, timeout_ms })
-                }
-                "--text-offset" => {
-                    if args.len() < 3 {
-                        return Err(AppError::invalid_argument(
-                            "usage: desktopctl ui click --text-offset <text> --dx <px> --dy <px> [--timeout <ms>]",
-                        ));
-                    }
-                    let text = args[2].clone();
-                    let mut timeout_ms = 2_000_u64;
-                    let mut dx: Option<i32> = None;
-                    let mut dy: Option<i32> = None;
-                    let mut i = 3;
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--dx" => {
-                                dx = Some(parse_i32(args.get(i + 1), "dx")?);
-                                i += 2;
-                            }
-                            "--dy" => {
-                                dy = Some(parse_i32(args.get(i + 1), "dy")?);
-                                i += 2;
-                            }
-                            "--timeout" => {
-                                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                                i += 2;
-                            }
-                            flag => {
-                                return Err(AppError::invalid_argument(format!(
-                                    "unknown flag for ui click --text-offset: {flag}"
-                                )));
-                            }
-                        }
-                    }
-                    let dx =
-                        dx.ok_or_else(|| AppError::invalid_argument("missing dx: --dx <px>"))?;
-                    let dy =
-                        dy.ok_or_else(|| AppError::invalid_argument("missing dy: --dy <px>"))?;
-                    Ok(Command::UiClickTextOffset {
-                        text,
-                        dx,
-                        dy,
-                        timeout_ms,
-                    })
-                }
-                "--settings-add" => Ok(Command::UiClickSettingsAdd),
-                "--settings-remove" => Ok(Command::UiClickSettingsRemove),
-                "--settings-toggle" => {
-                    if args.len() < 3 {
-                        return Err(AppError::invalid_argument(
-                            "usage: desktopctl ui click --settings-toggle <text> [--timeout <ms>]",
-                        ));
-                    }
-                    let text = args[2].clone();
-                    let mut timeout_ms = 1_000_u64;
-                    let mut i = 3;
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--timeout" => {
-                                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                                i += 2;
-                            }
-                            flag => {
-                                return Err(AppError::invalid_argument(format!(
-                                    "unknown flag for ui click --settings-toggle: {flag}"
-                                )));
-                            }
-                        }
-                    }
-                    Ok(Command::UiClickSettingsToggle { text, timeout_ms })
-                }
-                "--token" => {
-                    if args.len() < 3 {
-                        return Err(AppError::invalid_argument(
-                            "usage: desktopctl ui click --token <n>",
-                        ));
-                    }
-                    let token = parse_u32(args.get(2), "token")?;
-                    Ok(Command::UiClickToken { token })
-                }
-                _ => Err(AppError::invalid_argument(
-                    "usage: desktopctl ui click --text <text> [--timeout <ms>] | --text-offset <text> --dx <px> --dy <px> [--timeout <ms>] | --settings-add | --settings-remove | --settings-toggle <text> [--timeout <ms>] | --token <n>",
-                )),
-            }
-        }
         "read" => Ok(Command::UiRead),
         _ => Err(AppError::invalid_argument(usage())),
     }
@@ -586,9 +472,36 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
             Ok(Command::PointerUp { x, y })
         }
         "click" => {
-            let x = parse_u32(args.get(1), "x")?;
-            let y = parse_u32(args.get(2), "y")?;
-            Ok(Command::PointerClick { x, y })
+            if args.len() >= 2 && args[1] == "--text" {
+                let text = args.get(2).cloned().ok_or_else(|| {
+                    AppError::invalid_argument(
+                        "usage: desktopctl pointer click --text <text> [--timeout <ms>]",
+                    )
+                })?;
+                let mut timeout_ms = 2_000_u64;
+                let mut i = 3;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--timeout" => {
+                            timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
+                            i += 2;
+                        }
+                        flag => {
+                            return Err(AppError::invalid_argument(format!(
+                                "unknown flag for pointer click --text: {flag}"
+                            )));
+                        }
+                    }
+                }
+                Ok(Command::PointerClickText { text, timeout_ms })
+            } else if args.len() >= 2 && args[1] == "--token" {
+                let token = parse_u32(args.get(2), "token")?;
+                Ok(Command::PointerClickToken { token })
+            } else {
+                let x = parse_u32(args.get(1), "x")?;
+                let y = parse_u32(args.get(2), "y")?;
+                Ok(Command::PointerClick { x, y })
+            }
         }
         "drag" => {
             let x1 = parse_u32(args.get(1), "x1")?;
@@ -652,12 +565,6 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
         .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
 }
 
-fn parse_i32(value: Option<&String>, field: &str) -> Result<i32, AppError> {
-    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
-    raw.parse::<i32>()
-        .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
-}
-
 fn usage() -> &'static str {
     "usage:
   desktopctl ping
@@ -673,12 +580,6 @@ fn usage() -> &'static str {
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl overlay start
   desktopctl overlay stop
-  desktopctl ui click --text <text> [--timeout <ms>]
-  desktopctl ui click --text-offset <text> --dx <px> --dy <px> [--timeout <ms>]
-  desktopctl ui click --settings-add
-  desktopctl ui click --settings-remove
-  desktopctl ui click --settings-toggle <text> [--timeout <ms>]
-  desktopctl ui click --token <n>
   desktopctl ui read
   desktopctl permissions check
   desktopctl clipboard read
@@ -689,6 +590,8 @@ fn usage() -> &'static str {
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
   desktopctl pointer click <x> <y>
+  desktopctl pointer click --text <text> [--timeout <ms>]
+  desktopctl pointer click --token <n>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
   desktopctl type \"text\"
   desktopctl key press <key-or-hotkey>
@@ -1093,30 +996,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_ui_click_text_offset() {
+    fn parses_pointer_click_text() {
         let args = vec![
-            "ui".to_string(),
+            "pointer".to_string(),
             "click".to_string(),
-            "--text-offset".to_string(),
+            "--text".to_string(),
             "DesktopCtl".to_string(),
-            "--dx".to_string(),
-            "-16".to_string(),
-            "--dy".to_string(),
-            "92".to_string(),
             "--timeout".to_string(),
             "1500".to_string(),
         ];
-        let command = parse_command(&args).expect("ui click text-offset should parse");
+        let command = parse_command(&args).expect("pointer click --text should parse");
         match command {
-            Command::UiClickTextOffset {
-                text,
-                dx,
-                dy,
-                timeout_ms,
-            } => {
+            Command::PointerClickText { text, timeout_ms } => {
                 assert_eq!(text, "DesktopCtl");
-                assert_eq!(dx, -16);
-                assert_eq!(dy, 92);
                 assert_eq!(timeout_ms, 1500);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1164,32 +1056,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_settings_click_commands() {
-        let add = parse_command(&["ui", "click", "--settings-add"].map(str::to_string))
-            .expect("settings-add should parse");
-        assert!(matches!(add, Command::UiClickSettingsAdd));
-
-        let remove = parse_command(&["ui", "click", "--settings-remove"].map(str::to_string))
-            .expect("settings-remove should parse");
-        assert!(matches!(remove, Command::UiClickSettingsRemove));
-
-        let toggle = parse_command(
-            &[
-                "ui",
-                "click",
-                "--settings-toggle",
-                "DesktopCtl",
-                "--timeout",
-                "1800",
-            ]
-            .map(str::to_string),
-        )
-        .expect("settings-toggle should parse");
-        match toggle {
-            Command::UiClickSettingsToggle { text, timeout_ms } => {
-                assert_eq!(text, "DesktopCtl");
-                assert_eq!(timeout_ms, 1800);
-            }
+    fn parses_pointer_click_token() {
+        let token = parse_command(&["pointer", "click", "--token", "42"].map(str::to_string))
+            .expect("pointer click --token should parse");
+        match token {
+            Command::PointerClickToken { token } => assert_eq!(token, 42),
             other => panic!("unexpected command: {other:?}"),
         }
     }
