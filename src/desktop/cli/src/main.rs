@@ -233,8 +233,9 @@ fn parse_wait(args: &[String]) -> Result<Command, AppError> {
         });
     }
 
-    let ms = parse_u64(args.first(), "ms")?;
-    Ok(Command::Wait { ms })
+    Err(AppError::invalid_argument(
+        "usage: desktopctl wait --text <text> [--timeout <ms>] [--interval <ms>]",
+    ))
 }
 
 fn parse_screen(args: &[String]) -> Result<Command, AppError> {
@@ -582,7 +583,6 @@ fn usage() -> &'static str {
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
   desktopctl type \"text\"
   desktopctl key press <key-or-hotkey>
-  desktopctl wait <ms>
   desktopctl wait --text <text> [--timeout <ms>] [--interval <ms>]"
 }
 

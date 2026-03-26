@@ -435,11 +435,6 @@ fn execute(command: Command) -> Result<Value, AppError> {
             backend.press_enter()?;
             Ok(json!({}))
         }
-        Command::Wait { ms } => {
-            let backend = new_backend()?;
-            backend.sleep_ms(ms);
-            Ok(json!({}))
-        }
         Command::ScreenCapture {
             out_path,
             overlay,

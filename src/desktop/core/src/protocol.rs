@@ -86,9 +86,6 @@ pub enum Command {
         hotkey: String,
     },
     KeyEnter,
-    Wait {
-        ms: u64,
-    },
     WaitText {
         text: String,
         timeout_ms: u64,
@@ -147,7 +144,6 @@ impl Command {
             Command::UiType { .. } => "type",
             Command::KeyHotkey { .. } => "key_hotkey",
             Command::KeyEnter => "key_enter",
-            Command::Wait { .. } => "wait",
             Command::WaitText { .. } => "wait_text",
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenTokenize { .. } => "screen_tokenize",
