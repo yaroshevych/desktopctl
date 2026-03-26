@@ -59,11 +59,9 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
     }
 
     match args[0].as_str() {
-        "ping" => Ok(Command::Ping),
         "app" => parse_app(&args[1..]),
         "window" => parse_window(&args[1..]),
         "screen" => parse_screen(&args[1..]),
-        "overlay" => parse_overlay(&args[1..]),
         "permissions" => parse_permissions(&args[1..]),
         "clipboard" => parse_clipboard(&args[1..]),
         "debug" => parse_debug(&args[1..]),
@@ -167,10 +165,45 @@ fn parse_permissions(args: &[String]) -> Result<Command, AppError> {
 }
 
 fn parse_debug(args: &[String]) -> Result<Command, AppError> {
-    if args.len() == 1 && args[0] == "snapshot" {
-        return Ok(Command::DebugSnapshot);
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(usage()));
     }
-    Err(AppError::invalid_argument(usage()))
+    match args[0].as_str() {
+        "snapshot" if args.len() == 1 => Ok(Command::DebugSnapshot),
+        "ping" if args.len() == 1 => Ok(Command::Ping),
+        "overlay" => {
+            if args.len() < 2 {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl debug overlay start [--duration <ms>] | desktopctl debug overlay stop",
+                ));
+            }
+            match args[1].as_str() {
+                "start" => {
+                    let mut duration_ms: Option<u64> = None;
+                    let mut i = 2;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "--duration" => {
+                                duration_ms = Some(parse_u64(args.get(i + 1), "duration_ms")?);
+                                i += 2;
+                            }
+                            flag => {
+                                return Err(AppError::invalid_argument(format!(
+                                    "unknown flag for debug overlay start: {flag}"
+                                )));
+                            }
+                        }
+                    }
+                    Ok(Command::OverlayStart { duration_ms })
+                }
+                "stop" if args.len() == 2 => Ok(Command::OverlayStop),
+                _ => Err(AppError::invalid_argument(
+                    "usage: desktopctl debug overlay start [--duration <ms>] | desktopctl debug overlay stop",
+                )),
+            }
+        }
+        _ => Err(AppError::invalid_argument(usage())),
+    }
 }
 
 fn parse_replay(args: &[String]) -> Result<Command, AppError> {
@@ -418,21 +451,6 @@ fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
     })
 }
 
-fn parse_overlay(args: &[String]) -> Result<Command, AppError> {
-    if args.len() != 1 {
-        return Err(AppError::invalid_argument(
-            "usage: desktopctl overlay start | desktopctl overlay stop",
-        ));
-    }
-    match args[0].as_str() {
-        "start" => Ok(Command::OverlayStart),
-        "stop" => Ok(Command::OverlayStop),
-        _ => Err(AppError::invalid_argument(
-            "usage: desktopctl overlay start | desktopctl overlay stop",
-        )),
-    }
-}
-
 fn parse_open(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(usage()));
@@ -595,7 +613,6 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
 
 fn usage() -> &'static str {
     "usage:
-  desktopctl ping
   desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl app hide <application>
   desktopctl app show <application>
@@ -607,11 +624,12 @@ fn usage() -> &'static str {
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
-  desktopctl overlay start
-  desktopctl overlay stop
   desktopctl permissions check
   desktopctl clipboard read
   desktopctl clipboard write <text>
+  desktopctl debug ping
+  desktopctl debug overlay start [--duration <ms>]
+  desktopctl debug overlay stop
   desktopctl debug snapshot
   desktopctl replay record [--duration <ms>]
   desktopctl replay record --stop
@@ -1051,6 +1069,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_top_level_ping_command() {
+        let args = vec!["ping".to_string()];
+        let err = parse_command(&args).expect_err("top-level ping should be invalid");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
     fn parses_screen_screenshot_with_overlay() {
         let args = vec![
             "screen".to_string(),
@@ -1137,14 +1162,38 @@ mod tests {
     }
 
     #[test]
-    fn parses_overlay_start_stop() {
-        let start = parse_command(&["overlay", "start"].map(str::to_string))
-            .expect("overlay start should parse");
-        assert!(matches!(start, Command::OverlayStart));
+    fn parses_debug_overlay_start_stop() {
+        let start = parse_command(&["debug", "overlay", "start"].map(str::to_string))
+            .expect("debug overlay start should parse");
+        assert!(matches!(
+            start,
+            Command::OverlayStart {
+                duration_ms: None
+            }
+        ));
 
-        let stop = parse_command(&["overlay", "stop"].map(str::to_string))
-            .expect("overlay stop should parse");
+        let stop = parse_command(&["debug", "overlay", "stop"].map(str::to_string))
+            .expect("debug overlay stop should parse");
         assert!(matches!(stop, Command::OverlayStop));
+    }
+
+    #[test]
+    fn parses_debug_overlay_start_with_duration() {
+        let start = parse_command(
+            &["debug", "overlay", "start", "--duration", "1500"].map(str::to_string),
+        )
+        .expect("debug overlay start with duration should parse");
+        match start {
+            Command::OverlayStart { duration_ms } => assert_eq!(duration_ms, Some(1500)),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_debug_ping() {
+        let command = parse_command(&["debug", "ping"].map(str::to_string))
+            .expect("debug ping should parse");
+        assert!(matches!(command, Command::Ping));
     }
 
     #[test]

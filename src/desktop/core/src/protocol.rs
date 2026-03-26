@@ -110,7 +110,9 @@ pub enum Command {
         text: String,
         all: bool,
     },
-    OverlayStart,
+    OverlayStart {
+        duration_ms: Option<u64>,
+    },
     OverlayStop,
     ClipboardRead,
     ClipboardWrite {
@@ -152,7 +154,7 @@ impl Command {
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenTokenize { .. } => "screen_tokenize",
             Command::ScreenFindText { .. } => "screen_find_text",
-            Command::OverlayStart => "overlay_start",
+            Command::OverlayStart { .. } => "overlay_start",
             Command::OverlayStop => "overlay_stop",
             Command::ClipboardRead => "clipboard_read",
             Command::ClipboardWrite { .. } => "clipboard_write",

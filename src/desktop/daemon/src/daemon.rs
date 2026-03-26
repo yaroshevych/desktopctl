@@ -595,13 +595,28 @@ fn execute(command: Command) -> Result<Value, AppError> {
             permissions::ensure_screen_recording_permission()?;
             find_text_targets(&text, all)
         }
-        Command::OverlayStart => {
+        Command::OverlayStart { duration_ms } => {
             #[cfg(target_os = "macos")]
             {
                 let started = overlay::start_overlay()?;
+                if let Some(ms) = duration_ms {
+                    let stop_after = ms.max(1);
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(stop_after));
+                        if let Err(err) = overlay::stop_overlay() {
+                            trace::log(format!(
+                                "overlay:auto_stop err duration_ms={} error={}",
+                                stop_after, err
+                            ));
+                        } else {
+                            trace::log(format!("overlay:auto_stop ok duration_ms={stop_after}"));
+                        }
+                    });
+                }
                 return Ok(json!({
                     "overlay_running": true,
-                    "started": started
+                    "started": started,
+                    "duration_ms": duration_ms
                 }));
             }
             #[allow(unreachable_code)]
