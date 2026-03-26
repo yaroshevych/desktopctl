@@ -72,7 +72,6 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "pointer" => parse_pointer(&args[1..]),
         "type" => parse_type(&args[1..]),
         "key" => parse_key(&args[1..]),
-        "wait" => parse_wait(&args[1..]),
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -194,48 +193,6 @@ fn parse_clipboard(args: &[String]) -> Result<Command, AppError> {
         }
         _ => Err(AppError::invalid_argument(usage())),
     }
-}
-
-fn parse_wait(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-
-    if args[0] == "--text" {
-        let text = args
-            .get(1)
-            .cloned()
-            .ok_or_else(|| AppError::invalid_argument("usage: desktopctl wait --text <text>"))?;
-        let mut timeout_ms = 8_000_u64;
-        let mut interval_ms = 200_u64;
-        let mut i = 2;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--timeout" => {
-                    timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                    i += 2;
-                }
-                "--interval" => {
-                    interval_ms = parse_u64(args.get(i + 1), "interval_ms")?;
-                    i += 2;
-                }
-                flag => {
-                    return Err(AppError::invalid_argument(format!(
-                        "unknown flag for wait --text: {flag}"
-                    )));
-                }
-            }
-        }
-        return Ok(Command::WaitText {
-            text,
-            timeout_ms,
-            interval_ms,
-        });
-    }
-
-    Err(AppError::invalid_argument(
-        "usage: desktopctl wait --text <text> [--timeout <ms>] [--interval <ms>]",
-    ))
 }
 
 fn parse_screen(args: &[String]) -> Result<Command, AppError> {
@@ -366,8 +323,46 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             }
             Ok(Command::ScreenFindText { text, all })
         }
+        "wait" => parse_screen_wait(&args[1..]),
         _ => Err(AppError::invalid_argument(usage())),
     }
+}
+
+fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
+    if args.first().map(String::as_str) != Some("--text") {
+        return Err(AppError::invalid_argument(
+            "usage: desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>]",
+        ));
+    }
+
+    let text = args.get(1).cloned().ok_or_else(|| {
+        AppError::invalid_argument("usage: desktopctl screen wait --text <text>")
+    })?;
+    let mut timeout_ms = 8_000_u64;
+    let mut interval_ms = 200_u64;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--timeout" => {
+                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
+                i += 2;
+            }
+            "--interval" => {
+                interval_ms = parse_u64(args.get(i + 1), "interval_ms")?;
+                i += 2;
+            }
+            flag => {
+                return Err(AppError::invalid_argument(format!(
+                    "unknown flag for screen wait: {flag}"
+                )));
+            }
+        }
+    }
+    Ok(Command::WaitText {
+        text,
+        timeout_ms,
+        interval_ms,
+    })
 }
 
 fn parse_overlay(args: &[String]) -> Result<Command, AppError> {
@@ -567,6 +562,7 @@ fn usage() -> &'static str {
   desktopctl screen capture [--out <path>] [--overlay] [--active-window]
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
+  desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>]
   desktopctl overlay start
   desktopctl overlay stop
   desktopctl permissions check
@@ -582,8 +578,7 @@ fn usage() -> &'static str {
   desktopctl pointer click --token <n>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
   desktopctl type \"text\"
-  desktopctl key press <key-or-hotkey>
-  desktopctl wait --text <text> [--timeout <ms>] [--interval <ms>]"
+  desktopctl key press <key-or-hotkey>"
 }
 
 fn send_request_with_autostart(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
@@ -883,6 +878,44 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_screen_wait_text() {
+        let args = vec![
+            "screen".to_string(),
+            "wait".to_string(),
+            "--text".to_string(),
+            "Ready".to_string(),
+            "--timeout".to_string(),
+            "3000".to_string(),
+            "--interval".to_string(),
+            "120".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen wait should parse");
+        match command {
+            Command::WaitText {
+                text,
+                timeout_ms,
+                interval_ms,
+            } => {
+                assert_eq!(text, "Ready");
+                assert_eq!(timeout_ms, 3000);
+                assert_eq!(interval_ms, 120);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_top_level_wait_command() {
+        let args = vec![
+            "wait".to_string(),
+            "--text".to_string(),
+            "Ready".to_string(),
+        ];
+        let err = parse_command(&args).expect_err("top-level wait should be invalid");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 
     #[test]
