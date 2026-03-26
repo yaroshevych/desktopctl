@@ -228,8 +228,8 @@ main() {
   run_step "vm_baseline_capture" run_vm_cli "screen screenshot --out /tmp/dctl-tokenize-phase0-baseline.png" || true
   run_step "vm_baseline_copy" run_scp "$VM_HOST:/tmp/dctl-tokenize-phase0-baseline.png" "$RUN_DIR/raw/vm-baseline.png" || true
 
-  run_step "host_snapshot_json" "$HOST_DCTL" screen snapshot --json || true
-  run_step "vm_snapshot_json" run_vm_cli "screen snapshot --json" || true
+  run_step "host_snapshot_json" "$HOST_DCTL" screen tokenize --json || true
+  run_step "vm_snapshot_json" run_vm_cli "screen tokenize --json" || true
 
   if [[ "$VM_PHASE0_OPEN_IMAGES" == "1" ]]; then
     run_step "open_host_baseline" open "$RUN_DIR/raw/host-baseline.png" || true

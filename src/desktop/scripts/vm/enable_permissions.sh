@@ -151,6 +151,11 @@ run_host_dctl_direct() {
   "$HOST_DCTL" "$@"
 }
 
+sleep_ms() {
+  local ms="${1:-0}"
+  sleep "$(awk -v ms="$ms" 'BEGIN { printf("%.3f", ms / 1000.0) }')"
+}
+
 press_hotkey() {
   local combo="$1"
   log_action "press_hotkey: $combo"
@@ -200,7 +205,7 @@ type_text_slowly() {
     ch="${text:i:1}"
     printf "info: typing char[%d]='%s'\n" "$((i + 1))" "$ch"
     run_host_dctl_direct keyboard type "$ch"
-    run_host_dctl_direct wait "$delay_ms"
+    sleep_ms "$delay_ms"
   done
 }
 
@@ -227,7 +232,7 @@ click_text_fast() {
   local timeout_ms="${2:-100}"
   local payload coords cx cy
   log_action "click_text_fast: wait for \"$label\" (timeout=${timeout_ms}ms)"
-  if ! payload="$(run_host_dctl wait --text "$label" --timeout "$timeout_ms" --interval 35 2>/dev/null)"; then
+  if ! payload="$(run_host_dctl screen wait --text "$label" --timeout "$timeout_ms" --interval 35 2>/dev/null)"; then
     log_action "click_text_fast: \"$label\" not found"
     return 1
   fi
@@ -245,7 +250,7 @@ double_click_text_fast() {
   local timeout_ms="${2:-100}"
   local payload coords cx cy
   log_action "double_click_text_fast: wait for \"$label\" (timeout=${timeout_ms}ms)"
-  if ! payload="$(run_host_dctl wait --text "$label" --timeout "$timeout_ms" --interval 35 2>/dev/null)"; then
+  if ! payload="$(run_host_dctl screen wait --text "$label" --timeout "$timeout_ms" --interval 35 2>/dev/null)"; then
     log_action "double_click_text_fast: \"$label\" not found"
     return 1
   fi
@@ -256,9 +261,9 @@ double_click_text_fast() {
   cy="${coords##* }"
   log_action "double_click_text_fast: double-click \"$label\" at ($cx,$cy)"
   run_host_dctl pointer click "$cx" "$cy" >/dev/null
-  run_host_dctl wait 25 >/dev/null
+  sleep_ms 25 >/dev/null
   run_host_dctl pointer click "$cx" "$cy" >/dev/null
-  run_host_dctl wait 45 >/dev/null
+  sleep_ms 45 >/dev/null
 }
 
 click_open_in_open_dialog() {
@@ -269,7 +274,7 @@ click_open_in_open_dialog() {
     if click_text_fast "Open" 100; then
       return 0
     fi
-    run_host_dctl wait 40
+    sleep_ms 40
   done
   return 1
 }
@@ -288,7 +293,7 @@ select_desktopctl_from_open_dialog() {
       press_hotkey_direct enter
       return 0
     fi
-    run_host_dctl wait 35
+    sleep_ms 35
   done
   return 1
 }
@@ -301,7 +306,7 @@ submit_password_for_open_dialog() {
   log_action "submit_password_for_open_dialog: settings unlock"
   if run_host_dctl_try ui settings unlock --password "$VM_OS_PASSWORD" --timeout 100; then
     log_action "submit_password_for_open_dialog: unlock succeeded; waiting for Open dialog"
-    if run_host_dctl_try wait --text "Open" --timeout 100; then
+    if run_host_dctl_try screen wait --text "Open" --timeout 100; then
       return 0
     fi
     echo "warn: settings unlock helper did not open file dialog; retrying"
@@ -310,10 +315,10 @@ submit_password_for_open_dialog() {
   # Fallback: clear current field value, then type with short pacing.
   log_action "submit_password_for_open_dialog: fallback — type password manually"
   press_hotkey_direct cmd+a
-  run_host_dctl_direct wait 30
+  sleep_ms 30
   type_text_slowly "$VM_OS_PASSWORD" 15
   press_hotkey_direct enter
-  run_host_dctl_direct wait 180
+  sleep_ms 180
 }
 
 submit_password_for_settings_change() {
@@ -324,31 +329,31 @@ submit_password_for_settings_change() {
   # Optional dialog: only handle it when present.
   log_action "submit_password_for_settings_change: settings unlock (reason: $reason)"
   if run_host_dctl_try ui settings unlock --password "$VM_OS_PASSWORD" --timeout 100; then
-    run_host_dctl wait 140
+    sleep_ms 140
     return 0
   fi
 
   log_action "submit_password_for_settings_change: fallback — type password manually"
   press_hotkey_direct cmd+a
-  run_host_dctl_direct wait 30
+  sleep_ms 30
   type_text_slowly "$VM_OS_PASSWORD" 15
   press_hotkey_direct enter
-  run_host_dctl_direct wait 180
+  sleep_ms 180
 }
 
 wait_for_password_prompt() {
   local timeout_ms="${1:-100}"
   log_action "wait_for_password_prompt: timeout=${timeout_ms}ms"
-  run_host_dctl_try wait --text "Password" --timeout "$timeout_ms"
+  run_host_dctl_try screen wait --text "Password" --timeout "$timeout_ms"
 }
 
 wait_for_screen_recording_pane() {
   local timeout_ms="${1:-8000}"
   log_action "wait_for_screen_recording_pane: timeout=${timeout_ms}ms"
-  run_host_dctl_try wait --text "Screen & System Audio Recording" --timeout "$timeout_ms" \
-    || run_host_dctl_try wait --text "Allow the applications below to record the contents of your screen and system audio." --timeout "$timeout_ms" \
-    || run_host_dctl_try wait --text "Allow the applications below to record screen and system audio." --timeout "$timeout_ms" \
-    || run_host_dctl_try wait --text "Allow the applications below" --timeout "$timeout_ms"
+  run_host_dctl_try screen wait --text "Screen & System Audio Recording" --timeout "$timeout_ms" \
+    || run_host_dctl_try screen wait --text "Allow the applications below to record the contents of your screen and system audio." --timeout "$timeout_ms" \
+    || run_host_dctl_try screen wait --text "Allow the applications below to record screen and system audio." --timeout "$timeout_ms" \
+    || run_host_dctl_try screen wait --text "Allow the applications below" --timeout "$timeout_ms"
 }
 
 close_settings_window_via_close_button() {
@@ -362,20 +367,20 @@ close_settings_window_via_close_button() {
     wx="$(jq -r '.regions.settings_window.x // .regions.window.x // .frontmost_window.x // empty' <<<"$payload" 2>/dev/null || true)"
     wy="$(jq -r '.regions.settings_window.y // .regions.window.y // .frontmost_window.y // empty' <<<"$payload" 2>/dev/null || true)"
     if [[ -z "$wx" || -z "$wy" || "$wx" == "null" || "$wy" == "null" ]]; then
-      run_host_dctl wait 120 >/dev/null
+      sleep_ms 120 >/dev/null
       continue
     fi
     # Red traffic-light center is near top-left + ~20px in both axes.
     cx="$(awk -v x="$wx" 'BEGIN { printf("%d", x + 20.5) }')"
     cy="$(awk -v y="$wy" 'BEGIN { printf("%d", y + 20.5) }')"
     if [[ ! "$cx" =~ ^[0-9]+$ || ! "$cy" =~ ^[0-9]+$ ]]; then
-      run_host_dctl wait 120 >/dev/null
+      sleep_ms 120 >/dev/null
       continue
     fi
     echo "info: closing Settings via traffic-light at (${cx},${cy}) [attempt ${attempt}]"
     log_action "close_settings_window_via_close_button: click traffic-light at ($cx,$cy)"
     run_host_dctl pointer click "$cx" "$cy" >/dev/null
-    run_host_dctl wait 200 >/dev/null
+    sleep_ms 200 >/dev/null
     return 0
   done
   return 1
@@ -461,7 +466,7 @@ add_entry_in_current_pane() {
       submit_password_for_settings_change "remove (-) click"
     fi
     # After remove, macOS reflows the controls row; allow it to settle.
-    run_host_dctl wait 100
+    sleep_ms 100
   else
     echo "info: DesktopCtl row not found in current pane; skipping remove"
   fi
@@ -471,7 +476,7 @@ add_entry_in_current_pane() {
 
   if wait_for_password_prompt 100; then
     submit_password_for_open_dialog
-    if ! run_host_dctl_try wait --text "Open" --timeout 100; then
+    if ! run_host_dctl_try screen wait --text "Open" --timeout 100; then
       echo "info: Open dialog not visible after unlock; retrying '+' click once"
       log_action "add_entry_in_current_pane: retrying add (+) control after unlock"
       click_settings_add_control "$add_mode"
@@ -479,7 +484,7 @@ add_entry_in_current_pane() {
   fi
 
   log_action "add_entry_in_current_pane: waiting for Open file dialog"
-  run_host_dctl wait --text "Open" --timeout 100
+  run_host_dctl screen wait --text "Open" --timeout 100
   local submitted_with_open=0
   log_action "add_entry_in_current_pane: selecting DesktopCtl in Open dialog"
   if select_desktopctl_from_open_dialog 1; then
@@ -488,16 +493,16 @@ add_entry_in_current_pane() {
     echo "warn: OCR could not find DesktopCtl in Open dialog; falling back to full path"
     log_action "add_entry_in_current_pane: fallback — type full path in Go To Folder"
     press_hotkey cmd+shift+g
-    run_host_dctl wait 60
+    sleep_ms 60
     run_host_dctl keyboard type "$VM_DIALOG_APP_PATH"
     press_hotkey enter
-    run_host_dctl wait 80
+    sleep_ms 80
   fi
   if [[ "$submitted_with_open" -eq 0 ]]; then
     log_action "add_entry_in_current_pane: submitting Open dialog"
     click_open_in_open_dialog 4 || press_hotkey_direct cmd+o || press_hotkey_direct enter
   fi
-  run_host_dctl wait 100
+  sleep_ms 100
 }
 
 ensure_row_enabled() {
@@ -552,7 +557,7 @@ focus_vm_window_on_host() {
   if [[ -n "$HOST_RETURN_APP" && "$HOST_RETURN_APP" != "$VM_WINDOW_APP" ]]; then
     "$HOST_DCTL" app hide "$HOST_RETURN_APP" || true
   fi
-  "$HOST_DCTL" open "$VM_WINDOW_APP" --wait
+  "$HOST_DCTL" app open "$VM_WINDOW_APP" --wait
   # Brief settle so the window is ready before AppleScript resizes it.
   sleep 0.3
   if [[ "$VM_MAXIMIZE_WINDOW" == "1" ]]; then
@@ -569,7 +574,7 @@ configure_accessibility_pane() {
   log_action "configure_accessibility_pane: open deep-link"
   run_ssh "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'"
   log_action "configure_accessibility_pane: waiting for pane"
-  run_host_dctl wait --text "Allow the applications below to control your computer." --timeout 8000
+  run_host_dctl screen wait --text "Allow the applications below to control your computer." --timeout 8000
   log_action "configure_accessibility_pane: pane ready"
   add_entry_in_current_pane default
   log_action "configure_accessibility_pane: done"
@@ -581,7 +586,7 @@ configure_screen_recording_pane() {
   echo "      sending Cmd+Q to close Settings in VM before Screen Recording deep-link"
   log_action "configure_screen_recording_pane: cmd+q to close Settings"
   press_hotkey cmd+q
-  run_host_dctl wait 150
+  sleep_ms 150
   log_action "configure_screen_recording_pane: open deep-link"
   run_ssh "open -a 'System Settings' 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture' >/dev/null 2>&1 || open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'"
   log_action "configure_screen_recording_pane: waiting for pane"
@@ -606,7 +611,7 @@ verify_vm_permissions_and_capture() {
   log_action "verify_vm_permissions_and_capture: start"
   run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' permissions check"
   run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen screenshot --out /tmp/dctl-cap.png"
-  run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen snapshot --json"
+  run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen tokenize --json"
   run_ssh "DESKTOPCTL_APP_PATH='$VM_APP_PATH' '$VM_CLI_PATH' screen tokenize --json"
   log_action "verify_vm_permissions_and_capture: done"
 }

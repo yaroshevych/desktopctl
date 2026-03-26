@@ -37,6 +37,11 @@ run_host_dctl_direct() {
   "$HOST_DCTL" "$@"
 }
 
+sleep_ms() {
+  local ms="${1:-0}"
+  sleep "$(awk -v ms="$ms" 'BEGIN { printf("%.3f", ms / 1000.0) }')"
+}
+
 press_hotkey_direct() {
   local combo="$1"
   if [[ "$combo" == cmd+* ]]; then
@@ -54,7 +59,7 @@ type_text_slowly() {
     ch="${text:i:1}"
     printf "info: typing char[%d]='%s'\n" "$((i + 1))" "$ch"
     run_host_dctl_direct keyboard type "$ch"
-    run_host_dctl_direct wait "$delay_ms"
+    sleep_ms "$delay_ms"
   done
 }
 
@@ -72,7 +77,7 @@ main() {
   echo "[2/4] Focus VM window on host"
   run_host_dctl_direct app open "$VM_WINDOW_APP" --wait
   run_host_dctl_direct app isolate "$VM_WINDOW_APP" >/dev/null
-  run_host_dctl_direct wait 500
+  sleep_ms 500
 
   echo "[3/4] Create a new note inside VM (avoids host Cmd+N interception)"
   ssh "$VM_HOST" /usr/bin/osascript <<'APPLESCRIPT'
@@ -81,7 +86,7 @@ tell application "Notes"
   make new note
 end tell
 APPLESCRIPT
-  run_host_dctl_direct wait 450
+  sleep_ms 450
 
   echo "[4/4] Type password only (no paste)"
   type_text_slowly "$VM_OS_PASSWORD" "$CHAR_DELAY_MS"

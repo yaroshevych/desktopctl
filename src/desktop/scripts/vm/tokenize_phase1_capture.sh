@@ -284,7 +284,7 @@ capture_case() {
     : > "$host_bounds_json"
   fi
 
-  run_step "${capture_prefix}_screen_snapshot" run_vm_cli "screen snapshot --json" || true
+  run_step "${capture_prefix}_screen_snapshot" run_vm_cli "screen tokenize --json" || true
   if ! save_last_output_to_file "$host_snapshot_json"; then
     : > "$host_snapshot_json"
   fi
