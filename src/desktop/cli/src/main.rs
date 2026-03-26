@@ -366,14 +366,6 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             }
             Ok(Command::ScreenFindText { text, all })
         }
-        "layout" => {
-            if args.get(1).is_some() && args.get(1).map(String::as_str) != Some("--json") {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl screen layout [--json]",
-                ));
-            }
-            Ok(Command::ScreenLayout)
-        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -679,7 +671,6 @@ fn usage() -> &'static str {
   desktopctl screen capture [--out <path>] [--overlay] [--active-window]
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
-  desktopctl screen layout [--json]
   desktopctl overlay start
   desktopctl overlay stop
   desktopctl ui click --text <text> [--timeout <ms>]

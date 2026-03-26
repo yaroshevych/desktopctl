@@ -106,7 +106,6 @@ pub enum Command {
         text: String,
         all: bool,
     },
-    ScreenLayout,
     OverlayStart,
     OverlayStop,
     UiClickText {
@@ -164,7 +163,6 @@ impl Command {
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenTokenize { .. } => "screen_tokenize",
             Command::ScreenFindText { .. } => "screen_find_text",
-            Command::ScreenLayout => "screen_layout",
             Command::OverlayStart => "overlay_start",
             Command::OverlayStop => "overlay_stop",
             Command::UiClickText { .. } => "ui_click_text",

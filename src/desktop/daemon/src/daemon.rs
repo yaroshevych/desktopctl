@@ -600,10 +600,6 @@ fn execute(command: Command) -> Result<Value, AppError> {
             permissions::ensure_screen_recording_permission()?;
             find_text_targets(&text, all)
         }
-        Command::ScreenLayout => {
-            permissions::ensure_screen_recording_permission()?;
-            screen_layout_summary()
-        }
         Command::OverlayStart => {
             #[cfg(target_os = "macos")]
             {
