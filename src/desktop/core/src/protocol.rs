@@ -120,6 +120,16 @@ pub enum Command {
     },
     PermissionsCheck,
     DebugSnapshot,
+    RequestShow {
+        request_id: String,
+    },
+    RequestScreenshot {
+        request_id: String,
+        out_path: Option<String>,
+    },
+    RequestResponse {
+        request_id: String,
+    },
     ReplayRecord {
         duration_ms: u64,
         stop: bool,
@@ -160,6 +170,9 @@ impl Command {
             Command::ClipboardWrite { .. } => "clipboard_write",
             Command::PermissionsCheck => "permissions_check",
             Command::DebugSnapshot => "debug_snapshot",
+            Command::RequestShow { .. } => "request_show",
+            Command::RequestScreenshot { .. } => "request_screenshot",
+            Command::RequestResponse { .. } => "request_response",
             Command::ReplayRecord { stop: true, .. } => "replay_record_stop",
             Command::ReplayRecord { stop: false, .. } => "replay_record_start",
             Command::ReplayLoad { .. } => "replay_load",

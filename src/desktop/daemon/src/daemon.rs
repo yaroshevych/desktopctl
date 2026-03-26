@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 #[cfg(target_os = "macos")]
 use crate::overlay;
-use crate::{clipboard, permissions, recording, replay, trace, vision};
+use crate::{clipboard, permissions, recording, replay, request_store, trace, vision};
 
 mod settings_flow;
 
@@ -257,6 +257,9 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     if let Err(err) = recording::record_command(&request, &response) {
         eprintln!("recorder write failed: {err}");
         trace::log(format!("client:record_err {err}"));
+    }
+    if let Err(err) = request_store::record(&request, &response) {
+        trace::log(format!("client:request_store_err {err}"));
     }
     trace::log("client:write_response_begin");
     write_framed_json(&mut stream, &response)?;
@@ -672,6 +675,12 @@ fn execute(command: Command) -> Result<Value, AppError> {
             })?)
         }
         Command::DebugSnapshot => vision::debug::write_debug_snapshot(),
+        Command::RequestShow { request_id } => request_store::show(&request_id),
+        Command::RequestScreenshot {
+            request_id,
+            out_path,
+        } => request_store::screenshot(&request_id, out_path),
+        Command::RequestResponse { request_id } => request_store::response(&request_id),
         Command::ReplayRecord { duration_ms, stop } => {
             if stop {
                 recording::stop_recording()
@@ -865,7 +874,9 @@ fn wait_for_text(
             } else {
                 format!("timed out waiting for text \"{query}\"")
             };
-            return Err(AppError::timeout(message).with_details(json!({ "timeout_ms": timeout_ms })));
+            return Err(
+                AppError::timeout(message).with_details(json!({ "timeout_ms": timeout_ms }))
+            );
         }
         thread::sleep(Duration::from_millis(interval_ms.max(30)));
     }
@@ -2430,8 +2441,7 @@ mod tests {
     fn ranked_text_candidates_filters_long_noise_lines() {
         let texts = vec![
             SnapshotText {
-                text: r#"./dist/desktopctl pointer click --text "New Document""#
-                    .to_string(),
+                text: r#"./dist/desktopctl pointer click --text "New Document""#.to_string(),
                 bounds: Bounds {
                     x: 250.0,
                     y: 40.0,

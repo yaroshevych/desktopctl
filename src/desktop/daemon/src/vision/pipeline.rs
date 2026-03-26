@@ -10,6 +10,7 @@ use desktop_core::{
         TokenizePayload, TokenizeWindow, now_millis,
     },
 };
+use image::{ImageEncoder, codecs::png::PngEncoder};
 use image::{ImageFormat, Rgba, imageops::crop_imm};
 
 use crate::trace;
@@ -101,6 +102,7 @@ fn capture_and_update_internal(
     let frame = captured.frame;
     let image_path = frame.image_path.clone();
     let image = captured.image;
+    let frame_png = Some(encode_png(&image)?);
 
     with_state(move |state| {
         let roi = state
@@ -110,7 +112,7 @@ fn capture_and_update_internal(
                 upscale_region(region, frame.width, frame.height, thumb.width, thumb.height)
             });
 
-        let update = state.record_capture(frame, thumb, focused_app, texts, roi);
+        let update = state.record_capture(frame, frame_png, thumb, focused_app, texts, roi);
         trace::log(format!(
             "pipeline:capture_and_update:recorded snapshot_id={} event_id={}",
             update.snapshot.snapshot_id, update.event_id
@@ -205,6 +207,10 @@ pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
     with_state(|state| state.latest_snapshot())
 }
 
+pub fn latest_frame_png() -> Result<Option<Vec<u8>>, AppError> {
+    with_state(|state| state.latest_frame_png())
+}
+
 pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayload, AppError> {
     trace::log("pipeline:tokenize:window_mode");
     let cache_key = tokenize_cache_key(&window_meta);
@@ -233,6 +239,7 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let image_path = frame.image_path.clone();
     let focused_app = window_meta.app.clone();
     let thumb_for_record = thumb.clone();
+    let frame_png = Some(encode_png(&image)?);
     let capture = with_state(move |state| {
         let roi = state
             .latest_thumbnail()
@@ -247,7 +254,8 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
                 )
             });
 
-        let update = state.record_capture(frame, thumb_for_record, focused_app, texts, roi);
+        let update =
+            state.record_capture(frame, frame_png, thumb_for_record, focused_app, texts, roi);
         trace::log(format!(
             "pipeline:tokenize:window_recorded snapshot_id={} event_id={}",
             update.snapshot.snapshot_id, update.event_id
@@ -313,6 +321,19 @@ pub fn tokenize_screenshot(
         texts,
     };
     tokenize_from_snapshot(snapshot, &rgba, Some(screenshot_path), window_meta)
+}
+
+fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>, AppError> {
+    let mut out = Vec::new();
+    PngEncoder::new(&mut out)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|err| AppError::internal(format!("failed to encode frame png: {err}")))?;
+    Ok(out)
 }
 
 fn tokenize_from_snapshot(

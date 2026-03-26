@@ -233,6 +233,7 @@ version = "0.1.0"
 dependencies = [
  "desktop-core",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@ mod overlay;
 mod permissions;
 mod recording;
 mod replay;
+mod request_store;
 mod trace;
 mod vision;
 

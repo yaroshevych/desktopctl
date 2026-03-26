@@ -13,18 +13,37 @@ use std::{
 };
 
 fn main() {
-    match run() {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let (json_output, args) = strip_global_json_flag(raw_args);
+    match run(&args, json_output) {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            eprintln!("error: {err}");
+            if json_output {
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "request_id": serde_json::Value::Null,
+                    "error": {
+                        "code": err.code,
+                        "message": err.message,
+                        "retryable": err.retryable,
+                        "command": err.command,
+                        "debug_ref": err.debug_ref,
+                    }
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+                );
+            } else {
+                eprintln!("error: {err}");
+            }
             std::process::exit(map_error_code(&err.code));
         }
     }
 }
 
-fn run() -> Result<i32, AppError> {
-    let args: Vec<String> = std::env::args().collect();
-    let command = parse_command(&args[1..])?;
+fn run(args: &[String], json_output: bool) -> Result<i32, AppError> {
+    let command = parse_command(args)?;
     let request = RequestEnvelope::new(next_request_id(), command);
     trace_log(format!(
         "run:request_start request_id={} command={}",
@@ -32,6 +51,18 @@ fn run() -> Result<i32, AppError> {
         request.command.name()
     ));
     let response = send_request_with_autostart(&request)?;
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
+        );
+        let code = match response {
+            ResponseEnvelope::Success(_) => 0,
+            ResponseEnvelope::Error(err) => map_error_code(&err.error.code),
+        };
+        return Ok(code);
+    }
 
     match response {
         ResponseEnvelope::Success(success) => {
@@ -64,6 +95,7 @@ fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "screen" => parse_screen(&args[1..]),
         "clipboard" => parse_clipboard(&args[1..]),
         "debug" => parse_debug(&args[1..]),
+        "request" => parse_request(&args[1..]),
         "replay" => parse_replay(&args[1..]),
         "pointer" => parse_pointer(&args[1..]),
         "keyboard" => parse_keyboard(&args[1..]),
@@ -251,6 +283,57 @@ fn parse_replay(args: &[String]) -> Result<Command, AppError> {
     }
 }
 
+fn parse_request(args: &[String]) -> Result<Command, AppError> {
+    if args.is_empty() {
+        return Err(AppError::invalid_argument(usage()));
+    }
+    match args[0].as_str() {
+        "show" => {
+            let request_id = args.get(1).cloned().ok_or_else(|| {
+                AppError::invalid_argument("usage: desktopctl request show <request_id>")
+            })?;
+            Ok(Command::RequestShow { request_id })
+        }
+        "screenshot" => {
+            let request_id = args.get(1).cloned().ok_or_else(|| {
+                AppError::invalid_argument(
+                    "usage: desktopctl request screenshot <request_id> [--out <path>]",
+                )
+            })?;
+            let mut out_path: Option<String> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--out" => {
+                        out_path = Some(
+                            args.get(i + 1)
+                                .cloned()
+                                .ok_or_else(|| AppError::invalid_argument("missing out_path"))?,
+                        );
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for request screenshot: {flag}"
+                        )));
+                    }
+                }
+            }
+            Ok(Command::RequestScreenshot {
+                request_id,
+                out_path,
+            })
+        }
+        "response" => {
+            let request_id = args.get(1).cloned().ok_or_else(|| {
+                AppError::invalid_argument("usage: desktopctl request response <request_id>")
+            })?;
+            Ok(Command::RequestResponse { request_id })
+        }
+        _ => Err(AppError::invalid_argument(usage())),
+    }
+}
+
 fn parse_clipboard(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(usage()));
@@ -407,9 +490,10 @@ fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
         ));
     }
 
-    let text = args.get(1).cloned().ok_or_else(|| {
-        AppError::invalid_argument("usage: desktopctl screen wait --text <text>")
-    })?;
+    let text = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| AppError::invalid_argument("usage: desktopctl screen wait --text <text>"))?;
     let mut timeout_ms = 8_000_u64;
     let mut interval_ms = 200_u64;
     let mut disappear = false;
@@ -521,9 +605,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
         "click" => {
             if args.len() >= 2 && args[1] == "--text" {
                 let text = args.get(2).cloned().ok_or_else(|| {
-                    AppError::invalid_argument(
-                        "usage: desktopctl pointer click --text <text>",
-                    )
+                    AppError::invalid_argument("usage: desktopctl pointer click --text <text>")
                 })?;
                 if args.len() > 3 {
                     return Err(AppError::invalid_argument(format!(
@@ -621,6 +703,9 @@ fn usage() -> &'static str {
   desktopctl debug overlay start [--duration <ms>]
   desktopctl debug overlay stop
   desktopctl debug snapshot
+  desktopctl request show <request_id>
+  desktopctl request screenshot <request_id> [--out <path>]
+  desktopctl request response <request_id>
   desktopctl replay record [--duration <ms>]
   desktopctl replay record --stop
   desktopctl replay load <session_dir>
@@ -670,6 +755,15 @@ where
             ));
             Err(err)
         }
+    }
+}
+
+fn strip_global_json_flag(mut args: Vec<String>) -> (bool, Vec<String>) {
+    if let Some(pos) = args.iter().position(|arg| arg == "--json") {
+        args.remove(pos);
+        (true, args)
+    } else {
+        (false, args)
     }
 }
 
@@ -811,12 +905,7 @@ fn discover_daemon_binary_path() -> Option<PathBuf> {
 }
 
 fn next_request_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("req-{ts}")
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn trace_log(message: impl AsRef<str>) {
@@ -974,7 +1063,9 @@ mod tests {
         ];
         let command = parse_command(&args).expect("screen wait --disappear should parse");
         match command {
-            Command::WaitText { text, disappear, .. } => {
+            Command::WaitText {
+                text, disappear, ..
+            } => {
                 assert_eq!(text, "Loading");
                 assert!(disappear);
             }
@@ -1033,10 +1124,8 @@ mod tests {
 
     #[test]
     fn rejects_replay_record_duration_over_30m() {
-        let err = parse_command(
-            &["replay", "record", "--duration", "1800001"].map(str::to_string),
-        )
-        .expect_err("duration over max should fail");
+        let err = parse_command(&["replay", "record", "--duration", "1800001"].map(str::to_string))
+            .expect_err("duration over max should fail");
         assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 
@@ -1169,12 +1258,7 @@ mod tests {
     fn parses_debug_overlay_start_stop() {
         let start = parse_command(&["debug", "overlay", "start"].map(str::to_string))
             .expect("debug overlay start should parse");
-        assert!(matches!(
-            start,
-            Command::OverlayStart {
-                duration_ms: None
-            }
-        ));
+        assert!(matches!(start, Command::OverlayStart { duration_ms: None }));
 
         let stop = parse_command(&["debug", "overlay", "stop"].map(str::to_string))
             .expect("debug overlay stop should parse");
@@ -1183,10 +1267,9 @@ mod tests {
 
     #[test]
     fn parses_debug_overlay_start_with_duration() {
-        let start = parse_command(
-            &["debug", "overlay", "start", "--duration", "1500"].map(str::to_string),
-        )
-        .expect("debug overlay start with duration should parse");
+        let start =
+            parse_command(&["debug", "overlay", "start", "--duration", "1500"].map(str::to_string))
+                .expect("debug overlay start with duration should parse");
         match start {
             Command::OverlayStart { duration_ms } => assert_eq!(duration_ms, Some(1500)),
             other => panic!("unexpected command: {other:?}"),
@@ -1195,9 +1278,41 @@ mod tests {
 
     #[test]
     fn parses_debug_ping() {
-        let command = parse_command(&["debug", "ping"].map(str::to_string))
-            .expect("debug ping should parse");
+        let command =
+            parse_command(&["debug", "ping"].map(str::to_string)).expect("debug ping should parse");
         assert!(matches!(command, Command::Ping));
+    }
+
+    #[test]
+    fn parses_request_commands() {
+        let show = parse_command(&["request", "show", "req-1"].map(str::to_string))
+            .expect("request show should parse");
+        match show {
+            Command::RequestShow { request_id } => assert_eq!(request_id, "req-1"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let screenshot = parse_command(
+            &["request", "screenshot", "req-2", "--out", "/tmp/req.png"].map(str::to_string),
+        )
+        .expect("request screenshot should parse");
+        match screenshot {
+            Command::RequestScreenshot {
+                request_id,
+                out_path,
+            } => {
+                assert_eq!(request_id, "req-2");
+                assert_eq!(out_path.as_deref(), Some("/tmp/req.png"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let response = parse_command(&["request", "response", "req-3"].map(str::to_string))
+            .expect("request response should parse");
+        match response {
+            Command::RequestResponse { request_id } => assert_eq!(request_id, "req-3"),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub struct VisionState {
     next_event_id: u64,
     latest_snapshot: Option<SnapshotPayload>,
     latest_frame_path: Option<PathBuf>,
+    latest_frame_png: Option<Vec<u8>>,
     latest_thumbnail: Option<GrayThumbnail>,
     latest_tokenize_cache_key: Option<String>,
     latest_tokenize_thumbnail: Option<GrayThumbnail>,
@@ -48,6 +49,7 @@ impl VisionState {
             next_event_id: 1,
             latest_snapshot: None,
             latest_frame_path: None,
+            latest_frame_png: None,
             latest_thumbnail: None,
             latest_tokenize_cache_key: None,
             latest_tokenize_thumbnail: None,
@@ -68,6 +70,10 @@ impl VisionState {
 
     pub fn latest_frame_path(&self) -> Option<PathBuf> {
         self.latest_frame_path.clone()
+    }
+
+    pub fn latest_frame_png(&self) -> Option<Vec<u8>> {
+        self.latest_frame_png.clone()
     }
 
     pub fn cached_tokenize_payload(
@@ -116,6 +122,7 @@ impl VisionState {
     pub fn record_capture(
         &mut self,
         capture: CapturedFrame,
+        frame_png: Option<Vec<u8>>,
         thumbnail: GrayThumbnail,
         focused_app: Option<String>,
         texts: Vec<desktop_core::protocol::SnapshotText>,
@@ -141,6 +148,7 @@ impl VisionState {
 
         self.latest_snapshot = Some(snapshot.clone());
         self.latest_frame_path = capture.image_path.clone();
+        self.latest_frame_png = frame_png;
         self.latest_thumbnail = Some(thumbnail);
         if let Some(path) = capture.image_path {
             self.frames.push_back(path);
@@ -211,8 +219,8 @@ mod tests {
             scale: 2.0,
             image_path: Some(PathBuf::from("/tmp/b.png")),
         };
-        let first = state.record_capture(capture1, thumb.clone(), None, Vec::new(), None);
-        let second = state.record_capture(capture2, thumb, None, Vec::new(), None);
+        let first = state.record_capture(capture1, None, thumb.clone(), None, Vec::new(), None);
+        let second = state.record_capture(capture2, None, thumb, None, Vec::new(), None);
         assert!(first.snapshot.snapshot_id < second.snapshot.snapshot_id);
     }
 
@@ -233,9 +241,15 @@ mod tests {
             scale: 2.0,
             image_path: Some(PathBuf::from("/tmp/a.png")),
         };
-        let first =
-            state.record_capture(base_capture.clone(), thumb.clone(), None, Vec::new(), None);
-        let second = state.record_capture(base_capture, thumb, None, Vec::new(), None);
+        let first = state.record_capture(
+            base_capture.clone(),
+            None,
+            thumb.clone(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let second = state.record_capture(base_capture, None, thumb, None, Vec::new(), None);
         assert!(first.event_id < second.event_id);
     }
 
