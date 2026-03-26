@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 use crate::overlay;
 use crate::{clipboard, permissions, recording, replay, request_store, trace, vision};
 
+#[allow(dead_code)]
 mod settings_flow;
 
 use self::settings_flow::*;
@@ -804,6 +805,7 @@ fn find_text_targets(query: &str, all: bool) -> Result<Value, AppError> {
     }))
 }
 
+#[allow(dead_code)]
 fn screen_layout_summary() -> Result<Value, AppError> {
     let capture = vision::pipeline::capture_and_update(None)?;
     let text_envelope = bounds_from_texts(&capture.snapshot.texts);
@@ -1197,6 +1199,7 @@ fn confusable_text_match_score(query: &str, candidate: &str, confidence: f32) ->
     text_match_score(query, candidate, confidence).map(|score| score * 0.88)
 }
 
+#[allow(dead_code)]
 fn bounds_from_texts(
     texts: &[desktop_core::protocol::SnapshotText],
 ) -> Option<desktop_core::protocol::Bounds> {
@@ -1221,6 +1224,7 @@ fn bounds_from_texts(
     })
 }
 
+#[allow(dead_code)]
 fn infer_panels_from_texts(
     texts: &[desktop_core::protocol::SnapshotText],
 ) -> Vec<(String, desktop_core::protocol::Bounds, usize)> {
