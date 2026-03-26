@@ -67,7 +67,6 @@ pub enum Command {
     },
     PointerClickText {
         text: String,
-        timeout_ms: u64,
     },
     PointerClickToken {
         token: u32,

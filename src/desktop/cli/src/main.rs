@@ -506,25 +506,16 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
             if args.len() >= 2 && args[1] == "--text" {
                 let text = args.get(2).cloned().ok_or_else(|| {
                     AppError::invalid_argument(
-                        "usage: desktopctl pointer click --text <text> [--timeout <ms>]",
+                        "usage: desktopctl pointer click --text <text>",
                     )
                 })?;
-                let mut timeout_ms = 2_000_u64;
-                let mut i = 3;
-                while i < args.len() {
-                    match args[i].as_str() {
-                        "--timeout" => {
-                            timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                            i += 2;
-                        }
-                        flag => {
-                            return Err(AppError::invalid_argument(format!(
-                                "unknown flag for pointer click --text: {flag}"
-                            )));
-                        }
-                    }
+                if args.len() > 3 {
+                    return Err(AppError::invalid_argument(format!(
+                        "unknown flag for pointer click --text: {}",
+                        args[3]
+                    )));
                 }
-                Ok(Command::PointerClickText { text, timeout_ms })
+                Ok(Command::PointerClickText { text })
             } else if args.len() >= 2 && args[1] == "--token" {
                 let token = parse_u32(args.get(2), "token")?;
                 Ok(Command::PointerClickToken { token })
@@ -623,7 +614,7 @@ fn usage() -> &'static str {
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
   desktopctl pointer click <x> <y>
-  desktopctl pointer click --text <text> [--timeout <ms>]
+  desktopctl pointer click --text <text>
   desktopctl pointer click --token <n>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
   desktopctl type \"text\"
@@ -1136,14 +1127,11 @@ mod tests {
             "click".to_string(),
             "--text".to_string(),
             "DesktopCtl".to_string(),
-            "--timeout".to_string(),
-            "1500".to_string(),
         ];
         let command = parse_command(&args).expect("pointer click --text should parse");
         match command {
-            Command::PointerClickText { text, timeout_ms } => {
+            Command::PointerClickText { text } => {
                 assert_eq!(text, "DesktopCtl");
-                assert_eq!(timeout_ms, 1500);
             }
             other => panic!("unexpected command: {other:?}"),
         }

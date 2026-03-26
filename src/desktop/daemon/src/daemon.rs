@@ -628,7 +628,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
             timeout_ms,
             interval_ms,
         } => wait_for_text(&text, timeout_ms, interval_ms),
-        Command::PointerClickText { text, timeout_ms } => click_text_target(&text, timeout_ms),
+        Command::PointerClickText { text } => click_text_target(&text),
         Command::PointerClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -670,7 +670,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
     }
 }
 
-fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
+fn click_text_target(query: &str) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let capture = vision::pipeline::capture_and_update(None)?;
     let normalized_texts = normalize_snapshot_texts_to_display(
@@ -716,7 +716,6 @@ fn click_text_target(query: &str, timeout_ms: u64) -> Result<Value, AppError> {
     ));
     perform_click(&target.bounds)?;
 
-    verify_click_postcondition(query, &target.bounds, timeout_ms.min(2_000).max(300))?;
     Ok(json!({
         "snapshot_id": capture.snapshot.snapshot_id,
         "text": target.text,
@@ -2399,7 +2398,7 @@ mod tests {
     fn ranked_text_candidates_filters_long_noise_lines() {
         let texts = vec![
             SnapshotText {
-                text: r#"./dist/desktopctl pointer click --text "New Document" --timeout 2000"#
+                text: r#"./dist/desktopctl pointer click --text "New Document""#
                     .to_string(),
                 bounds: Bounds {
                     x: 250.0,
