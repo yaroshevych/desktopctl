@@ -281,32 +281,6 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                 active_window,
             })
         }
-        "snapshot" => {
-            let mut screenshot_path: Option<String> = None;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--json" => {
-                        i += 1;
-                    }
-                    "--screenshot" => {
-                        let path = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument(
-                                "missing value for --screenshot: desktopctl screen snapshot [--json] [--screenshot <path>]",
-                            )
-                        })?;
-                        screenshot_path = Some(path.clone());
-                        i += 2;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for screen snapshot: {flag}"
-                        )));
-                    }
-                }
-            }
-            Ok(Command::ScreenSnapshot { screenshot_path })
-        }
         "tokenize" => {
             let mut overlay_out_path: Option<String> = None;
             let mut window_id: Option<String> = None;
@@ -703,7 +677,6 @@ fn usage() -> &'static str {
   desktopctl window focus --title <text>
   desktopctl open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl screen capture [--out <path>] [--overlay] [--active-window]
-  desktopctl screen snapshot [--json] [--screenshot <path>]
   desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen layout [--json]
@@ -1195,36 +1168,6 @@ mod tests {
                 .expect("window focus should parse");
         match command {
             Command::WindowFocus { title } => assert_eq!(title, "Reminders"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_screen_snapshot_with_optional_screenshot() {
-        let base = parse_command(&["screen", "snapshot", "--json"].map(str::to_string))
-            .expect("screen snapshot should parse");
-        match base {
-            Command::ScreenSnapshot { screenshot_path } => {
-                assert_eq!(screenshot_path, None);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-
-        let with_file = parse_command(
-            &[
-                "screen",
-                "snapshot",
-                "--json",
-                "--screenshot",
-                "/tmp/open-dialog.png",
-            ]
-            .map(str::to_string),
-        )
-        .expect("screen snapshot with screenshot should parse");
-        match with_file {
-            Command::ScreenSnapshot { screenshot_path } => {
-                assert_eq!(screenshot_path.as_deref(), Some("/tmp/open-dialog.png"));
-            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

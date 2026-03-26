@@ -94,9 +94,6 @@ pub enum Command {
         #[serde(default)]
         active_window: bool,
     },
-    ScreenSnapshot {
-        screenshot_path: Option<String>,
-    },
     ScreenTokenize {
         #[serde(default)]
         overlay_out_path: Option<String>,
@@ -165,7 +162,6 @@ impl Command {
             Command::Wait { .. } => "wait",
             Command::WaitText { .. } => "wait_text",
             Command::ScreenCapture { .. } => "screen_capture",
-            Command::ScreenSnapshot { .. } => "screen_snapshot",
             Command::ScreenTokenize { .. } => "screen_tokenize",
             Command::ScreenFindText { .. } => "screen_find_text",
             Command::ScreenLayout => "screen_layout",

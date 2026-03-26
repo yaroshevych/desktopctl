@@ -16,9 +16,7 @@ use desktop_core::{
     automation::{Point, new_backend},
     error::AppError,
     ipc::{read_framed_json, socket_path, write_framed_json},
-    protocol::{
-        Command, RequestEnvelope, ResponseEnvelope, SnapshotDisplay, SnapshotPayload, now_millis,
-    },
+    protocol::{Command, RequestEnvelope, ResponseEnvelope},
 };
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
@@ -496,63 +494,6 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 "focused_app": capture.snapshot.focused_app,
                 "event_ids": capture.event_ids
             }))
-        }
-        Command::ScreenSnapshot { screenshot_path } => {
-            trace::log("execute:screen_snapshot:start");
-            if let Some(path) = screenshot_path {
-                let path = PathBuf::from(path);
-                if !path.exists() {
-                    return Err(AppError::invalid_argument(format!(
-                        "screenshot file does not exist: {}",
-                        path.display()
-                    )));
-                }
-                let image = image::open(&path).map_err(|err| {
-                    AppError::invalid_argument(format!(
-                        "failed to open screenshot {}: {err}",
-                        path.display()
-                    ))
-                })?;
-                let width = image.width();
-                let height = image.height();
-                let texts = vision::ocr::recognize_text_from_image(&path, width, height)?;
-                let snapshot = SnapshotPayload {
-                    snapshot_id: now_millis() as u64,
-                    timestamp: now_millis().to_string(),
-                    display: SnapshotDisplay {
-                        id: 1,
-                        width,
-                        height,
-                        scale: 1.0,
-                    },
-                    focused_app: None,
-                    texts,
-                };
-                trace::log(format!(
-                    "execute:screen_snapshot:from_screenshot path={} snapshot_id={} texts={}",
-                    path.display(),
-                    snapshot.snapshot_id,
-                    snapshot.texts.len()
-                ));
-                Ok(serde_json::to_value(snapshot).map_err(|err| {
-                    AppError::internal(format!("failed to encode snapshot: {err}"))
-                })?)
-            } else {
-                if let Some(snapshot) = vision::pipeline::latest_snapshot()? {
-                    trace::log(format!(
-                        "execute:screen_snapshot:cache_hit snapshot_id={}",
-                        snapshot.snapshot_id
-                    ));
-                    Ok(serde_json::to_value(snapshot).map_err(|err| {
-                        AppError::internal(format!("failed to encode snapshot: {err}"))
-                    })?)
-                } else {
-                    trace::log("execute:screen_snapshot:cache_miss");
-                    Err(AppError::target_not_found(
-                        "no snapshot available; run `desktopctl screen capture` first",
-                    ))
-                }
-            }
         }
         Command::ScreenTokenize {
             overlay_out_path,
