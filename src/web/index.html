@@ -14,7 +14,7 @@
       content="Playwright for desktop apps. Observe screen state, tokenize UI, and execute deterministic mouse/keyboard automation."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://desktopctl.dev" />
+    <meta property="og:url" content="https://desktopctl.com" />
     <meta property="og:image" content="/assets/og-desktopctl.png" />
     <meta name="theme-color" content="#0d0e10" />
     <link rel="stylesheet" href="./styles.css" />
@@ -26,7 +26,7 @@
       <div class="container">
         <a href="#" class="topbar-logo" aria-label="DesktopCtl home">desktop<span>ctl</span></a>
         <div class="topbar-links">
-          <a href="https://github.com/yourname/desktopctl" aria-label="GitHub repository">GitHub</a>
+          <a href="https://github.com/yaroshevych/desktopctl" aria-label="GitHub repository">GitHub</a>
         </div>
       </div>
     </nav>
@@ -43,7 +43,7 @@
             Privacy-first, free & open source, written in Rust.
           </p>
           <div class="hero-ctas">
-            <a class="btn-primary" href="https://github.com/yourname/desktopctl">View on GitHub</a>
+            <a class="btn-primary" href="https://github.com/yaroshevych/desktopctl">View on GitHub</a>
             <a class="btn-ghost" href="/spec">Read the spec</a>
             <code class="brew-snippet">desktopctl ui click --text "Send"</code>
           </div>
@@ -86,8 +86,8 @@
 <span class="cmd-comment"># click a UI element by visible text label</span>
 <span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">ui click</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Send"</span>
 
-<span class="cmd-comment"># block until the focused window stabilizes</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">wait</span> <span class="cmd-flag">--event</span> <span class="cmd-val">window-stable</span></pre>
+<span class="cmd-comment"># block until expected text appears</span>
+<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">wait</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Sent"</span> <span class="cmd-flag">--timeout</span> <span class="cmd-val">3000</span></pre>
           </div>
         </div>
       </section>
@@ -124,8 +124,8 @@
             Stay in control
           </h2>
           <ul class="what-list">
-            <li>Comptuter Vision and Text Recognition work locally on your machine.</li>
-            <li>By default, DesktopCtrl does not share sensitive screenshots with AI agents.</li>
+            <li>Computer Vision and text recognition work locally on your machine.</li>
+            <li>By default, DesktopCtl does not share sensitive screenshots with AI agents.</li>
             <li>Visual effect, when AI agent is accessing screen, mouse, or keyboard.</li>
             <li>Stay in control with OS-level permissions, granted to DesktopCtl only.</li>
           </ul>
@@ -140,7 +140,7 @@
           <strong>desktopctl</strong> · MIT License
         </div>
         <div class="footer-right">
-          <a href="https://github.com/yourname/desktopctl">GitHub</a>
+          <a href="https://github.com/yaroshevych/desktopctl">GitHub</a>
         </div>
       </div>
     </footer>

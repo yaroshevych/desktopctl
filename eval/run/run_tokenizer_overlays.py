@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DESKTOP_DIR = _REPO_ROOT / "src" / "desktop"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -27,21 +31,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--desktopctl-bin",
         type=Path,
-        default=Path("/Users/oleg/Projects/DesktopCtl/src/desktop/dist/desktopctl"),
+        default=_DESKTOP_DIR / "dist" / "desktopctl",
         help="Path to desktopctl binary.",
     )
     parser.add_argument(
         "--daemon-bin",
         type=Path,
-        default=Path(
-            "/Users/oleg/Projects/DesktopCtl/src/desktop/dist/DesktopCtl.app/Contents/MacOS/desktopctld"
-        ),
+        default=_DESKTOP_DIR / "dist" / "DesktopCtl.app" / "Contents" / "MacOS" / "desktopctld",
         help="Path to desktopctld binary.",
     )
     parser.add_argument(
         "--tokenize-dump-bin",
         type=Path,
-        default=Path("/Users/oleg/Projects/DesktopCtl/src/desktop/target/release/tokenize_dump"),
+        default=_DESKTOP_DIR / "target" / "release" / "tokenize_dump",
         help="Path to tokenize_dump binary (fast batch engine).",
     )
     parser.add_argument(
