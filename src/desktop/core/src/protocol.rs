@@ -105,6 +105,8 @@ pub enum Command {
         window_id: Option<String>,
         #[serde(default)]
         screenshot_path: Option<String>,
+        #[serde(default)]
+        active_window: bool,
     },
     ScreenFindText {
         text: String,

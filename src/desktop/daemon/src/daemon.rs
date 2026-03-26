@@ -497,12 +497,18 @@ fn execute(command: Command) -> Result<Value, AppError> {
             overlay_out_path,
             window_id,
             screenshot_path,
+            active_window,
         } => {
             trace::log("execute:screen_tokenize:start");
             let payload = if let Some(path_raw) = screenshot_path {
                 if window_id.is_some() {
                     return Err(AppError::invalid_argument(
                         "--window cannot be combined with --screenshot for screen tokenize",
+                    ));
+                }
+                if active_window {
+                    return Err(AppError::invalid_argument(
+                        "--active-window cannot be combined with --screenshot for screen tokenize",
                     ));
                 }
                 let screenshot = PathBuf::from(path_raw);
@@ -517,7 +523,27 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 permissions::ensure_screen_recording_permission()?;
                 let backend = new_backend()?;
                 backend.check_accessibility_permission()?;
-                if window_id.is_none() {
+                if active_window {
+                    if window_id.is_some() {
+                        return Err(AppError::invalid_argument(
+                            "--active-window cannot be combined with --window for screen tokenize",
+                        ));
+                    }
+                    let bounds = frontmost_window_bounds().ok_or_else(|| {
+                        AppError::target_not_found(
+                            "frontmost window bounds unavailable for --active-window",
+                        )
+                    })?;
+                    let app = frontmost_app_name();
+                    let title = app.clone().unwrap_or_else(|| "active_window".to_string());
+                    let window_meta = vision::pipeline::TokenizeWindowMeta {
+                        id: "frontmost:1".to_string(),
+                        title,
+                        app,
+                        bounds,
+                    };
+                    vision::pipeline::tokenize_window(window_meta)?
+                } else if window_id.is_none() {
                     let overlay_window_bounds = {
                         #[cfg(target_os = "macos")]
                         {

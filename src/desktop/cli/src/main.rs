@@ -397,6 +397,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             let mut overlay_out_path: Option<String> = None;
             let mut window_id: Option<String> = None;
             let mut screenshot_path: Option<String> = None;
+            let mut active_window = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -427,11 +428,15 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--screenshot" => {
                         let path = args.get(i + 1).ok_or_else(|| {
                             AppError::invalid_argument(
-                                "missing value for --screenshot: desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]",
+                                "missing value for --screenshot: desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>]",
                             )
                         })?;
                         screenshot_path = Some(path.clone());
                         i += 2;
+                    }
+                    "--active-window" => {
+                        active_window = true;
+                        i += 1;
                     }
                     flag => {
                         return Err(AppError::invalid_argument(format!(
@@ -445,10 +450,21 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--window cannot be combined with --screenshot for screen tokenize",
                 ));
             }
+            if active_window && window_id.is_some() {
+                return Err(AppError::invalid_argument(
+                    "--active-window cannot be combined with --window for screen tokenize",
+                ));
+            }
+            if active_window && screenshot_path.is_some() {
+                return Err(AppError::invalid_argument(
+                    "--active-window cannot be combined with --screenshot for screen tokenize",
+                ));
+            }
             Ok(Command::ScreenTokenize {
                 overlay_out_path,
                 window_id,
                 screenshot_path,
+                active_window,
             })
         }
         "find" => {
@@ -693,7 +709,7 @@ fn usage() -> &'static str {
   desktopctl window bounds --title <text> [--json]
   desktopctl window focus --title <text>
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
-  desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]
+  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>]
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read
@@ -1208,10 +1224,12 @@ mod tests {
                 overlay_out_path,
                 window_id,
                 screenshot_path,
+                active_window,
             } => {
                 assert_eq!(overlay_out_path.as_deref(), Some("/tmp/tokens.overlay.png"));
                 assert!(window_id.is_none());
                 assert!(screenshot_path.is_none());
+                assert!(!active_window);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1231,10 +1249,36 @@ mod tests {
                 overlay_out_path,
                 window_id,
                 screenshot_path,
+                active_window,
             } => {
                 assert!(overlay_out_path.is_none());
                 assert_eq!(window_id.as_deref(), Some("777:3"));
                 assert!(screenshot_path.is_none());
+                assert!(!active_window);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_tokenize_with_active_window() {
+        let args = vec![
+            "screen".to_string(),
+            "tokenize".to_string(),
+            "--active-window".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen tokenize should parse");
+        match command {
+            Command::ScreenTokenize {
+                overlay_out_path,
+                window_id,
+                screenshot_path,
+                active_window,
+            } => {
+                assert!(overlay_out_path.is_none());
+                assert!(window_id.is_none());
+                assert!(screenshot_path.is_none());
+                assert!(active_window);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1249,6 +1293,19 @@ mod tests {
             "123:1".to_string(),
             "--screenshot".to_string(),
             "/tmp/sample.png".to_string(),
+        ];
+        let err = parse_command(&args).expect_err("must reject incompatible flags");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn rejects_screen_tokenize_active_window_with_window() {
+        let args = vec![
+            "screen".to_string(),
+            "tokenize".to_string(),
+            "--active-window".to_string(),
+            "--window".to_string(),
+            "123:1".to_string(),
         ];
         let err = parse_command(&args).expect_err("must reject incompatible flags");
         assert_eq!(err.code, ErrorCode::InvalidArgument);
