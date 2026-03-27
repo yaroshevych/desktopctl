@@ -5,7 +5,6 @@ pub mod diff;
 pub mod metal_pipeline;
 pub mod ocr;
 pub mod pipeline;
-pub mod regions;
 pub mod state;
 pub mod text_group;
 pub mod tokenize_boxes;

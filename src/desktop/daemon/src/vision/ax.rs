@@ -153,33 +153,30 @@ mod macos {
         // Some controls (notably calculator-style buttons) expose their visible
         // label in child static text instead of the button's own title/value.
         if role == "AXButton" || role == "AXPopUpButton" || role == "AXMenuButton" {
-            return element
-                .children()
-                .ok()
-                .and_then(|children| {
-                    children.into_iter().find_map(|child| {
-                        child
-                            .title()
-                            .ok()
-                            .map(|v| v.to_string())
-                            .or_else(|| {
-                                child.attribute(&AXAttribute::value()).ok().and_then(|v| {
-                                    if v.instance_of::<CFString>() {
-                                        Some(
-                                            unsafe {
-                                                CFString::wrap_under_get_rule(v.as_CFTypeRef() as _)
-                                            }
-                                            .to_string(),
-                                        )
-                                    } else {
-                                        None
-                                    }
-                                })
+            return element.children().ok().and_then(|children| {
+                children.into_iter().find_map(|child| {
+                    child
+                        .title()
+                        .ok()
+                        .map(|v| v.to_string())
+                        .or_else(|| {
+                            child.attribute(&AXAttribute::value()).ok().and_then(|v| {
+                                if v.instance_of::<CFString>() {
+                                    Some(
+                                        unsafe {
+                                            CFString::wrap_under_get_rule(v.as_CFTypeRef() as _)
+                                        }
+                                        .to_string(),
+                                    )
+                                } else {
+                                    None
+                                }
                             })
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                    })
-                });
+                        })
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+            });
         }
         None
     }
