@@ -3,6 +3,28 @@
 version = 4
 
 [[package]]
+name = "accessibility"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ac9f33ffc1ef16eddb2451c03c983e56a5182ac760c3f2733da55ba8f48eac4"
+dependencies = [
+ "accessibility-sys",
+ "cocoa",
+ "core-foundation 0.10.1",
+ "objc",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "accessibility-sys"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46a6a8e90a1d8b96a48249e7c8f5b4058447bea8847280db7bfccb6dcab6b8e1"
+dependencies = [
+ "core-foundation-sys",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -133,6 +155,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cocoa"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad36507aeb7e16159dfe68db81ccc27571c3ccd4b76fb2fb72fc59e7a4b1b64c"
+dependencies = [
+ "bitflags 2.11.0",
+ "block",
+ "cocoa-foundation",
+ "core-foundation 0.10.1",
+ "core-graphics",
+ "foreign-types",
+ "libc",
+ "objc",
+]
+
+[[package]]
+name = "cocoa-foundation"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81411967c50ee9a1fc11365f8c585f863a22a9697c89239c452292c40ba79b0d"
+dependencies = [
+ "bitflags 2.11.0",
+ "block",
+ "core-foundation 0.10.1",
+ "core-graphics-types 0.2.0",
+ "objc",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -240,7 +291,10 @@ dependencies = [
 name = "desktopctld"
 version = "0.1.0"
 dependencies = [
+ "accessibility",
+ "accessibility-sys",
  "block2",
+ "core-foundation 0.10.1",
  "core-graphics",
  "desktop-core",
  "dispatch2",
