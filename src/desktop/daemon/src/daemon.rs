@@ -579,6 +579,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
             active_window,
         } => {
             trace::log("execute:screen_tokenize:start");
+            let screenshot_mode = screenshot_path.is_some();
             let payload = if let Some(path_raw) = screenshot_path {
                 if window_id.is_some() {
                     return Err(AppError::invalid_argument(
@@ -678,6 +679,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
                     vision::pipeline::tokenize_window(window_meta)?
                 }
             };
+            let mut payload = payload;
+            if !screenshot_mode {
+                backfill_tokenize_window_positions(&mut payload);
+            }
             if let Some(path_raw) = overlay_out_path {
                 let overlay_path = PathBuf::from(path_raw);
                 vision::pipeline::write_tokenize_overlay(&payload, &overlay_path)?;
@@ -812,6 +817,33 @@ fn resolve_pointer_click_point(x: u32, y: u32, absolute: bool) -> Result<Point, 
     let abs_x = (bounds.x + x as f64).round().max(0.0) as u32;
     let abs_y = (bounds.y + y as f64).round().max(0.0) as u32;
     Ok(Point::new(abs_x, abs_y))
+}
+
+fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::TokenizePayload) {
+    if payload.windows.is_empty()
+        || payload
+            .windows
+            .iter()
+            .all(|window| window.os_bounds.is_some())
+    {
+        return;
+    }
+    let Some(bounds) = frontmost_window_bounds() else {
+        return;
+    };
+    let mut filled = 0usize;
+    for window in &mut payload.windows {
+        if window.os_bounds.is_none() {
+            window.os_bounds = Some(bounds.clone());
+            filled += 1;
+        }
+    }
+    if filled > 0 {
+        trace::log(format!(
+            "screen_tokenize:backfill_os_bounds filled={} bounds=({:.1},{:.1},{:.1},{:.1})",
+            filled, bounds.x, bounds.y, bounds.width, bounds.height
+        ));
+    }
 }
 
 fn click_text_target(query: &str) -> Result<Value, AppError> {
