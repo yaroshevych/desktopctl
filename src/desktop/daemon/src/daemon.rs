@@ -458,14 +458,19 @@ fn execute(command: Command) -> Result<Value, AppError> {
             trace::log(format!("pointer_up:ok x={x} y={y}"));
             Ok(json!({}))
         }
-        Command::PointerClick { x, y } => {
-            trace::log(format!("pointer_click:start x={x} y={y}"));
+        Command::PointerClick { x, y, absolute } => {
+            trace::log(format!(
+                "pointer_click:start x={x} y={y} absolute={absolute}"
+            ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let point = Point::new(x, y);
+            let point = resolve_pointer_click_point(x, y, absolute)?;
             backend.move_mouse(point)?;
             backend.left_click(point)?;
-            trace::log(format!("pointer_click:ok x={x} y={y}"));
+            trace::log(format!(
+                "pointer_click:ok x={} y={} absolute={absolute}",
+                point.x, point.y
+            ));
             Ok(json!({}))
         }
         Command::PointerDrag {
@@ -793,6 +798,20 @@ fn execute(command: Command) -> Result<Value, AppError> {
             replay::load_session(&session_dir)
         }
     }
+}
+
+fn resolve_pointer_click_point(x: u32, y: u32, absolute: bool) -> Result<Point, AppError> {
+    if absolute {
+        return Ok(Point::new(x, y));
+    }
+    let bounds = click_scope_window_bounds().ok_or_else(|| {
+        AppError::target_not_found(
+            "frontmost window bounds unavailable for relative pointer click; use --absolute",
+        )
+    })?;
+    let abs_x = (bounds.x + x as f64).round().max(0.0) as u32;
+    let abs_y = (bounds.y + y as f64).round().max(0.0) as u32;
+    Ok(Point::new(abs_x, abs_y))
 }
 
 fn click_text_target(query: &str) -> Result<Value, AppError> {

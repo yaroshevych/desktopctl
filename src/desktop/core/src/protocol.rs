@@ -64,6 +64,8 @@ pub enum Command {
     PointerClick {
         x: u32,
         y: u32,
+        #[serde(default)]
+        absolute: bool,
     },
     PointerClickText {
         text: String,

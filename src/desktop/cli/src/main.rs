@@ -635,9 +635,29 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 let token = parse_u32(args.get(2), "token")?;
                 Ok(Command::PointerClickToken { token })
             } else {
-                let x = parse_u32(args.get(1), "x")?;
-                let y = parse_u32(args.get(2), "y")?;
-                Ok(Command::PointerClick { x, y })
+                let mut absolute = false;
+                let mut positional: Vec<&String> = Vec::new();
+                for token in args.iter().skip(1) {
+                    if token == "--absolute" {
+                        absolute = true;
+                        continue;
+                    }
+                    if token.starts_with("--") {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for pointer click: {}",
+                            token
+                        )));
+                    }
+                    positional.push(token);
+                }
+                if positional.len() != 2 {
+                    return Err(AppError::invalid_argument(
+                        "usage: desktopctl pointer click [--absolute] <x> <y>",
+                    ));
+                }
+                let x = parse_u32(Some(positional[0]), "x")?;
+                let y = parse_u32(Some(positional[1]), "y")?;
+                Ok(Command::PointerClick { x, y, absolute })
             }
         }
         "drag" => {
@@ -732,7 +752,7 @@ fn usage() -> &'static str {
   desktopctl pointer move <x> <y>
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
-  desktopctl pointer click <x> <y>
+  desktopctl pointer click [--absolute] <x> <y>
   desktopctl pointer click --text <text>
   desktopctl pointer click --token <n>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
@@ -1372,6 +1392,35 @@ mod tests {
             .expect("request response should parse");
         match response {
             Command::RequestResponse { request_id } => assert_eq!(request_id, "req-3"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_click_coordinates_relative_by_default() {
+        let command = parse_command(&["pointer", "click", "42", "7"].map(str::to_string))
+            .expect("pointer click should parse");
+        match command {
+            Command::PointerClick { x, y, absolute } => {
+                assert_eq!(x, 42);
+                assert_eq!(y, 7);
+                assert!(!absolute);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_click_coordinates_absolute() {
+        let command =
+            parse_command(&["pointer", "click", "--absolute", "420", "169"].map(str::to_string))
+                .expect("pointer click --absolute should parse");
+        match command {
+            Command::PointerClick { x, y, absolute } => {
+                assert_eq!(x, 420);
+                assert_eq!(y, 169);
+                assert!(absolute);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
