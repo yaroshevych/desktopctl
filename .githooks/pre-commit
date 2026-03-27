@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+cargo fmt --all --manifest-path src/desktop/Cargo.toml
+
+if ! git diff --quiet -- src/desktop; then
+  echo "pre-commit: formatting updated files under src/desktop."
+  echo "pre-commit: review and stage changes, then commit again."
+  git diff --name-only -- src/desktop
+  exit 1
+fi
