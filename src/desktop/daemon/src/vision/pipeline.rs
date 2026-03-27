@@ -621,7 +621,9 @@ pub fn write_tokenize_overlay(
             {
                 continue;
             }
-            let color = if element.has_border.unwrap_or(false) {
+            let color = if element.source.starts_with("accessibility_ax:") {
+                Rgba([0, 255, 255, 255])
+            } else if element.has_border.unwrap_or(false) {
                 Rgba([255, 0, 0, 255])
             } else {
                 match element.kind.as_str() {
