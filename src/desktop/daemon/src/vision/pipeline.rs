@@ -16,8 +16,11 @@ use image::{ImageFormat, Rgba, imageops::crop_imm};
 use crate::trace;
 
 use super::{
+    ax_merge::{AxMergeMetrics, merge_elements},
     capture::capture_screen_png,
+    coord_map::CoordMap,
     diff::{changed_pixel_count, diff_region, thumbnail_from_rgba, upscale_region},
+    element_normalizer::{ElementBuilder, finalize_elements},
     ocr::recognize_text,
     state::with_state,
 };
@@ -168,39 +171,20 @@ fn window_crop_rect(
     logical_height: u32,
     bounds: &Bounds,
 ) -> Option<(u32, u32, u32, u32)> {
-    if image_width == 0 || image_height == 0 {
+    if logical_width == 0 || logical_height == 0 {
         return None;
     }
-    if bounds.width <= 0.0 || bounds.height <= 0.0 {
-        return None;
-    }
-
-    let sx = if logical_width > 0 {
-        image_width as f64 / logical_width as f64
-    } else {
-        1.0
-    };
-    let sy = if logical_height > 0 {
-        image_height as f64 / logical_height as f64
-    } else {
-        1.0
-    };
-
-    let x = (bounds.x.max(0.0) * sx).floor() as i64;
-    let y = (bounds.y.max(0.0) * sy).floor() as i64;
-    let width = (bounds.width * sx).ceil().max(1.0) as i64;
-    let height = (bounds.height * sy).ceil().max(1.0) as i64;
-
-    let x1 = x.clamp(0, image_width as i64);
-    let y1 = y.clamp(0, image_height as i64);
-    let x2 = (x1 + width).clamp(0, image_width as i64);
-    let y2 = (y1 + height).clamp(0, image_height as i64);
-
-    if x2 <= x1 || y2 <= y1 {
-        return None;
-    }
-
-    Some((x1 as u32, y1 as u32, (x2 - x1) as u32, (y2 - y1) as u32))
+    let mapper = CoordMap::new(
+        Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: logical_width as f64,
+            height: logical_height as f64,
+        },
+        image_width,
+        image_height,
+    );
+    mapper.logical_to_image_rect_u32(bounds)
 }
 
 pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
@@ -379,18 +363,24 @@ fn build_window_elements(
 ) -> Result<(TokenizeImage, Vec<TokenizeWindow>), AppError> {
     let width = rgba.width();
     let height = rgba.height();
-    let frame = super::metal_pipeline::process_cpu(&rgba);
-    let words = super::text_group::build_words_from_ocr(&snapshot.texts, &frame);
-    let lines = super::text_group::group_words_into_lines(&words);
-    let paragraphs = super::text_group::group_lines_into_paragraphs(&lines);
-    let final_fields = super::text_group::final_text_fields(&lines, &paragraphs);
-    let line_bounds: Vec<Bounds> = lines.iter().map(|line| line.bounds.clone()).collect();
-    let detected_controls = super::tokenize_boxes::detect_controls(&frame, &line_bounds);
-
-    let mut elements = build_unified_text_elements(&lines, &final_fields, &detected_controls);
-    if let Some(meta) = window_meta.as_ref() {
-        enrich_with_ax(&mut elements, meta, width as f64, height as f64);
-    }
+    let mut elements = detect_vision_elements(snapshot, rgba);
+    let ax_elements = detect_ax_elements(window_meta.as_ref());
+    let ax_metrics = merge_elements_stage(
+        &mut elements,
+        window_meta.as_ref(),
+        &ax_elements,
+        width,
+        height,
+    );
+    finalize_elements_stage(&mut elements);
+    trace::log(format!(
+        "pipeline:tokenize:ax_metrics seen={} added={} replaced={} dropped_bounds={} text_filled={}",
+        ax_metrics.ax_seen,
+        ax_metrics.ax_added,
+        ax_metrics.ax_replaced,
+        ax_metrics.ax_dropped_bounds,
+        ax_metrics.ax_text_filled
+    ));
 
     let title = window_meta
         .as_ref()
@@ -434,192 +424,52 @@ fn build_window_elements(
     Ok((image_meta, vec![window]))
 }
 
-fn enrich_with_ax(
-    elements: &mut Vec<TokenizeElement>,
-    window_meta: &TokenizeWindowMeta,
-    image_width: f64,
-    image_height: f64,
-) {
-    let sx = if window_meta.bounds.width > 0.0 {
-        image_width / window_meta.bounds.width
-    } else {
-        1.0
-    };
-    let sy = if window_meta.bounds.height > 0.0 {
-        image_height / window_meta.bounds.height
-    } else {
-        1.0
-    };
+fn detect_vision_elements(
+    snapshot: &SnapshotPayload,
+    rgba: &image::RgbaImage,
+) -> Vec<TokenizeElement> {
+    let frame = super::metal_pipeline::process_cpu(rgba);
+    let words = super::text_group::build_words_from_ocr(&snapshot.texts, &frame);
+    let lines = super::text_group::group_words_into_lines(&words);
+    let paragraphs = super::text_group::group_lines_into_paragraphs(&lines);
+    let final_fields = super::text_group::final_text_fields(&lines, &paragraphs);
+    let line_bounds: Vec<Bounds> = lines.iter().map(|line| line.bounds.clone()).collect();
+    let detected_controls = super::tokenize_boxes::detect_controls(&frame, &line_bounds);
+    build_unified_text_elements(&lines, &final_fields, &detected_controls)
+}
 
-    let ax_elements = match super::ax::collect_frontmost_window_elements() {
+fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax::AxElement> {
+    if window_meta.is_none() {
+        return Vec::new();
+    }
+    match super::ax::collect_frontmost_window_elements() {
         Ok(items) => items,
         Err(err) => {
             trace::log(format!("pipeline:tokenize:ax_warn {err}"));
-            return;
+            Vec::new()
         }
+    }
+}
+
+fn merge_elements_stage(
+    elements: &mut Vec<TokenizeElement>,
+    window_meta: Option<&TokenizeWindowMeta>,
+    ax_elements: &[super::ax::AxElement],
+    image_width: u32,
+    image_height: u32,
+) -> AxMergeMetrics {
+    let Some(meta) = window_meta else {
+        return AxMergeMetrics::default();
     };
     if ax_elements.is_empty() {
-        return;
+        return AxMergeMetrics::default();
     }
-
-    let mut added = 0usize;
-    let mut replaced = 0usize;
-    for ax in ax_elements {
-        let mut local = Bounds {
-            // AX bounds are logical (points); tokenize element coordinates are
-            // image-space pixels for the cropped window image.
-            x: (ax.bounds.x - window_meta.bounds.x) * sx,
-            y: (ax.bounds.y - window_meta.bounds.y) * sy,
-            width: ax.bounds.width * sx,
-            height: ax.bounds.height * sy,
-        };
-        if local.width <= 1.0 || local.height <= 1.0 {
-            continue;
-        }
-        if local.x + local.width < 0.0 || local.y + local.height < 0.0 {
-            continue;
-        }
-        if local.x > image_width || local.y > image_height {
-            continue;
-        }
-        local.x = local.x.max(0.0);
-        local.y = local.y.max(0.0);
-        if local.x + local.width > image_width {
-            local.width = (image_width - local.x).max(0.0);
-        }
-        if local.y + local.height > image_height {
-            local.height = (image_height - local.y).max(0.0);
-        }
-        if local.width <= 1.0 || local.height <= 1.0 {
-            continue;
-        }
-
-        let merged_text = merged_ax_text(&local, elements, ax.text.as_deref());
-        let ax_text = merged_text.as_deref().unwrap_or("").trim();
-        let mut replace_idx: Option<usize> = None;
-        let mut replace_score = 0.0f64;
-        for (idx, existing) in elements.iter().enumerate() {
-            let eb = Bounds {
-                x: existing.bbox[0],
-                y: existing.bbox[1],
-                width: existing.bbox[2],
-                height: existing.bbox[3],
-            };
-            let overlap = overlap_area(&local, &eb);
-            let min_area = (local.width * local.height)
-                .min(eb.width * eb.height)
-                .max(1.0);
-            let overlap_ratio = overlap / min_area;
-            let same_region = overlap_ratio >= 0.70;
-            let existing_text = existing.text.as_deref().unwrap_or("").trim();
-            let same_text =
-                !ax_text.is_empty() && !existing_text.is_empty() && ax_text == existing_text;
-            let same_text_near = same_text && overlap_ratio >= 0.20;
-            if same_region || same_text_near {
-                let score = overlap_ratio + if same_text { 0.25 } else { 0.0 };
-                if score > replace_score {
-                    replace_score = score;
-                    replace_idx = Some(idx);
-                }
-            }
-        }
-
-        if let Some(idx) = replace_idx {
-            let existing = &mut elements[idx];
-            let existing_text = existing.text.clone();
-            existing.kind = String::new();
-            existing.bbox = bounds_to_bbox(&local);
-            existing.has_border = None;
-            existing.text = merged_text.or(existing_text);
-            existing.confidence = None;
-            existing.source = format!("accessibility_ax:{}", ax.role);
-            replaced += 1;
-            continue;
-        }
-
-        elements.push(TokenizeElement {
-            id: String::new(),
-            kind: String::new(),
-            bbox: bounds_to_bbox(&local),
-            has_border: None,
-            text: merged_text,
-            confidence: None,
-            source: format!("accessibility_ax:{}", ax.role),
-        });
-        added += 1;
-    }
-
-    if added == 0 && replaced == 0 {
-        return;
-    }
-    elements.sort_by(|a, b| {
-        a.bbox[1]
-            .partial_cmp(&b.bbox[1])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(
-                a.bbox[0]
-                    .partial_cmp(&b.bbox[0])
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
-    });
-    for (idx, element) in elements.iter_mut().enumerate() {
-        element.id = format!("text_{:04}", idx + 1);
-    }
-    trace::log(format!(
-        "pipeline:tokenize:ax_added count={added} replaced={replaced}"
-    ));
+    let coord_map = CoordMap::new(meta.bounds.clone(), image_width, image_height);
+    merge_elements(elements, ax_elements, &coord_map)
 }
 
-fn merged_ax_text(
-    ax_bounds: &Bounds,
-    elements: &[TokenizeElement],
-    ax_text: Option<&str>,
-) -> Option<String> {
-    let primary = ax_text
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string);
-    if primary.is_some() {
-        return primary;
-    }
-
-    let mut candidates: Vec<(f64, f64, f64, String)> = Vec::new();
-    for el in elements {
-        if el.source.starts_with("accessibility_ax:") {
-            continue;
-        }
-        let Some(text) = el.text.as_ref().map(|t| t.trim()).filter(|t| !t.is_empty()) else {
-            continue;
-        };
-        let eb = Bounds {
-            x: el.bbox[0],
-            y: el.bbox[1],
-            width: el.bbox[2],
-            height: el.bbox[3],
-        };
-        let ea = (eb.width * eb.height).max(1.0);
-        let overlap_ratio = overlap_area(&eb, ax_bounds) / ea;
-        if overlap_ratio < 0.60 && !center_inside(&eb, ax_bounds) {
-            continue;
-        }
-        let score = overlap_ratio;
-        candidates.push((score, eb.y, eb.x, text.to_string()));
-    }
-
-    if candidates.is_empty() {
-        return None;
-    }
-    candidates.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    Some(candidates[0].3.clone())
-}
-
-fn bounds_to_bbox(bounds: &Bounds) -> [f64; 4] {
-    [bounds.x, bounds.y, bounds.width, bounds.height]
+fn finalize_elements_stage(elements: &mut Vec<TokenizeElement>) {
+    finalize_elements(elements);
 }
 
 fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
@@ -675,15 +525,16 @@ fn build_unified_text_elements(
             if text.is_empty() {
                 continue;
             }
-            elements.push(TokenizeElement {
-                id: String::new(),
-                kind: String::new(),
-                bbox: bounds_to_bbox(&control.bounds),
-                has_border: Some(true),
-                text: Some(text.to_string()),
-                confidence: None,
-                source: "sat_control_v1".to_string(),
-            });
+            elements.push(
+                ElementBuilder::new()
+                    .kind("")
+                    .bbox(control.bounds.clone())
+                    .has_border(Some(true))
+                    .text(Some(text.to_string()))
+                    .confidence(None)
+                    .source("sat_control_v1")
+                    .build(),
+            );
         }
     }
 
@@ -703,29 +554,16 @@ fn build_unified_text_elements(
         if overlaps_consumed {
             continue;
         }
-        elements.push(TokenizeElement {
-            id: String::new(),
-            kind: String::new(),
-            bbox: bounds_to_bbox(&field.bounds),
-            has_border: None,
-            text: Some(field.text.clone()),
-            confidence: None,
-            source: "vision_ocr".to_string(),
-        });
-    }
-
-    elements.sort_by(|a, b| {
-        a.bbox[1]
-            .partial_cmp(&b.bbox[1])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(
-                a.bbox[0]
-                    .partial_cmp(&b.bbox[0])
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
-    });
-    for (idx, element) in elements.iter_mut().enumerate() {
-        element.id = format!("text_{:04}", idx + 1);
+        elements.push(
+            ElementBuilder::new()
+                .kind("")
+                .bbox(field.bounds.clone())
+                .has_border(None)
+                .text(Some(field.text.clone()))
+                .confidence(None)
+                .source("vision_ocr")
+                .build(),
+        );
     }
     elements
 }

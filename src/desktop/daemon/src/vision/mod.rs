@@ -1,7 +1,10 @@
 pub mod ax;
+pub mod ax_merge;
 pub mod capture;
+pub mod coord_map;
 pub mod debug;
 pub mod diff;
+pub mod element_normalizer;
 pub mod metal_pipeline;
 pub mod ocr;
 pub mod pipeline;
