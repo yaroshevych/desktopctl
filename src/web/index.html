@@ -45,7 +45,7 @@
           <div class="hero-ctas">
             <a class="btn-primary" href="https://github.com/yaroshevych/desktopctl">View on GitHub</a>
             <a class="btn-ghost" href="https://github.com/yaroshevych/desktopctl/blob/main/CLI.md">Read the spec</a>
-            <code class="brew-snippet">desktopctl ui click --text "Send"</code>
+            <code class="brew-snippet">desktopctl pointer click --text "Send"</code>
           </div>
         </div>
       </section>
@@ -84,10 +84,10 @@
 <span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">screen tokenize</span> <span class="cmd-flag">--json</span>
 
 <span class="cmd-comment"># click a UI element by visible text label</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">ui click</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Send"</span>
+<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">pointer click</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Send"</span>
 
 <span class="cmd-comment"># block until expected text appears</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">wait</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Sent"</span> <span class="cmd-flag">--timeout</span> <span class="cmd-val">3000</span></pre>
+<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">screen wait</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Sent"</span> <span class="cmd-flag">--timeout</span> <span class="cmd-val">3000</span></pre>
           </div>
         </div>
       </section>
