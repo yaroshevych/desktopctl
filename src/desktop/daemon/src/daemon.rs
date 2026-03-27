@@ -30,6 +30,8 @@ const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 120;
 #[cfg(target_os = "macos")]
 const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
 #[cfg(target_os = "macos")]
+const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
+#[cfg(target_os = "macos")]
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
@@ -200,6 +202,8 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
         request_id, command_name
     ));
     #[cfg(target_os = "macos")]
+    let transient_overlay_started = maybe_start_privacy_overlay(&command);
+    #[cfg(target_os = "macos")]
     if matches!(
         command,
         Command::ScreenCapture {
@@ -249,6 +253,10 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     };
     #[cfg(target_os = "macos")]
     let _ = overlay::agent_active_changed(false);
+    #[cfg(target_os = "macos")]
+    if transient_overlay_started {
+        schedule_transient_overlay_stop();
+    }
     if let Err(err) = recording::record_command(&request, &response) {
         eprintln!("recorder write failed: {err}");
         trace::log(format!("client:record_err {err}"));
@@ -260,6 +268,64 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     write_framed_json(&mut stream, &response)?;
     trace::log("client:write_response_ok");
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_start_privacy_overlay(command: &Command) -> bool {
+    if !command_requires_privacy_signal(command) || overlay::is_active() {
+        return false;
+    }
+    match overlay::start_overlay() {
+        Ok(started) => {
+            trace::log(format!(
+                "overlay:privacy_auto_start command={} started={started}",
+                command.name()
+            ));
+            started
+        }
+        Err(err) => {
+            trace::log(format!(
+                "overlay:privacy_auto_start_warn command={} err={err}",
+                command.name()
+            ));
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_transient_overlay_stop() {
+    thread::spawn(|| {
+        thread::sleep(Duration::from_millis(PRIVACY_OVERLAY_STOP_DELAY_MS));
+        if overlay::is_agent_active() || !overlay::is_active() {
+            return;
+        }
+        match overlay::stop_overlay() {
+            Ok(stopped) => trace::log(format!("overlay:privacy_auto_stop stopped={stopped}")),
+            Err(err) => trace::log(format!("overlay:privacy_auto_stop_warn {err}")),
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn command_requires_privacy_signal(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::ScreenCapture { .. }
+            | Command::ScreenTokenize { .. }
+            | Command::ScreenFindText { .. }
+            | Command::WaitText { .. }
+            | Command::PointerMove { .. }
+            | Command::PointerDown { .. }
+            | Command::PointerUp { .. }
+            | Command::PointerClick { .. }
+            | Command::PointerClickText { .. }
+            | Command::PointerClickToken { .. }
+            | Command::PointerDrag { .. }
+            | Command::UiType { .. }
+            | Command::KeyHotkey { .. }
+            | Command::KeyEnter
+    )
 }
 
 fn execute(command: Command) -> Result<Value, AppError> {
