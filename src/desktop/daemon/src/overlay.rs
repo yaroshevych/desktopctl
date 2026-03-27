@@ -38,10 +38,10 @@ const GLOW_WINDOW_CORNER_RADIUS: f64 = 10.0;
 const GLOW_SHADOW_RADIUS_SCALE: f64 = 1.35;
 const GLOW_WINDOW_SHADOW_RADIUS_MAX: f64 = 32.0;
 const MODE_CROSSFADE_SECS: f64 = 0.30;
-const WINDOW_TRACKING_SECS: f64 = 0.15;
+const WINDOW_TRACKING_SECS: f64 = 0.06;
 const GLOW_TICK_MS: u64 = 16;
-const LOW_CONFIDENCE_THRESHOLD: f32 = 0.60;
 const GLOW_POST_ACTIVE_SECS: f64 = 2.0;
+const GLOW_FADE_TAIL_SECS: f64 = 0.35;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchMode {
@@ -113,12 +113,10 @@ thread_local! {
 
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static GLOW_LOOP_SEQ: AtomicU64 = AtomicU64::new(0);
-static GLOW_START_AT: OnceLock<Instant> = OnceLock::new();
 static GLOW_MODEL: OnceLock<Mutex<GlowModel>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 struct GlowParams {
-    period: f64,
     border_min: f64,
     border_max: f64,
     bloom_min: f64,
@@ -513,7 +511,13 @@ fn apply_glow_frame_on_main(seq: u64) {
             1.0
         } else if let Some(until) = model.glow_hold_until {
             let remain = until.saturating_duration_since(now).as_secs_f64();
-            (remain / GLOW_POST_ACTIVE_SECS).clamp(0.0, 1.0)
+            if remain <= 0.0 {
+                0.0
+            } else if remain >= GLOW_FADE_TAIL_SECS {
+                1.0
+            } else {
+                (remain / GLOW_FADE_TAIL_SECS).clamp(0.0, 1.0)
+            }
         } else {
             0.0
         };
@@ -522,14 +526,12 @@ fn apply_glow_frame_on_main(seq: u64) {
             set_view_hidden(&window_glow_box, true);
             return;
         }
-        let low_confidence = model.confidence < LOW_CONFIDENCE_THRESHOLD;
-        let alpha_scale = hold_alpha * if low_confidence { 0.4 } else { 1.0 };
+        let alpha_scale = hold_alpha;
 
-        let window_params = params_for_mode(WatchMode::WindowMode, model.agent_active);
-        let desktop_params = params_for_mode(WatchMode::DesktopMode, model.agent_active);
-
-        let window_wave = pulse_wave(window_params.period, low_confidence);
-        let desktop_wave = pulse_wave(desktop_params.period, low_confidence);
+        let window_params = params_for_mode(WatchMode::WindowMode);
+        let desktop_params = params_for_mode(WatchMode::DesktopMode);
+        let window_wave = 0.58;
+        let desktop_wave = 0.50;
 
         let desktop_frame = full_overlay_frame(screen_frame);
         apply_glow_style(
@@ -671,62 +673,31 @@ fn mode_weights(model: &mut GlowModel) -> (f64, f64) {
     (window_weight, desktop_weight)
 }
 
-fn params_for_mode(mode: WatchMode, agent_active: bool) -> GlowParams {
+fn params_for_mode(mode: WatchMode) -> GlowParams {
     match mode {
-        WatchMode::WindowMode => {
-            let mut out = GlowParams {
-                period: 2.8,
-                border_min: 0.65,
-                border_max: 1.0,
-                bloom_min: 0.24,
-                bloom_max: 0.46,
-                blur_min: 10.0,
-                blur_max: 20.0,
-                spread_min: 1.0,
-                spread_max: 5.0,
-                corner_radius: GLOW_WINDOW_CORNER_RADIUS,
-            };
-            if agent_active {
-                out.period = 1.6;
-                out.blur_max *= 2.0;
-                out.spread_max *= 2.0;
-                out.border_max = 1.0;
-            }
-            out
-        }
-        WatchMode::DesktopMode => {
-            let mut out = GlowParams {
-                period: 3.2,
-                border_min: 0.30,
-                border_max: 0.60,
-                bloom_min: 0.0,
-                bloom_max: 0.06,
-                blur_min: 20.0,
-                blur_max: 42.0,
-                spread_min: 0.0,
-                spread_max: 12.0,
-                corner_radius: 0.0,
-            };
-            if agent_active {
-                out.period = 1.6;
-                out.blur_max *= 2.0;
-                out.spread_max *= 2.0;
-                out.border_max = 1.0;
-            }
-            out
-        }
+        WatchMode::WindowMode => GlowParams {
+            border_min: 0.65,
+            border_max: 1.0,
+            bloom_min: 0.24,
+            bloom_max: 0.46,
+            blur_min: 10.0,
+            blur_max: 20.0,
+            spread_min: 1.0,
+            spread_max: 5.0,
+            corner_radius: GLOW_WINDOW_CORNER_RADIUS,
+        },
+        WatchMode::DesktopMode => GlowParams {
+            border_min: 0.30,
+            border_max: 0.60,
+            bloom_min: 0.0,
+            bloom_max: 0.06,
+            blur_min: 20.0,
+            blur_max: 42.0,
+            spread_min: 0.0,
+            spread_max: 12.0,
+            corner_radius: 0.0,
+        },
     }
-}
-
-fn pulse_wave(period_secs: f64, low_confidence: bool) -> f64 {
-    if low_confidence {
-        return 0.0;
-    }
-    let start = GLOW_START_AT.get_or_init(Instant::now);
-    let elapsed = start.elapsed().as_secs_f64();
-    let period = period_secs.max(0.01);
-    let phase = (elapsed / period).fract();
-    0.5 - 0.5 * (2.0 * PI * phase).cos()
 }
 
 fn configure_glow_box_base(box_view: &NSBox) {

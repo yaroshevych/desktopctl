@@ -26,7 +26,7 @@ use crate::overlay;
 use crate::{clipboard, permissions, recording, replay, request_store, trace, vision};
 
 #[cfg(target_os = "macos")]
-const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 120;
+const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 40;
 #[cfg(target_os = "macos")]
 const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
 #[cfg(target_os = "macos")]
