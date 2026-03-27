@@ -70,21 +70,20 @@ pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
 
 #[cfg(target_os = "macos")]
 fn bootstrap_overlay_glow() {
-    match overlay::start_overlay() {
-        Ok(started) => trace::log(format!("overlay:bootstrap start started={started}")),
-        Err(err) => trace::log(format!("overlay:bootstrap start_warn {err}")),
-    }
+    trace::log("overlay:bootstrap ready");
     start_overlay_watch_tracker();
-    let (mode, bounds) = if let Some(bounds) = frontmost_window_bounds() {
-        (overlay::WatchMode::WindowMode, Some(bounds))
-    } else {
-        (overlay::WatchMode::DesktopMode, None)
-    };
-    if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
-        trace::log(format!("overlay:bootstrap mode_warn {err}"));
-    }
-    if let Err(err) = overlay::confidence_changed(1.0) {
-        trace::log(format!("overlay:bootstrap confidence_warn {err}"));
+    if overlay::is_active() {
+        let (mode, bounds) = if let Some(bounds) = frontmost_window_bounds() {
+            (overlay::WatchMode::WindowMode, Some(bounds))
+        } else {
+            (overlay::WatchMode::DesktopMode, None)
+        };
+        if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
+            trace::log(format!("overlay:bootstrap mode_warn {err}"));
+        }
+        if let Err(err) = overlay::confidence_changed(1.0) {
+            trace::log(format!("overlay:bootstrap confidence_warn {err}"));
+        }
     }
 }
 
