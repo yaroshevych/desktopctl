@@ -248,16 +248,6 @@ pub fn update_from_tokenize(payload: &TokenizePayload) -> Result<(), AppError> {
         return Ok(());
     }
 
-    if let Some(window) = payload.windows.first() {
-        if let Some(os_bounds) = window.os_bounds.as_ref() {
-            let _ = watch_mode_changed(WatchMode::WindowMode, Some(os_bounds.clone()));
-        } else {
-            let _ = watch_mode_changed(WatchMode::DesktopMode, None);
-        }
-    } else {
-        let _ = watch_mode_changed(WatchMode::DesktopMode, None);
-    }
-
     if !payload.tokens.is_empty() {
         let avg = payload
             .tokens

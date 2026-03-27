@@ -277,6 +277,19 @@ fn maybe_start_privacy_overlay(command: &Command) -> bool {
     }
     match overlay::start_overlay() {
         Ok(started) => {
+            if started {
+                let (mode, bounds) = if let Some(bounds) = frontmost_window_bounds() {
+                    (overlay::WatchMode::WindowMode, Some(bounds))
+                } else {
+                    (overlay::WatchMode::DesktopMode, None)
+                };
+                if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
+                    trace::log(format!(
+                        "overlay:privacy_auto_start mode_warn command={} err={err}",
+                        command.name()
+                    ));
+                }
+            }
             trace::log(format!(
                 "overlay:privacy_auto_start command={} started={started}",
                 command.name()
