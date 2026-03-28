@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 
 #[cfg(target_os = "macos")]
 use crate::overlay;
+use crate::platform::windowing::WindowInfo;
 use crate::{clipboard, permissions, platform, recording, replay, request_store, trace, vision};
 
 #[cfg(target_os = "macos")]
@@ -2114,176 +2115,12 @@ fn preferred_window_for_capture<'a>(
         })
 }
 
-#[derive(Debug, Clone)]
-struct WindowInfo {
-    id: String,
-    pid: i64,
-    index: u32,
-    app: String,
-    title: String,
-    bounds: desktop_core::protocol::Bounds,
-    frontmost: bool,
-    visible: bool,
-}
-
-impl WindowInfo {
-    fn as_json(&self) -> Value {
-        json!({
-            "id": self.id,
-            "pid": self.pid,
-            "index": self.index,
-            "app": self.app,
-            "title": self.title,
-            "bounds": self.bounds,
-            "frontmost": self.frontmost,
-            "visible": self.visible
-        })
-    }
-}
-
-fn parse_applescript_bool(value: &str) -> bool {
-    value.trim().eq_ignore_ascii_case("true")
-}
-
-fn parse_window_line(line: &str) -> Option<WindowInfo> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    if fields.len() != 10 {
-        return None;
-    }
-
-    let pid = fields[0].trim().parse::<i64>().ok()?;
-    let index = fields[1].trim().parse::<u32>().ok()?;
-    let app = fields[2].trim().to_string();
-    let title = fields[3].trim().to_string();
-    let x = fields[4].trim().parse::<f64>().ok()?;
-    let y = fields[5].trim().parse::<f64>().ok()?;
-    let width = fields[6].trim().parse::<f64>().ok()?;
-    let height = fields[7].trim().parse::<f64>().ok()?;
-    let frontmost = parse_applescript_bool(fields[8]);
-    let visible = parse_applescript_bool(fields[9]);
-
-    Some(WindowInfo {
-        id: format!("{pid}:{index}"),
-        pid,
-        index,
-        app,
-        title,
-        bounds: desktop_core::protocol::Bounds {
-            x: x.max(0.0),
-            y: y.max(0.0),
-            width: width.max(0.0),
-            height: height.max(0.0),
-        },
-        frontmost,
-        visible,
-    })
-}
-
 fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
-    let script = r#"tell application "System Events"
-set resultRows to {}
-repeat with p in (application processes whose background only is false)
-    set pname to (name of p) as text
-    set pfront to (frontmost of p) as string
-    set pvisible to (visible of p) as string
-    set ppid to unix id of p
-    set widx to 0
-    repeat with w in (windows of p)
-        set widx to widx + 1
-        try
-            set wname to (name of w) as text
-        on error
-            set wname to ""
-        end try
-        try
-            set winPos to position of w
-            set winSize to size of w
-            set wx to item 1 of winPos
-            set wy to item 2 of winPos
-            set ww to item 1 of winSize
-            set wh to item 2 of winSize
-            set end of resultRows to (ppid as string) & tab & (widx as string) & tab & pname & tab & wname & tab & (wx as string) & tab & (wy as string) & tab & (ww as string) & tab & (wh as string) & tab & pfront & tab & pvisible
-        end try
-    end repeat
-end repeat
-set AppleScript's text item delimiters to linefeed
-set outputText to resultRows as text
-set AppleScript's text item delimiters to ""
-return outputText
-end tell"#;
-
-    let output = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::backend_unavailable(format!(
-            "failed to enumerate windows: {stderr}"
-        )));
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let mut windows: Vec<WindowInfo> = raw.lines().filter_map(parse_window_line).collect();
-    windows.sort_by(|a, b| {
-        b.frontmost
-            .cmp(&a.frontmost)
-            .then_with(|| a.app.to_lowercase().cmp(&b.app.to_lowercase()))
-            .then_with(|| a.index.cmp(&b.index))
-    });
-    Ok(windows)
+    platform::windowing::list_windows()
 }
 
 fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
-    let script = r#"tell application "System Events"
-set resultRows to {}
-set frontProc to first application process whose frontmost is true
-set pname to (name of frontProc) as text
-set pvisible to (visible of frontProc) as string
-set ppid to unix id of frontProc
-set widx to 0
-repeat with w in (windows of frontProc)
-    set widx to widx + 1
-    try
-        set wname to (name of w) as text
-    on error
-        set wname to ""
-    end try
-    try
-        set winPos to position of w
-        set winSize to size of w
-        set wx to item 1 of winPos
-        set wy to item 2 of winPos
-        set ww to item 1 of winSize
-        set wh to item 2 of winSize
-        set end of resultRows to (ppid as string) & tab & (widx as string) & tab & pname & tab & wname & tab & (wx as string) & tab & (wy as string) & tab & (ww as string) & tab & (wh as string) & tab & "true" & tab & pvisible
-    end try
-end repeat
-set AppleScript's text item delimiters to linefeed
-set outputText to resultRows as text
-set AppleScript's text item delimiters to ""
-return outputText
-end tell"#;
-
-    let output = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::backend_unavailable(format!(
-            "failed to enumerate frontmost app windows: {stderr}"
-        )));
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let mut windows: Vec<WindowInfo> = raw.lines().filter_map(parse_window_line).collect();
-    windows.sort_by_key(|window| std::cmp::Reverse(window_area(&window.bounds)));
-    Ok(windows)
+    platform::windowing::list_frontmost_app_windows()
 }
 
 fn resolve_tokenize_window_target(
