@@ -18,7 +18,7 @@ use desktop_core::{
     ipc::{read_framed_json, socket_path, write_framed_json},
     protocol::{Command, ObserveOptions, ObserveUntil, RequestEnvelope, ResponseEnvelope},
 };
-use image::{ImageFormat, Rgba, RgbaImage};
+use image::{ImageFormat, Rgba, RgbaImage, imageops::crop_imm};
 use serde_json::{Value, json};
 
 #[cfg(target_os = "macos")]
@@ -2049,6 +2049,7 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
     let prev = vision::capture::capture_screen_png(None)?;
     let mut prev_thumb =
         vision::diff::thumbnail_from_rgba(&prev.image, OBSERVE_THUMB_WIDTH, OBSERVE_THUMB_HEIGHT);
+    let mut last_capture = prev;
     let mut changed_any = false;
     let mut quiet_frames = 0u32;
     let mut region_union: Option<desktop_core::protocol::Bounds> = None;
@@ -2057,9 +2058,16 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
 
     loop {
         if start.elapsed() >= timeout {
+            let (tokens, ax_available, ax_count) =
+                observe_tokens_for_region(&last_capture, region_union.as_ref());
             return Ok(Some(json!({
                 "changed": changed_any,
                 "regions": region_union.into_iter().collect::<Vec<_>>(),
+                "tokens": tokens,
+                "ax": {
+                    "available": ax_available,
+                    "count": ax_count
+                },
                 "stability": "timeout",
                 "elapsed_ms": start.elapsed().as_millis() as u64,
                 "samples": samples
@@ -2087,9 +2095,16 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
             );
             region_union = Some(merge_bounds(region_union.as_ref(), &upscaled));
             if options.until == ObserveUntil::FirstChange {
+                let (tokens, ax_available, ax_count) =
+                    observe_tokens_for_region(&curr, region_union.as_ref());
                 return Ok(Some(json!({
                     "changed": true,
                     "regions": region_union.into_iter().collect::<Vec<_>>(),
+                    "tokens": tokens,
+                    "ax": {
+                        "available": ax_available,
+                        "count": ax_count
+                    },
                     "stability": "settled",
                     "elapsed_ms": start.elapsed().as_millis() as u64,
                     "samples": samples
@@ -2099,9 +2114,16 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
             quiet_frames += 1;
             if changed_any {
                 if quiet_frames >= OBSERVE_QUIET_FRAMES {
+                    let (tokens, ax_available, ax_count) =
+                        observe_tokens_for_region(&curr, region_union.as_ref());
                     return Ok(Some(json!({
                         "changed": true,
                         "regions": region_union.into_iter().collect::<Vec<_>>(),
+                        "tokens": tokens,
+                        "ax": {
+                            "available": ax_available,
+                            "count": ax_count
+                        },
                         "stability": "settled",
                         "elapsed_ms": start.elapsed().as_millis() as u64,
                         "samples": samples
@@ -2112,14 +2134,87 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
                 return Ok(Some(json!({
                     "changed": false,
                     "regions": [],
+                    "tokens": [],
+                    "ax": {
+                        "available": false,
+                        "count": 0
+                    },
                     "stability": "no_change",
                     "elapsed_ms": start.elapsed().as_millis() as u64,
                     "samples": samples
                 })));
             }
         }
+        last_capture = curr;
         prev_thumb = curr_thumb;
     }
+}
+
+fn observe_tokens_for_region(
+    capture: &vision::types::CapturedImage,
+    region: Option<&desktop_core::protocol::Bounds>,
+) -> (Vec<Value>, bool, usize) {
+    let mut tokens: Vec<Value> = Vec::new();
+
+    if let Some(region) = region {
+        if let Some((ix, iy, iw, ih)) = logical_bounds_to_image_rect(
+            region,
+            capture.image.width(),
+            capture.image.height(),
+            capture.frame.width,
+            capture.frame.height,
+        ) {
+            let iw = (iw - ix).max(0) as u32;
+            let ih = (ih - iy).max(0) as u32;
+            if iw > 1 && ih > 1 {
+                let cropped = crop_imm(&capture.image, ix as u32, iy as u32, iw, ih).to_image();
+                if let Ok(texts) = vision::ocr::recognize_text(&cropped) {
+                    let scale_x = region.width / iw as f64;
+                    let scale_y = region.height / ih as f64;
+                    for text in texts {
+                        if text.text.trim().is_empty() {
+                            continue;
+                        }
+                        let logical_bounds = desktop_core::protocol::Bounds {
+                            x: region.x + text.bounds.x * scale_x,
+                            y: region.y + text.bounds.y * scale_y,
+                            width: text.bounds.width * scale_x,
+                            height: text.bounds.height * scale_y,
+                        };
+                        tokens.push(json!({
+                            "source": "vision_ocr",
+                            "text": text.text,
+                            "bbox": [logical_bounds.x, logical_bounds.y, logical_bounds.width, logical_bounds.height]
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut ax_available = false;
+    let mut ax_count = 0usize;
+    if let Ok(ax_elements) = platform::ax::collect_frontmost_window_elements() {
+        ax_available = true;
+        for ax in ax_elements {
+            if let Some(region) = region {
+                if iou(region, &ax.bounds) <= 0.01 {
+                    continue;
+                }
+            }
+            let id = vision::ax_merge::primary_id_for_ax(&ax)
+                .unwrap_or_else(|| format!("ax_{}", ax.role.to_ascii_lowercase()));
+            tokens.push(json!({
+                "id": id,
+                "source": format!("accessibility_ax:{}", ax.role),
+                "text": ax.text,
+                "bbox": [ax.bounds.x, ax.bounds.y, ax.bounds.width, ax.bounds.height]
+            }));
+            ax_count += 1;
+        }
+    }
+
+    (tokens, ax_available, ax_count)
 }
 
 fn merge_bounds(
