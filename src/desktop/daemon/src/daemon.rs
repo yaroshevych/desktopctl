@@ -2110,6 +2110,7 @@ fn observe_after_action(
     let mut prev_thumb =
         vision::diff::thumbnail_from_rgba(&prev.image, OBSERVE_THUMB_WIDTH, OBSERVE_THUMB_HEIGHT);
     let mut last_capture = prev;
+    let start_tokens = observe_tokens_for_region(&last_capture, None).0;
     let mut changed_any = false;
     let mut quiet_frames = 0u32;
     let mut region_union: Option<desktop_core::protocol::Bounds> = None;
@@ -2120,12 +2121,14 @@ fn observe_after_action(
         if start.elapsed() >= timeout {
             let (tokens, ax_available, ax_count) =
                 observe_tokens_for_region(&last_capture, region_union.as_ref());
+            let tokens_delta = diff_observe_tokens(&start_tokens, &tokens);
             let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
                 observe_transition_state(start_state);
             return Ok(Some(json!({
                 "changed": changed_any,
                 "regions": region_union.into_iter().collect::<Vec<_>>(),
                 "tokens": tokens,
+                "tokens_delta": tokens_delta,
                 "focus_changed": focus_changed,
                 "focused_element_id": focused_element_id,
                 "active_window_changed": active_window_changed,
@@ -2163,12 +2166,14 @@ fn observe_after_action(
             if options.until == ObserveUntil::FirstChange {
                 let (tokens, ax_available, ax_count) =
                     observe_tokens_for_region(&curr, region_union.as_ref());
+                let tokens_delta = diff_observe_tokens(&start_tokens, &tokens);
                 let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
                     observe_transition_state(start_state);
                 return Ok(Some(json!({
                     "changed": true,
                     "regions": region_union.into_iter().collect::<Vec<_>>(),
                     "tokens": tokens,
+                    "tokens_delta": tokens_delta,
                     "focus_changed": focus_changed,
                     "focused_element_id": focused_element_id,
                     "active_window_changed": active_window_changed,
@@ -2188,6 +2193,7 @@ fn observe_after_action(
                 if quiet_frames >= OBSERVE_QUIET_FRAMES {
                     let (tokens, ax_available, ax_count) =
                         observe_tokens_for_region(&curr, region_union.as_ref());
+                    let tokens_delta = diff_observe_tokens(&start_tokens, &tokens);
                     let (
                         focus_changed,
                         focused_element_id,
@@ -2198,6 +2204,7 @@ fn observe_after_action(
                         "changed": true,
                         "regions": region_union.into_iter().collect::<Vec<_>>(),
                         "tokens": tokens,
+                        "tokens_delta": tokens_delta,
                         "focus_changed": focus_changed,
                         "focused_element_id": focused_element_id,
                         "active_window_changed": active_window_changed,
@@ -2219,6 +2226,11 @@ fn observe_after_action(
                     "changed": false,
                     "regions": [],
                     "tokens": [],
+                    "tokens_delta": {
+                        "added": [],
+                        "removed": [],
+                        "changed": []
+                    },
                     "focus_changed": focus_changed,
                     "focused_element_id": focused_element_id,
                     "active_window_changed": active_window_changed,
@@ -2303,6 +2315,80 @@ fn observe_tokens_for_region(
     }
 
     (tokens, ax_available, ax_count)
+}
+
+fn diff_observe_tokens(before: &[Value], after: &[Value]) -> Value {
+    use std::collections::{HashMap, HashSet};
+    let mut before_map: HashMap<String, &Value> = HashMap::new();
+    let mut after_map: HashMap<String, &Value> = HashMap::new();
+    for token in before {
+        before_map.insert(observe_token_key(token), token);
+    }
+    for token in after {
+        after_map.insert(observe_token_key(token), token);
+    }
+
+    let mut added: Vec<Value> = Vec::new();
+    let mut removed: Vec<Value> = Vec::new();
+    let mut changed: Vec<Value> = Vec::new();
+    let before_keys: HashSet<String> = before_map.keys().cloned().collect();
+    let after_keys: HashSet<String> = after_map.keys().cloned().collect();
+
+    for key in after_keys.difference(&before_keys) {
+        if let Some(token) = after_map.get(key) {
+            added.push((*token).clone());
+        }
+    }
+    for key in before_keys.difference(&after_keys) {
+        if let Some(token) = before_map.get(key) {
+            removed.push((*token).clone());
+        }
+    }
+    for key in before_keys.intersection(&after_keys) {
+        let Some(before_token) = before_map.get(key) else {
+            continue;
+        };
+        let Some(after_token) = after_map.get(key) else {
+            continue;
+        };
+        if !observe_token_semantic_equal(before_token, after_token) {
+            changed.push(json!({
+                "before": (*before_token).clone(),
+                "after": (*after_token).clone()
+            }));
+        }
+    }
+
+    json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed
+    })
+}
+
+fn observe_token_key(token: &Value) -> String {
+    if let Some(id) = token.get("id").and_then(Value::as_str) {
+        if !id.trim().is_empty() {
+            return format!("id:{id}");
+        }
+    }
+    let source = token
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let text = token.get("text").and_then(Value::as_str).unwrap_or("");
+    let bbox = token.get("bbox").cloned().unwrap_or_else(|| json!([]));
+    format!("fallback:{source}:{text}:{bbox}")
+}
+
+fn observe_token_semantic_equal(a: &Value, b: &Value) -> bool {
+    let a_text = a.get("text").cloned().unwrap_or(Value::Null);
+    let b_text = b.get("text").cloned().unwrap_or(Value::Null);
+    let a_bbox = a.get("bbox").cloned().unwrap_or_else(|| json!([]));
+    let b_bbox = b.get("bbox").cloned().unwrap_or_else(|| json!([]));
+    let a_source = a.get("source").cloned().unwrap_or(Value::Null);
+    let b_source = b.get("source").cloned().unwrap_or(Value::Null);
+    a_text == b_text && a_bbox == b_bbox && a_source == b_source
 }
 
 fn merge_bounds(
