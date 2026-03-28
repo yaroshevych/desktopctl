@@ -542,12 +542,12 @@ fn execute(command: Command) -> Result<Value, AppError> {
                         "frontmost window not found; ensure a standard app window is focused",
                     )
                 })?;
-                Some(resolve_tokenize_region_bounds(base, region.as_ref())?)
+                Some(resolve_capture_region_bounds(base, region.as_ref())?)
             } else if region.is_some() {
                 let base = main_display_bounds().ok_or_else(|| {
                     AppError::target_not_found("display bounds unavailable for screenshot --region")
                 })?;
-                Some(resolve_tokenize_region_bounds(base, region.as_ref())?)
+                Some(resolve_capture_region_bounds(base, region.as_ref())?)
             } else {
                 None
             };
@@ -856,18 +856,33 @@ fn resolve_tokenize_region_bounds(
     base: desktop_core::protocol::Bounds,
     region: Option<&desktop_core::protocol::Bounds>,
 ) -> Result<desktop_core::protocol::Bounds, AppError> {
+    resolve_relative_region_bounds("tokenize", base, region)
+}
+
+fn resolve_capture_region_bounds(
+    base: desktop_core::protocol::Bounds,
+    region: Option<&desktop_core::protocol::Bounds>,
+) -> Result<desktop_core::protocol::Bounds, AppError> {
+    resolve_relative_region_bounds("screenshot", base, region)
+}
+
+fn resolve_relative_region_bounds(
+    command_name: &str,
+    base: desktop_core::protocol::Bounds,
+    region: Option<&desktop_core::protocol::Bounds>,
+) -> Result<desktop_core::protocol::Bounds, AppError> {
     let Some(region) = region else {
         return Ok(base);
     };
     if region.width <= 0.0 || region.height <= 0.0 {
-        return Err(AppError::invalid_argument(
-            "tokenize --region width/height must be > 0",
-        ));
+        return Err(AppError::invalid_argument(format!(
+            "{command_name} --region width/height must be > 0"
+        )));
     }
     if region.x < 0.0 || region.y < 0.0 {
-        return Err(AppError::invalid_argument(
-            "tokenize --region x/y must be >= 0",
-        ));
+        return Err(AppError::invalid_argument(format!(
+            "{command_name} --region x/y must be >= 0"
+        )));
     }
 
     let x = base.x + region.x;
@@ -879,7 +894,7 @@ fn resolve_tokenize_region_bounds(
 
     if x < base.x || y < base.y || right > base_right || bottom > base_bottom {
         return Err(AppError::invalid_argument(format!(
-            "tokenize --region ({:.0},{:.0},{:.0},{:.0}) exceeds target bounds ({:.0},{:.0},{:.0},{:.0})",
+            "{command_name} --region ({:.0},{:.0},{:.0},{:.0}) exceeds target bounds ({:.0},{:.0},{:.0},{:.0})",
             region.x,
             region.y,
             region.width,
@@ -2369,6 +2384,48 @@ mod tests {
         assert_eq!(resolved.y, base.y);
         assert_eq!(resolved.width, base.width);
         assert_eq!(resolved.height, base.height);
+    }
+
+    #[test]
+    fn screenshot_region_resolves_inside_target_bounds() {
+        let base = Bounds {
+            x: 100.0,
+            y: 200.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let region = Bounds {
+            x: 50.0,
+            y: 60.0,
+            width: 300.0,
+            height: 250.0,
+        };
+        let resolved = super::resolve_capture_region_bounds(base.clone(), Some(&region))
+            .expect("region should resolve");
+        assert_eq!(resolved.x, 150.0);
+        assert_eq!(resolved.y, 260.0);
+        assert_eq!(resolved.width, 300.0);
+        assert_eq!(resolved.height, 250.0);
+    }
+
+    #[test]
+    fn screenshot_region_rejects_outside_target_bounds() {
+        let base = Bounds {
+            x: 100.0,
+            y: 200.0,
+            width: 320.0,
+            height: 240.0,
+        };
+        let region = Bounds {
+            x: 200.0,
+            y: 120.0,
+            width: 200.0,
+            height: 200.0,
+        };
+        let err = super::resolve_capture_region_bounds(base, Some(&region))
+            .expect_err("region should fail");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("screenshot --region"));
     }
 
     #[test]
