@@ -4,11 +4,20 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-cargo fmt --all --manifest-path src/desktop/Cargo.toml
+staged_rust=()
+while IFS= read -r path; do
+  staged_rust+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACMR -- ':(glob)src/desktop/**/*.rs')
 
-if ! git diff --quiet -- src/desktop; then
-  echo "pre-commit: formatting updated files under src/desktop."
+if [[ "${#staged_rust[@]}" -eq 0 ]]; then
+  exit 0
+fi
+
+cargo fmt --manifest-path src/desktop/Cargo.toml -- "${staged_rust[@]}"
+
+if ! git diff --quiet -- "${staged_rust[@]}"; then
+  echo "pre-commit: formatting updated staged Rust files under src/desktop."
   echo "pre-commit: review and stage changes, then commit again."
-  git diff --name-only -- src/desktop
+  git diff --name-only -- "${staged_rust[@]}"
   exit 1
 fi
