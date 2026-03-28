@@ -47,15 +47,17 @@ desktopctl window focus --id <id>
 
 ## Screen and OCR
 ```bash
+# common flags for screen screenshot/tokenize:
+# --active-window [<id>]    # target frontmost window (optionally enforce id)
+# --region <x> <y> <w> <h>  # region relative to selected target
+
 # take screenshot (display or active window)
 desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
-# region is relative to the selected screenshot target (display or active window)
 
 # tokenize current screen/window into structured OCR + UI elements
 desktopctl screen tokenize [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
 # tokenize response window `id` is an opaque window id; pass it back via --active-window <id> to enforce target window
 # element ids are semantic and predictable (examples: button_7, button_add, text_settings)
-# region is relative to the selected tokenize target (window or screenshot)
 
 # find text on screen via OCR
 desktopctl screen find --text <text> [--all]
@@ -66,6 +68,11 @@ desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disap
 
 ## Pointer and Keyboard
 ```bash
+# common observe flags for pointer/keyboard actions:
+# [--observe] [--no-observe]
+# [--observe-until <stable|change|first-change>]
+# [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+
 # move pointer
 desktopctl pointer move <x> <y>
 
@@ -74,20 +81,20 @@ desktopctl pointer down <x> <y>
 desktopctl pointer up <x> <y>
 
 # click pointer by coordinate, OCR text, element id, or token
-desktopctl pointer click <x> <y> [--absolute] [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
-desktopctl pointer click --text <text> [--active-window [<id>]] [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
-desktopctl pointer click --id <element_id> --active-window [<id>] [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+desktopctl pointer click <x> <y> [--absolute]
+desktopctl pointer click --text <text> [--active-window [<id>]]
+desktopctl pointer click --id <element_id> --active-window [<id>]
 desktopctl pointer click --token <n>
 
 # scroll pointer viewport/content by signed deltas (positive dy scrolls down)
-desktopctl pointer scroll <dx> <dy> [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+desktopctl pointer scroll <dx> <dy>
 
 # drag pointer between coordinates
 desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
 
 # keyboard text and key/hotkey press
-desktopctl keyboard type "text" [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
-desktopctl keyboard press <key-or-hotkey> [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+desktopctl keyboard type "text" [--active-window [<id>]]
+desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]]
 ```
 
 ## Clipboard
