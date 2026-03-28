@@ -36,7 +36,8 @@ desktopctl window focus --title <text>
 ## Screen and OCR
 ```bash
 # take screenshot (display or active window)
-desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
+desktopctl screen screenshot [--out <path>] [--overlay] [--active-window] [--region <x> <y> <width> <height>]
+# region is relative to the selected screenshot target (display or active window)
 
 # tokenize current screen/window into structured OCR + UI elements
 desktopctl screen tokenize [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]

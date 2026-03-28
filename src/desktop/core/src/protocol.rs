@@ -106,6 +106,8 @@ pub enum Command {
         overlay: bool,
         #[serde(default)]
         active_window: bool,
+        #[serde(default)]
+        region: Option<Bounds>,
     },
     ScreenTokenize {
         #[serde(default)]

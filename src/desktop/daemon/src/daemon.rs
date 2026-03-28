@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 #[cfg(target_os = "macos")]
 use crate::overlay;
 use crate::{clipboard, permissions, recording, replay, request_store, trace, vision};
+#[cfg(target_os = "macos")]
+use core_graphics::display::CGDisplay;
 
 #[cfg(target_os = "macos")]
 const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 40;
@@ -531,22 +533,29 @@ fn execute(command: Command) -> Result<Value, AppError> {
             out_path,
             overlay,
             active_window,
+            region,
         } => {
             trace::log("execute:screen_capture:start");
             permissions::ensure_screen_recording_permission()?;
-            let window_bounds = if active_window {
-                Some(frontmost_window_bounds().ok_or_else(|| {
+            let capture_bounds = if active_window {
+                let base = frontmost_window_bounds().ok_or_else(|| {
                     AppError::target_not_found(
                         "frontmost window not found; ensure a standard app window is focused",
                     )
-                })?)
+                })?;
+                Some(resolve_tokenize_region_bounds(base, region.as_ref())?)
+            } else if region.is_some() {
+                let base = main_display_bounds().ok_or_else(|| {
+                    AppError::target_not_found("display bounds unavailable for screenshot --region")
+                })?;
+                Some(resolve_tokenize_region_bounds(base, region.as_ref())?)
             } else {
                 None
             };
             let capture_out_path: Option<PathBuf> = out_path
                 .map(Into::into)
                 .or_else(|| Some(vision::capture::default_capture_path()));
-            let capture = if let Some(bounds) = window_bounds.clone() {
+            let capture = if let Some(bounds) = capture_bounds.clone() {
                 vision::pipeline::capture_and_update_active_window(
                     capture_out_path.clone(),
                     bounds,
@@ -575,8 +584,14 @@ fn execute(command: Command) -> Result<Value, AppError> {
                     .as_ref()
                     .map(|path| path.display().to_string()),
                 "overlay_path": overlay_path,
-                "capture_scope": if active_window { "active_window" } else { "display" },
-                "window_bounds": window_bounds,
+                "capture_scope": if active_window {
+                    "active_window"
+                } else if region.is_some() {
+                    "region"
+                } else {
+                    "display"
+                },
+                "window_bounds": capture_bounds,
                 "display": capture.snapshot.display,
                 "focused_app": capture.snapshot.focused_app,
                 "event_ids": capture.event_ids
@@ -1981,6 +1996,21 @@ fn click_scope_window_bounds() -> Option<desktop_core::protocol::Bounds> {
         trace::log("ui_click_text:window_scope source=none");
     }
     bounds
+}
+
+fn main_display_bounds() -> Option<desktop_core::protocol::Bounds> {
+    #[cfg(target_os = "macos")]
+    {
+        let bounds = CGDisplay::main().bounds();
+        return Some(desktop_core::protocol::Bounds {
+            x: bounds.origin.x,
+            y: bounds.origin.y,
+            width: bounds.size.width.max(0.0),
+            height: bounds.size.height.max(0.0),
+        });
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 #[derive(Debug, Clone)]

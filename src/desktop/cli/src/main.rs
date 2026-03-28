@@ -361,6 +361,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             let mut out_path: Option<String> = None;
             let mut overlay = false;
             let mut active_window = false;
+            let mut region: Option<desktop_core::protocol::Bounds> = None;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -381,6 +382,24 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                         active_window = true;
                         i += 1;
                     }
+                    "--region" => {
+                        let x = parse_u32(args.get(i + 1), "region_x")?;
+                        let y = parse_u32(args.get(i + 2), "region_y")?;
+                        let width = parse_u32(args.get(i + 3), "region_width")?;
+                        let height = parse_u32(args.get(i + 4), "region_height")?;
+                        if width == 0 || height == 0 {
+                            return Err(AppError::invalid_argument(
+                                "region width/height must be > 0",
+                            ));
+                        }
+                        region = Some(desktop_core::protocol::Bounds {
+                            x: x as f64,
+                            y: y as f64,
+                            width: width as f64,
+                            height: height as f64,
+                        });
+                        i += 5;
+                    }
                     flag => {
                         return Err(AppError::invalid_argument(format!(
                             "unknown flag for screen screenshot: {flag}"
@@ -392,6 +411,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                 out_path,
                 overlay,
                 active_window,
+                region,
             })
         }
         "tokenize" => {
@@ -772,7 +792,8 @@ fn usage() -> &'static str {
   desktopctl window list [--json]
   desktopctl window bounds --title <text> [--json]
   desktopctl window focus --title <text>
-  desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
+  desktopctl screen screenshot [--out <path>] [--overlay] [--active-window] [--region <x> <y> <width> <height>]
+    note: --region is relative to the selected active-window/display target
   desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
     note: --window cannot be combined with --screenshot
     note: --active-window cannot be combined with --window or --screenshot
@@ -1269,10 +1290,36 @@ mod tests {
                 out_path,
                 overlay,
                 active_window,
+                region,
             } => {
                 assert_eq!(out_path.as_deref(), Some("/tmp/cap.png"));
                 assert!(overlay);
                 assert!(active_window);
+                assert!(region.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_screenshot_with_region() {
+        let args = vec![
+            "screen".to_string(),
+            "screenshot".to_string(),
+            "--region".to_string(),
+            "0".to_string(),
+            "80".to_string(),
+            "640".to_string(),
+            "720".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen screenshot with region should parse");
+        match command {
+            Command::ScreenCapture { region, .. } => {
+                let region = region.expect("region should be present");
+                assert_eq!(region.x, 0.0);
+                assert_eq!(region.y, 80.0);
+                assert_eq!(region.width, 640.0);
+                assert_eq!(region.height, 720.0);
             }
             other => panic!("unexpected command: {other:?}"),
         }
