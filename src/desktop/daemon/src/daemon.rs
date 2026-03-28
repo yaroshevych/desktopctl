@@ -23,8 +23,10 @@ use serde_json::{Value, json};
 
 #[cfg(target_os = "macos")]
 use crate::overlay;
-use crate::platform::windowing::WindowInfo;
-use crate::{clipboard, permissions, platform, recording, replay, request_store, trace, vision};
+use crate::{
+    clipboard, permissions, platform, recording, replay, request_store, trace, vision,
+    window_target,
+};
 
 #[cfg(target_os = "macos")]
 const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 40;
@@ -76,7 +78,7 @@ fn bootstrap_overlay_glow() {
     trace::log("overlay:bootstrap ready");
     start_overlay_watch_tracker();
     if overlay::is_active() {
-        let (mode, bounds) = if let Some(bounds) = frontmost_window_bounds() {
+        let (mode, bounds) = if let Some(bounds) = window_target::frontmost_window_bounds() {
             (overlay::WatchMode::WindowMode, Some(bounds))
         } else {
             (overlay::WatchMode::DesktopMode, None)
@@ -103,7 +105,7 @@ fn start_overlay_watch_tracker() {
         loop {
             if overlay::is_active() {
                 if !overlay::is_agent_active() && !overlay::is_watch_mode_locked() {
-                    if let Some(bounds) = frontmost_window_bounds() {
+                    if let Some(bounds) = window_target::frontmost_window_bounds() {
                         let _ = overlay::watch_mode_changed(
                             overlay::WatchMode::WindowMode,
                             Some(bounds),
@@ -218,7 +220,7 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             Duration::from_millis(OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS),
         );
     } else if !matches!(command, Command::ScreenTokenize { .. }) {
-        if let Some(bounds) = frontmost_window_bounds() {
+        if let Some(bounds) = window_target::frontmost_window_bounds() {
             let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
         }
     }
@@ -279,7 +281,8 @@ fn maybe_start_privacy_overlay(command: &Command) -> bool {
     match overlay::start_overlay() {
         Ok(started) => {
             if started {
-                let (mode, bounds) = if let Some(bounds) = frontmost_window_bounds() {
+                let (mode, bounds) = if let Some(bounds) = window_target::frontmost_window_bounds()
+                {
                     (overlay::WatchMode::WindowMode, Some(bounds))
                 } else {
                     (overlay::WatchMode::DesktopMode, None)
@@ -370,7 +373,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
         Command::WindowList => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let windows = list_windows()?;
+            let windows = window_target::list_windows()?;
             Ok(json!({
                 "windows": windows.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
             }))
@@ -378,8 +381,8 @@ fn execute(command: Command) -> Result<Value, AppError> {
         Command::WindowBounds { title } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let windows = list_windows()?;
-            let selected = select_window_candidate(&windows, &title)?;
+            let windows = window_target::list_windows()?;
+            let selected = window_target::select_window_candidate(&windows, &title)?;
             Ok(json!({
                 "window": selected.as_json()
             }))
@@ -387,8 +390,8 @@ fn execute(command: Command) -> Result<Value, AppError> {
         Command::WindowFocus { title } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let windows = list_windows()?;
-            let selected = select_window_candidate(&windows, &title)?;
+            let windows = window_target::list_windows()?;
+            let selected = window_target::select_window_candidate(&windows, &title)?;
             platform::apps::focus_window(selected)?;
             Ok(json!({
                 "window": selected.as_json(),
@@ -544,14 +547,14 @@ fn execute(command: Command) -> Result<Value, AppError> {
             trace::log("execute:screen_capture:start");
             permissions::ensure_screen_recording_permission()?;
             let capture_bounds = if active_window {
-                let base = frontmost_window_bounds().ok_or_else(|| {
+                let base = window_target::frontmost_window_bounds().ok_or_else(|| {
                     AppError::target_not_found(
                         "frontmost window not found; ensure a standard app window is focused",
                     )
                 })?;
                 Some(resolve_capture_region_bounds(base, region.as_ref())?)
             } else if region.is_some() {
-                let base = main_display_bounds().ok_or_else(|| {
+                let base = window_target::main_display_bounds().ok_or_else(|| {
                     AppError::target_not_found("display bounds unavailable for screenshot --region")
                 })?;
                 Some(resolve_capture_region_bounds(base, region.as_ref())?)
@@ -636,13 +639,13 @@ fn execute(command: Command) -> Result<Value, AppError> {
                             "--active-window cannot be combined with --window for screen tokenize",
                         ));
                     }
-                    let bounds = frontmost_window_bounds().ok_or_else(|| {
+                    let bounds = window_target::frontmost_window_bounds().ok_or_else(|| {
                         AppError::target_not_found(
                             "frontmost window bounds unavailable for --active-window",
                         )
                     })?;
                     let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
-                    let app = frontmost_app_name();
+                    let app = window_target::frontmost_app_name();
                     let title = app.clone().unwrap_or_else(|| "active_window".to_string());
                     let window_meta = vision::pipeline::TokenizeWindowMeta {
                         id: "frontmost:1".to_string(),
@@ -675,9 +678,9 @@ fn execute(command: Command) -> Result<Value, AppError> {
                             bounds,
                         };
                         vision::pipeline::tokenize_window(window_meta)?
-                    } else if let Some(bounds) = frontmost_window_bounds() {
+                    } else if let Some(bounds) = window_target::frontmost_window_bounds() {
                         let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
-                        let app = frontmost_app_name();
+                        let app = window_target::frontmost_app_name();
                         let title = app.clone().unwrap_or_else(|| "active_window".to_string());
                         let window_meta = vision::pipeline::TokenizeWindowMeta {
                             id: "frontmost:1".to_string(),
@@ -687,8 +690,8 @@ fn execute(command: Command) -> Result<Value, AppError> {
                         };
                         vision::pipeline::tokenize_window(window_meta)?
                     } else {
-                        let windows = list_windows()?;
-                        let target = resolve_tokenize_window_target(&windows, None)?;
+                        let windows = window_target::list_windows()?;
+                        let target = window_target::resolve_tokenize_window_target(&windows, None)?;
                         let bounds =
                             resolve_tokenize_region_bounds(target.bounds.clone(), region.as_ref())?;
                         let window_meta = vision::pipeline::TokenizeWindowMeta {
@@ -700,8 +703,11 @@ fn execute(command: Command) -> Result<Value, AppError> {
                         vision::pipeline::tokenize_window(window_meta)?
                     }
                 } else {
-                    let windows = list_windows()?;
-                    let target = resolve_tokenize_window_target(&windows, window_id.as_deref())?;
+                    let windows = window_target::list_windows()?;
+                    let target = window_target::resolve_tokenize_window_target(
+                        &windows,
+                        window_id.as_deref(),
+                    )?;
                     let bounds =
                         resolve_tokenize_region_bounds(target.bounds.clone(), region.as_ref())?;
                     let window_meta = vision::pipeline::TokenizeWindowMeta {
@@ -925,7 +931,7 @@ fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::Toke
     {
         return;
     }
-    let Some(bounds) = frontmost_window_bounds() else {
+    let Some(bounds) = window_target::frontmost_window_bounds() else {
         return;
     };
     let mut filled = 0usize;
@@ -1034,7 +1040,7 @@ fn click_element_id_target(id: &str) -> Result<Value, AppError> {
     let bounds = click_scope_window_bounds().ok_or_else(|| {
         AppError::target_not_found("frontmost window bounds unavailable for click --id")
     })?;
-    let app = frontmost_app_name();
+    let app = window_target::frontmost_app_name();
     let window_meta = vision::pipeline::TokenizeWindowMeta {
         id: "frontmost:1".to_string(),
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
@@ -1091,7 +1097,7 @@ fn tokenize_click_text_candidate(
     let bounds = window_bounds.cloned().ok_or_else(|| {
         AppError::target_not_found("frontmost window bounds unavailable for tokenize fallback")
     })?;
-    let app = frontmost_app_name();
+    let app = window_target::frontmost_app_name();
     let window_meta = vision::pipeline::TokenizeWindowMeta {
         id: "frontmost:1".to_string(),
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
@@ -1269,7 +1275,7 @@ fn screen_layout_summary() -> Result<Value, AppError> {
         "timestamp": capture.snapshot.timestamp,
         "display": capture.snapshot.display,
         "focused_app": capture.snapshot.focused_app,
-        "frontmost_window": frontmost_window_bounds(),
+        "frontmost_window": window_target::frontmost_window_bounds(),
         "text_envelope": text_envelope,
         "panels": panels,
         "button_like_texts": button_like
@@ -1346,7 +1352,7 @@ fn wait_for_open_app(app_name: &str, timeout_ms: u64) -> Result<(), AppError> {
     let needle = app_name.to_lowercase();
     let start = Instant::now();
     loop {
-        if let Some(frontmost) = frontmost_app_name() {
+        if let Some(frontmost) = window_target::frontmost_app_name() {
             if frontmost.to_lowercase().contains(&needle) {
                 return Ok(());
             }
@@ -2002,7 +2008,7 @@ fn click_scope_window_bounds() -> Option<desktop_core::protocol::Bounds> {
             }
         }
     }
-    let bounds = frontmost_window_bounds();
+    let bounds = window_target::frontmost_window_bounds();
     if let Some(b) = bounds.as_ref() {
         trace::log(format!(
             "ui_click_text:window_scope source=frontmost bounds=({:.1},{:.1},{:.1},{:.1})",
@@ -2012,240 +2018,6 @@ fn click_scope_window_bounds() -> Option<desktop_core::protocol::Bounds> {
         trace::log("ui_click_text:window_scope source=none");
     }
     bounds
-}
-
-fn main_display_bounds() -> Option<desktop_core::protocol::Bounds> {
-    platform::windowing::main_display_bounds()
-}
-
-fn frontmost_window_context() -> Option<platform::windowing::FrontmostWindowContext> {
-    platform::windowing::frontmost_window_context()
-}
-
-fn frontmost_window_bounds() -> Option<desktop_core::protocol::Bounds> {
-    let context = frontmost_window_context();
-    let direct = context.as_ref().and_then(|ctx| ctx.bounds.clone());
-    if let Some(direct) = direct.as_ref() {
-        if !is_tiny_window_bounds(direct) {
-            return Some(direct.clone());
-        }
-    }
-
-    let app_hint = context.as_ref().and_then(|ctx| ctx.app.as_deref());
-    let listed = list_frontmost_app_windows()
-        .ok()
-        .and_then(|windows| {
-            preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
-        })
-        .or_else(|| {
-            list_windows().ok().and_then(|windows| {
-                preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
-            })
-        });
-
-    match (direct, listed) {
-        (Some(direct), Some(listed))
-            if is_tiny_window_bounds(&direct) && !is_tiny_window_bounds(&listed) =>
-        {
-            trace::log(format!(
-                "frontmost_window_bounds:replace_tiny_direct direct=({:.1},{:.1},{:.1},{:.1}) listed=({:.1},{:.1},{:.1},{:.1})",
-                direct.x,
-                direct.y,
-                direct.width,
-                direct.height,
-                listed.x,
-                listed.y,
-                listed.width,
-                listed.height
-            ));
-            Some(listed)
-        }
-        (Some(direct), Some(listed))
-            if !is_tiny_window_bounds(&listed)
-                && window_area(&listed) > window_area(&direct).saturating_mul(4) =>
-        {
-            trace::log(format!(
-                "frontmost_window_bounds:replace_small_direct direct=({:.1},{:.1},{:.1},{:.1}) listed=({:.1},{:.1},{:.1},{:.1})",
-                direct.x,
-                direct.y,
-                direct.width,
-                direct.height,
-                listed.x,
-                listed.y,
-                listed.width,
-                listed.height
-            ));
-            Some(listed)
-        }
-        (Some(direct), _) => Some(direct),
-        (None, Some(listed)) => Some(listed),
-        (None, None) => None,
-    }
-}
-
-fn frontmost_app_name() -> Option<String> {
-    frontmost_window_context().and_then(|ctx| ctx.app)
-}
-
-fn window_area(bounds: &desktop_core::protocol::Bounds) -> u64 {
-    let area = bounds.width.max(0.0) * bounds.height.max(0.0);
-    area.round().max(0.0) as u64
-}
-
-fn is_tiny_window_bounds(bounds: &desktop_core::protocol::Bounds) -> bool {
-    bounds.width < 120.0 || bounds.height < 90.0 || window_area(bounds) < 30_000
-}
-
-fn preferred_window_for_capture<'a>(
-    windows: &'a [WindowInfo],
-    app_hint: Option<&str>,
-) -> Option<&'a WindowInfo> {
-    let eligible = |window: &&WindowInfo| {
-        window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
-    };
-    let app_matches = |window: &&WindowInfo| match app_hint {
-        Some(app) => window.app.eq_ignore_ascii_case(app),
-        None => true,
-    };
-
-    windows
-        .iter()
-        .filter(|window| eligible(window) && window.frontmost && app_matches(window))
-        .max_by_key(|window| window_area(&window.bounds))
-        .or_else(|| {
-            windows
-                .iter()
-                .filter(|window| eligible(window) && app_matches(window))
-                .max_by_key(|window| window_area(&window.bounds))
-        })
-        .or_else(|| {
-            windows
-                .iter()
-                .filter(|window| eligible(window) && window.frontmost)
-                .max_by_key(|window| window_area(&window.bounds))
-        })
-        .or_else(|| {
-            windows
-                .iter()
-                .filter(eligible)
-                .max_by_key(|window| window_area(&window.bounds))
-        })
-}
-
-fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
-    platform::windowing::list_windows()
-}
-
-fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
-    platform::windowing::list_frontmost_app_windows()
-}
-
-fn resolve_tokenize_window_target(
-    windows: &[WindowInfo],
-    query: Option<&str>,
-) -> Result<WindowInfo, AppError> {
-    if windows.is_empty() {
-        return Err(AppError::target_not_found(
-            "no windows available for screen tokenize",
-        ));
-    }
-
-    if let Some(query) = query {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return Err(AppError::invalid_argument(
-                "window id must not be empty for screen tokenize",
-            ));
-        }
-        if let Some(found) = windows.iter().find(|w| w.id == trimmed) {
-            return Ok(found.clone());
-        }
-        let selected = select_window_candidate(windows, trimmed)?;
-        return Ok(selected.clone());
-    }
-
-    // Filter out tiny transient windows (tooltips/popovers) that destabilize tokenization.
-    windows
-        .iter()
-        .find(|w| w.frontmost && w.visible && w.bounds.width > 8.0 && w.bounds.height > 8.0)
-        .or_else(|| {
-            windows
-                .iter()
-                .find(|w| w.visible && w.bounds.width > 8.0 && w.bounds.height > 8.0)
-        })
-        .cloned()
-        .ok_or_else(|| {
-            AppError::target_not_found("no visible window available for screen tokenize")
-        })
-}
-
-fn select_window_candidate<'a>(
-    windows: &'a [WindowInfo],
-    query: &str,
-) -> Result<&'a WindowInfo, AppError> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err(AppError::invalid_argument("window title must not be empty"));
-    }
-
-    let lower = query.to_lowercase();
-
-    let exact_title: Vec<&WindowInfo> = windows
-        .iter()
-        .filter(|w| w.title.eq_ignore_ascii_case(query))
-        .collect();
-    if exact_title.len() == 1 {
-        return Ok(exact_title[0]);
-    }
-    if exact_title.len() > 1 {
-        return Err(AppError::ambiguous_target(format!(
-            "multiple windows matched title \"{query}\""
-        ))
-        .with_details(json!({
-            "query": query,
-            "candidates": exact_title.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
-        })));
-    }
-
-    let exact_app: Vec<&WindowInfo> = windows
-        .iter()
-        .filter(|w| w.app.eq_ignore_ascii_case(query))
-        .collect();
-    if exact_app.len() == 1 {
-        return Ok(exact_app[0]);
-    }
-    if exact_app.len() > 1 {
-        return Err(AppError::ambiguous_target(format!(
-            "multiple windows matched app \"{query}\""
-        ))
-        .with_details(json!({
-            "query": query,
-            "candidates": exact_app.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
-        })));
-    }
-
-    let partial: Vec<&WindowInfo> = windows
-        .iter()
-        .filter(|w| {
-            w.title.to_lowercase().contains(&lower) || w.app.to_lowercase().contains(&lower)
-        })
-        .collect();
-    if partial.len() == 1 {
-        return Ok(partial[0]);
-    }
-    if partial.len() > 1 {
-        return Err(AppError::ambiguous_target(format!(
-            "multiple windows partially matched \"{query}\""
-        ))
-        .with_details(json!({
-            "query": query,
-            "candidates": partial.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
-        })));
-    }
-
-    Err(AppError::target_not_found(format!(
-        "window \"{query}\" was not found"
-    )))
 }
 
 #[cfg(test)]
@@ -2264,71 +2036,6 @@ mod tests {
     fn ping_returns_message() {
         let result = execute(desktop_core::protocol::Command::Ping).expect("ping");
         assert_eq!(result["message"], "pong");
-    }
-
-    fn test_window(pid: i64, index: u32, app: &str, title: &str) -> super::WindowInfo {
-        super::WindowInfo {
-            id: format!("{pid}:{index}"),
-            pid,
-            index,
-            app: app.to_string(),
-            title: title.to_string(),
-            bounds: Bounds {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            },
-            frontmost: false,
-            visible: true,
-        }
-    }
-
-    #[test]
-    fn select_window_prefers_exact_title() {
-        let windows = vec![
-            test_window(10, 1, "TextEdit", "Document 1"),
-            test_window(11, 1, "Calculator", "Calculator"),
-        ];
-        let selected = super::select_window_candidate(&windows, "Calculator").expect("selected");
-        assert_eq!(selected.app, "Calculator");
-        assert_eq!(selected.title, "Calculator");
-    }
-
-    #[test]
-    fn select_window_reports_ambiguous_app_matches() {
-        let windows = vec![
-            test_window(20, 1, "Safari", "Tab A"),
-            test_window(20, 2, "Safari", "Tab B"),
-        ];
-        let err =
-            super::select_window_candidate(&windows, "Safari").expect_err("must be ambiguous");
-        assert_eq!(err.code, ErrorCode::AmbiguousTarget);
-    }
-
-    #[test]
-    fn tokenize_target_prefers_explicit_window_id() {
-        let mut windows = vec![
-            test_window(20, 1, "Safari", "Tab A"),
-            test_window(22, 2, "Calculator", "Calculator"),
-        ];
-        windows[0].frontmost = true;
-        let selected =
-            super::resolve_tokenize_window_target(&windows, Some("22:2")).expect("selected");
-        assert_eq!(selected.id, "22:2");
-        assert_eq!(selected.app, "Calculator");
-    }
-
-    #[test]
-    fn tokenize_target_defaults_to_frontmost_visible() {
-        let mut windows = vec![
-            test_window(20, 1, "Safari", "Tab A"),
-            test_window(22, 2, "Calculator", "Calculator"),
-        ];
-        windows[1].frontmost = true;
-        let selected =
-            super::resolve_tokenize_window_target(&windows, None).expect("selected frontmost");
-        assert_eq!(selected.id, "22:2");
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod replay;
 mod request_store;
 mod trace;
 mod vision;
+mod window_target;
 
 #[cfg(target_os = "macos")]
 use std::{
