@@ -1024,6 +1024,9 @@ fn click_text_target(
     request_context: &RequestContext,
 ) -> Result<Value, AppError> {
     if active_window {
+        if let Some(result) = try_click_text_active_window_ax(query)? {
+            return Ok(result);
+        }
         let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
             AppError::target_not_found("frontmost window bounds unavailable for click --text")
         })?;
@@ -1131,6 +1134,61 @@ fn click_text_target(
         "text": target.text,
         "bounds": target.bounds
     }))
+}
+
+fn try_click_text_active_window_ax(query: &str) -> Result<Option<Value>, AppError> {
+    let ax_elements = match platform::ax::collect_frontmost_window_elements() {
+        Ok(items) => items,
+        Err(err) => {
+            trace::log(format!("ui_click_text:active_window_ax_warn {err}"));
+            return Ok(None);
+        }
+    };
+    if ax_elements.is_empty() {
+        return Ok(None);
+    }
+
+    let texts: Vec<desktop_core::protocol::SnapshotText> = ax_elements
+        .iter()
+        .filter_map(|ax| {
+            let text = ax.text.as_ref()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(desktop_core::protocol::SnapshotText {
+                text: text.to_string(),
+                bounds: ax.bounds.clone(),
+                confidence: 0.92,
+            })
+        })
+        .collect();
+    if texts.is_empty() {
+        return Ok(None);
+    }
+
+    match select_text_candidate(&texts, query) {
+        Ok(target) => {
+            trace::log("ui_click_text:active_window source=ax");
+            trace::log(format!(
+                "ui_click_text:selected text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
+                compact_for_log(&target.text),
+                target.confidence,
+                target.bounds.x,
+                target.bounds.y,
+                target.bounds.width,
+                target.bounds.height
+            ));
+            perform_click(&target.bounds)?;
+            Ok(Some(json!({
+                "snapshot_id": 0,
+                "text": target.text,
+                "bounds": target.bounds
+            })))
+        }
+        Err(err) if matches!(err.code, desktop_core::error::ErrorCode::TargetNotFound) => Ok(None),
+        Err(err) if matches!(err.code, desktop_core::error::ErrorCode::AmbiguousTarget) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 #[derive(Debug, Clone)]
