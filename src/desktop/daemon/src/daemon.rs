@@ -207,6 +207,10 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     let transient_overlay_started = maybe_start_privacy_overlay(&command);
     #[cfg(target_os = "macos")]
+    let overlay_token_updates_enabled = !transient_overlay_started;
+    #[cfg(not(target_os = "macos"))]
+    let overlay_token_updates_enabled = true;
+    #[cfg(target_os = "macos")]
     if matches!(
         command,
         Command::ScreenCapture {
@@ -226,8 +230,9 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     }
     #[cfg(target_os = "macos")]
     let _ = overlay::agent_active_changed(true);
-    let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(command)))
-    {
+    let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute_with_context(command, overlay_token_updates_enabled)
+    })) {
         Ok(Ok(result)) => {
             trace::log("client:execute_ok");
             ResponseEnvelope::success(request_id.clone(), result)
@@ -348,7 +353,15 @@ fn command_requires_privacy_signal(command: &Command) -> bool {
     )
 }
 
+#[cfg(test)]
 fn execute(command: Command) -> Result<Value, AppError> {
+    execute_with_context(command, true)
+}
+
+fn execute_with_context(
+    command: Command,
+    overlay_token_updates_enabled: bool,
+) -> Result<Value, AppError> {
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
         Command::AppHide { name } => {
@@ -732,8 +745,12 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 ));
             }
             #[cfg(target_os = "macos")]
-            if let Err(err) = overlay::update_from_tokenize(&payload) {
-                trace::log(format!("execute:screen_tokenize:overlay_update_warn {err}"));
+            if overlay_token_updates_enabled {
+                if let Err(err) = overlay::update_from_tokenize(&payload) {
+                    trace::log(format!("execute:screen_tokenize:overlay_update_warn {err}"));
+                }
+            } else {
+                trace::log("execute:screen_tokenize:overlay_update_skipped transient_privacy");
             }
             let element_count: usize = payload.windows.iter().map(|w| w.elements.len()).sum();
             trace::log(format!(
