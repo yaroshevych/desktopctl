@@ -706,17 +706,38 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
         "move" => {
             let x = parse_u32(args.get(1), "x")?;
             let y = parse_u32(args.get(2), "y")?;
-            Ok(Command::PointerMove { x, y })
+            let (active_window, active_window_id) =
+                parse_active_window_options(&args[3..], "pointer move")?;
+            Ok(Command::PointerMove {
+                x,
+                y,
+                active_window,
+                active_window_id,
+            })
         }
         "down" => {
             let x = parse_u32(args.get(1), "x")?;
             let y = parse_u32(args.get(2), "y")?;
-            Ok(Command::PointerDown { x, y })
+            let (active_window, active_window_id) =
+                parse_active_window_options(&args[3..], "pointer down")?;
+            Ok(Command::PointerDown {
+                x,
+                y,
+                active_window,
+                active_window_id,
+            })
         }
         "up" => {
             let x = parse_u32(args.get(1), "x")?;
             let y = parse_u32(args.get(2), "y")?;
-            Ok(Command::PointerUp { x, y })
+            let (active_window, active_window_id) =
+                parse_active_window_options(&args[3..], "pointer up")?;
+            Ok(Command::PointerUp {
+                x,
+                y,
+                active_window,
+                active_window_id,
+            })
         }
         "click" => {
             if args.len() >= 2 && args[1] == "--text" {
@@ -858,10 +879,18 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 })
             } else if args.len() >= 2 && args[1] == "--token" {
                 let token = parse_u32(args.get(2), "token")?;
-                Ok(Command::PointerClickToken { token })
+                let (active_window, active_window_id) =
+                    parse_active_window_options(&args[3..], "pointer click --token")?;
+                Ok(Command::PointerClickToken {
+                    token,
+                    active_window,
+                    active_window_id,
+                })
             } else {
                 let mut absolute = false;
                 let mut observe = ObserveOptions::default();
+                let mut active_window = false;
+                let mut active_window_id: Option<String> = None;
                 let mut positional: Vec<&String> = Vec::new();
                 let mut i = 1usize;
                 while i < args.len() {
@@ -901,6 +930,23 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                         i += 2;
                         continue;
                     }
+                    if token == "--active-window" {
+                        active_window = true;
+                        if let Some(value) = args.get(i + 1) {
+                            if !value.starts_with("--") {
+                                if value.trim().is_empty() {
+                                    return Err(AppError::invalid_argument(
+                                        "active window id must not be empty",
+                                    ));
+                                }
+                                active_window_id = Some(value.clone());
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
                     if token.starts_with("--") {
                         return Err(AppError::invalid_argument(format!(
                             "unknown flag for pointer click: {}",
@@ -922,6 +968,8 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     y,
                     absolute,
                     observe,
+                    active_window,
+                    active_window_id,
                 })
             }
         }
@@ -930,26 +978,77 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
             let y1 = parse_u32(args.get(2), "y1")?;
             let x2 = parse_u32(args.get(3), "x2")?;
             let y2 = parse_u32(args.get(4), "y2")?;
-            let hold_ms = args
-                .get(5)
-                .map(|v| parse_u64(Some(v), "hold_ms"))
-                .transpose()?
-                .unwrap_or(60);
+            let mut hold_ms = 60;
+            let mut active_window = false;
+            let mut active_window_id: Option<String> = None;
+            let mut i = 5usize;
+            while i < args.len() {
+                let token = &args[i];
+                if token == "--active-window" {
+                    active_window = true;
+                    if let Some(value) = args.get(i + 1) {
+                        if !value.starts_with("--") {
+                            if value.trim().is_empty() {
+                                return Err(AppError::invalid_argument(
+                                    "active window id must not be empty",
+                                ));
+                            }
+                            active_window_id = Some(value.clone());
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+                if token.starts_with("--") {
+                    return Err(AppError::invalid_argument(format!(
+                        "unknown flag for pointer drag: {token}"
+                    )));
+                }
+                if hold_ms != 60 {
+                    return Err(AppError::invalid_argument(
+                        "pointer drag accepts at most one hold_ms positional argument",
+                    ));
+                }
+                hold_ms = parse_u64(Some(token), "hold_ms")?;
+                i += 1;
+            }
             Ok(Command::PointerDrag {
                 x1,
                 y1,
                 x2,
                 y2,
                 hold_ms,
+                active_window,
+                active_window_id,
             })
         }
         "scroll" => {
             let dx = parse_i32(args.get(1), "dx")?;
             let dy = parse_i32(args.get(2), "dy")?;
             let mut observe = ObserveOptions::default();
+            let mut active_window = false;
+            let mut active_window_id: Option<String> = None;
             let mut i = 3usize;
             while i < args.len() {
                 match args[i].as_str() {
+                    "--active-window" => {
+                        active_window = true;
+                        if let Some(value) = args.get(i + 1) {
+                            if !value.starts_with("--") {
+                                if value.trim().is_empty() {
+                                    return Err(AppError::invalid_argument(
+                                        "active window id must not be empty",
+                                    ));
+                                }
+                                active_window_id = Some(value.clone());
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
                     "--observe" => {
                         observe.enabled = true;
                         i += 1;
@@ -982,10 +1081,51 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     }
                 }
             }
-            Ok(Command::PointerScroll { dx, dy, observe })
+            Ok(Command::PointerScroll {
+                dx,
+                dy,
+                observe,
+                active_window,
+                active_window_id,
+            })
         }
         _ => Err(AppError::invalid_argument(usage())),
     }
+}
+
+fn parse_active_window_options(
+    args: &[String],
+    command_name: &str,
+) -> Result<(bool, Option<String>), AppError> {
+    let mut active_window = false;
+    let mut active_window_id: Option<String> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--active-window" => {
+                active_window = true;
+                if let Some(value) = args.get(i + 1) {
+                    if !value.starts_with("--") {
+                        if value.trim().is_empty() {
+                            return Err(AppError::invalid_argument(
+                                "active window id must not be empty",
+                            ));
+                        }
+                        active_window_id = Some(value.clone());
+                        i += 2;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            flag => {
+                return Err(AppError::invalid_argument(format!(
+                    "unknown flag for {command_name}: {flag}"
+                )));
+            }
+        }
+    }
+    Ok((active_window, active_window_id))
 }
 
 fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
@@ -1164,16 +1304,16 @@ fn usage() -> &'static str {
   desktopctl replay record [--duration <ms>]
   desktopctl replay record --stop
   desktopctl replay load <session_dir>
-  desktopctl pointer move <x> <y>
-  desktopctl pointer down <x> <y>
-  desktopctl pointer up <x> <y>
-  desktopctl pointer click [--absolute] <x> <y>
-  desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] <x> <y>
+  desktopctl pointer move <x> <y> [--active-window [<id>]]
+  desktopctl pointer down <x> <y> [--active-window [<id>]]
+  desktopctl pointer up <x> <y> [--active-window [<id>]]
+  desktopctl pointer click [--absolute] <x> <y> [--active-window [<id>]]
+  desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] [--active-window [<id>]] <x> <y>
   desktopctl pointer click --text <text> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
-  desktopctl pointer click --token <n>
-  desktopctl pointer scroll <dx> <dy> [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
-  desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
+  desktopctl pointer click --token <n> [--active-window [<id>]]
+  desktopctl pointer scroll <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+  desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms] [--active-window [<id>]]
   desktopctl keyboard type \"text\" [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]"
 }
@@ -1972,7 +2112,7 @@ mod tests {
         let command = parse_command(&["pointer", "click", "42", "7"].map(str::to_string))
             .expect("pointer click should parse");
         match command {
-            Command::PointerClick { x, y, absolute } => {
+            Command::PointerClick { x, y, absolute, .. } => {
                 assert_eq!(x, 42);
                 assert_eq!(y, 7);
                 assert!(!absolute);
@@ -1987,7 +2127,7 @@ mod tests {
             parse_command(&["pointer", "click", "--absolute", "420", "169"].map(str::to_string))
                 .expect("pointer click --absolute should parse");
         match command {
-            Command::PointerClick { x, y, absolute } => {
+            Command::PointerClick { x, y, absolute, .. } => {
                 assert_eq!(x, 420);
                 assert_eq!(y, 169);
                 assert!(absolute);
@@ -2011,6 +2151,7 @@ mod tests {
                 text,
                 active_window,
                 active_window_id,
+                ..
             } => {
                 assert_eq!(text, "DesktopCtl");
                 assert!(active_window);
@@ -2035,6 +2176,7 @@ mod tests {
                 id,
                 active_window,
                 active_window_id,
+                ..
             } => {
                 assert_eq!(id, "button_0018");
                 assert!(active_window);
@@ -2074,6 +2216,7 @@ mod tests {
                 id,
                 active_window,
                 active_window_id,
+                ..
             } => {
                 assert_eq!(id, "axid_nine");
                 assert!(active_window);
@@ -2091,21 +2234,21 @@ mod tests {
         let typed = parse_command(&["keyboard", "type", "hello"].map(str::to_string))
             .expect("keyboard type should parse");
         match typed {
-            Command::UiType { text } => assert_eq!(text, "hello"),
+            Command::UiType { text, .. } => assert_eq!(text, "hello"),
             other => panic!("unexpected command: {other:?}"),
         }
 
         let esc = parse_command(&["keyboard", "press", "escape"].map(str::to_string))
             .expect("keyboard press escape should parse");
         match esc {
-            Command::KeyEscape => {}
+            Command::KeyEscape { .. } => {}
             other => panic!("unexpected command: {other:?}"),
         }
 
         let pressed = parse_command(&["keyboard", "press", "cmd+shift+p"].map(str::to_string))
             .expect("keyboard press should parse");
         match pressed {
-            Command::KeyHotkey { hotkey } => assert_eq!(hotkey, "cmd+shift+p"),
+            Command::KeyHotkey { hotkey, .. } => assert_eq!(hotkey, "cmd+shift+p"),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -2176,7 +2319,7 @@ mod tests {
         let token = parse_command(&["pointer", "click", "--token", "42"].map(str::to_string))
             .expect("pointer click --token should parse");
         match token {
-            Command::PointerClickToken { token } => assert_eq!(token, 42),
+            Command::PointerClickToken { token, .. } => assert_eq!(token, 42),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -2186,9 +2329,59 @@ mod tests {
         let command = parse_command(&["pointer", "scroll", "0", "-320"].map(str::to_string))
             .expect("pointer scroll should parse");
         match command {
-            Command::PointerScroll { dx, dy } => {
+            Command::PointerScroll { dx, dy, .. } => {
                 assert_eq!(dx, 0);
                 assert_eq!(dy, -320);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_move_with_active_window_id() {
+        let command = parse_command(
+            &["pointer", "move", "10", "20", "--active-window", "abc123"].map(str::to_string),
+        )
+        .expect("pointer move with active-window id should parse");
+        match command {
+            Command::PointerMove {
+                x,
+                y,
+                active_window,
+                active_window_id,
+            } => {
+                assert_eq!(x, 10);
+                assert_eq!(y, 20);
+                assert!(active_window);
+                assert_eq!(active_window_id.as_deref(), Some("abc123"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_click_token_with_active_window() {
+        let command = parse_command(
+            &[
+                "pointer",
+                "click",
+                "--token",
+                "7",
+                "--active-window",
+                "abc123",
+            ]
+            .map(str::to_string),
+        )
+        .expect("pointer click --token with active-window should parse");
+        match command {
+            Command::PointerClickToken {
+                token,
+                active_window,
+                active_window_id,
+            } => {
+                assert_eq!(token, 7);
+                assert!(active_window);
+                assert_eq!(active_window_id.as_deref(), Some("abc123"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

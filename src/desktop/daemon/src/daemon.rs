@@ -518,28 +518,46 @@ fn execute_with_context(
             }
             Ok(json!({}))
         }
-        Command::PointerMove { x, y } => {
+        Command::PointerMove {
+            x,
+            y,
+            active_window,
+            active_window_id,
+        } => {
             trace::log(format!("pointer_move:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             backend.move_mouse(Point::new(x, y))?;
             trace::log(format!("pointer_move:ok x={x} y={y}"));
             Ok(json!({}))
         }
-        Command::PointerDown { x, y } => {
+        Command::PointerDown {
+            x,
+            y,
+            active_window,
+            active_window_id,
+        } => {
             trace::log(format!("pointer_down:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
             backend.left_down(point)?;
             trace::log(format!("pointer_down:ok x={x} y={y}"));
             Ok(json!({}))
         }
-        Command::PointerUp { x, y } => {
+        Command::PointerUp {
+            x,
+            y,
+            active_window,
+            active_window_id,
+        } => {
             trace::log(format!("pointer_up:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
             backend.left_up(point)?;
@@ -551,6 +569,8 @@ fn execute_with_context(
             y,
             absolute,
             observe,
+            active_window,
+            active_window_id,
         } => {
             trace::log(format!(
                 "pointer_click:start x={x} y={y} absolute={absolute}"
@@ -558,7 +578,16 @@ fn execute_with_context(
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let observe_start = capture_observe_start_state(&observe);
-            let point = resolve_pointer_click_point(x, y, absolute, request_context)?;
+            let observe_scope =
+                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+            let point = resolve_pointer_click_point(
+                x,
+                y,
+                absolute,
+                active_window,
+                active_window_id.as_deref(),
+                request_context,
+            )?;
             backend.move_mouse(point)?;
             backend.left_click(point)?;
             trace::log(format!(
@@ -568,21 +597,29 @@ fn execute_with_context(
             let mut result = json!({});
             append_observe_payload(
                 &mut result,
-                observe_after_action(&observe, &observe_start, None)?,
+                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
             );
             Ok(result)
         }
-        Command::PointerScroll { dx, dy, observe } => {
+        Command::PointerScroll {
+            dx,
+            dy,
+            observe,
+            active_window,
+            active_window_id,
+        } => {
             trace::log(format!("pointer_scroll:start dx={dx} dy={dy}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let observe_start = capture_observe_start_state(&observe);
+            let observe_scope =
+                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             backend.scroll_wheel(dx, dy)?;
             trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
             let mut result = json!({});
             append_observe_payload(
                 &mut result,
-                observe_after_action(&observe, &observe_start, None)?,
+                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
             );
             Ok(result)
         }
@@ -592,6 +629,8 @@ fn execute_with_context(
             x2,
             y2,
             hold_ms,
+            active_window,
+            active_window_id,
         } => {
             trace::log(format!(
                 "pointer_drag:start from=({}, {}) to=({}, {}) hold_ms={}",
@@ -599,6 +638,7 @@ fn execute_with_context(
             ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             let start = Point::new(x1, y1);
             let end = Point::new(x2, y2);
             backend.move_mouse(start)?;
@@ -1020,7 +1060,11 @@ fn execute_with_context(
             );
             Ok(result)
         }
-        Command::PointerClickToken { token } => click_token_target(token),
+        Command::PointerClickToken {
+            token,
+            active_window,
+            active_window_id,
+        } => click_token_target(token, active_window, active_window_id.as_deref()),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
             Ok(json!({ "text": text }))
@@ -1071,16 +1115,27 @@ fn resolve_pointer_click_point(
     x: u32,
     y: u32,
     absolute: bool,
+    active_window: bool,
+    active_window_id: Option<&str>,
     request_context: &RequestContext,
 ) -> Result<Point, AppError> {
     if absolute {
         return Ok(Point::new(x, y));
     }
-    let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
-        AppError::target_not_found(
-            "frontmost window bounds unavailable for relative pointer click; use --absolute",
-        )
-    })?;
+    let bounds = if active_window {
+        let target = if let Some(reference) = active_window_id {
+            assert_active_window_id_matches(reference)?
+        } else {
+            resolve_active_window_target()?
+        };
+        target.bounds
+    } else {
+        click_scope_window_bounds(request_context).ok_or_else(|| {
+            AppError::target_not_found(
+                "frontmost window bounds unavailable for relative pointer click; use --absolute",
+            )
+        })?
+    };
     let abs_x = (bounds.x + x as f64).round().max(0.0) as u32;
     let abs_y = (bounds.y + y as f64).round().max(0.0) as u32;
     Ok(Point::new(abs_x, abs_y))
@@ -1902,7 +1957,21 @@ fn screen_layout_summary() -> Result<Value, AppError> {
     }))
 }
 
-fn click_token_target(token_id: u32) -> Result<Value, AppError> {
+fn click_token_target(
+    token_id: u32,
+    active_window: bool,
+    active_window_id: Option<&str>,
+) -> Result<Value, AppError> {
+    if let Some(reference) = active_window_id {
+        if !active_window {
+            return Err(AppError::invalid_argument(
+                "active window id requires --active-window",
+            ));
+        }
+        assert_active_window_id_matches(reference)?;
+    } else if active_window {
+        let _ = resolve_active_window_target()?;
+    }
     let token = vision::pipeline::token(token_id)?.ok_or_else(|| {
         AppError::target_not_found(format!(
             "token {token_id} not found; run `screen tokenize --json` first"

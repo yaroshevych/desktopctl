@@ -52,10 +52,10 @@ desktopctl window focus --id <id>
 # --region <x> <y> <w> <h>  # region relative to selected target
 
 # take screenshot (display or active window)
-desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
+desktopctl screen screenshot [--out <path>] [--overlay] [--region <x> <y> <width> <height>]
 
 # tokenize current screen/window into structured OCR + UI elements
-desktopctl screen tokenize [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
+desktopctl screen tokenize [--overlay <path>] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
 # tokenize response window `id` is an opaque window id; pass it back via --active-window <id> to enforce target window
 # element ids are semantic and predictable (examples: button_7, button_add, text_settings)
 
@@ -72,6 +72,7 @@ desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disap
 # [--observe] [--no-observe]
 # [--observe-until <stable|change|first-change>]
 # [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+# [--active-window [<id>]]  # optional frontmost-window guard for all pointer actions
 
 # move pointer
 desktopctl pointer move <x> <y>
@@ -82,7 +83,7 @@ desktopctl pointer up <x> <y>
 
 # click pointer by coordinate, OCR text, element id, or token
 desktopctl pointer click <x> <y> [--absolute]
-desktopctl pointer click --text <text> [--active-window [<id>]]
+desktopctl pointer click --text <text>
 desktopctl pointer click --id <element_id> --active-window [<id>]
 desktopctl pointer click --token <n>
 
@@ -93,8 +94,8 @@ desktopctl pointer scroll <dx> <dy>
 desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
 
 # keyboard text and key/hotkey press
-desktopctl keyboard type "text" [--active-window [<id>]]
-desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]]
+desktopctl keyboard type "text"
+desktopctl keyboard press <key-or-hotkey>
 ```
 
 ## Clipboard

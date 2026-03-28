@@ -55,14 +55,26 @@ pub enum Command {
     PointerMove {
         x: u32,
         y: u32,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     PointerDown {
         x: u32,
         y: u32,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     PointerUp {
         x: u32,
         y: u32,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     PointerClick {
         x: u32,
@@ -71,6 +83,10 @@ pub enum Command {
         absolute: bool,
         #[serde(default)]
         observe: ObserveOptions,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     PointerClickText {
         text: String,
@@ -92,12 +108,20 @@ pub enum Command {
     },
     PointerClickToken {
         token: u32,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     PointerScroll {
         dx: i32,
         dy: i32,
         #[serde(default)]
         observe: ObserveOptions,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     PointerDrag {
         x1: u32,
@@ -105,6 +129,10 @@ pub enum Command {
         x2: u32,
         y2: u32,
         hold_ms: u64,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     UiType {
         text: String,
