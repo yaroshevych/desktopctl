@@ -553,16 +553,11 @@ fn execute(command: Command) -> Result<Value, AppError> {
             };
             let capture_out_path: Option<PathBuf> = out_path
                 .map(Into::into)
-                .or_else(|| Some(vision::capture::default_capture_path()));
+                .or_else(|| Some(platform::capture::default_capture_path()));
             let capture = if let Some(bounds) = capture_bounds.clone() {
-                vision::pipeline::capture_and_update_active_window(
-                    capture_out_path.clone(),
-                    bounds,
-                    None,
-                    true,
-                )?
+                platform::capture::capture_bounds(capture_out_path.clone(), bounds, None, true)?
             } else {
-                vision::pipeline::capture_and_update(capture_out_path)?
+                platform::capture::capture_display(capture_out_path)?
             };
             let overlay_path = if overlay {
                 let path = write_capture_overlay(&capture)?;
