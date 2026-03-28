@@ -220,4 +220,92 @@ mod tests {
         assert_eq!(elements.len(), 1);
         assert_eq!(elements[0].text.as_deref(), Some("outside"));
     }
+
+    #[test]
+    fn merge_elements_prefers_ax_text_for_text_area_and_keeps_outside_ocr() {
+        let mut elements = vec![
+            make_element("vision_ocr", Some("hello"), [10.0, 10.0, 80.0, 20.0]),
+            make_element("vision_ocr", Some("world"), [10.0, 35.0, 70.0, 20.0]),
+            make_element("vision_ocr", Some("outside"), [220.0, 220.0, 40.0, 20.0]),
+        ];
+        let ax_elements = vec![AxElement {
+            role: "AXTextArea".to_string(),
+            text: Some("hello world from ax".to_string()),
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 80.0,
+            },
+        }];
+        let coord_map = CoordMap::new(
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 300.0,
+            },
+            300,
+            300,
+        );
+
+        let metrics = merge_elements(&mut elements, &ax_elements, &coord_map);
+        assert_eq!(metrics.ax_seen, 1);
+        assert_eq!(metrics.ax_added, 1);
+        assert_eq!(metrics.ax_replaced, 0);
+        assert_eq!(metrics.ax_text_filled, 0);
+
+        assert_eq!(elements.len(), 2);
+        let outside = elements
+            .iter()
+            .find(|el| el.text.as_deref() == Some("outside"))
+            .expect("outside OCR element should remain");
+        assert_eq!(outside.source, "vision_ocr");
+
+        let ax = elements
+            .iter()
+            .find(|el| el.source == "accessibility_ax:AXTextArea")
+            .expect("AX element should be present");
+        assert_eq!(ax.text.as_deref(), Some("hello world from ax"));
+    }
+
+    #[test]
+    fn merge_elements_fills_missing_ax_text_from_overlapping_ocr() {
+        let mut elements = vec![make_element(
+            "vision_ocr",
+            Some("draft"),
+            [10.0, 10.0, 80.0, 20.0],
+        )];
+        let ax_elements = vec![AxElement {
+            role: "AXTextField".to_string(),
+            text: None,
+            bounds: Bounds {
+                x: 8.0,
+                y: 8.0,
+                width: 90.0,
+                height: 30.0,
+            },
+        }];
+        let coord_map = CoordMap::new(
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 60.0,
+            },
+            120,
+            60,
+        );
+
+        let metrics = merge_elements(&mut elements, &ax_elements, &coord_map);
+        assert_eq!(metrics.ax_seen, 1);
+        assert_eq!(metrics.ax_text_filled, 1);
+        assert_eq!(metrics.ax_added, 1);
+        assert_eq!(metrics.ax_replaced, 0);
+
+        assert_eq!(elements.len(), 1);
+        let only = &elements[0];
+        assert_eq!(only.source, "accessibility_ax:AXTextField");
+        assert_eq!(only.text.as_deref(), Some("draft"));
+    }
 }
