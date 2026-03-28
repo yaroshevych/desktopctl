@@ -7,6 +7,12 @@ use crate::{
     trace,
 };
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FrontmostSnapshot {
+    pub app: Option<String>,
+    pub bounds: Option<Bounds>,
+}
+
 pub(crate) fn main_display_bounds() -> Option<Bounds> {
     platform::windowing::main_display_bounds()
 }
@@ -15,16 +21,20 @@ fn frontmost_window_context() -> Option<FrontmostWindowContext> {
     platform::windowing::frontmost_window_context()
 }
 
-pub(crate) fn frontmost_window_bounds() -> Option<Bounds> {
+pub(crate) fn resolve_frontmost_snapshot() -> FrontmostSnapshot {
     let context = frontmost_window_context();
     let direct = context.as_ref().and_then(|ctx| ctx.bounds.clone());
+    let app = context.as_ref().and_then(|ctx| ctx.app.clone());
     if let Some(direct) = direct.as_ref() {
         if !is_tiny_window_bounds(direct) {
-            return Some(direct.clone());
+            return FrontmostSnapshot {
+                app,
+                bounds: Some(direct.clone()),
+            };
         }
     }
 
-    let app_hint = context.as_ref().and_then(|ctx| ctx.app.as_deref());
+    let app_hint = app.as_deref();
     let listed = list_frontmost_app_windows()
         .ok()
         .and_then(|windows| {
@@ -36,7 +46,7 @@ pub(crate) fn frontmost_window_bounds() -> Option<Bounds> {
             })
         });
 
-    match (direct, listed) {
+    let bounds = match (direct, listed) {
         (Some(direct), Some(listed))
             if is_tiny_window_bounds(&direct) && !is_tiny_window_bounds(&listed) =>
         {
@@ -73,11 +83,17 @@ pub(crate) fn frontmost_window_bounds() -> Option<Bounds> {
         (Some(direct), _) => Some(direct),
         (None, Some(listed)) => Some(listed),
         (None, None) => None,
-    }
+    };
+
+    FrontmostSnapshot { app, bounds }
+}
+
+pub(crate) fn frontmost_window_bounds() -> Option<Bounds> {
+    resolve_frontmost_snapshot().bounds
 }
 
 pub(crate) fn frontmost_app_name() -> Option<String> {
-    frontmost_window_context().and_then(|ctx| ctx.app)
+    resolve_frontmost_snapshot().app
 }
 
 fn window_area(bounds: &Bounds) -> u64 {

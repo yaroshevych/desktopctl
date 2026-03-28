@@ -37,6 +37,12 @@ const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
 #[cfg(target_os = "macos")]
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
 
+#[derive(Debug, Clone, Default)]
+struct RequestContext {
+    #[cfg(target_os = "macos")]
+    frontmost: Option<window_target::FrontmostSnapshot>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
     pub idle_timeout: Option<Duration>,
@@ -205,7 +211,17 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
         request_id, command_name
     ));
     #[cfg(target_os = "macos")]
-    let transient_overlay_started = maybe_start_privacy_overlay(&command);
+    let request_context = RequestContext {
+        frontmost: if command_requires_privacy_signal(&command) {
+            Some(window_target::resolve_frontmost_snapshot())
+        } else {
+            None
+        },
+    };
+    #[cfg(not(target_os = "macos"))]
+    let request_context = RequestContext::default();
+    #[cfg(target_os = "macos")]
+    let transient_overlay_started = maybe_start_privacy_overlay(&command, &request_context);
     #[cfg(target_os = "macos")]
     let overlay_token_updates_enabled = !transient_overlay_started;
     #[cfg(not(target_os = "macos"))]
@@ -224,14 +240,14 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             Duration::from_millis(OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS),
         );
     } else if !matches!(command, Command::ScreenTokenize { .. }) {
-        if let Some(bounds) = window_target::frontmost_window_bounds() {
+        if let Some(bounds) = request_frontmost_bounds(&request_context) {
             let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
         }
     }
     #[cfg(target_os = "macos")]
     let _ = overlay::agent_active_changed(true);
     let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        execute_with_context(command, overlay_token_updates_enabled)
+        execute_with_context(command, overlay_token_updates_enabled, &request_context)
     })) {
         Ok(Ok(result)) => {
             trace::log("client:execute_ok");
@@ -279,15 +295,14 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
 }
 
 #[cfg(target_os = "macos")]
-fn maybe_start_privacy_overlay(command: &Command) -> bool {
+fn maybe_start_privacy_overlay(command: &Command, context: &RequestContext) -> bool {
     if !command_requires_privacy_signal(command) || overlay::is_active() {
         return false;
     }
     match overlay::start_overlay() {
         Ok(started) => {
             if started {
-                let (mode, bounds) = if let Some(bounds) = window_target::frontmost_window_bounds()
-                {
+                let (mode, bounds) = if let Some(bounds) = request_frontmost_bounds(context) {
                     (overlay::WatchMode::WindowMode, Some(bounds))
                 } else {
                     (overlay::WatchMode::DesktopMode, None)
@@ -313,6 +328,32 @@ fn maybe_start_privacy_overlay(command: &Command) -> bool {
             false
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn request_frontmost_bounds(context: &RequestContext) -> Option<desktop_core::protocol::Bounds> {
+    context
+        .frontmost
+        .as_ref()
+        .and_then(|snapshot| snapshot.bounds.clone())
+        .or_else(window_target::frontmost_window_bounds)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_frontmost_bounds(_context: &RequestContext) -> Option<desktop_core::protocol::Bounds> {
+    window_target::frontmost_window_bounds()
+}
+
+fn request_frontmost_app(context: &RequestContext) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = context
+        .frontmost
+        .as_ref()
+        .and_then(|snapshot| snapshot.app.clone())
+    {
+        return Some(app);
+    }
+    window_target::frontmost_app_name()
 }
 
 #[cfg(target_os = "macos")]
@@ -355,12 +396,13 @@ fn command_requires_privacy_signal(command: &Command) -> bool {
 
 #[cfg(test)]
 fn execute(command: Command) -> Result<Value, AppError> {
-    execute_with_context(command, true)
+    execute_with_context(command, true, &RequestContext::default())
 }
 
 fn execute_with_context(
     command: Command,
     overlay_token_updates_enabled: bool,
+    request_context: &RequestContext,
 ) -> Result<Value, AppError> {
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
@@ -484,7 +526,7 @@ fn execute_with_context(
             ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let point = resolve_pointer_click_point(x, y, absolute)?;
+            let point = resolve_pointer_click_point(x, y, absolute, request_context)?;
             backend.move_mouse(point)?;
             backend.left_click(point)?;
             trace::log(format!(
@@ -814,8 +856,8 @@ fn execute_with_context(
             interval_ms,
             disappear,
         } => wait_for_text(&text, timeout_ms, interval_ms, disappear),
-        Command::PointerClickText { text } => click_text_target(&text),
-        Command::PointerClickId { id } => click_element_id_target(&id),
+        Command::PointerClickText { text } => click_text_target(&text, request_context),
+        Command::PointerClickId { id } => click_element_id_target(&id, request_context),
         Command::PointerClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -863,11 +905,16 @@ fn execute_with_context(
     }
 }
 
-fn resolve_pointer_click_point(x: u32, y: u32, absolute: bool) -> Result<Point, AppError> {
+fn resolve_pointer_click_point(
+    x: u32,
+    y: u32,
+    absolute: bool,
+    request_context: &RequestContext,
+) -> Result<Point, AppError> {
     if absolute {
         return Ok(Point::new(x, y));
     }
-    let bounds = click_scope_window_bounds().ok_or_else(|| {
+    let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
         AppError::target_not_found(
             "frontmost window bounds unavailable for relative pointer click; use --absolute",
         )
@@ -966,7 +1013,7 @@ fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::Toke
     }
 }
 
-fn click_text_target(query: &str) -> Result<Value, AppError> {
+fn click_text_target(query: &str, request_context: &RequestContext) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let capture = vision::pipeline::capture_and_update(None)?;
     let normalized_texts = normalize_snapshot_texts_to_display(
@@ -976,7 +1023,7 @@ fn click_text_target(query: &str) -> Result<Value, AppError> {
         capture.snapshot.display.width,
         capture.snapshot.display.height,
     );
-    let window_bounds = click_scope_window_bounds();
+    let window_bounds = click_scope_window_bounds(request_context);
     let window_filtered = window_bounds
         .as_ref()
         .map(|bounds| filter_texts_to_window_progressive(&normalized_texts, bounds))
@@ -1002,7 +1049,7 @@ fn click_text_target(query: &str) -> Result<Value, AppError> {
                 "ui_click_text:ocr_primary_failed code={:?} msg={}",
                 primary_err.code, primary_err.message
             ));
-            match tokenize_click_text_candidate(query, window_bounds.as_ref()) {
+            match tokenize_click_text_candidate(query, window_bounds.as_ref(), request_context) {
                 Ok(fallback) => {
                     trace::log("ui_click_text:fallback source=tokenize");
                     fallback
@@ -1048,16 +1095,21 @@ struct TokenizeClickElementCandidate {
     source: String,
 }
 
-fn click_element_id_target(id: &str) -> Result<Value, AppError> {
+fn click_element_id_target(id: &str, request_context: &RequestContext) -> Result<Value, AppError> {
     permissions::ensure_screen_recording_permission()?;
     let needle = id.trim();
     if needle.is_empty() {
         return Err(AppError::invalid_argument("empty element id selector"));
     }
-    let bounds = click_scope_window_bounds().ok_or_else(|| {
+    if is_ax_element_id(needle) {
+        if let Some(result) = try_click_ax_element_id_target(needle)? {
+            return Ok(result);
+        }
+    }
+    let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
         AppError::target_not_found("frontmost window bounds unavailable for click --id")
     })?;
-    let app = window_target::frontmost_app_name();
+    let app = request_frontmost_app(request_context);
     let window_meta = vision::pipeline::TokenizeWindowMeta {
         id: "frontmost:1".to_string(),
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
@@ -1107,14 +1159,100 @@ fn click_element_id_target(id: &str) -> Result<Value, AppError> {
     }))
 }
 
+fn is_ax_element_id(id: &str) -> bool {
+    id.starts_with("axid_") || id.starts_with("axp_")
+}
+
+fn try_click_ax_element_id_target(needle: &str) -> Result<Option<Value>, AppError> {
+    let ax_elements = match platform::ax::collect_frontmost_window_elements() {
+        Ok(items) => items,
+        Err(err) => {
+            trace::log(format!("pointer_click_id:ax_direct_warn {err}"));
+            return Ok(None);
+        }
+    };
+    if ax_elements.is_empty() {
+        return Ok(None);
+    }
+
+    let mut elements: Vec<desktop_core::protocol::TokenizeElement> = ax_elements
+        .iter()
+        .map(|ax| {
+            vision::element_normalizer::ElementBuilder::new()
+                .id(vision::ax_merge::primary_id_for_ax(ax))
+                .kind("")
+                .bbox(ax.bounds.clone())
+                .has_border(None)
+                .text(ax.text.clone())
+                .confidence(None)
+                .source(format!("accessibility_ax:{}", ax.role))
+                .build()
+        })
+        .collect();
+    vision::element_normalizer::finalize_elements(&mut elements);
+    let candidates: Vec<TokenizeClickElementCandidate> = elements
+        .into_iter()
+        .map(|element| TokenizeClickElementCandidate {
+            id: element.id,
+            text: element.text,
+            bounds: desktop_core::protocol::Bounds {
+                x: element.bbox[0],
+                y: element.bbox[1],
+                width: element.bbox[2],
+                height: element.bbox[3],
+            },
+            source: element.source,
+        })
+        .collect();
+    let total_candidates = candidates.len();
+    let matches: Vec<TokenizeClickElementCandidate> = candidates
+        .into_iter()
+        .filter(|element| element.id == needle)
+        .collect();
+    trace::log(format!(
+        "pointer_click_id:ax_direct_candidates id=\"{}\" total={} matched={}",
+        compact_for_log(needle),
+        total_candidates,
+        matches.len()
+    ));
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() > 1 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple AX elements matched id \"{needle}\""
+        )));
+    }
+
+    let target = &matches[0];
+    trace::log(format!(
+        "pointer_click_id:ax_direct_selected id=\"{}\" source={} bounds=({:.1}, {:.1}, {:.1}, {:.1}) text=\"{}\"",
+        compact_for_log(&target.id),
+        compact_for_log(&target.source),
+        target.bounds.x,
+        target.bounds.y,
+        target.bounds.width,
+        target.bounds.height,
+        compact_for_log(target.text.as_deref().unwrap_or(""))
+    ));
+    perform_click(&target.bounds)?;
+    Ok(Some(json!({
+        "id": target.id.clone(),
+        "text": target.text.clone(),
+        "bounds": target.bounds.clone(),
+        "source": target.source.clone()
+    })))
+}
+
 fn tokenize_click_text_candidate(
     query: &str,
     window_bounds: Option<&desktop_core::protocol::Bounds>,
+    request_context: &RequestContext,
 ) -> Result<desktop_core::protocol::SnapshotText, AppError> {
     let bounds = window_bounds.cloned().ok_or_else(|| {
         AppError::target_not_found("frontmost window bounds unavailable for tokenize fallback")
     })?;
-    let app = window_target::frontmost_app_name();
+    let app = request_frontmost_app(request_context);
     let window_meta = vision::pipeline::TokenizeWindowMeta {
         id: "frontmost:1".to_string(),
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
@@ -2012,7 +2150,9 @@ fn filter_texts_to_window_progressive(
     Vec::new()
 }
 
-fn click_scope_window_bounds() -> Option<desktop_core::protocol::Bounds> {
+fn click_scope_window_bounds(
+    request_context: &RequestContext,
+) -> Option<desktop_core::protocol::Bounds> {
     #[cfg(target_os = "macos")]
     {
         if overlay::is_active() {
@@ -2025,7 +2165,7 @@ fn click_scope_window_bounds() -> Option<desktop_core::protocol::Bounds> {
             }
         }
     }
-    let bounds = window_target::frontmost_window_bounds();
+    let bounds = request_frontmost_bounds(request_context);
     if let Some(b) = bounds.as_ref() {
         trace::log(format!(
             "ui_click_text:window_scope source=frontmost bounds=({:.1},{:.1},{:.1},{:.1})",

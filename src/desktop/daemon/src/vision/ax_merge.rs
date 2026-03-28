@@ -28,7 +28,7 @@ pub fn merge_elements(
 
         let (merged_text, filled_from_ocr) =
             merged_ax_text(&ax.role, &local, elements, ax.text.as_deref());
-        let ax_primary_id = ax_primary_id(ax);
+        let ax_primary_id = primary_id_for_ax(ax);
         if filled_from_ocr {
             metrics.ax_text_filled += 1;
         }
@@ -97,7 +97,7 @@ pub fn merge_elements(
     metrics
 }
 
-fn ax_primary_id(ax: &AxElement) -> Option<String> {
+pub(crate) fn primary_id_for_ax(ax: &AxElement) -> Option<String> {
     if let Some(identifier) = ax
         .ax_identifier
         .as_deref()
@@ -429,7 +429,7 @@ mod tests {
             ax_identifier: Some("SaveButtonMain".to_string()),
             ax_path: Some("AXButton:0.1.2".to_string()),
         };
-        let id = ax_primary_id(&ax).expect("id");
+        let id = primary_id_for_ax(&ax).expect("id");
         assert_eq!(id, "axid_savebuttonmain");
     }
 }
