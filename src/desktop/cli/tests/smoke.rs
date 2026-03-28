@@ -634,8 +634,9 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
         .and_then(Value::as_f64)
         .ok_or_else(|| format!("missing window_bounds.height: {}", pretty_json(wb)))?;
 
-    let center_x = (wx + ww * 0.5).round().max(0.0) as u32;
-    let center_y = (wy + wh * 0.5).round().max(0.0) as u32;
+    // In Settings, the left sidebar is the primary scrollable list.
+    let center_x = (wx + ww * 0.12).round().max(0.0) as u32;
+    let center_y = (wy + wh * 0.55).round().max(0.0) as u32;
     let _ = cli.run_json_ok(
         &[
             "pointer",
@@ -647,10 +648,10 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
         "scroll_pointer_move",
     )?;
 
-    let region_width = ww.max(1.0).min(360.0).floor().max(80.0) as u32;
-    let max_region_height = (wh - 120.0).max(80.0);
+    let region_width = (ww * 0.25).max(120.0).min(420.0).floor() as u32;
+    let max_region_height = (wh - 90.0).max(80.0);
     let region_height = max_region_height.min(520.0).floor() as u32;
-    let region_y = 100_u32;
+    let region_y = 70_u32;
 
     let before = cli.run_json_ok(
         &[
@@ -672,13 +673,19 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
     }
 
     let mut changed = false;
-    for (step, dy) in [("scroll_down", -800), ("scroll_up", 800)] {
+    for (step, dy) in [
+        ("scroll_down_1", -1200),
+        ("scroll_down_2", -1200),
+        ("scroll_down_3", -1200),
+        ("scroll_down_4", -1200),
+        ("scroll_up_1", 1200),
+    ] {
         let _ = cli.run_json_ok(
             &["pointer", "scroll", "0", &dy.to_string()],
             DEFAULT_TIMEOUT,
             step,
         )?;
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(700));
 
         let after = cli.run_json_ok(
             &[
