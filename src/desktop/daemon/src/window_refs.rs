@@ -10,6 +10,7 @@ use crate::platform::windowing::WindowInfo;
 
 const WINDOW_REF_TTL: Duration = Duration::from_secs(10 * 60);
 const WINDOW_REF_MAX: usize = 1024;
+const WINDOW_ID_LEN: usize = 6;
 
 #[derive(Clone)]
 struct Entry {
@@ -78,7 +79,13 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
         }
         return existing;
     }
-    let ref_id = Uuid::new_v4().to_string();
+    let ref_id = loop {
+        // Opaque short id for CLI ergonomics; retry if collision exists in live buffer.
+        let candidate = Uuid::new_v4().simple().to_string()[..WINDOW_ID_LEN].to_string();
+        if !store.by_ref.contains_key(&candidate) {
+            break candidate;
+        }
+    };
     store.by_key.insert(native_key, ref_id.clone());
     store.by_ref.insert(
         ref_id.clone(),
