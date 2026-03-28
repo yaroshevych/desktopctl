@@ -19,6 +19,7 @@ pub trait Automation {
     fn check_accessibility_permission(&self) -> Result<(), AppError>;
     fn press_hotkey(&self, hotkey: &str) -> Result<(), AppError>;
     fn press_enter(&self) -> Result<(), AppError>;
+    fn press_escape(&self) -> Result<(), AppError>;
     fn type_text(&self, text: &str) -> Result<(), AppError>;
     fn move_mouse(&self, point: Point) -> Result<(), AppError>;
     fn left_down(&self, point: Point) -> Result<(), AppError>;

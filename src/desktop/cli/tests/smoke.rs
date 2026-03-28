@@ -2,7 +2,6 @@
 
 use serde_json::Value;
 use std::{
-    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -358,30 +357,62 @@ fn active_window_elements(tokenize_response: &Value) -> Result<Vec<Value>, Strin
     Ok(elements.clone())
 }
 
-fn find_button_id_by_text(elements: &[Value], candidates: &[&str]) -> Option<String> {
-    let wanted: HashSet<String> = candidates.iter().map(|c| normalize_label(c)).collect();
-
-    elements.iter().find_map(|el| {
-        let source = el.get("source")?.as_str()?;
-        if !source.starts_with("accessibility_ax:") {
-            return None;
+fn click_and_wait_signature_change(
+    cli: &SmokeCli,
+    button_id: &str,
+    previous_signature: &[String],
+    click_step: &str,
+    verify_step: &str,
+) -> Result<(Value, Vec<String>), String> {
+    let timeout = Duration::from_secs(4);
+    let _ = cli.run_json_ok(
+        &["pointer", "click", "--id", button_id],
+        timeout,
+        click_step,
+    )?;
+    let mut last_err = String::new();
+    for _ in 0..3 {
+        let response = cli.run_json_ok(
+            &["screen", "tokenize", "--active-window"],
+            timeout,
+            verify_step,
+        )?;
+        let signature = element_signature(&response)?;
+        if signature == previous_signature {
+            last_err = "tokenize signature unchanged yet".to_string();
+            thread::sleep(Duration::from_millis(60));
+            continue;
         }
-        let text = el.get("text")?.as_str()?;
-        let normalized = normalize_label(text);
-        if !wanted.contains(&normalized) {
-            return None;
-        }
-        el.get("id")?.as_str().map(|s| s.to_string())
-    })
+        return Ok((response, signature));
+    }
+    Err(last_err)
 }
 
-fn normalize_label(s: &str) -> String {
-    s.trim()
-        .replace('＋', "+")
-        .replace('−', "-")
-        .replace('×', "*")
-        .replace('÷', "/")
-        .to_lowercase()
+fn press_and_wait_signature_change(
+    cli: &SmokeCli,
+    key: &str,
+    previous_signature: &[String],
+    press_step: &str,
+    verify_step: &str,
+) -> Result<(Value, Vec<String>), String> {
+    let timeout = Duration::from_secs(4);
+    let _ = cli.run_json_ok(&["keyboard", "press", key], timeout, press_step)?;
+    let mut last_err = String::new();
+    for _ in 0..3 {
+        let response = cli.run_json_ok(
+            &["screen", "tokenize", "--active-window"],
+            timeout,
+            verify_step,
+        )?;
+        let signature = element_signature(&response)?;
+        if signature == previous_signature {
+            last_err = "tokenize signature unchanged yet".to_string();
+            thread::sleep(Duration::from_millis(60));
+            continue;
+        }
+        return Ok((response, signature));
+    }
+    Err(last_err)
 }
 
 fn element_signature(response: &Value) -> Result<Vec<String>, String> {
@@ -583,66 +614,59 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     };
     let _session = cli.begin_session();
 
-    cli.open_app("Calculator", 12_000)?;
-    thread::sleep(Duration::from_millis(500));
-
-    let tokenize = retry_json(8, Duration::from_millis(200), || {
-        let response = cli.run_json_ok(
-            &["screen", "tokenize", "--active-window"],
-            DEFAULT_TIMEOUT,
-            "tokenize_for_ids",
-        )?;
-        let elements = active_window_elements(&response)?;
-        if elements.is_empty() {
-            return Err("tokenize elements still empty".to_string());
-        }
-        Ok(response)
-    })?;
-
-    let before_sig = element_signature(&tokenize)?;
-    let elements = active_window_elements(&tokenize)?;
-
-    let target_digit_id = find_button_id_by_text(&elements, &["7", "8", "9", "4", "5", "6"]);
-    let target_any_button = elements.iter().find_map(|el| {
-        let source = el.get("source")?.as_str()?;
-        let id = el.get("id")?.as_str()?;
-        if source.starts_with("accessibility_ax:") && id.starts_with("button_") {
-            Some(id.to_string())
-        } else {
-            None
-        }
-    });
-    let target_id = target_digit_id
-        .clone()
-        .or(target_any_button)
-        .ok_or_else(|| {
-            "failed to find any clickable AX button id in tokenize output".to_string()
-        })?;
-
-    let _ = cli.run_json_ok(
-        &["pointer", "click", "--id", &target_id],
-        DEFAULT_TIMEOUT,
-        "click_target_id",
+    let timeout = Duration::from_secs(4);
+    cli.open_app("Calculator", 4_000)?;
+    thread::sleep(Duration::from_millis(40));
+    let baseline = cli.run_json_ok(
+        &["screen", "tokenize", "--active-window"],
+        timeout,
+        "baseline_signature",
     )?;
-    thread::sleep(Duration::from_millis(220));
+    let baseline_sig = element_signature(&baseline)?;
 
-    let verify = retry_json(8, Duration::from_millis(250), || {
-        cli.run_json_ok(
-            &["screen", "tokenize", "--active-window"],
-            DEFAULT_TIMEOUT,
-            "verify_click_by_id",
-        )
-    })?;
-    let _ = request_id(&verify)?;
+    // Step 1: type one digit and verify change.
+    let (_, after_digit_sig) = click_and_wait_signature_change(
+        &cli,
+        "button_7",
+        &baseline_sig,
+        "type_digit_seed",
+        "verify_type_digit_seed",
+    )?;
 
-    if target_digit_id.is_some() {
-        let after_sig = element_signature(&verify)?;
-        if before_sig == after_sig {
-            return Err(format!(
-                "click by id produced no observable tokenize change for id={target_id}"
-            ));
-        }
-    }
+    // Step 2: clear via Esc keypress and verify change.
+    let (_, after_clear1_sig) = press_and_wait_signature_change(
+        &cli,
+        "escape",
+        &after_digit_sig,
+        "clear_first",
+        "verify_clear_first",
+    )?;
+
+    // Step 3: type two digits and verify change.
+    let _ = cli.run_json_ok(
+        &["pointer", "click", "--id", "button_7"],
+        timeout,
+        "type_digit_first",
+    )?;
+    thread::sleep(Duration::from_millis(40));
+    let (_, after_digits_sig) = click_and_wait_signature_change(
+        &cli,
+        "button_8",
+        &after_clear1_sig,
+        "type_digit_second",
+        "verify_type_two_digits",
+    )?;
+
+    // Step 4: clear via Esc keypress again and verify change.
+    let (final_state, _) = press_and_wait_signature_change(
+        &cli,
+        "escape",
+        &after_digits_sig,
+        "clear_second",
+        "verify_clear_second",
+    )?;
+    let _ = request_id(&final_state)?;
+
     Ok(())
 }
 

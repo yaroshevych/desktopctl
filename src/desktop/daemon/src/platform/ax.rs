@@ -148,11 +148,12 @@ mod macos {
                 candidates.push(selected);
             }
         }
+        // Calculator display commonly appears as AXScrollArea with dynamic value in descendants.
+        if role == "AXScrollArea" {
+            collect_descendant_text_candidates(element, 6, &mut candidates);
+        }
 
-        let primary = candidates
-            .into_iter()
-            .map(|s| s.trim().to_string())
-            .find(|s| !s.is_empty());
+        let primary = best_label_candidate(role, candidates);
         if primary.is_some() {
             return primary;
         }
@@ -161,7 +162,7 @@ mod macos {
         // label in child static text instead of the button's own title/value.
         if role == "AXButton" || role == "AXPopUpButton" || role == "AXMenuButton" {
             return element.children().ok().and_then(|children| {
-                children.into_iter().find_map(|child| {
+                children.iter().find_map(|child| {
                     child
                         .title()
                         .ok()
@@ -190,6 +191,98 @@ mod macos {
 
     fn is_text_container_role(role: &str) -> bool {
         matches!(role, "AXTextField" | "AXTextArea" | "AXWebArea")
+    }
+
+    fn best_label_candidate(role: &str, candidates: Vec<String>) -> Option<String> {
+        let mut best: Option<(u8, String)> = None;
+        for raw in candidates {
+            let text = raw.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let score = label_candidate_score(role, &text);
+            match &best {
+                None => best = Some((score, text)),
+                Some((best_score, best_text)) => {
+                    if score > *best_score || (score == *best_score && text.len() > best_text.len())
+                    {
+                        best = Some((score, text));
+                    }
+                }
+            }
+        }
+        best.map(|(_, text)| text)
+    }
+
+    fn label_candidate_score(role: &str, text: &str) -> u8 {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return 0;
+        }
+        if role == "AXScrollArea" {
+            let lower = trimmed.to_lowercase();
+            if lower == "input" || lower == "output" || lower == "calculator" {
+                return 1;
+            }
+            if trimmed.chars().any(|ch| ch.is_ascii_digit()) {
+                return 5;
+            }
+            if trimmed.contains('+')
+                || trimmed.contains('-')
+                || trimmed.contains('*')
+                || trimmed.contains('×')
+                || trimmed.contains('÷')
+                || trimmed.contains('=')
+            {
+                return 4;
+            }
+            return 2;
+        }
+        2
+    }
+
+    fn collect_descendant_text_candidates(element: &AXUIElement, depth: u8, out: &mut Vec<String>) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(children) = element.children() else {
+            return;
+        };
+        for child in children.iter() {
+            push_direct_text_candidates(&child, out);
+            if depth > 1 {
+                collect_descendant_text_candidates(&child, depth - 1, out);
+            }
+        }
+    }
+
+    fn push_direct_text_candidates(element: &AXUIElement, out: &mut Vec<String>) {
+        if let Ok(v) = element.title() {
+            out.push(v.to_string());
+        }
+        if let Ok(v) = element.description() {
+            out.push(v.to_string());
+        }
+        if let Ok(v) = element.label_value() {
+            out.push(v.to_string());
+        }
+        if let Ok(v) = element.value_description() {
+            out.push(v.to_string());
+        }
+        if let Ok(v) = element.placeholder_value() {
+            out.push(v.to_string());
+        }
+        if let Ok(v) = element.help() {
+            out.push(v.to_string());
+        }
+        if let Some(selected) = attribute_text_by_name(element, "AXSelectedText") {
+            out.push(selected);
+        }
+        if let Ok(v) = element.attribute(&AXAttribute::value()) {
+            if let Some(text) = cf_type_text(&v) {
+                out.push(text);
+            }
+        }
     }
 
     fn cf_type_text(value: &CFType) -> Option<String> {

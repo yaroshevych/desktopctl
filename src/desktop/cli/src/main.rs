@@ -756,6 +756,8 @@ fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
             })?;
             if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
                 Ok(Command::KeyEnter)
+            } else if key.eq_ignore_ascii_case("escape") || key.eq_ignore_ascii_case("esc") {
+                Ok(Command::KeyEscape)
             } else {
                 Ok(Command::KeyHotkey { hotkey: key })
             }
@@ -1618,6 +1620,13 @@ mod tests {
             .expect("keyboard type should parse");
         match typed {
             Command::UiType { text } => assert_eq!(text, "hello"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let esc = parse_command(&["keyboard", "press", "escape"].map(str::to_string))
+            .expect("keyboard press escape should parse");
+        match esc {
+            Command::KeyEscape => {}
             other => panic!("unexpected command: {other:?}"),
         }
 

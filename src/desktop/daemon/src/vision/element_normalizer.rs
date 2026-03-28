@@ -32,8 +32,8 @@ impl ElementBuilder {
 
     pub fn text(mut self, text: Option<String>) -> Self {
         self.element.text = text.and_then(|v| {
-            let trimmed = v.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            let cleaned = sanitize_text(&v);
+            (!cleaned.is_empty()).then_some(cleaned)
         });
         self
     }
@@ -72,6 +72,13 @@ pub fn finalize_elements(elements: &mut [TokenizeElement]) {
 
     let mut dedupe_counts: HashMap<String, usize> = HashMap::new();
     for element in elements.iter_mut() {
+        if let Some(text) = element.text.as_mut() {
+            *text = sanitize_text(text);
+            if text.is_empty() {
+                element.text = None;
+            }
+        }
+
         let base_id = element_id_base(element);
         let next_idx = dedupe_counts.get(&base_id).copied().unwrap_or(0) + 1;
         dedupe_counts.insert(base_id.clone(), next_idx);
@@ -83,13 +90,38 @@ pub fn finalize_elements(elements: &mut [TokenizeElement]) {
         if element.source.trim().is_empty() {
             element.source = "unknown".to_string();
         }
-        if let Some(text) = element.text.as_mut() {
-            *text = text.trim().to_string();
-            if text.is_empty() {
-                element.text = None;
-            }
-        }
     }
+}
+
+fn sanitize_text(input: &str) -> String {
+    input
+        .chars()
+        .filter(|&ch| !is_invisible_text_mark(ch))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn is_invisible_text_mark(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}' // zero-width space
+            | '\u{200C}' // zero-width non-joiner
+            | '\u{200D}' // zero-width joiner
+            | '\u{200E}' // left-to-right mark
+            | '\u{200F}' // right-to-left mark
+            | '\u{202A}' // left-to-right embedding
+            | '\u{202B}' // right-to-left embedding
+            | '\u{202C}' // pop directional formatting
+            | '\u{202D}' // left-to-right override
+            | '\u{202E}' // right-to-left override
+            | '\u{2060}' // word joiner
+            | '\u{2066}' // left-to-right isolate
+            | '\u{2067}' // right-to-left isolate
+            | '\u{2068}' // first strong isolate
+            | '\u{2069}' // pop directional isolate
+            | '\u{FEFF}' // byte-order mark / zero-width no-break space
+    )
 }
 
 fn element_id_base(element: &TokenizeElement) -> String {
@@ -227,5 +259,18 @@ mod tests {
         assert_eq!(elements[0].id, "button_7");
         assert_eq!(elements[1].id, "button_7_2");
         assert_eq!(elements[2].id, "button_7_3");
+    }
+
+    #[test]
+    fn finalize_elements_strips_invisible_bidi_marks_from_text() {
+        let mut elements = vec![el(
+            "accessibility_ax:AXScrollArea",
+            "",
+            Some("\u{200E}777,787,878"),
+            None,
+            10.0,
+        )];
+        finalize_elements(&mut elements);
+        assert_eq!(elements[0].text.as_deref(), Some("777,787,878"));
     }
 }

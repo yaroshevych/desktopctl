@@ -26,7 +26,8 @@ pub fn merge_elements(
             continue;
         };
 
-        let (merged_text, filled_from_ocr) = merged_ax_text(&local, elements, ax.text.as_deref());
+        let (merged_text, filled_from_ocr) =
+            merged_ax_text(&ax.role, &local, elements, ax.text.as_deref());
         if filled_from_ocr {
             metrics.ax_text_filled += 1;
         }
@@ -117,14 +118,12 @@ fn drop_ocr_text_inside_ax_region(elements: &mut Vec<TokenizeElement>, ax_bounds
 }
 
 fn merged_ax_text(
+    role: &str,
     ax_bounds: &Bounds,
     elements: &[TokenizeElement],
     ax_text: Option<&str>,
 ) -> (Option<String>, bool) {
-    let primary = ax_text
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string);
+    let primary = ax_text.and_then(|text| normalize_ax_primary_text(role, text));
     if let Some(text) = primary {
         return (Some(text), false);
     }
@@ -161,6 +160,27 @@ fn merged_ax_text(
             .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
     });
     (Some(candidates[0].3.clone()), true)
+}
+
+fn normalize_ax_primary_text(role: &str, text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if is_uninformative_ax_text(role, trimmed) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn is_uninformative_ax_text(role: &str, text: &str) -> bool {
+    if role != "AXScrollArea" {
+        return false;
+    }
+    matches!(
+        text.to_ascii_lowercase().as_str(),
+        "input" | "output" | "calculator"
+    )
 }
 
 fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
@@ -307,5 +327,42 @@ mod tests {
         let only = &elements[0];
         assert_eq!(only.source, "accessibility_ax:AXTextField");
         assert_eq!(only.text.as_deref(), Some("draft"));
+    }
+
+    #[test]
+    fn merge_elements_ignores_generic_scrollarea_label_and_uses_ocr_display() {
+        let mut elements = vec![make_element(
+            "vision_ocr",
+            Some("7777878"),
+            [12.0, 12.0, 100.0, 28.0],
+        )];
+        let ax_elements = vec![AxElement {
+            role: "AXScrollArea".to_string(),
+            text: Some("Input".to_string()),
+            bounds: Bounds {
+                x: 8.0,
+                y: 8.0,
+                width: 120.0,
+                height: 40.0,
+            },
+        }];
+        let coord_map = CoordMap::new(
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 80.0,
+            },
+            200,
+            80,
+        );
+
+        let metrics = merge_elements(&mut elements, &ax_elements, &coord_map);
+        assert_eq!(metrics.ax_seen, 1);
+        assert_eq!(metrics.ax_text_filled, 1);
+        assert_eq!(elements.len(), 1);
+        let only = &elements[0];
+        assert_eq!(only.source, "accessibility_ax:AXScrollArea");
+        assert_eq!(only.text.as_deref(), Some("7777878"));
     }
 }

@@ -94,6 +94,7 @@ pub enum Command {
         hotkey: String,
     },
     KeyEnter,
+    KeyEscape,
     WaitText {
         text: String,
         timeout_ms: u64,
@@ -177,6 +178,7 @@ impl Command {
             Command::UiType { .. } => "type",
             Command::KeyHotkey { .. } => "key_hotkey",
             Command::KeyEnter => "key_enter",
+            Command::KeyEscape => "key_escape",
             Command::WaitText { .. } => "wait_text",
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenTokenize { .. } => "screen_tokenize",

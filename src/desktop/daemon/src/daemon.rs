@@ -341,6 +341,7 @@ fn command_requires_privacy_signal(command: &Command) -> bool {
             | Command::UiType { .. }
             | Command::KeyHotkey { .. }
             | Command::KeyEnter
+            | Command::KeyEscape
     )
 }
 
@@ -526,6 +527,12 @@ fn execute(command: Command) -> Result<Value, AppError> {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             backend.press_enter()?;
+            Ok(json!({}))
+        }
+        Command::KeyEscape => {
+            let backend = new_backend()?;
+            backend.check_accessibility_permission()?;
+            backend.press_escape()?;
             Ok(json!({}))
         }
         Command::ScreenCapture {

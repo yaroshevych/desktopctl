@@ -26,6 +26,13 @@ impl Automation for StubAutomation {
         )))
     }
 
+    fn press_escape(&self) -> Result<(), AppError> {
+        Err(AppError::backend_unavailable(format!(
+            "unsupported platform: {}",
+            std::env::consts::OS
+        )))
+    }
+
     fn type_text(&self, _text: &str) -> Result<(), AppError> {
         Err(AppError::backend_unavailable(format!(
             "unsupported platform: {}",

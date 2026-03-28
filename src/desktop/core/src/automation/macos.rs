@@ -44,6 +44,10 @@ impl Automation for MacosAutomation {
         run_osascript(r#"tell application "System Events" to key code 36"#)
     }
 
+    fn press_escape(&self) -> Result<(), AppError> {
+        run_osascript(r#"tell application "System Events" to key code 53"#)
+    }
+
     fn type_text(&self, text: &str) -> Result<(), AppError> {
         let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
         let script = format!(r#"tell application "System Events" to keystroke "{escaped}""#);
