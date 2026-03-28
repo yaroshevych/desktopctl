@@ -7,7 +7,7 @@ use std::{
 
 use core_graphics::{
     display::CGDisplay,
-    event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton},
+    event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit},
     event_source::{CGEventSource, CGEventSourceStateID},
     geometry::CGPoint,
 };
@@ -70,6 +70,10 @@ impl Automation for MacosAutomation {
         self.left_down(point)?;
         self.left_up(point)
     }
+
+    fn scroll_wheel(&self, dx: i32, dy: i32) -> Result<(), AppError> {
+        post_scroll_event(dx, dy)
+    }
 }
 
 fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppError> {
@@ -96,6 +100,28 @@ fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppErro
 
     event.post(CGEventTapLocation::HID);
     trace_mouse(format!("mouse_event:posted type={:?}", event_type));
+    Ok(())
+}
+
+fn post_scroll_event(dx: i32, dy: i32) -> Result<(), AppError> {
+    trace_mouse(format!("scroll_event:post dx={} dy={}", dx, dy));
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| AppError::backend_unavailable("failed to create CoreGraphics event source"))?;
+
+    // Command semantics: positive `dy` means scroll down (screen-space Y+).
+    // CoreGraphics wheel1 uses positive values for up, so invert `dy`.
+    let vertical = -dy;
+    let horizontal = dx;
+    let event =
+        CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 2, vertical, horizontal, 0)
+            .map_err(|_| AppError::backend_unavailable("failed to create scroll event"))?;
+
+    event.post(CGEventTapLocation::HID);
+    trace_mouse(format!(
+        "scroll_event:posted wheel1(vertical)={} wheel2(horizontal)={}",
+        vertical, horizontal
+    ));
     Ok(())
 }
 

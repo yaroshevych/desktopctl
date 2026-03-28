@@ -335,6 +335,7 @@ fn command_requires_privacy_signal(command: &Command) -> bool {
             | Command::PointerClickText { .. }
             | Command::PointerClickId { .. }
             | Command::PointerClickToken { .. }
+            | Command::PointerScroll { .. }
             | Command::PointerDrag { .. }
             | Command::UiType { .. }
             | Command::KeyHotkey { .. }
@@ -472,6 +473,14 @@ fn execute(command: Command) -> Result<Value, AppError> {
                 "pointer_click:ok x={} y={} absolute={absolute}",
                 point.x, point.y
             ));
+            Ok(json!({}))
+        }
+        Command::PointerScroll { dx, dy } => {
+            trace::log(format!("pointer_scroll:start dx={dx} dy={dy}"));
+            let backend = new_backend()?;
+            backend.check_accessibility_permission()?;
+            backend.scroll_wheel(dx, dy)?;
+            trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
             Ok(json!({}))
         }
         Command::PointerDrag {

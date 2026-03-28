@@ -64,6 +64,9 @@ desktopctl pointer click --text <text>
 desktopctl pointer click --id <element_id>
 desktopctl pointer click --token <n>
 
+# scroll pointer viewport/content by signed deltas (positive dy scrolls down)
+desktopctl pointer scroll <dx> <dy>
+
 # drag pointer between coordinates
 desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
 

@@ -689,6 +689,11 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 hold_ms,
             })
         }
+        "scroll" => {
+            let dx = parse_i32(args.get(1), "dx")?;
+            let dy = parse_i32(args.get(2), "dy")?;
+            Ok(Command::PointerScroll { dx, dy })
+        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -731,6 +736,12 @@ fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
         .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
 }
 
+fn parse_i32(value: Option<&String>, field: &str) -> Result<i32, AppError> {
+    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
+    raw.parse::<i32>()
+        .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
+}
+
 fn usage() -> &'static str {
     "usage:
   desktopctl --json <command...>
@@ -767,6 +778,7 @@ fn usage() -> &'static str {
   desktopctl pointer click --text <text>
   desktopctl pointer click --id <element_id>
   desktopctl pointer click --token <n>
+  desktopctl pointer scroll <dx> <dy>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
   desktopctl keyboard type \"text\"
   desktopctl keyboard press <key-or-hotkey>"
@@ -1534,6 +1546,19 @@ mod tests {
             .expect("pointer click --token should parse");
         match token {
             Command::PointerClickToken { token } => assert_eq!(token, 42),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_scroll() {
+        let command = parse_command(&["pointer", "scroll", "0", "-320"].map(str::to_string))
+            .expect("pointer scroll should parse");
+        match command {
+            Command::PointerScroll { dx, dy } => {
+                assert_eq!(dx, 0);
+                assert_eq!(dy, -320);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

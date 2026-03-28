@@ -76,6 +76,10 @@ pub enum Command {
     PointerClickToken {
         token: u32,
     },
+    PointerScroll {
+        dx: i32,
+        dy: i32,
+    },
     PointerDrag {
         x1: u32,
         y1: u32,
@@ -164,6 +168,7 @@ impl Command {
             Command::PointerClickText { .. } => "pointer_click_text",
             Command::PointerClickId { .. } => "pointer_click_id",
             Command::PointerClickToken { .. } => "pointer_click_token",
+            Command::PointerScroll { .. } => "pointer_scroll",
             Command::PointerDrag { .. } => "pointer_drag",
             Command::UiType { .. } => "type",
             Command::KeyHotkey { .. } => "key_hotkey",
