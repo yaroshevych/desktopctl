@@ -13,7 +13,7 @@ if [[ "${#staged_rust[@]}" -eq 0 ]]; then
   exit 0
 fi
 
-cargo fmt --manifest-path src/desktop/Cargo.toml -- "${staged_rust[@]}"
+cargo fmt --all --manifest-path src/desktop/Cargo.toml
 
 if ! git diff --quiet -- "${staged_rust[@]}"; then
   echo "pre-commit: formatting updated staged Rust files under src/desktop."

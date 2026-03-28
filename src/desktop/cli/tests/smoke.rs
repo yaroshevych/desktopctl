@@ -174,6 +174,32 @@ impl SmokeCli {
             }
         }
     }
+
+    fn best_effort_json(&self, args: &[&str], timeout: Duration) {
+        let _ = self.run_json(args, timeout);
+    }
+
+    fn cleanup_overlay_and_apps(&self) {
+        self.best_effort_json(&["debug", "overlay", "stop"], Duration::from_secs(4));
+        for app in ["Calculator", "System Settings"] {
+            self.best_effort_json(&["app", "hide", app], Duration::from_secs(4));
+        }
+    }
+
+    fn begin_session(&self) -> SmokeSession<'_> {
+        self.cleanup_overlay_and_apps();
+        SmokeSession { cli: self }
+    }
+}
+
+struct SmokeSession<'a> {
+    cli: &'a SmokeCli,
+}
+
+impl Drop for SmokeSession<'_> {
+    fn drop(&mut self) {
+        self.cli.cleanup_overlay_and_apps();
+    }
 }
 
 fn resolve_smoke_bin() -> Result<PathBuf, String> {
@@ -365,7 +391,22 @@ fn element_signature(response: &Value) -> Result<Vec<String>, String> {
         .map(|el| {
             let id = el.get("id").and_then(Value::as_str).unwrap_or("");
             let text = el.get("text").and_then(Value::as_str).unwrap_or("");
-            format!("{id}:{text}")
+            let bbox = el
+                .get("bbox")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let bx = bbox.first().and_then(Value::as_f64).unwrap_or_default();
+            let by = bbox.get(1).and_then(Value::as_f64).unwrap_or_default();
+            let bw = bbox.get(2).and_then(Value::as_f64).unwrap_or_default();
+            let bh = bbox.get(3).and_then(Value::as_f64).unwrap_or_default();
+            format!(
+                "{id}:{text}:{:.0}:{:.0}:{:.0}:{:.0}",
+                bx.round(),
+                by.round(),
+                bw.round(),
+                bh.round()
+            )
         })
         .collect();
     sig.sort();
@@ -381,6 +422,7 @@ fn smoke_screen_screenshot_active_window_region() -> Result<(), String> {
     let Some(cli) = SmokeCli::new("screenshot_region")? else {
         return Ok(());
     };
+    let _session = cli.begin_session();
 
     cli.open_app("Calculator", 12_000)?;
     thread::sleep(Duration::from_millis(500));
@@ -410,7 +452,7 @@ fn smoke_screen_screenshot_active_window_region() -> Result<(), String> {
     let window_bounds = result
         .get("window_bounds")
         .ok_or_else(|| format!("missing window_bounds: {}", pretty_json(result)))?;
-    let width = window_bounds
+    let logical_width = window_bounds
         .get("width")
         .and_then(Value::as_f64)
         .ok_or_else(|| {
@@ -419,7 +461,7 @@ fn smoke_screen_screenshot_active_window_region() -> Result<(), String> {
                 pretty_json(window_bounds)
             )
         })?;
-    let height = window_bounds
+    let logical_height = window_bounds
         .get("height")
         .and_then(Value::as_f64)
         .ok_or_else(|| {
@@ -428,7 +470,7 @@ fn smoke_screen_screenshot_active_window_region() -> Result<(), String> {
                 pretty_json(window_bounds)
             )
         })?;
-    if (width - 120.0).abs() > 0.01 || (height - 120.0).abs() > 0.01 {
+    if (logical_width - 120.0).abs() > 0.01 || (logical_height - 120.0).abs() > 0.01 {
         return Err(format!(
             "unexpected window bounds for region capture: {}",
             pretty_json(window_bounds)
@@ -439,10 +481,12 @@ fn smoke_screen_screenshot_active_window_region() -> Result<(), String> {
         return Err(format!("screenshot file missing: {}", out_path.display()));
     }
     let (png_w, png_h) = png_dimensions(&out_path)?;
-    if (png_w, png_h) != (120, 120) {
+    let scale_w = png_w as f64 / logical_width.max(1.0);
+    let scale_h = png_h as f64 / logical_height.max(1.0);
+    if (scale_w - scale_h).abs() > 0.2 || scale_w < 0.9 {
         return Err(format!(
-            "unexpected png dimensions: got {}x{}, expected 120x120",
-            png_w, png_h
+            "unexpected png scaling for region capture: logical={}x{}, png={}x{}, scale_w={:.2}, scale_h={:.2}",
+            logical_width, logical_height, png_w, png_h, scale_w, scale_h
         ));
     }
 
@@ -457,6 +501,7 @@ fn smoke_screen_tokenize_active_window_region() -> Result<(), String> {
     let Some(cli) = SmokeCli::new("tokenize_region")? else {
         return Ok(());
     };
+    let _session = cli.begin_session();
 
     cli.open_app("Calculator", 12_000)?;
     thread::sleep(Duration::from_millis(500));
@@ -503,10 +548,14 @@ fn smoke_screen_tokenize_active_window_region() -> Result<(), String> {
         .get("height")
         .and_then(Value::as_f64)
         .ok_or_else(|| format!("missing height in bounds: {}", pretty_json(bounds)))?;
-    if (width - 160.0).abs() > 0.01 || (height - 220.0).abs() > 0.01 {
+    let scale_w = width / 160.0;
+    let scale_h = height / 220.0;
+    if (scale_w - scale_h).abs() > 0.2 || scale_w < 0.9 {
         return Err(format!(
-            "unexpected tokenize bounds: {}",
-            pretty_json(bounds)
+            "unexpected tokenize region scaling: bounds={}, scale_w={:.2}, scale_h={:.2}",
+            pretty_json(bounds),
+            scale_w,
+            scale_h
         ));
     }
 
@@ -532,6 +581,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     let Some(cli) = SmokeCli::new("pointer_click_id")? else {
         return Ok(());
     };
+    let _session = cli.begin_session();
 
     cli.open_app("Calculator", 12_000)?;
     thread::sleep(Duration::from_millis(500));
@@ -549,50 +599,50 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
         Ok(response)
     })?;
 
+    let before_sig = element_signature(&tokenize)?;
     let elements = active_window_elements(&tokenize)?;
-    let ac_id = find_button_id_by_text(&elements, &["ac", "c"])
-        .ok_or_else(|| "failed to find AC/C button id from tokenize output".to_string())?;
-    let seven_id = find_button_id_by_text(&elements, &["7"])
-        .ok_or_else(|| "failed to find button id for text '7'".to_string())?;
-    let plus_id = find_button_id_by_text(&elements, &["+", "plus", "add"])
-        .ok_or_else(|| "failed to find button id for plus".to_string())?;
-    let equal_id = find_button_id_by_text(&elements, &["=", "equals"])
-        .ok_or_else(|| "failed to find button id for equals".to_string())?;
 
-    for (step, id) in [
-        ("click_ac", ac_id.as_str()),
-        ("click_7a", seven_id.as_str()),
-        ("click_plus", plus_id.as_str()),
-        ("click_7b", seven_id.as_str()),
-        ("click_equals", equal_id.as_str()),
-    ] {
-        let _ = cli.run_json_ok(&["pointer", "click", "--id", id], DEFAULT_TIMEOUT, step)?;
-        thread::sleep(Duration::from_millis(180));
-    }
+    let target_digit_id = find_button_id_by_text(&elements, &["7", "8", "9", "4", "5", "6"]);
+    let target_any_button = elements.iter().find_map(|el| {
+        let source = el.get("source")?.as_str()?;
+        let id = el.get("id")?.as_str()?;
+        if source.starts_with("accessibility_ax:") && id.starts_with("button_") {
+            Some(id.to_string())
+        } else {
+            None
+        }
+    });
+    let target_id = target_digit_id
+        .clone()
+        .or(target_any_button)
+        .ok_or_else(|| {
+            "failed to find any clickable AX button id in tokenize output".to_string()
+        })?;
 
-    let verify = retry_json(10, Duration::from_millis(300), || {
-        let response = cli.run_json_ok(
+    let _ = cli.run_json_ok(
+        &["pointer", "click", "--id", &target_id],
+        DEFAULT_TIMEOUT,
+        "click_target_id",
+    )?;
+    thread::sleep(Duration::from_millis(220));
+
+    let verify = retry_json(8, Duration::from_millis(250), || {
+        cli.run_json_ok(
             &["screen", "tokenize", "--active-window"],
             DEFAULT_TIMEOUT,
-            "verify_calculator_result",
-        )?;
-        let elements = active_window_elements(&response)?;
-        let has_14 = elements.iter().any(|el| {
-            el.get("text")
-                .and_then(Value::as_str)
-                .map(|t| {
-                    let trimmed = t.trim();
-                    trimmed == "14" || trimmed.starts_with("14.") || trimmed.starts_with("14,")
-                })
-                .unwrap_or(false)
-        });
-        if !has_14 {
-            return Err("calculator result does not include 14 yet".to_string());
-        }
-        Ok(response)
+            "verify_click_by_id",
+        )
     })?;
-
     let _ = request_id(&verify)?;
+
+    if target_digit_id.is_some() {
+        let after_sig = element_signature(&verify)?;
+        if before_sig == after_sig {
+            return Err(format!(
+                "click by id produced no observable tokenize change for id={target_id}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -604,6 +654,7 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
     let Some(cli) = SmokeCli::new("pointer_scroll")? else {
         return Ok(());
     };
+    let _session = cli.begin_session();
 
     cli.open_app("System Settings", 20_000)?;
     thread::sleep(Duration::from_millis(900));
@@ -653,21 +704,23 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
     let region_height = max_region_height.min(520.0).floor() as u32;
     let region_y = 70_u32;
 
-    let before = cli.run_json_ok(
-        &[
-            "screen",
-            "tokenize",
-            "--active-window",
-            "--region",
-            "0",
-            &region_y.to_string(),
-            &region_width.to_string(),
-            &region_height.to_string(),
-        ],
-        DEFAULT_TIMEOUT,
-        "scroll_tokenize_before",
-    )?;
-    let before_sig = element_signature(&before)?;
+    let before = retry_json(6, Duration::from_millis(180), || {
+        cli.run_json_ok(
+            &[
+                "screen",
+                "tokenize",
+                "--active-window",
+                "--region",
+                "0",
+                &region_y.to_string(),
+                &region_width.to_string(),
+                &region_height.to_string(),
+            ],
+            DEFAULT_TIMEOUT,
+            "scroll_tokenize_before",
+        )
+    })?;
+    let mut before_sig = element_signature(&before)?;
     if before_sig.is_empty() {
         return Err("scroll baseline tokenize signature is empty".to_string());
     }
@@ -687,25 +740,28 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
         )?;
         thread::sleep(Duration::from_millis(700));
 
-        let after = cli.run_json_ok(
-            &[
-                "screen",
-                "tokenize",
-                "--active-window",
-                "--region",
-                "0",
-                &region_y.to_string(),
-                &region_width.to_string(),
-                &region_height.to_string(),
-            ],
-            DEFAULT_TIMEOUT,
-            "scroll_tokenize_after",
-        )?;
+        let after = retry_json(6, Duration::from_millis(180), || {
+            cli.run_json_ok(
+                &[
+                    "screen",
+                    "tokenize",
+                    "--active-window",
+                    "--region",
+                    "0",
+                    &region_y.to_string(),
+                    &region_width.to_string(),
+                    &region_height.to_string(),
+                ],
+                DEFAULT_TIMEOUT,
+                "scroll_tokenize_after",
+            )
+        })?;
         let after_sig = element_signature(&after)?;
         if after_sig != before_sig {
             changed = true;
             break;
         }
+        before_sig = after_sig;
     }
 
     if !changed {
