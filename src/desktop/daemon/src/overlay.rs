@@ -901,8 +901,14 @@ fn append_window_rects(
     let anchor_bounds = window.os_bounds.as_ref().unwrap_or(&window.bounds);
     let img_w = image_w.unwrap_or(window.bounds.width).max(1.0);
     let img_h = image_h.unwrap_or(window.bounds.height).max(1.0);
-    let sx = (anchor_bounds.width / img_w).max(0.0001);
-    let sy = (anchor_bounds.height / img_h).max(0.0001);
+    let (sx, sy) = if window.os_bounds.is_some() {
+        (1.0, 1.0)
+    } else {
+        (
+            (anchor_bounds.width / img_w).max(0.0001),
+            (anchor_bounds.height / img_h).max(0.0001),
+        )
+    };
 
     let bordered_boxes: Vec<[f64; 4]> = window
         .elements

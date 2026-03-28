@@ -411,6 +411,23 @@ fn build_window_elements(
         height,
     );
     finalize_elements_stage(&mut elements);
+    if let Some(meta) = window_meta.as_ref() {
+        let coord_map = CoordMap::new(meta.bounds.clone(), width, height);
+        elements = elements
+            .into_iter()
+            .filter_map(|mut element| {
+                let image_bounds = Bounds {
+                    x: element.bbox[0],
+                    y: element.bbox[1],
+                    width: element.bbox[2],
+                    height: element.bbox[3],
+                };
+                let logical = coord_map.image_to_logical_local_bounds_clamped(&image_bounds)?;
+                element.bbox = [logical.x, logical.y, logical.width, logical.height];
+                Some(element)
+            })
+            .collect();
+    }
     trace::log(format!(
         "pipeline:tokenize:ax_metrics seen={} added={} replaced={} dropped_bounds={} text_filled={}",
         ax_metrics.ax_seen,
@@ -633,25 +650,53 @@ pub fn write_tokenize_overlay(
     let mut canvas = base.to_rgba8();
 
     for window in &payload.windows {
-        draw_bounds_outline(&mut canvas, &window.bounds, Rgba([255, 255, 255, 255]), 2);
+        let window_outline = overlay_bounds_to_image_space(
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: window
+                    .os_bounds
+                    .as_ref()
+                    .map(|b| b.width)
+                    .unwrap_or(window.bounds.width),
+                height: window
+                    .os_bounds
+                    .as_ref()
+                    .map(|b| b.height)
+                    .unwrap_or(window.bounds.height),
+            },
+            window,
+            image_meta,
+        );
+        draw_bounds_outline(&mut canvas, &window_outline, Rgba([255, 255, 255, 255]), 2);
         let bordered: Vec<Bounds> = window
             .elements
             .iter()
             .filter(|e| e.has_border.unwrap_or(false))
-            .map(|e| Bounds {
-                x: e.bbox[0],
-                y: e.bbox[1],
-                width: e.bbox[2],
-                height: e.bbox[3],
+            .map(|e| {
+                overlay_bounds_to_image_space(
+                    Bounds {
+                        x: e.bbox[0],
+                        y: e.bbox[1],
+                        width: e.bbox[2],
+                        height: e.bbox[3],
+                    },
+                    window,
+                    image_meta,
+                )
             })
             .collect();
         for element in &window.elements {
-            let bounds = Bounds {
-                x: element.bbox[0],
-                y: element.bbox[1],
-                width: element.bbox[2],
-                height: element.bbox[3],
-            };
+            let bounds = overlay_bounds_to_image_space(
+                Bounds {
+                    x: element.bbox[0],
+                    y: element.bbox[1],
+                    width: element.bbox[2],
+                    height: element.bbox[3],
+                },
+                window,
+                image_meta,
+            );
             if !element.has_border.unwrap_or(false)
                 && (element.kind.is_empty() || element.kind == "text" || element.text.is_some())
                 && bordered
@@ -694,6 +739,24 @@ pub fn write_tokenize_overlay(
             ))
         })?;
     Ok(())
+}
+
+fn overlay_bounds_to_image_space(
+    bounds: Bounds,
+    window: &TokenizeWindow,
+    image_meta: &TokenizeImage,
+) -> Bounds {
+    let Some(os) = window.os_bounds.as_ref() else {
+        return bounds;
+    };
+    let sx = image_meta.width as f64 / os.width.max(1.0);
+    let sy = image_meta.height as f64 / os.height.max(1.0);
+    Bounds {
+        x: bounds.x * sx,
+        y: bounds.y * sy,
+        width: bounds.width * sx,
+        height: bounds.height * sy,
+    }
 }
 
 fn draw_bounds_outline(

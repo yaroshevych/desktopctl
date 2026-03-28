@@ -65,4 +65,37 @@ impl CoordMap {
             mapped.height as u32,
         ))
     }
+
+    pub fn image_to_logical_local_bounds_clamped(&self, bounds: &Bounds) -> Option<Bounds> {
+        if self.image_width == 0 || self.image_height == 0 {
+            return None;
+        }
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return None;
+        }
+        if self.logical_window_bounds.width <= 0.0 || self.logical_window_bounds.height <= 0.0 {
+            return None;
+        }
+
+        let sx = self.logical_window_bounds.width / self.image_width as f64;
+        let sy = self.logical_window_bounds.height / self.image_height as f64;
+
+        let x = (bounds.x * sx).clamp(0.0, self.logical_window_bounds.width);
+        let y = (bounds.y * sy).clamp(0.0, self.logical_window_bounds.height);
+        let right = ((bounds.x + bounds.width) * sx).clamp(0.0, self.logical_window_bounds.width);
+        let bottom =
+            ((bounds.y + bounds.height) * sy).clamp(0.0, self.logical_window_bounds.height);
+        let width = (right - x).max(0.0);
+        let height = (bottom - y).max(0.0);
+        if width <= 0.5 || height <= 0.5 {
+            return None;
+        }
+
+        Some(Bounds {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
 }

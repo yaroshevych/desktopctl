@@ -1464,20 +1464,16 @@ fn tokenize_payload_elements_for_click(
 fn tokenize_element_bbox_to_display(
     bbox: &[f64; 4],
     os_bounds: &desktop_core::protocol::Bounds,
-    image: &desktop_core::protocol::TokenizeImage,
+    _image: &desktop_core::protocol::TokenizeImage,
 ) -> Option<desktop_core::protocol::Bounds> {
-    let image_w = image.width as f64;
-    let image_h = image.height as f64;
-    if image_w <= 0.0 || image_h <= 0.0 {
+    if bbox[2] <= 0.0 || bbox[3] <= 0.0 {
         return None;
     }
-    let sx = os_bounds.width / image_w;
-    let sy = os_bounds.height / image_h;
     Some(desktop_core::protocol::Bounds {
-        x: os_bounds.x + bbox[0] * sx,
-        y: os_bounds.y + bbox[1] * sy,
-        width: bbox[2] * sx,
-        height: bbox[3] * sy,
+        x: os_bounds.x + bbox[0],
+        y: os_bounds.y + bbox[1],
+        width: bbox[2],
+        height: bbox[3],
     })
 }
 
