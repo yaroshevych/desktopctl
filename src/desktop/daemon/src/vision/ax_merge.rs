@@ -1,4 +1,5 @@
 use desktop_core::protocol::{Bounds, TokenizeElement};
+use std::collections::HashMap;
 
 use super::{ax::AxElement, coord_map::CoordMap, element_normalizer::ElementBuilder};
 
@@ -17,6 +18,7 @@ pub fn merge_elements(
     coord_map: &CoordMap,
 ) -> AxMergeMetrics {
     let mut metrics = AxMergeMetrics::default();
+    let mut fallback_id_counts: HashMap<String, usize> = HashMap::new();
 
     for ax in ax_elements {
         metrics.ax_seen += 1;
@@ -28,7 +30,8 @@ pub fn merge_elements(
 
         let (merged_text, filled_from_ocr) =
             merged_ax_text(&ax.role, &local, elements, ax.text.as_deref());
-        let ax_primary_id = primary_id_for_ax(ax);
+        let ax_primary_id =
+            primary_id_for_ax(ax).or_else(|| Some(fallback_id_for_ax(ax, &mut fallback_id_counts)));
         if filled_from_ocr {
             metrics.ax_text_filled += 1;
         }
@@ -105,10 +108,51 @@ pub(crate) fn primary_id_for_ax(ax: &AxElement) -> Option<String> {
     {
         return Some(format!("axid_{identifier}"));
     }
-    ax.ax_path
+    None
+}
+
+fn fallback_id_for_ax(ax: &AxElement, counts: &mut HashMap<String, usize>) -> String {
+    let role = normalize_ax_role_name(&ax.role);
+    let text = ax
+        .text
         .as_deref()
         .and_then(sanitize_ax_id_component)
-        .map(|path| format!("axp_{path}"))
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate_component(&s, 20));
+    let base = match text {
+        Some(label) => format!("{role}_{label}"),
+        None => role.to_string(),
+    };
+    let next = counts
+        .entry(base.clone())
+        .and_modify(|n| *n += 1)
+        .or_insert(1usize);
+    if *next == 1 {
+        base
+    } else {
+        format!("{base}_{next}")
+    }
+}
+
+fn normalize_ax_role_name(role: &str) -> &str {
+    match role {
+        "AXButton" => "button",
+        "AXCheckBox" => "checkbox",
+        "AXRadioButton" => "radiobutton",
+        "AXPopUpButton" => "popup",
+        "AXTextField" => "textfield",
+        "AXTextArea" => "textarea",
+        "AXMenuButton" => "menubutton",
+        _ => "element",
+    }
+}
+
+fn truncate_component(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        value.to_string()
+    } else {
+        value[..max_len].to_string()
+    }
 }
 
 fn sanitize_ax_id_component(raw: &str) -> Option<String> {
@@ -300,7 +344,6 @@ mod tests {
                 height: 80.0,
             },
             ax_identifier: None,
-            ax_path: Some("AXTextArea:0.1".to_string()),
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -350,7 +393,6 @@ mod tests {
                 height: 30.0,
             },
             ax_identifier: None,
-            ax_path: Some("AXTextField:0.2".to_string()),
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -373,7 +415,7 @@ mod tests {
         let only = &elements[0];
         assert_eq!(only.source, "accessibility_ax:AXTextField");
         assert_eq!(only.text.as_deref(), Some("draft"));
-        assert!(only.id.starts_with("axp_"));
+        assert!(only.id.starts_with("textfield"));
     }
 
     #[test]
@@ -393,7 +435,6 @@ mod tests {
                 height: 40.0,
             },
             ax_identifier: None,
-            ax_path: Some("AXScrollArea:0.3".to_string()),
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -427,7 +468,6 @@ mod tests {
                 height: 10.0,
             },
             ax_identifier: Some("SaveButtonMain".to_string()),
-            ax_path: Some("AXButton:0.1.2".to_string()),
         };
         let id = primary_id_for_ax(&ax).expect("id");
         assert_eq!(id, "axid_savebuttonmain");

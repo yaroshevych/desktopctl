@@ -6,7 +6,6 @@ pub struct AxElement {
     pub text: Option<String>,
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
-    pub ax_path: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -55,52 +54,31 @@ mod macos {
             .or_else(|_| app.main_window())
             .map_err(ax_err)?;
         let mut elements = Vec::new();
-        let mut path = Vec::new();
-        collect_elements_recursive(&window, &mut path, &mut elements);
+        collect_elements_recursive(&window, &mut elements);
         Ok(elements)
     }
 
-    fn collect_elements_recursive(
-        element: &AXUIElement,
-        path: &mut Vec<usize>,
-        out: &mut Vec<AxElement>,
-    ) {
+    fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
         if let Some(role) = element.role().ok().map(|v| v.to_string()) {
             if is_interactive_role(&role) {
                 if let Some(bounds) = element_bounds(element) {
                     let text = element_label(element, &role);
                     let ax_identifier = element_identifier(element);
-                    let ax_path = Some(format_ax_path(path, &role));
                     out.push(AxElement {
                         role,
                         text,
                         bounds,
                         ax_identifier,
-                        ax_path,
                     });
                 }
             }
         }
 
         if let Ok(children) = element.children() {
-            for (idx, child) in children.iter().enumerate() {
-                path.push(idx);
-                collect_elements_recursive(&child, path, out);
-                path.pop();
+            for child in children.iter() {
+                collect_elements_recursive(&child, out);
             }
         }
-    }
-
-    fn format_ax_path(path: &[usize], role: &str) -> String {
-        let path_body = if path.is_empty() {
-            "root".to_string()
-        } else {
-            path.iter()
-                .map(|idx| idx.to_string())
-                .collect::<Vec<_>>()
-                .join(".")
-        };
-        format!("{role}:{path_body}")
     }
 
     fn is_interactive_role(role: &str) -> bool {
