@@ -349,19 +349,19 @@ fn execute(command: Command) -> Result<Value, AppError> {
         Command::Ping => Ok(json!({ "message": "pong" })),
         Command::AppHide { name } => {
             trace::log(format!("app_hide:start name={name}"));
-            let state = hide_application(&name)?;
+            let state = platform::apps::hide_application(&name)?;
             trace::log(format!("app_hide:ok name={name} state={state}"));
             Ok(json!({ "app": name, "state": state }))
         }
         Command::AppShow { name } => {
             trace::log(format!("app_show:start name={name}"));
-            show_application(&name)?;
+            platform::apps::show_application(&name)?;
             trace::log(format!("app_show:ok name={name}"));
             Ok(json!({ "app": name, "state": "shown" }))
         }
         Command::AppIsolate { name } => {
             trace::log(format!("app_isolate:start name={name}"));
-            let hidden = isolate_application(&name)?;
+            let hidden = platform::apps::isolate_application(&name)?;
             let _ = wait_for_open_app(&name, 6_000);
             trace::log(format!("app_isolate:ok name={name} hidden={hidden}"));
             Ok(json!({ "app": name, "state": "isolated", "hidden_apps": hidden }))
@@ -388,7 +388,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
             backend.check_accessibility_permission()?;
             let windows = list_windows()?;
             let selected = select_window_candidate(&windows, &title)?;
-            focus_window_candidate(selected)?;
+            platform::apps::focus_window(selected)?;
             Ok(json!({
                 "window": selected.as_json(),
                 "focused": true
@@ -2229,145 +2229,6 @@ fn select_window_candidate<'a>(
     Err(AppError::target_not_found(format!(
         "window \"{query}\" was not found"
     )))
-}
-
-fn focus_window_candidate(window: &WindowInfo) -> Result<(), AppError> {
-    let escaped_app = window.app.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        r#"tell application "System Events"
-set targetPid to {pid}
-set targetIndex to {index}
-repeat with p in (application processes whose background only is false)
-    if (unix id of p) is targetPid then
-        set frontmost of p to true
-        set idx to 0
-        repeat with w in (windows of p)
-            set idx to idx + 1
-            if idx is targetIndex then
-                try
-                    perform action "AXRaise" of w
-                end try
-                exit repeat
-            end if
-        end repeat
-        return "ok"
-    end if
-end repeat
-return ""
-end tell
-tell application "{escaped_app}" to activate"#,
-        pid = window.pid,
-        index = window.index
-    );
-    let output = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::internal(format!(
-            "failed to focus window \"{}\": {stderr}",
-            window.title
-        )));
-    }
-    Ok(())
-}
-
-fn hide_application(name: &str) -> Result<&'static str, AppError> {
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        r#"tell application "System Events"
-if exists process "{escaped}" then
-    set visible of process "{escaped}" to false
-    return "hidden"
-else
-    return "not_running"
-end if
-end tell"#
-    );
-    let output = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::internal(format!(
-            "failed to hide application \"{name}\": {stderr}"
-        )));
-    }
-
-    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if state == "hidden" {
-        Ok("hidden")
-    } else {
-        Ok("not_running")
-    }
-}
-
-fn show_application(name: &str) -> Result<(), AppError> {
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        r#"tell application "System Events"
-if exists process "{escaped}" then
-    set visible of process "{escaped}" to true
-end if
-end tell
-tell application "{escaped}" to activate"#
-    );
-    let output = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::internal(format!(
-            "failed to show application \"{name}\": {stderr}"
-        )));
-    }
-    Ok(())
-}
-
-fn isolate_application(name: &str) -> Result<u32, AppError> {
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        r#"tell application "System Events"
-set targetName to "{escaped}"
-set hiddenCount to 0
-repeat with p in (application processes whose background only is false)
-    set pname to (name of p) as text
-    if pname is not targetName then
-        try
-            if visible of p then
-                set visible of p to false
-                set hiddenCount to hiddenCount + 1
-            end if
-        end try
-    end if
-end repeat
-return hiddenCount as string
-end tell
-tell application "{escaped}" to activate"#
-    );
-    let output = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::internal(format!(
-            "failed to isolate application \"{name}\": {stderr}"
-        )));
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(value.parse::<u32>().unwrap_or(0))
 }
 
 #[cfg(test)]
