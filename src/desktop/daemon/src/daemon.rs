@@ -600,16 +600,26 @@ fn execute_with_context(
             out_path,
             overlay,
             active_window,
+            active_window_id,
             region,
         } => {
             trace::log("execute:screen_capture:start");
             permissions::ensure_screen_recording_permission()?;
+            if active_window_id.is_some() && !active_window {
+                return Err(AppError::invalid_argument(
+                    "active window id requires --active-window",
+                ));
+            }
             let capture_bounds = if active_window {
-                let base = window_target::frontmost_window_bounds().ok_or_else(|| {
-                    AppError::target_not_found(
-                        "frontmost window not found; ensure a standard app window is focused",
-                    )
-                })?;
+                let base = if let Some(reference) = active_window_id.as_deref() {
+                    assert_active_window_id_matches(reference)?.bounds
+                } else {
+                    window_target::frontmost_window_bounds().ok_or_else(|| {
+                        AppError::target_not_found(
+                            "frontmost window not found; ensure a standard app window is focused",
+                        )
+                    })?
+                };
                 Some(resolve_capture_region_bounds(base, region.as_ref())?)
             } else if region.is_some() {
                 let base = window_target::main_display_bounds().ok_or_else(|| {
@@ -661,18 +671,18 @@ fn execute_with_context(
         }
         Command::ScreenTokenize {
             overlay_out_path,
-            window_id,
+            window_query,
             screenshot_path,
             active_window,
-            active_window_ref,
+            active_window_id,
             region,
         } => {
             trace::log("execute:screen_tokenize:start");
             let screenshot_mode = screenshot_path.is_some();
             let payload = if let Some(path_raw) = screenshot_path {
-                if window_id.is_some() {
+                if window_query.is_some() {
                     return Err(AppError::invalid_argument(
-                        "--window cannot be combined with --screenshot for screen tokenize",
+                        "--window-query cannot be combined with --screenshot for screen tokenize",
                     ));
                 }
                 if active_window {
@@ -692,19 +702,19 @@ fn execute_with_context(
                 permissions::ensure_screen_recording_permission()?;
                 let backend = new_backend()?;
                 backend.check_accessibility_permission()?;
-                if active_window_ref.is_some() && !active_window {
+                if active_window_id.is_some() && !active_window {
                     return Err(AppError::invalid_argument(
-                        "active window ref requires --active-window",
+                        "active window id requires --active-window",
                     ));
                 }
                 if active_window {
-                    if window_id.is_some() {
+                    if window_query.is_some() {
                         return Err(AppError::invalid_argument(
-                            "--active-window cannot be combined with --window for screen tokenize",
+                            "--active-window cannot be combined with --window-query for screen tokenize",
                         ));
                     }
-                    let frontmost_window = if let Some(reference) = active_window_ref.as_deref() {
-                        Some(assert_active_window_ref_matches(reference)?)
+                    let frontmost_window = if let Some(reference) = active_window_id.as_deref() {
+                        Some(assert_active_window_id_matches(reference)?)
                     } else {
                         None
                     };
@@ -727,13 +737,13 @@ fn execute_with_context(
                         .map(|window| window.title.clone())
                         .or_else(|| app.clone())
                         .unwrap_or_else(|| "active_window".to_string());
-                    let window_id = frontmost_window
+                    let window_query = frontmost_window
                         .as_ref()
                         .map(|window| window.id.clone())
                         .unwrap_or_else(|| "frontmost:1".to_string());
                     let mut payload =
                         vision::pipeline::tokenize_window(vision::pipeline::TokenizeWindowMeta {
-                            id: window_id,
+                            id: window_query,
                             title,
                             app,
                             bounds,
@@ -744,7 +754,7 @@ fn execute_with_context(
                         first.window_ref = window.window_ref.clone();
                     }
                     payload
-                } else if window_id.is_none() {
+                } else if window_query.is_none() {
                     let overlay_window_bounds = {
                         #[cfg(target_os = "macos")]
                         {
@@ -802,7 +812,7 @@ fn execute_with_context(
                     enrich_window_refs(&mut windows);
                     let target = window_target::resolve_tokenize_window_target(
                         &windows,
-                        window_id.as_deref(),
+                        window_query.as_deref(),
                     )?;
                     let bounds =
                         resolve_tokenize_region_bounds(target.bounds.clone(), region.as_ref())?;
@@ -845,9 +855,11 @@ fn execute_with_context(
                 "execute:screen_tokenize:ok snapshot_id={} elements={}",
                 payload.snapshot_id, element_count
             ));
-            Ok(serde_json::to_value(payload).map_err(|err| {
+            let mut value = serde_json::to_value(payload).map_err(|err| {
                 AppError::internal(format!("failed to encode token payload: {err}"))
-            })?)
+            })?;
+            remap_tokenize_window_id_field(&mut value);
+            Ok(value)
         }
         Command::ScreenFindText { text, all } => {
             permissions::ensure_screen_recording_permission()?;
@@ -905,21 +917,21 @@ fn execute_with_context(
         Command::PointerClickText {
             text,
             active_window,
-            active_window_ref,
+            active_window_id,
         } => click_text_target(
             &text,
             active_window,
-            active_window_ref.as_deref(),
+            active_window_id.as_deref(),
             request_context,
         ),
         Command::PointerClickId {
             id,
             active_window,
-            active_window_ref,
+            active_window_id,
         } => click_element_id_target(
             &id,
             active_window,
-            active_window_ref.as_deref(),
+            active_window_id.as_deref(),
             request_context,
         ),
         Command::PointerClickToken { token } => click_token_target(token),
@@ -1058,13 +1070,13 @@ fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]) {
     }
 }
 
-fn assert_active_window_ref_matches(
+fn assert_active_window_id_matches(
     reference: &str,
 ) -> Result<platform::windowing::WindowInfo, AppError> {
     let trimmed = reference.trim();
     if trimmed.is_empty() {
         return Err(AppError::invalid_argument(
-            "active window ref must not be empty",
+            "active window id must not be empty",
         ));
     }
     let mut windows = window_target::list_frontmost_app_windows()?;
@@ -1073,10 +1085,10 @@ fn assert_active_window_ref_matches(
     let active_ref = active
         .window_ref
         .clone()
-        .ok_or_else(|| AppError::target_not_found("active window reference is unavailable"))?;
+        .ok_or_else(|| AppError::target_not_found("active window id is unavailable"))?;
     if active_ref != trimmed {
         return Err(AppError::target_not_found(format!(
-            "active window does not match requested ref \"{trimmed}\""
+            "active window does not match requested id \"{trimmed}\""
         )));
     }
     Ok(active)
@@ -1170,20 +1182,39 @@ fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::Toke
     }
 }
 
+fn remap_tokenize_window_id_field(value: &mut Value) {
+    let Some(windows) = value.get_mut("windows").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for window in windows {
+        let Some(object) = window.as_object_mut() else {
+            continue;
+        };
+        match object.remove("window_ref") {
+            Some(Value::String(ref_id)) if !ref_id.trim().is_empty() => {
+                object.insert("id".to_string(), Value::String(ref_id));
+            }
+            _ => {
+                object.remove("id");
+            }
+        }
+    }
+}
+
 fn click_text_target(
     query: &str,
     active_window: bool,
-    active_window_ref: Option<&str>,
+    active_window_id: Option<&str>,
     request_context: &RequestContext,
 ) -> Result<Value, AppError> {
-    if active_window_ref.is_some() && !active_window {
+    if active_window_id.is_some() && !active_window {
         return Err(AppError::invalid_argument(
-            "active window ref requires --active-window",
+            "active window id requires --active-window",
         ));
     }
     if active_window {
-        if let Some(reference) = active_window_ref {
-            assert_active_window_ref_matches(reference)?;
+        if let Some(reference) = active_window_id {
+            assert_active_window_id_matches(reference)?;
         }
         if let Some(result) = try_click_text_active_window_ax(query)? {
             return Ok(result);
@@ -1363,7 +1394,7 @@ struct TokenizeClickElementCandidate {
 fn click_element_id_target(
     id: &str,
     active_window: bool,
-    active_window_ref: Option<&str>,
+    active_window_id: Option<&str>,
     request_context: &RequestContext,
 ) -> Result<Value, AppError> {
     if !active_window {
@@ -1371,8 +1402,8 @@ fn click_element_id_target(
             "pointer click --id requires --active-window",
         ));
     }
-    if let Some(reference) = active_window_ref {
-        assert_active_window_ref_matches(reference)?;
+    if let Some(reference) = active_window_id {
+        assert_active_window_id_matches(reference)?;
     }
     permissions::ensure_screen_recording_permission()?;
     let needle = id.trim();

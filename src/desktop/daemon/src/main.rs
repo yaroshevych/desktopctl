@@ -330,10 +330,10 @@ fn start_overlay_live_loop() {
                 request_id,
                 Command::ScreenTokenize {
                     overlay_out_path: None,
-                    window_id: None,
+                    window_query: None,
                     screenshot_path: None,
                     active_window: false,
-                    active_window_ref: None,
+                    active_window_id: None,
                     region: None,
                 },
             );

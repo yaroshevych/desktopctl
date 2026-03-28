@@ -361,6 +361,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             let mut out_path: Option<String> = None;
             let mut overlay = false;
             let mut active_window = false;
+            let mut active_window_id: Option<String> = None;
             let mut region: Option<desktop_core::protocol::Bounds> = None;
             let mut i = 1;
             while i < args.len() {
@@ -380,6 +381,18 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     }
                     "--active-window" => {
                         active_window = true;
+                        if let Some(value) = args.get(i + 1) {
+                            if !value.starts_with("--") {
+                                if value.trim().is_empty() {
+                                    return Err(AppError::invalid_argument(
+                                        "active window id must not be empty",
+                                    ));
+                                }
+                                active_window_id = Some(value.clone());
+                                i += 2;
+                                continue;
+                            }
+                        }
                         i += 1;
                     }
                     "--region" => {
@@ -411,15 +424,16 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                 out_path,
                 overlay,
                 active_window,
+                active_window_id,
                 region,
             })
         }
         "tokenize" => {
             let mut overlay_out_path: Option<String> = None;
-            let mut window_id: Option<String> = None;
+            let mut window_query: Option<String> = None;
             let mut screenshot_path: Option<String> = None;
             let mut active_window = false;
-            let mut active_window_ref: Option<String> = None;
+            let mut active_window_id: Option<String> = None;
             let mut region: Option<desktop_core::protocol::Bounds> = None;
             let mut i = 1;
             while i < args.len() {
@@ -436,22 +450,24 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                         overlay_out_path = Some(path.clone());
                         i += 2;
                     }
-                    "--window" => {
+                    "--window-query" => {
                         let id = args.get(i + 1).ok_or_else(|| {
                             AppError::invalid_argument(
-                                "missing value for --window: desktopctl screen tokenize [--json] [--overlay <path>] [--window <id>] [--screenshot <path>]",
+                                "missing value for --window-query: desktopctl screen tokenize [--json] [--overlay <path>] [--window-query <text>] [--screenshot <path>]",
                             )
                         })?;
                         if id.trim().is_empty() {
-                            return Err(AppError::invalid_argument("window id must not be empty"));
+                            return Err(AppError::invalid_argument(
+                                "window query must not be empty",
+                            ));
                         }
-                        window_id = Some(id.clone());
+                        window_query = Some(id.clone());
                         i += 2;
                     }
                     "--screenshot" => {
                         let path = args.get(i + 1).ok_or_else(|| {
                             AppError::invalid_argument(
-                                "missing value for --screenshot: desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>]",
+                                "missing value for --screenshot: desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>]",
                             )
                         })?;
                         screenshot_path = Some(path.clone());
@@ -463,10 +479,10 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                             if !value.starts_with("--") {
                                 if value.trim().is_empty() {
                                     return Err(AppError::invalid_argument(
-                                        "active window ref must not be empty",
+                                        "active window id must not be empty",
                                     ));
                                 }
-                                active_window_ref = Some(value.clone());
+                                active_window_id = Some(value.clone());
                                 i += 2;
                                 continue;
                             }
@@ -498,14 +514,14 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     }
                 }
             }
-            if window_id.is_some() && screenshot_path.is_some() {
+            if window_query.is_some() && screenshot_path.is_some() {
                 return Err(AppError::invalid_argument(
-                    "--window cannot be combined with --screenshot for screen tokenize",
+                    "--window-query cannot be combined with --screenshot for screen tokenize",
                 ));
             }
-            if active_window && window_id.is_some() {
+            if active_window && window_query.is_some() {
                 return Err(AppError::invalid_argument(
-                    "--active-window cannot be combined with --window for screen tokenize",
+                    "--active-window cannot be combined with --window-query for screen tokenize",
                 ));
             }
             if active_window && screenshot_path.is_some() {
@@ -513,17 +529,17 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--active-window cannot be combined with --screenshot for screen tokenize",
                 ));
             }
-            if active_window_ref.is_some() && !active_window {
+            if active_window_id.is_some() && !active_window {
                 return Err(AppError::invalid_argument(
-                    "active window ref requires --active-window",
+                    "active window id requires --active-window",
                 ));
             }
             Ok(Command::ScreenTokenize {
                 overlay_out_path,
-                window_id,
+                window_query,
                 screenshot_path,
                 active_window,
-                active_window_ref,
+                active_window_id,
                 region,
             })
         }
@@ -682,11 +698,11 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
             if args.len() >= 2 && args[1] == "--text" {
                 let text = args.get(2).cloned().ok_or_else(|| {
                     AppError::invalid_argument(
-                        "usage: desktopctl pointer click --text <text> [--active-window [<uuid>]]",
+                        "usage: desktopctl pointer click --text <text> [--active-window [<id>]]",
                     )
                 })?;
                 let mut active_window = false;
-                let mut active_window_ref: Option<String> = None;
+                let mut active_window_id: Option<String> = None;
                 let mut i = 3usize;
                 while i < args.len() {
                     match args[i].as_str() {
@@ -696,10 +712,10 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                                 if !value.starts_with("--") {
                                     if value.trim().is_empty() {
                                         return Err(AppError::invalid_argument(
-                                            "active window ref must not be empty",
+                                            "active window id must not be empty",
                                         ));
                                     }
-                                    active_window_ref = Some(value.clone());
+                                    active_window_id = Some(value.clone());
                                     i += 2;
                                     continue;
                                 }
@@ -716,16 +732,16 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 Ok(Command::PointerClickText {
                     text,
                     active_window,
-                    active_window_ref,
+                    active_window_id,
                 })
             } else if args.len() >= 2 && args[1] == "--id" {
                 let id = args.get(2).cloned().ok_or_else(|| {
                     AppError::invalid_argument(
-                        "usage: desktopctl pointer click --id <element_id> --active-window [<uuid>]",
+                        "usage: desktopctl pointer click --id <element_id> --active-window [<id>]",
                     )
                 })?;
                 let mut active_window = false;
-                let mut active_window_ref: Option<String> = None;
+                let mut active_window_id: Option<String> = None;
                 let mut i = 3usize;
                 while i < args.len() {
                     match args[i].as_str() {
@@ -735,10 +751,10 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                                 if !value.starts_with("--") {
                                     if value.trim().is_empty() {
                                         return Err(AppError::invalid_argument(
-                                            "active window ref must not be empty",
+                                            "active window id must not be empty",
                                         ));
                                     }
-                                    active_window_ref = Some(value.clone());
+                                    active_window_id = Some(value.clone());
                                     i += 2;
                                     continue;
                                 }
@@ -760,7 +776,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 Ok(Command::PointerClickId {
                     id,
                     active_window,
-                    active_window_ref,
+                    active_window_id,
                 })
             } else if args.len() >= 2 && args[1] == "--token" {
                 let token = parse_u32(args.get(2), "token")?;
@@ -874,11 +890,11 @@ fn usage() -> &'static str {
   desktopctl window list [--json]
   desktopctl window bounds --title <text> [--json]
   desktopctl window focus --title <text>
-  desktopctl screen screenshot [--out <path>] [--overlay] [--active-window] [--region <x> <y> <width> <height>]
+  desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
     note: --region is relative to the selected active-window/display target
-  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<uuid>]] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
-    note: --window cannot be combined with --screenshot
-    note: --active-window cannot be combined with --window or --screenshot
+  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
+    note: --window-query cannot be combined with --screenshot
+    note: --active-window cannot be combined with --window-query or --screenshot
     note: --region is relative to the selected window/screenshot target
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
@@ -899,8 +915,8 @@ fn usage() -> &'static str {
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
   desktopctl pointer click [--absolute] <x> <y>
-  desktopctl pointer click --text <text> [--active-window [<uuid>]]
-  desktopctl pointer click --id <element_id> --active-window [<uuid>]
+  desktopctl pointer click --text <text> [--active-window [<id>]]
+  desktopctl pointer click --id <element_id> --active-window [<id>]
   desktopctl pointer click --token <n>
   desktopctl pointer scroll <dx> <dy>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
@@ -1372,12 +1388,39 @@ mod tests {
                 out_path,
                 overlay,
                 active_window,
+                active_window_id,
                 region,
             } => {
                 assert_eq!(out_path.as_deref(), Some("/tmp/cap.png"));
                 assert!(overlay);
                 assert!(active_window);
+                assert!(active_window_id.is_none());
                 assert!(region.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_screenshot_with_active_window_id() {
+        let args = vec![
+            "screen".to_string(),
+            "screenshot".to_string(),
+            "--active-window".to_string(),
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen screenshot with active-window id");
+        match command {
+            Command::ScreenCapture {
+                active_window,
+                active_window_id,
+                ..
+            } => {
+                assert!(active_window);
+                assert_eq!(
+                    active_window_id.as_deref(),
+                    Some("550e8400-e29b-41d4-a716-446655440000")
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1435,17 +1478,17 @@ mod tests {
         match command {
             Command::ScreenTokenize {
                 overlay_out_path,
-                window_id,
+                window_query,
                 screenshot_path,
                 active_window,
-                active_window_ref,
+                active_window_id,
                 region,
             } => {
                 assert_eq!(overlay_out_path.as_deref(), Some("/tmp/tokens.overlay.png"));
-                assert!(window_id.is_none());
+                assert!(window_query.is_none());
                 assert!(screenshot_path.is_none());
                 assert!(!active_window);
-                assert!(active_window_ref.is_none());
+                assert!(active_window_id.is_none());
                 assert!(region.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1457,24 +1500,24 @@ mod tests {
         let args = vec![
             "screen".to_string(),
             "tokenize".to_string(),
-            "--window".to_string(),
+            "--window-query".to_string(),
             "777:3".to_string(),
         ];
         let command = parse_command(&args).expect("screen tokenize should parse");
         match command {
             Command::ScreenTokenize {
                 overlay_out_path,
-                window_id,
+                window_query,
                 screenshot_path,
                 active_window,
-                active_window_ref,
+                active_window_id,
                 region,
             } => {
                 assert!(overlay_out_path.is_none());
-                assert_eq!(window_id.as_deref(), Some("777:3"));
+                assert_eq!(window_query.as_deref(), Some("777:3"));
                 assert!(screenshot_path.is_none());
                 assert!(!active_window);
-                assert!(active_window_ref.is_none());
+                assert!(active_window_id.is_none());
                 assert!(region.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1482,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_screen_tokenize_with_active_window_ref() {
+    fn parses_screen_tokenize_with_active_window_id() {
         let args = vec![
             "screen".to_string(),
             "tokenize".to_string(),
@@ -1490,22 +1533,22 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000".to_string(),
         ];
         let command =
-            parse_command(&args).expect("screen tokenize --active-window <uuid> should parse");
+            parse_command(&args).expect("screen tokenize --active-window <id> should parse");
         match command {
             Command::ScreenTokenize {
                 active_window,
-                active_window_ref,
-                window_id,
+                active_window_id,
+                window_query,
                 screenshot_path,
                 region,
                 overlay_out_path,
             } => {
                 assert!(active_window);
                 assert_eq!(
-                    active_window_ref.as_deref(),
+                    active_window_id.as_deref(),
                     Some("550e8400-e29b-41d4-a716-446655440000")
                 );
-                assert!(window_id.is_none());
+                assert!(window_query.is_none());
                 assert!(screenshot_path.is_none());
                 assert!(region.is_none());
                 assert!(overlay_out_path.is_none());
@@ -1525,17 +1568,17 @@ mod tests {
         match command {
             Command::ScreenTokenize {
                 overlay_out_path,
-                window_id,
+                window_query,
                 screenshot_path,
                 active_window,
-                active_window_ref,
+                active_window_id,
                 region,
             } => {
                 assert!(overlay_out_path.is_none());
-                assert!(window_id.is_none());
+                assert!(window_query.is_none());
                 assert!(screenshot_path.is_none());
                 assert!(active_window);
-                assert!(active_window_ref.is_none());
+                assert!(active_window_id.is_none());
                 assert!(region.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1587,7 +1630,7 @@ mod tests {
         let args = vec![
             "screen".to_string(),
             "tokenize".to_string(),
-            "--window".to_string(),
+            "--window-query".to_string(),
             "123:1".to_string(),
             "--screenshot".to_string(),
             "/tmp/sample.png".to_string(),
@@ -1602,7 +1645,7 @@ mod tests {
             "screen".to_string(),
             "tokenize".to_string(),
             "--active-window".to_string(),
-            "--window".to_string(),
+            "--window-query".to_string(),
             "123:1".to_string(),
         ];
         let err = parse_command(&args).expect_err("must reject incompatible flags");
@@ -1713,11 +1756,11 @@ mod tests {
             Command::PointerClickText {
                 text,
                 active_window,
-                active_window_ref,
+                active_window_id,
             } => {
                 assert_eq!(text, "DesktopCtl");
                 assert!(active_window);
-                assert!(active_window_ref.is_none());
+                assert!(active_window_id.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1737,11 +1780,11 @@ mod tests {
             Command::PointerClickId {
                 id,
                 active_window,
-                active_window_ref,
+                active_window_id,
             } => {
                 assert_eq!(id, "button_0018");
                 assert!(active_window);
-                assert!(active_window_ref.is_none());
+                assert!(active_window_id.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1761,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_pointer_click_id_with_active_window_ref() {
+    fn parses_pointer_click_id_with_active_window_id() {
         let args = vec![
             "pointer".to_string(),
             "click".to_string(),
@@ -1771,17 +1814,17 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000".to_string(),
         ];
         let command =
-            parse_command(&args).expect("pointer click --id with active window ref should parse");
+            parse_command(&args).expect("pointer click --id with active window id should parse");
         match command {
             Command::PointerClickId {
                 id,
                 active_window,
-                active_window_ref,
+                active_window_id,
             } => {
                 assert_eq!(id, "axid_nine");
-                assert!(!active_window);
+                assert!(active_window);
                 assert_eq!(
-                    active_window_ref.as_deref(),
+                    active_window_id.as_deref(),
                     Some("550e8400-e29b-41d4-a716-446655440000")
                 );
             }

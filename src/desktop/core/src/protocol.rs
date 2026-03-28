@@ -72,14 +72,14 @@ pub enum Command {
         #[serde(default)]
         active_window: bool,
         #[serde(default)]
-        active_window_ref: Option<String>,
+        active_window_id: Option<String>,
     },
     PointerClickId {
         id: String,
         #[serde(default)]
         active_window: bool,
         #[serde(default)]
-        active_window_ref: Option<String>,
+        active_window_id: Option<String>,
     },
     PointerClickToken {
         token: u32,
@@ -116,19 +116,21 @@ pub enum Command {
         #[serde(default)]
         active_window: bool,
         #[serde(default)]
+        active_window_id: Option<String>,
+        #[serde(default)]
         region: Option<Bounds>,
     },
     ScreenTokenize {
         #[serde(default)]
         overlay_out_path: Option<String>,
         #[serde(default)]
-        window_id: Option<String>,
+        window_query: Option<String>,
         #[serde(default)]
         screenshot_path: Option<String>,
         #[serde(default)]
         active_window: bool,
         #[serde(default)]
-        active_window_ref: Option<String>,
+        active_window_id: Option<String>,
         #[serde(default)]
         region: Option<Bounds>,
     },

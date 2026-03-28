@@ -369,20 +369,15 @@ fn active_window(tokenize_response: &Value) -> Result<Value, String> {
         .ok_or_else(|| format!("tokenize returned no windows: {}", pretty_json(result)))
 }
 
-fn active_window_ref(tokenize_response: &Value) -> Result<String, String> {
+fn active_window_id(tokenize_response: &Value) -> Result<String, String> {
     let window = active_window(tokenize_response)?;
     window
-        .get("window_ref")
+        .get("id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
-        .ok_or_else(|| {
-            format!(
-                "tokenize window missing window_ref: {}",
-                pretty_json(&window)
-            )
-        })
+        .ok_or_else(|| format!("tokenize window missing id: {}", pretty_json(&window)))
 }
 
 fn find_element_id_by_text(tokenize_response: &Value, text: &str) -> Result<String, String> {
@@ -428,7 +423,7 @@ fn text_signature(response: &Value) -> Result<Vec<String>, String> {
 fn click_and_wait_signature_change(
     cli: &SmokeCli,
     button_id: &str,
-    active_window_ref: &str,
+    active_window_id: &str,
     previous_signature: &[String],
     click_step: &str,
     verify_step: &str,
@@ -441,7 +436,7 @@ fn click_and_wait_signature_change(
             "--id",
             button_id,
             "--active-window",
-            active_window_ref,
+            active_window_id,
         ],
         timeout,
         click_step,
@@ -449,7 +444,7 @@ fn click_and_wait_signature_change(
     let mut last_err = String::new();
     for _ in 0..3 {
         let response = cli.run_json_ok(
-            &["screen", "tokenize", "--active-window", active_window_ref],
+            &["screen", "tokenize", "--active-window", active_window_id],
             timeout,
             verify_step,
         )?;
@@ -467,7 +462,7 @@ fn click_and_wait_signature_change(
 fn press_and_wait_signature_change(
     cli: &SmokeCli,
     key: &str,
-    active_window_ref: &str,
+    active_window_id: &str,
     previous_signature: &[String],
     press_step: &str,
     verify_step: &str,
@@ -477,7 +472,7 @@ fn press_and_wait_signature_change(
     let mut last_err = String::new();
     for _ in 0..3 {
         let response = cli.run_json_ok(
-            &["screen", "tokenize", "--active-window", active_window_ref],
+            &["screen", "tokenize", "--active-window", active_window_id],
             timeout,
             verify_step,
         )?;
@@ -699,7 +694,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
         timeout,
         "baseline_signature",
     )?;
-    let active_window_ref = active_window_ref(&baseline)?;
+    let active_window_id = active_window_id(&baseline)?;
     let seven_id =
         find_element_id_by_text(&baseline, "7").unwrap_or_else(|_| "axid_seven".to_string());
     let eight_id =
@@ -725,7 +720,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     let (_, after_digit_sig) = click_and_wait_signature_change(
         &cli,
         &seven_id,
-        &active_window_ref,
+        &active_window_id,
         &baseline_sig,
         "type_digit_seed",
         "verify_type_digit_seed",
@@ -735,7 +730,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     let (_, after_clear1_sig) = press_and_wait_signature_change(
         &cli,
         "escape",
-        &active_window_ref,
+        &active_window_id,
         &after_digit_sig,
         "clear_first",
         "verify_clear_first",
@@ -749,7 +744,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
             "--id",
             &seven_id,
             "--active-window",
-            &active_window_ref,
+            &active_window_id,
         ],
         timeout,
         "type_digit_first",
@@ -758,7 +753,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     let (_, after_digits_sig) = click_and_wait_signature_change(
         &cli,
         &eight_id,
-        &active_window_ref,
+        &active_window_id,
         &after_clear1_sig,
         "type_digit_second",
         "verify_type_two_digits",
@@ -768,7 +763,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     let (final_state, _) = press_and_wait_signature_change(
         &cli,
         "escape",
-        &active_window_ref,
+        &active_window_id,
         &after_digits_sig,
         "clear_second",
         "verify_clear_second",
