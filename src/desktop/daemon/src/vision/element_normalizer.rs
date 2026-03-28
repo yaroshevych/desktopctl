@@ -1,6 +1,11 @@
 use desktop_core::protocol::{Bounds, TokenizeElement};
 use std::collections::HashMap;
 
+const MAX_ELEMENT_TEXT_CHARS: usize = 8192;
+const MAX_ELEMENT_SLUG_CHARS: usize = 48;
+const MAX_ELEMENT_ID_CHARS: usize = 72;
+const POSITIONAL_ID_MARKER: &str = "__ord__";
+
 pub struct ElementBuilder {
     element: TokenizeElement,
 }
@@ -14,6 +19,7 @@ impl ElementBuilder {
                 bbox: [0.0, 0.0, 0.0, 0.0],
                 has_border: None,
                 text: None,
+                text_truncated: None,
                 confidence: None,
                 source: String::new(),
             },
@@ -25,16 +31,31 @@ impl ElementBuilder {
         self
     }
 
+    pub fn id(mut self, id: Option<String>) -> Self {
+        self.element.id = id.unwrap_or_default();
+        self
+    }
+
     pub fn kind(mut self, kind: impl Into<String>) -> Self {
         self.element.kind = kind.into();
         self
     }
 
     pub fn text(mut self, text: Option<String>) -> Self {
-        self.element.text = text.and_then(|v| {
-            let cleaned = sanitize_text(&v);
-            (!cleaned.is_empty()).then_some(cleaned)
-        });
+        match text {
+            Some(v) => {
+                let (cleaned, truncated) = sanitize_text(&v);
+                self.element.text_truncated = truncated.then_some(true);
+                self.element.text = (!cleaned.is_empty()).then_some(cleaned);
+                if self.element.text.is_none() {
+                    self.element.text_truncated = None;
+                }
+            }
+            None => {
+                self.element.text = None;
+                self.element.text_truncated = None;
+            }
+        }
         self
     }
 
@@ -73,33 +94,66 @@ pub fn finalize_elements(elements: &mut [TokenizeElement]) {
     let mut dedupe_counts: HashMap<String, usize> = HashMap::new();
     for element in elements.iter_mut() {
         if let Some(text) = element.text.as_mut() {
-            *text = sanitize_text(text);
+            let (sanitized, truncated) = sanitize_text(text);
+            *text = sanitized;
             if text.is_empty() {
                 element.text = None;
+                element.text_truncated = None;
+            } else {
+                let already = element.text_truncated == Some(true);
+                element.text_truncated = (already || truncated).then_some(true);
             }
         }
 
         let base_id = element_id_base(element);
-        let next_idx = dedupe_counts.get(&base_id).copied().unwrap_or(0) + 1;
-        dedupe_counts.insert(base_id.clone(), next_idx);
-        element.id = if next_idx == 1 {
+        let base_id = if element.id.trim().is_empty() {
             base_id
         } else {
-            format!("{base_id}_{next_idx}")
+            normalize_existing_id(&element.id).unwrap_or(base_id)
         };
+        let next_idx = dedupe_counts.get(&base_id).copied().unwrap_or(0) + 1;
+        dedupe_counts.insert(base_id.clone(), next_idx);
+        element.id = deduped_id(&base_id, next_idx);
         if element.source.trim().is_empty() {
             element.source = "unknown".to_string();
         }
     }
 }
 
-fn sanitize_text(input: &str) -> String {
-    input
+fn sanitize_text(input: &str) -> (String, bool) {
+    let stripped = input
         .chars()
         .filter(|&ch| !is_invisible_text_mark(ch))
-        .collect::<String>()
-        .trim()
-        .to_string()
+        .collect::<String>();
+    let normalized_newlines = stripped
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\u{2028}', "\n")
+        .replace('\u{2029}', "\n");
+    let unescaped = normalize_escaped_newlines(&normalized_newlines);
+    let compact = if unescaped.contains('\n') {
+        unescaped
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        unescaped.trim().to_string()
+    };
+    let cleaned_len = compact.chars().count();
+    let truncated = cleaned_len > MAX_ELEMENT_TEXT_CHARS;
+    (truncate_chars(&compact, MAX_ELEMENT_TEXT_CHARS), truncated)
+}
+
+fn normalize_escaped_newlines(input: &str) -> String {
+    if !(input.contains("\\n") || input.contains("\\r")) {
+        return input.to_string();
+    }
+    input
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
 }
 
 fn is_invisible_text_mark(ch: char) -> bool {
@@ -126,12 +180,10 @@ fn is_invisible_text_mark(ch: char) -> bool {
 
 fn element_id_base(element: &TokenizeElement) -> String {
     let prefix = element_kind_prefix(element);
-    let suffix = element
-        .text
-        .as_deref()
-        .and_then(element_text_slug)
-        .unwrap_or_else(|| "1".to_string());
-    format!("{prefix}_{suffix}")
+    if let Some(suffix) = element_stable_text_suffix(element) {
+        return truncate_id_to_limit(&format!("{prefix}_{suffix}"), MAX_ELEMENT_ID_CHARS);
+    }
+    format!("{prefix}_{POSITIONAL_ID_MARKER}")
 }
 
 fn element_kind_prefix(element: &TokenizeElement) -> &'static str {
@@ -192,6 +244,9 @@ fn element_text_slug(text: &str) -> Option<String> {
     let mut out = String::new();
     let mut prev_is_sep = false;
     for ch in normalized.chars() {
+        if out.len() >= MAX_ELEMENT_SLUG_CHARS {
+            break;
+        }
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_lowercase());
             prev_is_sep = false;
@@ -207,7 +262,112 @@ fn element_text_slug(text: &str) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed)
+        Some(truncate_chars(&trimmed, MAX_ELEMENT_SLUG_CHARS))
+    }
+}
+
+fn element_stable_text_suffix(element: &TokenizeElement) -> Option<String> {
+    let text = element.text.as_deref()?;
+    if !can_use_text_for_id(element, text) {
+        return None;
+    }
+    element_text_slug(text)
+}
+
+fn can_use_text_for_id(element: &TokenizeElement, text: &str) -> bool {
+    if !is_control_like_element(element) {
+        return false;
+    }
+    is_stable_id_text(text)
+}
+
+fn is_control_like_element(element: &TokenizeElement) -> bool {
+    if element.has_border == Some(true) {
+        return true;
+    }
+    match element.source.strip_prefix("accessibility_ax:") {
+        Some("AXButton" | "AXPopUpButton" | "AXMenuButton" | "AXCheckBox" | "AXRadioButton") => {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_stable_id_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.chars().count() > 24 {
+        return false;
+    }
+    if trimmed.split_whitespace().count() > 4 {
+        return false;
+    }
+    trimmed.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                ' ' | '_' | '-' | '+' | '*' | '/' | '=' | '.' | ',' | '%' | '−' | '×' | '÷'
+            )
+    })
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect::<String>()
+}
+
+fn truncate_id_to_limit(input: &str, max_chars: usize) -> String {
+    let mut out = truncate_chars(input, max_chars);
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "element_1".to_string()
+    } else {
+        out
+    }
+}
+
+fn deduped_id(base_id: &str, next_idx: usize) -> String {
+    let positional_suffix = format!("_{POSITIONAL_ID_MARKER}");
+    if let Some(prefix) = base_id
+        .strip_suffix(&positional_suffix)
+        .or_else(|| base_id.strip_suffix("___ord"))
+    {
+        return truncate_id_to_limit(&format!("{prefix}_{next_idx}"), MAX_ELEMENT_ID_CHARS);
+    }
+    if next_idx == 1 {
+        return truncate_id_to_limit(base_id, MAX_ELEMENT_ID_CHARS);
+    }
+    let suffix = format!("_{next_idx}");
+    let suffix_len = suffix.chars().count();
+    let base_budget = MAX_ELEMENT_ID_CHARS.saturating_sub(suffix_len);
+    let truncated_base = truncate_id_to_limit(base_id, base_budget.max(1));
+    truncate_id_to_limit(&format!("{truncated_base}{suffix}"), MAX_ELEMENT_ID_CHARS)
+}
+
+fn normalize_existing_id(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut prev_sep = false;
+    for ch in raw.trim().chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_sep = false;
+        } else if !prev_sep {
+            out.push('_');
+            prev_sep = true;
+        }
+        if out.chars().count() >= MAX_ELEMENT_ID_CHARS {
+            break;
+        }
+    }
+    let normalized = out.trim_matches('_').to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
     }
 }
 
@@ -228,6 +388,7 @@ mod tests {
             bbox: [x, 10.0, 20.0, 20.0],
             has_border,
             text: text.map(ToString::to_string),
+            text_truncated: None,
             confidence: None,
             source: source.to_string(),
         }
@@ -242,7 +403,7 @@ mod tests {
             el("sat_control_v1", "", Some("OK"), Some(true), 80.0),
         ];
         finalize_elements(&mut elements);
-        assert_eq!(elements[0].id, "text_hello_world");
+        assert_eq!(elements[0].id, "text_1");
         assert_eq!(elements[1].id, "button_7");
         assert_eq!(elements[2].id, "button_add");
         assert_eq!(elements[3].id, "button_ok");
@@ -272,5 +433,57 @@ mod tests {
         )];
         finalize_elements(&mut elements);
         assert_eq!(elements[0].text.as_deref(), Some("777,787,878"));
+    }
+
+    #[test]
+    fn finalize_elements_caps_text_and_id_lengths() {
+        let long_text = "a".repeat(50_000);
+        let mut elements = vec![el(
+            "accessibility_ax:AXTextArea",
+            "",
+            Some(&long_text),
+            None,
+            10.0,
+        )];
+        finalize_elements(&mut elements);
+        let text = elements[0].text.as_deref().expect("text");
+        assert_eq!(text.chars().count(), MAX_ELEMENT_TEXT_CHARS);
+        assert_eq!(elements[0].text_truncated, Some(true));
+        assert!(elements[0].id.chars().count() <= MAX_ELEMENT_ID_CHARS);
+    }
+
+    #[test]
+    fn finalize_elements_decodes_escaped_newlines_and_trims_indent() {
+        let mut elements = vec![el(
+            "accessibility_ax:AXTextArea",
+            "",
+            Some("\\n          {\\n            \\\"a\\\": 1\\n          }\\n"),
+            None,
+            10.0,
+        )];
+        finalize_elements(&mut elements);
+        assert_eq!(elements[0].text.as_deref(), Some("{\n\\\"a\\\": 1\n}"));
+        assert_eq!(elements[0].text_truncated, None);
+    }
+
+    #[test]
+    fn finalize_elements_caps_deduped_ids() {
+        let base = "x".repeat(200);
+        let id = deduped_id(&base, 2);
+        assert!(id.chars().count() <= MAX_ELEMENT_ID_CHARS);
+        assert!(id.ends_with("_2"));
+    }
+
+    #[test]
+    fn finalize_elements_uses_bbox_id_for_fluid_text_area_content() {
+        let mut elements = vec![el(
+            "accessibility_ax:AXTextArea",
+            "",
+            Some("{ huge json payload that changes every frame }"),
+            None,
+            123.0,
+        )];
+        finalize_elements(&mut elements);
+        assert_eq!(elements[0].id, "element_1");
     }
 }

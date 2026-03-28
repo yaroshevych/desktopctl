@@ -351,6 +351,8 @@ pub struct TokenizeElement {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
     pub source: String,
 }

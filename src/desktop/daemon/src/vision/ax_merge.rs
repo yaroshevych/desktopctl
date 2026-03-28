@@ -28,6 +28,7 @@ pub fn merge_elements(
 
         let (merged_text, filled_from_ocr) =
             merged_ax_text(&ax.role, &local, elements, ax.text.as_deref());
+        let ax_primary_id = ax_primary_id(ax);
         if filled_from_ocr {
             metrics.ax_text_filled += 1;
         }
@@ -67,6 +68,7 @@ pub fn merge_elements(
         if let Some(idx) = replace_idx {
             let existing_text = elements[idx].text.clone();
             elements[idx] = ElementBuilder::new()
+                .id(ax_primary_id.clone())
                 .kind("")
                 .bbox(local)
                 .has_border(None)
@@ -80,6 +82,7 @@ pub fn merge_elements(
 
         elements.push(
             ElementBuilder::new()
+                .id(ax_primary_id)
                 .kind("")
                 .bbox(local)
                 .has_border(None)
@@ -92,6 +95,44 @@ pub fn merge_elements(
     }
 
     metrics
+}
+
+fn ax_primary_id(ax: &AxElement) -> Option<String> {
+    if let Some(identifier) = ax
+        .ax_identifier
+        .as_deref()
+        .and_then(sanitize_ax_id_component)
+    {
+        return Some(format!("axid_{identifier}"));
+    }
+    ax.ax_path
+        .as_deref()
+        .and_then(sanitize_ax_id_component)
+        .map(|path| format!("axp_{path}"))
+}
+
+fn sanitize_ax_id_component(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut prev_sep = false;
+    for ch in raw.trim().chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_sep = false;
+        } else if !prev_sep {
+            out.push('_');
+            prev_sep = true;
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    let normalized = out.trim_matches('_').to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 }
 
 fn should_prioritize_ax_text_region(role: &str, ax_text: &str) -> bool {
@@ -214,6 +255,7 @@ mod tests {
             bbox,
             has_border: None,
             text: text.map(ToString::to_string),
+            text_truncated: None,
             confidence: None,
             source: source.to_string(),
         }
@@ -257,6 +299,8 @@ mod tests {
                 width: 120.0,
                 height: 80.0,
             },
+            ax_identifier: None,
+            ax_path: Some("AXTextArea:0.1".to_string()),
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -305,6 +349,8 @@ mod tests {
                 width: 90.0,
                 height: 30.0,
             },
+            ax_identifier: None,
+            ax_path: Some("AXTextField:0.2".to_string()),
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -327,6 +373,7 @@ mod tests {
         let only = &elements[0];
         assert_eq!(only.source, "accessibility_ax:AXTextField");
         assert_eq!(only.text.as_deref(), Some("draft"));
+        assert!(only.id.starts_with("axp_"));
     }
 
     #[test]
@@ -345,6 +392,8 @@ mod tests {
                 width: 120.0,
                 height: 40.0,
             },
+            ax_identifier: None,
+            ax_path: Some("AXScrollArea:0.3".to_string()),
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -364,5 +413,23 @@ mod tests {
         let only = &elements[0];
         assert_eq!(only.source, "accessibility_ax:AXScrollArea");
         assert_eq!(only.text.as_deref(), Some("7777878"));
+    }
+
+    #[test]
+    fn ax_primary_id_prefers_identifier_over_path() {
+        let ax = AxElement {
+            role: "AXButton".to_string(),
+            text: Some("Save".to_string()),
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            ax_identifier: Some("SaveButtonMain".to_string()),
+            ax_path: Some("AXButton:0.1.2".to_string()),
+        };
+        let id = ax_primary_id(&ax).expect("id");
+        assert_eq!(id, "axid_savebuttonmain");
     }
 }
