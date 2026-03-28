@@ -19,8 +19,6 @@ impl WindowInfo {
         let public_id = self.window_ref.as_deref().unwrap_or(self.id.as_str());
         json!({
             "id": public_id,
-            "pid": self.pid,
-            "index": self.index,
             "app": self.app,
             "title": self.title,
             "bounds": self.bounds,

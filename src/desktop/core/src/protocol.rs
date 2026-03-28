@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq};
 use serde_json::{Value, json};
 
 use crate::error::{AppError, ErrorCode};
@@ -285,9 +285,13 @@ impl ResponseEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bounds {
+    #[serde(serialize_with = "serialize_compact_f64")]
     pub x: f64,
+    #[serde(serialize_with = "serialize_compact_f64")]
     pub y: f64,
+    #[serde(serialize_with = "serialize_compact_f64")]
     pub width: f64,
+    #[serde(serialize_with = "serialize_compact_f64")]
     pub height: f64,
 }
 
@@ -303,6 +307,7 @@ pub struct SnapshotDisplay {
     pub id: u32,
     pub width: u32,
     pub height: u32,
+    #[serde(serialize_with = "serialize_compact_f64")]
     pub scale: f64,
 }
 
@@ -359,6 +364,7 @@ pub struct TokenizeElement {
     pub id: String,
     #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
+    #[serde(serialize_with = "serialize_compact_bbox")]
     pub bbox: [f64; 4],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_border: Option<bool>,
@@ -382,6 +388,41 @@ pub struct PermissionState {
 pub struct PermissionsPayload {
     pub accessibility: PermissionState,
     pub screen_recording: PermissionState,
+}
+
+fn serialize_compact_f64<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if value.is_finite() && value.fract() == 0.0 {
+        let int = *value as i64;
+        if (int as f64) == *value {
+            return serializer.serialize_i64(int);
+        }
+    }
+    serializer.serialize_f64(*value)
+}
+
+fn serialize_compact_bbox<S>(bbox: &[f64; 4], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(4))?;
+    for value in bbox {
+        seq.serialize_element(&CompactF64(*value))?;
+    }
+    seq.end()
+}
+
+struct CompactF64(f64);
+
+impl Serialize for CompactF64 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_compact_f64(&self.0, serializer)
+    }
 }
 
 pub fn now_millis() -> u128 {
