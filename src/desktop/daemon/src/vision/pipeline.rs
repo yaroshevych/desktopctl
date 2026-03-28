@@ -436,6 +436,12 @@ fn build_window_elements(
         .and_then(|meta| meta.app.clone())
         .or_else(|| snapshot.focused_app.clone());
     let os_bounds = window_meta.as_ref().map(|meta| meta.bounds.clone());
+    let bounds = os_bounds.clone().unwrap_or(Bounds {
+        x: 0.0,
+        y: 0.0,
+        width: width as f64,
+        height: height as f64,
+    });
     let window = TokenizeWindow {
         id: window_meta
             .as_ref()
@@ -443,12 +449,7 @@ fn build_window_elements(
             .unwrap_or_else(|| "win_0001".to_string()),
         title,
         app,
-        bounds: Bounds {
-            x: 0.0,
-            y: 0.0,
-            width: width as f64,
-            height: height as f64,
-        },
+        bounds,
         os_bounds,
         elements,
     };
