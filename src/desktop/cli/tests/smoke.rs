@@ -357,6 +357,31 @@ fn active_window_elements(tokenize_response: &Value) -> Result<Vec<Value>, Strin
     Ok(elements.clone())
 }
 
+fn active_window(tokenize_response: &Value) -> Result<Value, String> {
+    let result = response_result(tokenize_response, "tokenize")?;
+    let windows = result
+        .get("windows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("tokenize result missing windows: {}", pretty_json(result)))?;
+    windows
+        .first()
+        .cloned()
+        .ok_or_else(|| format!("tokenize returned no windows: {}", pretty_json(result)))
+}
+
+fn text_signature(response: &Value) -> Result<Vec<String>, String> {
+    let elements = active_window_elements(response)?;
+    let mut texts: Vec<String> = elements
+        .iter()
+        .filter_map(|el| el.get("text").and_then(Value::as_str))
+        .map(|s| s.trim().replace('\u{200e}', ""))
+        .filter(|s| !s.is_empty())
+        .collect();
+    texts.sort();
+    texts.dedup();
+    Ok(texts)
+}
+
 fn click_and_wait_signature_change(
     cli: &SmokeCli,
     button_id: &str,
@@ -671,7 +696,89 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
 }
 
 #[test]
-fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
+fn smoke_screen_tokenize_overlay_contract_without_legacy_tokens() -> Result<(), String> {
+    let _guard = smoke_lock()
+        .lock()
+        .map_err(|_| "failed to acquire smoke lock".to_string())?;
+    let Some(cli) = SmokeCli::new("tokenize_overlay_contract")? else {
+        return Ok(());
+    };
+    let _session = cli.begin_session();
+
+    cli.open_app("Calculator", 10_000)?;
+    thread::sleep(Duration::from_millis(400));
+
+    let overlay_path = cli.artifact_dir.join("tokenize-overlay.png");
+    let overlay_text = overlay_path.to_string_lossy().to_string();
+    let response = cli.run_json_ok(
+        &[
+            "screen",
+            "tokenize",
+            "--active-window",
+            "--overlay",
+            &overlay_text,
+        ],
+        DEFAULT_TIMEOUT,
+        "tokenize_overlay",
+    )?;
+    let _ = request_id(&response)?;
+    let result = response_result(&response, "tokenize_overlay")?;
+    if result.get("tokens").is_some() {
+        return Err(format!(
+            "legacy tokens field unexpectedly present: {}",
+            pretty_json(result)
+        ));
+    }
+
+    let image = result
+        .get("image")
+        .ok_or_else(|| format!("missing image in tokenize result: {}", pretty_json(result)))?;
+    let width = image
+        .get("width")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("missing image.width: {}", pretty_json(image)))?
+        as u32;
+    let height = image
+        .get("height")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("missing image.height: {}", pretty_json(image)))?
+        as u32;
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "invalid tokenize image dimensions: {}",
+            pretty_json(image)
+        ));
+    }
+
+    if !overlay_path.exists() {
+        return Err(format!(
+            "expected overlay output to exist: {}",
+            overlay_path.display()
+        ));
+    }
+    let (overlay_w, overlay_h) = png_dimensions(&overlay_path)?;
+    if overlay_w != width || overlay_h != height {
+        return Err(format!(
+            "overlay dimensions mismatch tokenize image: overlay={}x{}, tokenize={}x{}",
+            overlay_w, overlay_h, width, height
+        ));
+    }
+    let win = active_window(&response)?;
+    let elements = win
+        .get("elements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing elements in tokenize window: {}", pretty_json(&win)))?;
+    if elements.is_empty() {
+        return Err(format!(
+            "tokenize overlay contract test got empty elements: {}",
+            pretty_json(&win)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn smoke_pointer_scroll_changes_tokenized_region_long_text() -> Result<(), String> {
     let _guard = smoke_lock()
         .lock()
         .map_err(|_| "failed to acquire smoke lock".to_string())?;
@@ -748,8 +855,13 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
     if before_sig.is_empty() {
         return Err("scroll baseline tokenize signature is empty".to_string());
     }
+    let mut before_text_sig = text_signature(&before)?;
+    if before_text_sig.is_empty() {
+        return Err("scroll baseline tokenize text signature is empty".to_string());
+    }
 
     let mut changed = false;
+    let mut changed_text = false;
     for (step, dy) in [
         ("scroll_down_1", -1200),
         ("scroll_down_2", -1200),
@@ -781,15 +893,74 @@ fn smoke_pointer_scroll_changes_tokenized_region() -> Result<(), String> {
             )
         })?;
         let after_sig = element_signature(&after)?;
+        let after_text_sig = text_signature(&after)?;
         if after_sig != before_sig {
             changed = true;
+            changed_text = after_text_sig != before_text_sig;
             break;
         }
         before_sig = after_sig;
+        before_text_sig = after_text_sig;
     }
 
     if !changed {
         return Err("pointer scroll did not change tokenize signature in region".to_string());
+    }
+    if !changed_text {
+        return Err("pointer scroll changed structure but not long-text OCR in region".to_string());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn smoke_small_window_tokenize_region_perf_guard() -> Result<(), String> {
+    let _guard = smoke_lock()
+        .lock()
+        .map_err(|_| "failed to acquire smoke lock".to_string())?;
+    if env::var("DESKTOPCTL_SMOKE_PERF").is_err() {
+        eprintln!(
+            "skipping smoke test perf_guard: set DESKTOPCTL_SMOKE_PERF=1 to enable perf assertions"
+        );
+        return Ok(());
+    }
+    let Some(cli) = SmokeCli::new("tokenize_perf_guard")? else {
+        return Ok(());
+    };
+    let _session = cli.begin_session();
+    cli.open_app("Calculator", 10_000)?;
+    thread::sleep(Duration::from_millis(350));
+
+    let args = [
+        "screen",
+        "tokenize",
+        "--active-window",
+        "--region",
+        "0",
+        "0",
+        "180",
+        "220",
+    ];
+    let _ = cli.run_json_ok(&args, DEFAULT_TIMEOUT, "perf_warmup")?;
+    thread::sleep(Duration::from_millis(80));
+
+    let mut samples_ms: Vec<u128> = Vec::new();
+    for idx in 0..3 {
+        let start = Instant::now();
+        let _ = cli.run_json_ok(&args, DEFAULT_TIMEOUT, &format!("perf_sample_{}", idx + 1))?;
+        let elapsed = start.elapsed().as_millis();
+        samples_ms.push(elapsed);
+        thread::sleep(Duration::from_millis(60));
+    }
+    let mut sorted = samples_ms.clone();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    let max = sorted.iter().copied().max().unwrap_or(0);
+    if median > 1_200 || max > 2_200 {
+        return Err(format!(
+            "small-window tokenize perf guard failed (median={}ms, max={}ms, samples={:?})",
+            median, max, samples_ms
+        ));
     }
 
     Ok(())
