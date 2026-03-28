@@ -1326,6 +1326,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_screen_screenshot_with_zero_region_size() {
+        let args = vec![
+            "screen".to_string(),
+            "screenshot".to_string(),
+            "--region".to_string(),
+            "10".to_string(),
+            "20".to_string(),
+            "0".to_string(),
+            "100".to_string(),
+        ];
+        let err = parse_command(&args).expect_err("zero width region must fail");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
     fn parses_screen_tokenize_with_overlay() {
         let args = vec![
             "screen".to_string(),
@@ -1429,6 +1444,21 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_screen_tokenize_with_zero_region_size() {
+        let args = vec![
+            "screen".to_string(),
+            "tokenize".to_string(),
+            "--region".to_string(),
+            "10".to_string(),
+            "20".to_string(),
+            "300".to_string(),
+            "0".to_string(),
+        ];
+        let err = parse_command(&args).expect_err("zero height region must fail");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 
     #[test]

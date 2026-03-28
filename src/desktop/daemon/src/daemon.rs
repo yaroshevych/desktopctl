@@ -2722,6 +2722,22 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_region_without_override_uses_base_bounds() {
+        let base = Bounds {
+            x: 10.0,
+            y: 20.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let resolved = super::resolve_tokenize_region_bounds(base.clone(), None)
+            .expect("region should default to base");
+        assert_eq!(resolved.x, base.x);
+        assert_eq!(resolved.y, base.y);
+        assert_eq!(resolved.width, base.width);
+        assert_eq!(resolved.height, base.height);
+    }
+
+    #[test]
     fn tokenize_payload_texts_maps_ax_element_bounds_to_display() {
         let payload = TokenizePayload {
             snapshot_id: 1,
@@ -2820,6 +2836,42 @@ mod tests {
         assert!((el.bounds.y - 240.0).abs() < 0.001);
         assert!((el.bounds.width - 80.0).abs() < 0.001);
         assert!((el.bounds.height - 60.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn tokenize_payload_contract_omits_legacy_tokens_field() {
+        let payload = TokenizePayload {
+            snapshot_id: 99,
+            timestamp: "99".to_string(),
+            image: Some(TokenizeImage {
+                path: "<memory>".to_string(),
+                width: 200,
+                height: 100,
+            }),
+            windows: vec![TokenizeWindow {
+                id: "frontmost:1".to_string(),
+                title: "Notes".to_string(),
+                app: Some("Notes".to_string()),
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+                os_bounds: None,
+                elements: vec![TokenizeElement {
+                    id: "text_note".to_string(),
+                    kind: "text".to_string(),
+                    bbox: [10.0, 10.0, 100.0, 30.0],
+                    has_border: None,
+                    text: Some("Hello".to_string()),
+                    confidence: Some(0.99),
+                    source: "vision_ocr".to_string(),
+                }],
+            }],
+        };
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        assert!(value.get("tokens").is_none(), "tokens field must be absent");
     }
 
     #[test]
