@@ -3,6 +3,7 @@ mod daemon;
 #[cfg(target_os = "macos")]
 mod overlay;
 mod permissions;
+mod platform;
 mod recording;
 mod replay;
 mod request_store;
