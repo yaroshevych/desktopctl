@@ -16,8 +16,9 @@ pub struct WindowInfo {
 
 impl WindowInfo {
     pub fn as_json(&self) -> Value {
-        let mut value = json!({
-            "id": self.id,
+        let public_id = self.window_ref.as_deref().unwrap_or(self.id.as_str());
+        json!({
+            "id": public_id,
             "pid": self.pid,
             "index": self.index,
             "app": self.app,
@@ -25,11 +26,7 @@ impl WindowInfo {
             "bounds": self.bounds,
             "frontmost": self.frontmost,
             "visible": self.visible
-        });
-        if let Some(window_ref) = self.window_ref.as_ref() {
-            value["window_ref"] = Value::String(window_ref.clone());
-        }
-        value
+        })
     }
 }
 

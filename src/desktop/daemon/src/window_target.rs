@@ -193,7 +193,24 @@ pub(crate) fn select_window_candidate<'a>(
 ) -> Result<&'a WindowInfo, AppError> {
     let query = query.trim();
     if query.is_empty() {
-        return Err(AppError::invalid_argument("window title must not be empty"));
+        return Err(AppError::invalid_argument("window query must not be empty"));
+    }
+
+    let exact_id: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|w| w.id == query || w.window_ref.as_deref() == Some(query))
+        .collect();
+    if exact_id.len() == 1 {
+        return Ok(exact_id[0]);
+    }
+    if exact_id.len() > 1 {
+        return Err(
+            AppError::ambiguous_target(format!("multiple windows matched id \"{query}\""))
+                .with_details(json!({
+                    "query": query,
+                    "candidates": exact_id.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
+                })),
+        );
     }
 
     let lower = query.to_lowercase();

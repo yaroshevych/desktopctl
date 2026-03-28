@@ -136,7 +136,7 @@ fn parse_app(args: &[String]) -> Result<Command, AppError> {
 fn parse_window(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(
-            "usage: desktopctl window list [--json] | desktopctl window bounds --title <text> [--json] | desktopctl window focus --title <text>",
+            "usage: desktopctl window list [--json] | desktopctl window bounds (--title <text> | --id <id>) [--json] | desktopctl window focus (--title <text> | --id <id>)",
         ));
     }
 
@@ -150,40 +150,64 @@ fn parse_window(args: &[String]) -> Result<Command, AppError> {
             Ok(Command::WindowList)
         }
         "bounds" => {
-            if args.len() < 3 || args[1] != "--title" {
+            if args.len() < 3 {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds --title <text> [--json]",
+                    "usage: desktopctl window bounds (--title <text> | --id <id>) [--json]",
                 ));
             }
-            let title = args[2].clone();
-            if title.trim().is_empty() {
+            let selector_flag = args[1].as_str();
+            if selector_flag != "--title" && selector_flag != "--id" {
                 return Err(AppError::invalid_argument(
-                    "missing title: desktopctl window bounds --title <text>",
+                    "usage: desktopctl window bounds (--title <text> | --id <id>) [--json]",
                 ));
+            }
+            let query = args[2].clone();
+            if query.trim().is_empty() {
+                return Err(AppError::invalid_argument(format!(
+                    "missing {}: desktopctl window bounds {} <...>",
+                    if selector_flag == "--id" {
+                        "id"
+                    } else {
+                        "title"
+                    },
+                    selector_flag
+                )));
             }
             if args.len() > 3 && args[3] != "--json" {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds --title <text> [--json]",
+                    "usage: desktopctl window bounds (--title <text> | --id <id>) [--json]",
                 ));
             }
-            Ok(Command::WindowBounds { title })
+            Ok(Command::WindowBounds { title: query })
         }
         "focus" => {
-            if args.len() != 3 || args[1] != "--title" {
+            if args.len() != 3 {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl window focus --title <text>",
+                    "usage: desktopctl window focus (--title <text> | --id <id>)",
                 ));
             }
-            let title = args[2].clone();
-            if title.trim().is_empty() {
+            let selector_flag = args[1].as_str();
+            if selector_flag != "--title" && selector_flag != "--id" {
                 return Err(AppError::invalid_argument(
-                    "missing title: desktopctl window focus --title <text>",
+                    "usage: desktopctl window focus (--title <text> | --id <id>)",
                 ));
             }
-            Ok(Command::WindowFocus { title })
+            let query = args[2].clone();
+            if query.trim().is_empty() {
+                return Err(AppError::invalid_argument(format!(
+                    "missing {}: desktopctl window focus {} <...>",
+                    if selector_flag == "--id" {
+                        "id"
+                    } else {
+                        "title"
+                    },
+                    selector_flag
+                )));
+            }
+            Ok(Command::WindowFocus { title: query })
         }
         _ => Err(AppError::invalid_argument(
-            "usage: desktopctl window list [--json] | desktopctl window bounds --title <text> [--json] | desktopctl window focus --title <text>",
+            "usage: desktopctl window list [--json] | desktopctl window bounds (--title <text> | --id <id>) [--json] | desktopctl window focus (--title <text> | --id <id>)",
         )),
     }
 }
@@ -888,8 +912,8 @@ fn usage() -> &'static str {
   desktopctl app show <application>
   desktopctl app isolate <application>
   desktopctl window list [--json]
-  desktopctl window bounds --title <text> [--json]
-  desktopctl window focus --title <text>
+  desktopctl window bounds (--title <text> | --id <id>) [--json]
+  desktopctl window focus (--title <text> | --id <id>)
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
     note: --region is relative to the selected active-window/display target
   desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
@@ -1892,6 +1916,27 @@ mod tests {
                 .expect("window focus should parse");
         match command {
             Command::WindowFocus { title } => assert_eq!(title, "Reminders"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_window_bounds_with_id() {
+        let command =
+            parse_command(&["window", "bounds", "--id", "35a5c9", "--json"].map(str::to_string))
+                .expect("window bounds by id should parse");
+        match command {
+            Command::WindowBounds { title } => assert_eq!(title, "35a5c9"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_window_focus_with_id() {
+        let command = parse_command(&["window", "focus", "--id", "35a5c9"].map(str::to_string))
+            .expect("window focus by id should parse");
+        match command {
+            Command::WindowFocus { title } => assert_eq!(title, "35a5c9"),
             other => panic!("unexpected command: {other:?}"),
         }
     }

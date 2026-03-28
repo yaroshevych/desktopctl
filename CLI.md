@@ -26,11 +26,13 @@ desktopctl app show <application>
 # list visible windows
 desktopctl window list
 
-# find window bounds by title/app text
+# find window bounds by title/app text or exact window id
 desktopctl window bounds --title <text>
+desktopctl window bounds --id <id>
 
-# focus a matching window
+# focus a matching window by title/app text or exact window id
 desktopctl window focus --title <text>
+desktopctl window focus --id <id>
 ```
 
 ## Screen and OCR
