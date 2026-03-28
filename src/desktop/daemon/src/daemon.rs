@@ -36,6 +36,8 @@ const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
 const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
 #[cfg(target_os = "macos")]
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static PRIVACY_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 const OBSERVE_SAMPLE_INTERVAL_MS: u64 = 40;
 const OBSERVE_QUIET_FRAMES: u32 = 2;
 const OBSERVE_DIFF_THRESHOLD: u8 = 8;
@@ -246,7 +248,8 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     let transient_overlay_started = maybe_start_privacy_overlay(&command, &request_context);
     #[cfg(target_os = "macos")]
-    let overlay_token_updates_enabled = !transient_overlay_started;
+    let overlay_token_updates_enabled =
+        !transient_overlay_started && !PRIVACY_OVERLAY_ACTIVE.load(Ordering::SeqCst);
     #[cfg(not(target_os = "macos"))]
     let overlay_token_updates_enabled = true;
     #[cfg(target_os = "macos")]
@@ -325,6 +328,7 @@ fn maybe_start_privacy_overlay(command: &Command, context: &RequestContext) -> b
     match overlay::start_overlay() {
         Ok(started) => {
             if started {
+                PRIVACY_OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
                 let (mode, bounds) = if let Some(bounds) = request_frontmost_bounds(context) {
                     (overlay::WatchMode::WindowMode, Some(bounds))
                 } else {
@@ -387,7 +391,12 @@ fn schedule_transient_overlay_stop() {
             return;
         }
         match overlay::stop_overlay() {
-            Ok(stopped) => trace::log(format!("overlay:privacy_auto_stop stopped={stopped}")),
+            Ok(stopped) => {
+                if stopped {
+                    PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
+                }
+                trace::log(format!("overlay:privacy_auto_stop stopped={stopped}"));
+            }
             Err(err) => trace::log(format!("overlay:privacy_auto_stop_warn {err}")),
         }
     });
@@ -976,6 +985,7 @@ fn execute_with_context(
         Command::OverlayStart { duration_ms } => {
             #[cfg(target_os = "macos")]
             {
+                PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
                 let started = overlay::start_overlay()?;
                 if let Some(ms) = duration_ms {
                     let stop_after = ms.max(1);
@@ -1005,6 +1015,7 @@ fn execute_with_context(
         Command::OverlayStop => {
             #[cfg(target_os = "macos")]
             {
+                PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
                 let stopped = overlay::stop_overlay()?;
                 return Ok(json!({
                     "overlay_running": false,
