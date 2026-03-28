@@ -875,12 +875,33 @@ fn click_text_target(query: &str) -> Result<Value, AppError> {
             .map(|b| format!("({:.1},{:.1},{:.1},{:.1})", b.x, b.y, b.width, b.height))
             .unwrap_or_else(|| "null".to_string())
     ));
-    if window_bounds.is_some() && window_filtered.is_empty() {
-        return Err(AppError::target_not_found(
-            "no OCR text detected in frontmost window; cannot click target safely",
-        ));
-    }
-    let target = select_text_candidate(&window_filtered, query)?;
+    let target = match select_text_candidate(&window_filtered, query) {
+        Ok(target) => target,
+        Err(primary_err) => {
+            trace::log(format!(
+                "ui_click_text:ocr_primary_failed code={:?} msg={}",
+                primary_err.code, primary_err.message
+            ));
+            match tokenize_click_text_candidate(query, window_bounds.as_ref()) {
+                Ok(fallback) => {
+                    trace::log("ui_click_text:fallback source=tokenize");
+                    fallback
+                }
+                Err(fallback_err) => {
+                    trace::log(format!(
+                        "ui_click_text:fallback_failed code={:?} msg={}",
+                        fallback_err.code, fallback_err.message
+                    ));
+                    if window_bounds.is_some() && window_filtered.is_empty() {
+                        return Err(AppError::target_not_found(
+                            "no OCR/tokenize text detected in frontmost window; cannot click target safely",
+                        ));
+                    }
+                    return Err(primary_err);
+                }
+            }
+        }
+    };
     trace::log(format!(
         "ui_click_text:selected text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
         compact_for_log(&target.text),
@@ -897,6 +918,80 @@ fn click_text_target(query: &str) -> Result<Value, AppError> {
         "text": target.text,
         "bounds": target.bounds
     }))
+}
+
+fn tokenize_click_text_candidate(
+    query: &str,
+    window_bounds: Option<&desktop_core::protocol::Bounds>,
+) -> Result<desktop_core::protocol::SnapshotText, AppError> {
+    let bounds = window_bounds.cloned().ok_or_else(|| {
+        AppError::target_not_found("frontmost window bounds unavailable for tokenize fallback")
+    })?;
+    let app = frontmost_app_name();
+    let window_meta = vision::pipeline::TokenizeWindowMeta {
+        id: "frontmost:1".to_string(),
+        title: app.clone().unwrap_or_else(|| "active_window".to_string()),
+        app,
+        bounds,
+    };
+    let payload = vision::pipeline::tokenize_window(window_meta)?;
+    let tokenize_texts = tokenize_payload_texts_for_click(&payload);
+    if tokenize_texts.is_empty() {
+        return Err(AppError::target_not_found(
+            "tokenize fallback produced no text elements",
+        ));
+    }
+    select_text_candidate(&tokenize_texts, query)
+}
+
+fn tokenize_payload_texts_for_click(
+    payload: &desktop_core::protocol::TokenizePayload,
+) -> Vec<desktop_core::protocol::SnapshotText> {
+    let mut out = Vec::new();
+    let Some(image) = payload.image.as_ref() else {
+        return out;
+    };
+    let image_w = image.width as f64;
+    let image_h = image.height as f64;
+    if image_w <= 0.0 || image_h <= 0.0 {
+        return out;
+    }
+
+    for window in &payload.windows {
+        let Some(os_bounds) = window.os_bounds.as_ref() else {
+            continue;
+        };
+        let sx = os_bounds.width / image_w;
+        let sy = os_bounds.height / image_h;
+        for element in &window.elements {
+            let text = element
+                .text
+                .as_ref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string);
+            let Some(text) = text else { continue };
+            let confidence =
+                element
+                    .confidence
+                    .unwrap_or(if element.source.starts_with("accessibility_ax:") {
+                        0.92
+                    } else {
+                        0.62
+                    });
+            out.push(desktop_core::protocol::SnapshotText {
+                text,
+                bounds: desktop_core::protocol::Bounds {
+                    x: os_bounds.x + element.bbox[0] * sx,
+                    y: os_bounds.y + element.bbox[1] * sy,
+                    width: element.bbox[2] * sx,
+                    height: element.bbox[3] * sy,
+                },
+                confidence,
+            });
+        }
+    }
+    out
 }
 
 fn find_text_targets(query: &str, all: bool) -> Result<Value, AppError> {
@@ -2295,7 +2390,10 @@ mod tests {
     use super::execute;
     use desktop_core::{
         error::ErrorCode,
-        protocol::{Bounds, RequestEnvelope, ResponseEnvelope, SnapshotText},
+        protocol::{
+            Bounds, RequestEnvelope, ResponseEnvelope, SnapshotText, TokenizeElement,
+            TokenizeImage, TokenizePayload, TokenizeWindow,
+        },
     };
     use image::{Rgba, RgbaImage};
 
@@ -2368,6 +2466,57 @@ mod tests {
         let selected =
             super::resolve_tokenize_window_target(&windows, None).expect("selected frontmost");
         assert_eq!(selected.id, "22:2");
+    }
+
+    #[test]
+    fn tokenize_payload_texts_maps_ax_element_bounds_to_display() {
+        let payload = TokenizePayload {
+            snapshot_id: 1,
+            timestamp: "1".to_string(),
+            tokens: vec![],
+            image: Some(TokenizeImage {
+                path: "<memory>".to_string(),
+                width: 200,
+                height: 100,
+            }),
+            windows: vec![TokenizeWindow {
+                id: "frontmost:1".to_string(),
+                title: "Calculator".to_string(),
+                app: Some("Calculator".to_string()),
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+                os_bounds: Some(Bounds {
+                    x: 500.0,
+                    y: 300.0,
+                    width: 400.0,
+                    height: 200.0,
+                }),
+                elements: vec![TokenizeElement {
+                    id: "text_0001".to_string(),
+                    kind: "".to_string(),
+                    bbox: [20.0, 30.0, 50.0, 20.0],
+                    has_border: None,
+                    text: Some("7".to_string()),
+                    confidence: None,
+                    source: "accessibility_ax:AXButton".to_string(),
+                }],
+            }],
+        };
+
+        let texts = super::tokenize_payload_texts_for_click(&payload);
+        assert_eq!(texts.len(), 1);
+        let t = &texts[0];
+        assert_eq!(t.text, "7");
+        // x scale = 400/200 = 2.0 ; y scale = 200/100 = 2.0
+        assert!((t.bounds.x - 540.0).abs() < 0.001);
+        assert!((t.bounds.y - 360.0).abs() < 0.001);
+        assert!((t.bounds.width - 100.0).abs() < 0.001);
+        assert!((t.bounds.height - 40.0).abs() < 0.001);
+        assert!((t.confidence - 0.92).abs() < 0.0001);
     }
 
     #[test]
