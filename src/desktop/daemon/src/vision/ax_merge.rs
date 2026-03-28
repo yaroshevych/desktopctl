@@ -31,6 +31,9 @@ pub fn merge_elements(
             metrics.ax_text_filled += 1;
         }
         let ax_text = merged_text.as_deref().unwrap_or("").trim();
+        if should_prioritize_ax_text_region(&ax.role, ax_text) {
+            drop_ocr_text_inside_ax_region(elements, &local);
+        }
 
         let mut replace_idx: Option<usize> = None;
         let mut replace_score = 0.0f64;
@@ -88,6 +91,29 @@ pub fn merge_elements(
     }
 
     metrics
+}
+
+fn should_prioritize_ax_text_region(role: &str, ax_text: &str) -> bool {
+    !ax_text.is_empty() && matches!(role, "AXTextField" | "AXTextArea")
+}
+
+fn drop_ocr_text_inside_ax_region(elements: &mut Vec<TokenizeElement>, ax_bounds: &Bounds) {
+    elements.retain(|el| {
+        if el.source.starts_with("accessibility_ax:") {
+            return true;
+        }
+        let eb = Bounds {
+            x: el.bbox[0],
+            y: el.bbox[1],
+            width: el.bbox[2],
+            height: el.bbox[3],
+        };
+        let overlap = overlap_area(&eb, ax_bounds);
+        let ea = (eb.width * eb.height).max(1.0);
+        let mostly_inside = overlap / ea >= 0.85;
+        let center_in = center_inside(&eb, ax_bounds);
+        !(mostly_inside || center_in)
+    });
 }
 
 fn merged_ax_text(
@@ -155,4 +181,43 @@ fn center_inside(inner: &Bounds, outer: &Bounds) -> bool {
     let cx = inner.x + inner.width * 0.5;
     let cy = inner.y + inner.height * 0.5;
     cx >= outer.x && cx <= outer.x + outer.width && cy >= outer.y && cy <= outer.y + outer.height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_element(source: &str, text: Option<&str>, bbox: [f64; 4]) -> TokenizeElement {
+        TokenizeElement {
+            id: String::new(),
+            kind: String::new(),
+            bbox,
+            has_border: None,
+            text: text.map(ToString::to_string),
+            confidence: None,
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn prioritizes_ax_text_field_region_over_ocr_fragments() {
+        let mut elements = vec![
+            make_element("vision_ocr", Some("hello"), [10.0, 10.0, 80.0, 20.0]),
+            make_element("vision_ocr", Some("world"), [10.0, 35.0, 70.0, 20.0]),
+            make_element("vision_ocr", Some("outside"), [220.0, 220.0, 40.0, 20.0]),
+        ];
+        let ax_bounds = Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 80.0,
+        };
+        assert!(should_prioritize_ax_text_region(
+            "AXTextArea",
+            "hello world"
+        ));
+        drop_ocr_text_inside_ax_region(&mut elements, &ax_bounds);
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].text.as_deref(), Some("outside"));
+    }
 }

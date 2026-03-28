@@ -17,6 +17,7 @@ mod macos {
         kAXPositionAttribute, kAXSizeAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize,
     };
     use core_foundation::{
+        attributed_string::{CFAttributedString, CFAttributedStringGetString},
         base::{CFType, TCFType},
         string::CFString,
     };
@@ -103,11 +104,13 @@ mod macos {
                 | "AXRadioButton"
                 | "AXPopUpButton"
                 | "AXTextField"
+                | "AXTextArea"
                 | "AXComboBox"
                 | "AXSlider"
                 | "AXMenuButton"
                 | "AXScrollBar"
                 | "AXScrollArea"
+                | "AXWebArea"
                 | "AXValueIndicator"
                 | "AXIncrementor"
                 | "AXSplitter"
@@ -135,10 +138,14 @@ mod macos {
             candidates.push(v.to_string());
         }
         if let Ok(v) = element.attribute(&AXAttribute::value()) {
-            if v.instance_of::<CFString>() {
-                candidates.push(
-                    unsafe { CFString::wrap_under_get_rule(v.as_CFTypeRef() as _) }.to_string(),
-                );
+            if let Some(value_text) = cf_type_text(&v) {
+                candidates.push(value_text);
+            }
+        }
+        // Some editors expose selected/visible text through AXSelectedText.
+        if is_text_container_role(role) {
+            if let Some(selected) = attribute_text_by_name(element, "AXSelectedText") {
+                candidates.push(selected);
             }
         }
 
@@ -179,6 +186,39 @@ mod macos {
             });
         }
         None
+    }
+
+    fn is_text_container_role(role: &str) -> bool {
+        matches!(role, "AXTextField" | "AXTextArea" | "AXWebArea")
+    }
+
+    fn cf_type_text(value: &CFType) -> Option<String> {
+        if value.instance_of::<CFString>() {
+            let text =
+                unsafe { CFString::wrap_under_get_rule(value.as_CFTypeRef() as _) }.to_string();
+            let trimmed = text.trim().to_string();
+            return (!trimmed.is_empty()).then_some(trimmed);
+        }
+        if value.instance_of::<CFAttributedString>() {
+            let attributed =
+                unsafe { CFAttributedString::wrap_under_get_rule(value.as_CFTypeRef() as _) };
+            let string_ref =
+                unsafe { CFAttributedStringGetString(attributed.as_concrete_TypeRef()) };
+            if !string_ref.is_null() {
+                let text = unsafe { CFString::wrap_under_get_rule(string_ref) }.to_string();
+                let trimmed = text.trim().to_string();
+                return (!trimmed.is_empty()).then_some(trimmed);
+            }
+        }
+        None
+    }
+
+    fn attribute_text_by_name(element: &AXUIElement, name: &'static str) -> Option<String> {
+        let attr = AXAttribute::<CFType>::new(&CFString::from_static_string(name));
+        element
+            .attribute(&attr)
+            .ok()
+            .and_then(|value| cf_type_text(&value))
     }
 
     fn element_bounds(element: &AXUIElement) -> Option<Bounds> {
