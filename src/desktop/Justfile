@@ -9,6 +9,7 @@ cli_path := dist_dir + "/desktopctl"
 stable_runtime_dir := workspace_dir + "/runtime-stable"
 stable_app_dir := stable_runtime_dir + "/DesktopCtl.app"
 stable_cli_path := stable_runtime_dir + "/desktopctl"
+manifest_path := workspace_dir + "/Cargo.toml"
 
 build:
   cd {{workspace_dir}} && cargo build --release -p desktopctld -p desktopctl
@@ -73,3 +74,18 @@ vm-smoke vm_host="" vm_user="" vm_window_app="" iterations="1":
   DESKTOP_WORKSPACE_DIR="{{workspace_dir}}" \
   "{{workspace_dir}}/scripts/vm/smoke.sh" \
     "{{vm_host}}" "{{vm_user}}" "{{vm_window_app}}" "{{iterations}}"
+
+test-compile:
+  cd {{workspace_dir}} && cargo test -p desktopctl --manifest-path {{manifest_path}} --no-run
+  cd {{workspace_dir}} && cargo test -p desktopctld --manifest-path {{manifest_path}} --no-run
+
+test-regression:
+  cd {{workspace_dir}} && cargo test -p desktopctld --manifest-path {{manifest_path}} --test fixtures_contract -- --nocapture
+  cd {{workspace_dir}} && cargo test -p desktopctld --manifest-path {{manifest_path}} --test text_field_button_labels -- --nocapture --test-threads=1
+  just -f {{workspace_dir}}/Justfile test-compile
+
+test-smoke:
+  cd {{workspace_dir}} && \
+    DESKTOPCTL_SMOKE=1 \
+    DESKTOPCTL_SMOKE_BIN={{cli_path}} \
+    cargo test -p desktopctl --manifest-path {{manifest_path}} --test smoke -- --nocapture --test-threads=1
