@@ -57,9 +57,10 @@ desktopctl pointer move <x> <y>
 desktopctl pointer down <x> <y>
 desktopctl pointer up <x> <y>
 
-# click pointer by coordinate, OCR text, or token
+# click pointer by coordinate, OCR text, element id, or token
 desktopctl pointer click <x> <y>
 desktopctl pointer click --text <text>
+desktopctl pointer click --id <element_id>
 desktopctl pointer click --token <n>
 
 # drag pointer between coordinates

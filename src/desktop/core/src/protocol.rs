@@ -70,6 +70,9 @@ pub enum Command {
     PointerClickText {
         text: String,
     },
+    PointerClickId {
+        id: String,
+    },
     PointerClickToken {
         token: u32,
     },
@@ -159,6 +162,7 @@ impl Command {
             Command::PointerUp { .. } => "pointer_up",
             Command::PointerClick { .. } => "pointer_click",
             Command::PointerClickText { .. } => "pointer_click_text",
+            Command::PointerClickId { .. } => "pointer_click_id",
             Command::PointerClickToken { .. } => "pointer_click_token",
             Command::PointerDrag { .. } => "pointer_drag",
             Command::UiType { .. } => "type",

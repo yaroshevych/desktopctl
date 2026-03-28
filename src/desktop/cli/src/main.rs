@@ -631,6 +631,17 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     )));
                 }
                 Ok(Command::PointerClickText { text })
+            } else if args.len() >= 2 && args[1] == "--id" {
+                let id = args.get(2).cloned().ok_or_else(|| {
+                    AppError::invalid_argument("usage: desktopctl pointer click --id <element_id>")
+                })?;
+                if args.len() > 3 {
+                    return Err(AppError::invalid_argument(format!(
+                        "unknown flag for pointer click --id: {}",
+                        args[3]
+                    )));
+                }
+                Ok(Command::PointerClickId { id })
             } else if args.len() >= 2 && args[1] == "--token" {
                 let token = parse_u32(args.get(2), "token")?;
                 Ok(Command::PointerClickToken { token })
@@ -754,6 +765,7 @@ fn usage() -> &'static str {
   desktopctl pointer up <x> <y>
   desktopctl pointer click [--absolute] <x> <y>
   desktopctl pointer click --text <text>
+  desktopctl pointer click --id <element_id>
   desktopctl pointer click --token <n>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
   desktopctl keyboard type \"text\"
@@ -1437,6 +1449,23 @@ mod tests {
         match command {
             Command::PointerClickText { text } => {
                 assert_eq!(text, "DesktopCtl");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_click_id() {
+        let args = vec![
+            "pointer".to_string(),
+            "click".to_string(),
+            "--id".to_string(),
+            "button_0018".to_string(),
+        ];
+        let command = parse_command(&args).expect("pointer click --id should parse");
+        match command {
+            Command::PointerClickId { id } => {
+                assert_eq!(id, "button_0018");
             }
             other => panic!("unexpected command: {other:?}"),
         }
