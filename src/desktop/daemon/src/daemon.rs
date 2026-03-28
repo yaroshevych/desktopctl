@@ -48,6 +48,12 @@ struct RequestContext {
     frontmost: Option<window_target::FrontmostSnapshot>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ObserveStartState {
+    active_window_id: Option<String>,
+    focused_element_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
     pub idle_timeout: Option<Duration>,
@@ -539,6 +545,7 @@ fn execute_with_context(
             ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let observe_start = capture_observe_start_state(&observe);
             let point = resolve_pointer_click_point(x, y, absolute, request_context)?;
             backend.move_mouse(point)?;
             backend.left_click(point)?;
@@ -547,17 +554,18 @@ fn execute_with_context(
                 point.x, point.y
             ));
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::PointerScroll { dx, dy, observe } => {
             trace::log(format!("pointer_scroll:start dx={dx} dy={dy}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let observe_start = capture_observe_start_state(&observe);
             backend.scroll_wheel(dx, dy)?;
             trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::PointerDrag {
@@ -589,33 +597,37 @@ fn execute_with_context(
         Command::UiType { text, observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let observe_start = capture_observe_start_state(&observe);
             backend.type_text(&text)?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::KeyHotkey { hotkey, observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let observe_start = capture_observe_start_state(&observe);
             backend.press_hotkey(&hotkey)?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::KeyEnter { observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let observe_start = capture_observe_start_state(&observe);
             backend.press_enter()?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::KeyEscape { observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let observe_start = capture_observe_start_state(&observe);
             backend.press_escape()?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::ScreenCapture {
@@ -920,13 +932,14 @@ fn execute_with_context(
             active_window_id,
             observe,
         } => {
+            let observe_start = capture_observe_start_state(&observe);
             let mut result = click_text_target(
                 &text,
                 active_window,
                 active_window_id.as_deref(),
                 request_context,
             )?;
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::PointerClickId {
@@ -935,13 +948,14 @@ fn execute_with_context(
             active_window_id,
             observe,
         } => {
+            let observe_start = capture_observe_start_state(&observe);
             let mut result = click_element_id_target(
                 &id,
                 active_window,
                 active_window_id.as_deref(),
                 request_context,
             )?;
-            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
             Ok(result)
         }
         Command::PointerClickToken { token } => click_token_target(token),
@@ -2041,7 +2055,53 @@ fn append_observe_payload(result: &mut Value, observe: Option<Value>) {
     }
 }
 
-fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppError> {
+fn capture_observe_start_state(options: &ObserveOptions) -> ObserveStartState {
+    if !options.enabled {
+        return ObserveStartState::default();
+    }
+    let active_window_id = resolve_active_window_target()
+        .ok()
+        .and_then(|window| window.window_ref.clone());
+    let focused_element_id = focused_element_id_from_ax();
+    ObserveStartState {
+        active_window_id,
+        focused_element_id,
+    }
+}
+
+fn focused_element_id_from_ax() -> Option<String> {
+    let ax = platform::ax::focused_frontmost_element().ok()??;
+    vision::ax_merge::primary_id_for_ax(&ax).or_else(|| {
+        let role = ax.role.trim().to_ascii_lowercase();
+        if role.is_empty() {
+            None
+        } else {
+            Some(format!("ax_{role}"))
+        }
+    })
+}
+
+fn observe_transition_state(
+    start_state: &ObserveStartState,
+) -> (bool, Option<String>, bool, Option<String>) {
+    let active_window_id = resolve_active_window_target()
+        .ok()
+        .and_then(|window| window.window_ref.clone());
+    let focused_element_id = focused_element_id_from_ax();
+    let active_window_changed = active_window_id != start_state.active_window_id;
+    let focus_changed = focused_element_id != start_state.focused_element_id;
+    (
+        focus_changed,
+        focused_element_id,
+        active_window_changed,
+        active_window_id,
+    )
+}
+
+fn observe_after_action(
+    options: &ObserveOptions,
+    start_state: &ObserveStartState,
+) -> Result<Option<Value>, AppError> {
     if !options.enabled {
         return Ok(None);
     }
@@ -2060,10 +2120,16 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
         if start.elapsed() >= timeout {
             let (tokens, ax_available, ax_count) =
                 observe_tokens_for_region(&last_capture, region_union.as_ref());
+            let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
+                observe_transition_state(start_state);
             return Ok(Some(json!({
                 "changed": changed_any,
                 "regions": region_union.into_iter().collect::<Vec<_>>(),
                 "tokens": tokens,
+                "focus_changed": focus_changed,
+                "focused_element_id": focused_element_id,
+                "active_window_changed": active_window_changed,
+                "active_window_id": active_window_id,
                 "ax": {
                     "available": ax_available,
                     "count": ax_count
@@ -2097,10 +2163,16 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
             if options.until == ObserveUntil::FirstChange {
                 let (tokens, ax_available, ax_count) =
                     observe_tokens_for_region(&curr, region_union.as_ref());
+                let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
+                    observe_transition_state(start_state);
                 return Ok(Some(json!({
                     "changed": true,
                     "regions": region_union.into_iter().collect::<Vec<_>>(),
                     "tokens": tokens,
+                    "focus_changed": focus_changed,
+                    "focused_element_id": focused_element_id,
+                    "active_window_changed": active_window_changed,
+                    "active_window_id": active_window_id,
                     "ax": {
                         "available": ax_available,
                         "count": ax_count
@@ -2116,10 +2188,20 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
                 if quiet_frames >= OBSERVE_QUIET_FRAMES {
                     let (tokens, ax_available, ax_count) =
                         observe_tokens_for_region(&curr, region_union.as_ref());
+                    let (
+                        focus_changed,
+                        focused_element_id,
+                        active_window_changed,
+                        active_window_id,
+                    ) = observe_transition_state(start_state);
                     return Ok(Some(json!({
                         "changed": true,
                         "regions": region_union.into_iter().collect::<Vec<_>>(),
                         "tokens": tokens,
+                        "focus_changed": focus_changed,
+                        "focused_element_id": focused_element_id,
+                        "active_window_changed": active_window_changed,
+                        "active_window_id": active_window_id,
                         "ax": {
                             "available": ax_available,
                             "count": ax_count
@@ -2131,10 +2213,16 @@ fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppEr
                 }
             } else if options.until == ObserveUntil::Stable && quiet_frames >= OBSERVE_QUIET_FRAMES
             {
+                let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
+                    observe_transition_state(start_state);
                 return Ok(Some(json!({
                     "changed": false,
                     "regions": [],
                     "tokens": [],
+                    "focus_changed": focus_changed,
+                    "focused_element_id": focused_element_id,
+                    "active_window_changed": active_window_changed,
+                    "active_window_id": active_window_id,
                     "ax": {
                         "available": false,
                         "count": 0

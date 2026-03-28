@@ -13,7 +13,8 @@ mod macos {
     use accessibility::{AXAttribute, AXUIElement, AXUIElementAttributes};
     use accessibility_sys::{
         AXValueGetType, AXValueGetValue, AXValueRef, kAXFocusedApplicationAttribute,
-        kAXPositionAttribute, kAXSizeAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize,
+        kAXFocusedUIElementAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXValueTypeCGPoint,
+        kAXValueTypeCGSize,
     };
     use core_foundation::{
         attributed_string::{CFAttributedString, CFAttributedStringGetString},
@@ -56,6 +57,46 @@ mod macos {
         let mut elements = Vec::new();
         collect_elements_recursive(&window, &mut elements);
         Ok(elements)
+    }
+
+    pub(super) fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
+        let system = AXUIElement::system_wide();
+        let focused_app_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(
+            kAXFocusedApplicationAttribute,
+        ));
+        let app_cf = system.attribute(&focused_app_attr).map_err(ax_err)?;
+        if !app_cf.instance_of::<AXUIElement>() {
+            return Ok(None);
+        }
+        let app = unsafe { AXUIElement::wrap_under_get_rule(app_cf.as_CFTypeRef() as _) };
+        let focused_element_attr =
+            AXAttribute::<CFType>::new(&CFString::from_static_string(kAXFocusedUIElementAttribute));
+        let focused_cf = match app.attribute(&focused_element_attr) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        if !focused_cf.instance_of::<AXUIElement>() {
+            return Ok(None);
+        }
+        let focused = unsafe { AXUIElement::wrap_under_get_rule(focused_cf.as_CFTypeRef() as _) };
+        let role = focused
+            .role()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| "AXUnknown".to_string());
+        let bounds = element_bounds(&focused).unwrap_or(Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        });
+        let text = element_label(&focused, &role);
+        let ax_identifier = element_identifier(&focused);
+        Ok(Some(AxElement {
+            role,
+            text,
+            bounds,
+            ax_identifier,
+        }))
     }
 
     fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
@@ -373,7 +414,17 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
     macos::collect_frontmost_window_elements()
 }
 
+#[cfg(target_os = "macos")]
+pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
+    macos::focused_frontmost_element()
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
     Ok(Vec::new())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
+    Ok(None)
 }
