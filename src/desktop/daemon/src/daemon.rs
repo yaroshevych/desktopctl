@@ -2665,7 +2665,7 @@ mod tests {
                     height: 200.0,
                 }),
                 elements: vec![TokenizeElement {
-                    id: "text_0018".to_string(),
+                    id: "button_7".to_string(),
                     kind: "".to_string(),
                     bbox: [10.0, 20.0, 40.0, 30.0],
                     has_border: None,
@@ -2679,7 +2679,7 @@ mod tests {
         let elements = super::tokenize_payload_elements_for_click(&payload);
         assert_eq!(elements.len(), 1);
         let el = &elements[0];
-        assert_eq!(el.id, "text_0018");
+        assert_eq!(el.id, "button_7");
         assert_eq!(el.text.as_deref(), Some("7"));
         assert_eq!(el.source, "accessibility_ax:AXButton");
         // x/y scale = 2.0

@@ -40,6 +40,7 @@ desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
 
 # tokenize current screen/window into structured OCR + UI elements
 desktopctl screen tokenize [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>]
+# element ids are semantic and predictable (examples: button_7, button_add, text_settings)
 
 # find text on screen via OCR
 desktopctl screen find --text <text> [--all]
