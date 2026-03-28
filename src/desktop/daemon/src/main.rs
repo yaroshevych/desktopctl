@@ -330,6 +330,7 @@ fn start_overlay_live_loop() {
                     window_id: None,
                     screenshot_path: None,
                     active_window: false,
+                    region: None,
                 },
             );
             let mut tick_status = "ok";

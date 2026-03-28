@@ -39,8 +39,9 @@ desktopctl window focus --title <text>
 desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
 
 # tokenize current screen/window into structured OCR + UI elements
-desktopctl screen tokenize [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>]
+desktopctl screen tokenize [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
 # element ids are semantic and predictable (examples: button_7, button_add, text_settings)
+# region is relative to the selected tokenize target (window or screenshot)
 
 # find text on screen via OCR
 desktopctl screen find --text <text> [--all]

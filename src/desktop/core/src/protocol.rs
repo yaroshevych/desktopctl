@@ -116,6 +116,8 @@ pub enum Command {
         screenshot_path: Option<String>,
         #[serde(default)]
         active_window: bool,
+        #[serde(default)]
+        region: Option<Bounds>,
     },
     ScreenFindText {
         text: String,

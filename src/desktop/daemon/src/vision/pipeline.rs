@@ -280,8 +280,9 @@ fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
 pub fn tokenize_screenshot(
     screenshot_path: &Path,
     window_meta: Option<TokenizeWindowMeta>,
+    region: Option<&Bounds>,
 ) -> Result<TokenizePayload, AppError> {
-    let rgba = image::open(screenshot_path)
+    let mut rgba = image::open(screenshot_path)
         .map_err(|err| {
             AppError::invalid_argument(format!(
                 "failed to open screenshot {}: {err}",
@@ -289,6 +290,21 @@ pub fn tokenize_screenshot(
             ))
         })?
         .to_rgba8();
+    if let Some(region) = region {
+        let (x, y, width, height) =
+            screenshot_region_crop_rect(rgba.width(), rgba.height(), region).ok_or_else(|| {
+                AppError::invalid_argument(format!(
+                    "tokenize --region ({:.0},{:.0},{:.0},{:.0}) exceeds screenshot bounds {}x{}",
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                    rgba.width(),
+                    rgba.height()
+                ))
+            })?;
+        rgba = crop_imm(&rgba, x, y, width, height).to_image();
+    }
     let width = rgba.width();
     let height = rgba.height();
     let texts = recognize_text(&rgba)?;
@@ -305,6 +321,29 @@ pub fn tokenize_screenshot(
         texts,
     };
     tokenize_from_snapshot(snapshot, &rgba, Some(screenshot_path), window_meta)
+}
+
+fn screenshot_region_crop_rect(
+    image_width: u32,
+    image_height: u32,
+    region: &Bounds,
+) -> Option<(u32, u32, u32, u32)> {
+    if region.width <= 0.0 || region.height <= 0.0 || region.x < 0.0 || region.y < 0.0 {
+        return None;
+    }
+    let x = region.x.round() as u32;
+    let y = region.y.round() as u32;
+    let width = region.width.round() as u32;
+    let height = region.height.round() as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let right = x.checked_add(width)?;
+    let bottom = y.checked_add(height)?;
+    if right > image_width || bottom > image_height {
+        return None;
+    }
+    Some((x, y, width, height))
 }
 
 fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>, AppError> {

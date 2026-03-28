@@ -399,6 +399,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             let mut window_id: Option<String> = None;
             let mut screenshot_path: Option<String> = None;
             let mut active_window = false;
+            let mut region: Option<desktop_core::protocol::Bounds> = None;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -439,6 +440,24 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                         active_window = true;
                         i += 1;
                     }
+                    "--region" => {
+                        let x = parse_u32(args.get(i + 1), "region_x")?;
+                        let y = parse_u32(args.get(i + 2), "region_y")?;
+                        let width = parse_u32(args.get(i + 3), "region_width")?;
+                        let height = parse_u32(args.get(i + 4), "region_height")?;
+                        if width == 0 || height == 0 {
+                            return Err(AppError::invalid_argument(
+                                "region width/height must be > 0",
+                            ));
+                        }
+                        region = Some(desktop_core::protocol::Bounds {
+                            x: x as f64,
+                            y: y as f64,
+                            width: width as f64,
+                            height: height as f64,
+                        });
+                        i += 5;
+                    }
                     flag => {
                         return Err(AppError::invalid_argument(format!(
                             "unknown flag for screen tokenize: {flag}"
@@ -466,6 +485,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                 window_id,
                 screenshot_path,
                 active_window,
+                region,
             })
         }
         "find" => {
@@ -753,9 +773,10 @@ fn usage() -> &'static str {
   desktopctl window bounds --title <text> [--json]
   desktopctl window focus --title <text>
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window]
-  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>]
+  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
     note: --window cannot be combined with --screenshot
     note: --active-window cannot be combined with --window or --screenshot
+    note: --region is relative to the selected window/screenshot target
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read
@@ -1273,11 +1294,13 @@ mod tests {
                 window_id,
                 screenshot_path,
                 active_window,
+                region,
             } => {
                 assert_eq!(overlay_out_path.as_deref(), Some("/tmp/tokens.overlay.png"));
                 assert!(window_id.is_none());
                 assert!(screenshot_path.is_none());
                 assert!(!active_window);
+                assert!(region.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1298,11 +1321,13 @@ mod tests {
                 window_id,
                 screenshot_path,
                 active_window,
+                region,
             } => {
                 assert!(overlay_out_path.is_none());
                 assert_eq!(window_id.as_deref(), Some("777:3"));
                 assert!(screenshot_path.is_none());
                 assert!(!active_window);
+                assert!(region.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1322,11 +1347,38 @@ mod tests {
                 window_id,
                 screenshot_path,
                 active_window,
+                region,
             } => {
                 assert!(overlay_out_path.is_none());
                 assert!(window_id.is_none());
                 assert!(screenshot_path.is_none());
                 assert!(active_window);
+                assert!(region.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_tokenize_with_region() {
+        let args = vec![
+            "screen".to_string(),
+            "tokenize".to_string(),
+            "--active-window".to_string(),
+            "--region".to_string(),
+            "10".to_string(),
+            "20".to_string(),
+            "300".to_string(),
+            "400".to_string(),
+        ];
+        let command = parse_command(&args).expect("screen tokenize with region should parse");
+        match command {
+            Command::ScreenTokenize { region, .. } => {
+                let region = region.expect("region should be present");
+                assert_eq!(region.x, 10.0);
+                assert_eq!(region.y, 20.0);
+                assert_eq!(region.width, 300.0);
+                assert_eq!(region.height, 400.0);
             }
             other => panic!("unexpected command: {other:?}"),
         }

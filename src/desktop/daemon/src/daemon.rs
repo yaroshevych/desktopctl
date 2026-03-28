@@ -587,6 +587,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
             window_id,
             screenshot_path,
             active_window,
+            region,
         } => {
             trace::log("execute:screen_tokenize:start");
             let screenshot_mode = screenshot_path.is_some();
@@ -608,7 +609,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
                         screenshot.display()
                     )));
                 }
-                vision::pipeline::tokenize_screenshot(&screenshot, None)?
+                vision::pipeline::tokenize_screenshot(&screenshot, None, region.as_ref())?
             } else {
                 permissions::ensure_screen_recording_permission()?;
                 let backend = new_backend()?;
@@ -624,6 +625,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
                             "frontmost window bounds unavailable for --active-window",
                         )
                     })?;
+                    let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
                     let app = frontmost_app_name();
                     let title = app.clone().unwrap_or_else(|| "active_window".to_string());
                     let window_meta = vision::pipeline::TokenizeWindowMeta {
@@ -649,6 +651,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
                         }
                     };
                     if let Some(bounds) = overlay_window_bounds {
+                        let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
                         let window_meta = vision::pipeline::TokenizeWindowMeta {
                             id: "frontmost:1".to_string(),
                             title: "active_window".to_string(),
@@ -657,6 +660,7 @@ fn execute(command: Command) -> Result<Value, AppError> {
                         };
                         vision::pipeline::tokenize_window(window_meta)?
                     } else if let Some(bounds) = frontmost_window_bounds() {
+                        let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
                         let app = frontmost_app_name();
                         let title = app.clone().unwrap_or_else(|| "active_window".to_string());
                         let window_meta = vision::pipeline::TokenizeWindowMeta {
@@ -669,22 +673,26 @@ fn execute(command: Command) -> Result<Value, AppError> {
                     } else {
                         let windows = list_windows()?;
                         let target = resolve_tokenize_window_target(&windows, None)?;
+                        let bounds =
+                            resolve_tokenize_region_bounds(target.bounds.clone(), region.as_ref())?;
                         let window_meta = vision::pipeline::TokenizeWindowMeta {
                             id: target.id.clone(),
                             title: target.title.clone(),
                             app: Some(target.app.clone()),
-                            bounds: target.bounds.clone(),
+                            bounds,
                         };
                         vision::pipeline::tokenize_window(window_meta)?
                     }
                 } else {
                     let windows = list_windows()?;
                     let target = resolve_tokenize_window_target(&windows, window_id.as_deref())?;
+                    let bounds =
+                        resolve_tokenize_region_bounds(target.bounds.clone(), region.as_ref())?;
                     let window_meta = vision::pipeline::TokenizeWindowMeta {
                         id: target.id.clone(),
                         title: target.title.clone(),
                         app: Some(target.app.clone()),
-                        bounds: target.bounds.clone(),
+                        bounds,
                     };
                     vision::pipeline::tokenize_window(window_meta)?
                 }
@@ -828,6 +836,53 @@ fn resolve_pointer_click_point(x: u32, y: u32, absolute: bool) -> Result<Point, 
     let abs_x = (bounds.x + x as f64).round().max(0.0) as u32;
     let abs_y = (bounds.y + y as f64).round().max(0.0) as u32;
     Ok(Point::new(abs_x, abs_y))
+}
+
+fn resolve_tokenize_region_bounds(
+    base: desktop_core::protocol::Bounds,
+    region: Option<&desktop_core::protocol::Bounds>,
+) -> Result<desktop_core::protocol::Bounds, AppError> {
+    let Some(region) = region else {
+        return Ok(base);
+    };
+    if region.width <= 0.0 || region.height <= 0.0 {
+        return Err(AppError::invalid_argument(
+            "tokenize --region width/height must be > 0",
+        ));
+    }
+    if region.x < 0.0 || region.y < 0.0 {
+        return Err(AppError::invalid_argument(
+            "tokenize --region x/y must be >= 0",
+        ));
+    }
+
+    let x = base.x + region.x;
+    let y = base.y + region.y;
+    let right = x + region.width;
+    let bottom = y + region.height;
+    let base_right = base.x + base.width;
+    let base_bottom = base.y + base.height;
+
+    if x < base.x || y < base.y || right > base_right || bottom > base_bottom {
+        return Err(AppError::invalid_argument(format!(
+            "tokenize --region ({:.0},{:.0},{:.0},{:.0}) exceeds target bounds ({:.0},{:.0},{:.0},{:.0})",
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+            base.x,
+            base.y,
+            base.width,
+            base.height
+        )));
+    }
+
+    Ok(desktop_core::protocol::Bounds {
+        x,
+        y,
+        width: region.width,
+        height: region.height,
+    })
 }
 
 fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::TokenizePayload) {
@@ -2593,6 +2648,47 @@ mod tests {
         let selected =
             super::resolve_tokenize_window_target(&windows, None).expect("selected frontmost");
         assert_eq!(selected.id, "22:2");
+    }
+
+    #[test]
+    fn tokenize_region_resolves_inside_target_bounds() {
+        let base = Bounds {
+            x: 100.0,
+            y: 200.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let region = Bounds {
+            x: 50.0,
+            y: 60.0,
+            width: 300.0,
+            height: 250.0,
+        };
+        let resolved = super::resolve_tokenize_region_bounds(base.clone(), Some(&region))
+            .expect("region should resolve");
+        assert_eq!(resolved.x, 150.0);
+        assert_eq!(resolved.y, 260.0);
+        assert_eq!(resolved.width, 300.0);
+        assert_eq!(resolved.height, 250.0);
+    }
+
+    #[test]
+    fn tokenize_region_rejects_outside_target_bounds() {
+        let base = Bounds {
+            x: 100.0,
+            y: 200.0,
+            width: 320.0,
+            height: 240.0,
+        };
+        let region = Bounds {
+            x: 200.0,
+            y: 120.0,
+            width: 200.0,
+            height: 200.0,
+        };
+        let err = super::resolve_tokenize_region_bounds(base, Some(&region))
+            .expect_err("region should fail");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 
     #[test]
