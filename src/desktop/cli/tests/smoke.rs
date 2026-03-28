@@ -708,13 +708,34 @@ fn smoke_screen_tokenize_overlay_contract_without_legacy_tokens() -> Result<(), 
     cli.open_app("Calculator", 10_000)?;
     thread::sleep(Duration::from_millis(400));
 
+    let screenshot_path = cli.artifact_dir.join("tokenize-source.png");
+    let screenshot_text = screenshot_path.to_string_lossy().to_string();
+    let _ = cli.run_json_ok(
+        &[
+            "screen",
+            "screenshot",
+            "--active-window",
+            "--out",
+            &screenshot_text,
+        ],
+        DEFAULT_TIMEOUT,
+        "tokenize_overlay_source_shot",
+    )?;
+    if !screenshot_path.exists() {
+        return Err(format!(
+            "expected tokenize source screenshot to exist: {}",
+            screenshot_path.display()
+        ));
+    }
+
     let overlay_path = cli.artifact_dir.join("tokenize-overlay.png");
     let overlay_text = overlay_path.to_string_lossy().to_string();
     let response = cli.run_json_ok(
         &[
             "screen",
             "tokenize",
-            "--active-window",
+            "--screenshot",
+            &screenshot_text,
             "--overlay",
             &overlay_text,
         ],
