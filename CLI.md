@@ -9,6 +9,16 @@
 desktopctl --json <command...>
 ```
 
+## Observe Mode (Action Feedback)
+```bash
+# pointer/keyboard actions observe UI change by default
+# disable when you need minimum latency
+--observe                 # explicit enable (default)
+--no-observe              # disable post-action observe loop
+--observe-until <mode>    # stable | change | first-change
+--observe-timeout <ms>    # observe loop hard timeout (default: 300)
+```
+
 ## App and Window
 ```bash
 # open an app; optionally wait until it is ready
@@ -64,20 +74,20 @@ desktopctl pointer down <x> <y>
 desktopctl pointer up <x> <y>
 
 # click pointer by coordinate, OCR text, element id, or token
-desktopctl pointer click <x> <y>
-desktopctl pointer click --text <text> [--active-window [<id>]]
-desktopctl pointer click --id <element_id> --active-window [<id>]
+desktopctl pointer click <x> <y> [--absolute] [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+desktopctl pointer click --text <text> [--active-window [<id>]] [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+desktopctl pointer click --id <element_id> --active-window [<id>] [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
 desktopctl pointer click --token <n>
 
 # scroll pointer viewport/content by signed deltas (positive dy scrolls down)
-desktopctl pointer scroll <dx> <dy>
+desktopctl pointer scroll <dx> <dy> [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
 
 # drag pointer between coordinates
 desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
 
 # keyboard text and key/hotkey press
-desktopctl keyboard type "text"
-desktopctl keyboard press <key-or-hotkey>
+desktopctl keyboard type "text" [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+desktopctl keyboard press <key-or-hotkey> [--observe] [--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
 ```
 
 ## Clipboard
