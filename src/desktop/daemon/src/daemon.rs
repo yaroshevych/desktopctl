@@ -856,8 +856,13 @@ fn execute_with_context(
             interval_ms,
             disappear,
         } => wait_for_text(&text, timeout_ms, interval_ms, disappear),
-        Command::PointerClickText { text } => click_text_target(&text, request_context),
-        Command::PointerClickId { id } => click_element_id_target(&id, request_context),
+        Command::PointerClickText {
+            text,
+            active_window,
+        } => click_text_target(&text, active_window, request_context),
+        Command::PointerClickId { id, active_window } => {
+            click_element_id_target(&id, active_window, request_context)
+        }
         Command::PointerClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -1013,7 +1018,48 @@ fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::Toke
     }
 }
 
-fn click_text_target(query: &str, request_context: &RequestContext) -> Result<Value, AppError> {
+fn click_text_target(
+    query: &str,
+    active_window: bool,
+    request_context: &RequestContext,
+) -> Result<Value, AppError> {
+    if active_window {
+        let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
+            AppError::target_not_found("frontmost window bounds unavailable for click --text")
+        })?;
+        let app = request_frontmost_app(request_context);
+        let window_meta = vision::pipeline::TokenizeWindowMeta {
+            id: "frontmost:1".to_string(),
+            title: app.clone().unwrap_or_else(|| "active_window".to_string()),
+            app,
+            bounds,
+        };
+        let payload = vision::pipeline::tokenize_window(window_meta)?;
+        let tokenize_texts = tokenize_payload_texts_for_click(&payload);
+        if tokenize_texts.is_empty() {
+            return Err(AppError::target_not_found(
+                "no tokenize text detected in frontmost window; cannot click target safely",
+            ));
+        }
+        let target = select_text_candidate(&tokenize_texts, query)?;
+        trace::log("ui_click_text:active_window source=tokenize");
+        trace::log(format!(
+            "ui_click_text:selected text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
+            compact_for_log(&target.text),
+            target.confidence,
+            target.bounds.x,
+            target.bounds.y,
+            target.bounds.width,
+            target.bounds.height
+        ));
+        perform_click(&target.bounds)?;
+        return Ok(json!({
+            "snapshot_id": payload.snapshot_id,
+            "text": target.text,
+            "bounds": target.bounds
+        }));
+    }
+
     permissions::ensure_screen_recording_permission()?;
     let capture = vision::pipeline::capture_and_update(None)?;
     let normalized_texts = normalize_snapshot_texts_to_display(
@@ -1095,7 +1141,16 @@ struct TokenizeClickElementCandidate {
     source: String,
 }
 
-fn click_element_id_target(id: &str, request_context: &RequestContext) -> Result<Value, AppError> {
+fn click_element_id_target(
+    id: &str,
+    active_window: bool,
+    request_context: &RequestContext,
+) -> Result<Value, AppError> {
+    if !active_window {
+        return Err(AppError::invalid_argument(
+            "pointer click --id requires --active-window",
+        ));
+    }
     permissions::ensure_screen_recording_permission()?;
     let needle = id.trim();
     if needle.is_empty() {

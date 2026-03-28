@@ -662,26 +662,46 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
         "click" => {
             if args.len() >= 2 && args[1] == "--text" {
                 let text = args.get(2).cloned().ok_or_else(|| {
-                    AppError::invalid_argument("usage: desktopctl pointer click --text <text>")
+                    AppError::invalid_argument(
+                        "usage: desktopctl pointer click --text <text> [--active-window]",
+                    )
                 })?;
-                if args.len() > 3 {
+                let mut active_window = false;
+                for token in args.iter().skip(3) {
+                    if token == "--active-window" {
+                        active_window = true;
+                        continue;
+                    }
                     return Err(AppError::invalid_argument(format!(
-                        "unknown flag for pointer click --text: {}",
-                        args[3]
+                        "unknown flag for pointer click --text: {token}",
                     )));
                 }
-                Ok(Command::PointerClickText { text })
+                Ok(Command::PointerClickText {
+                    text,
+                    active_window,
+                })
             } else if args.len() >= 2 && args[1] == "--id" {
                 let id = args.get(2).cloned().ok_or_else(|| {
-                    AppError::invalid_argument("usage: desktopctl pointer click --id <element_id>")
+                    AppError::invalid_argument(
+                        "usage: desktopctl pointer click --id <element_id> --active-window",
+                    )
                 })?;
-                if args.len() > 3 {
+                let mut active_window = false;
+                for token in args.iter().skip(3) {
+                    if token == "--active-window" {
+                        active_window = true;
+                        continue;
+                    }
                     return Err(AppError::invalid_argument(format!(
-                        "unknown flag for pointer click --id: {}",
-                        args[3]
+                        "unknown flag for pointer click --id: {token}",
                     )));
                 }
-                Ok(Command::PointerClickId { id })
+                if !active_window {
+                    return Err(AppError::invalid_argument(
+                        "pointer click --id requires --active-window",
+                    ));
+                }
+                Ok(Command::PointerClickId { id, active_window })
             } else if args.len() >= 2 && args[1] == "--token" {
                 let token = parse_u32(args.get(2), "token")?;
                 Ok(Command::PointerClickToken { token })
@@ -819,8 +839,8 @@ fn usage() -> &'static str {
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
   desktopctl pointer click [--absolute] <x> <y>
-  desktopctl pointer click --text <text>
-  desktopctl pointer click --id <element_id>
+  desktopctl pointer click --text <text> [--active-window]
+  desktopctl pointer click --id <element_id> --active-window
   desktopctl pointer click --token <n>
   desktopctl pointer scroll <dx> <dy>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
@@ -1587,11 +1607,16 @@ mod tests {
             "click".to_string(),
             "--text".to_string(),
             "DesktopCtl".to_string(),
+            "--active-window".to_string(),
         ];
         let command = parse_command(&args).expect("pointer click --text should parse");
         match command {
-            Command::PointerClickText { text } => {
+            Command::PointerClickText {
+                text,
+                active_window,
+            } => {
                 assert_eq!(text, "DesktopCtl");
+                assert!(active_window);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1604,14 +1629,29 @@ mod tests {
             "click".to_string(),
             "--id".to_string(),
             "button_0018".to_string(),
+            "--active-window".to_string(),
         ];
         let command = parse_command(&args).expect("pointer click --id should parse");
         match command {
-            Command::PointerClickId { id } => {
+            Command::PointerClickId { id, active_window } => {
                 assert_eq!(id, "button_0018");
+                assert!(active_window);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_pointer_click_id_without_active_window() {
+        let args = vec![
+            "pointer".to_string(),
+            "click".to_string(),
+            "--id".to_string(),
+            "button_0018".to_string(),
+        ];
+        let err =
+            parse_command(&args).expect_err("pointer click --id must require --active-window");
+        assert!(err.message.contains("requires --active-window"));
     }
 
     #[test]

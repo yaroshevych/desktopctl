@@ -69,9 +69,13 @@ pub enum Command {
     },
     PointerClickText {
         text: String,
+        #[serde(default)]
+        active_window: bool,
     },
     PointerClickId {
         id: String,
+        #[serde(default)]
+        active_window: bool,
     },
     PointerClickToken {
         token: u32,

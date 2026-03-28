@@ -62,8 +62,8 @@ desktopctl pointer up <x> <y>
 
 # click pointer by coordinate, OCR text, element id, or token
 desktopctl pointer click <x> <y>
-desktopctl pointer click --text <text>
-desktopctl pointer click --id <element_id>
+desktopctl pointer click --text <text> [--active-window]
+desktopctl pointer click --id <element_id> --active-window
 desktopctl pointer click --token <n>
 
 # scroll pointer viewport/content by signed deltas (positive dy scrolls down)
