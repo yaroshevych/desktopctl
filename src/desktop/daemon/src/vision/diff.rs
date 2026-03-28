@@ -190,49 +190,96 @@ pub fn diff_region(
     curr: &GrayThumbnail,
     threshold: u8,
 ) -> Option<ThumbRegion> {
+    let regions = diff_regions(prev, curr, threshold);
+    if regions.is_empty() {
+        return None;
+    }
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0_u32;
+    let mut max_y = 0_u32;
+    for region in &regions {
+        min_x = min_x.min(region.x);
+        min_y = min_y.min(region.y);
+        max_x = max_x.max(region.x + region.width.saturating_sub(1));
+        max_y = max_y.max(region.y + region.height.saturating_sub(1));
+    }
+    Some(ThumbRegion {
+        x: min_x,
+        y: min_y,
+        width: max_x.saturating_sub(min_x).saturating_add(1).max(1),
+        height: max_y.saturating_sub(min_y).saturating_add(1).max(1),
+    })
+}
+
+pub fn diff_regions(prev: &GrayThumbnail, curr: &GrayThumbnail, threshold: u8) -> Vec<ThumbRegion> {
     if prev.width != curr.width
         || prev.height != curr.height
         || prev.pixels.len() != curr.pixels.len()
     {
-        return Some(ThumbRegion {
+        return vec![ThumbRegion {
             x: 0,
             y: 0,
             width: curr.width.max(1),
             height: curr.height.max(1),
-        });
+        }];
     }
 
-    let mut min_x = curr.width;
-    let mut min_y = curr.height;
-    let mut max_x = 0_u32;
-    let mut max_y = 0_u32;
-    let mut changed = false;
-
-    for y in 0..curr.height {
-        for x in 0..curr.width {
-            let idx = (y * curr.width + x) as usize;
-            let a = prev.pixels[idx];
-            let b = curr.pixels[idx];
-            if a.abs_diff(b) > threshold {
-                changed = true;
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
+    let width = curr.width as usize;
+    let height = curr.height as usize;
+    let mut changed = vec![false; curr.pixels.len()];
+    for idx in 0..curr.pixels.len() {
+        if prev.pixels[idx].abs_diff(curr.pixels[idx]) > threshold {
+            changed[idx] = true;
         }
     }
+    let mut visited = vec![false; changed.len()];
+    let mut regions = Vec::new();
+    let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
 
-    if !changed {
-        None
-    } else {
-        Some(ThumbRegion {
-            x: min_x,
-            y: min_y,
-            width: (max_x - min_x + 1).max(1),
-            height: (max_y - min_y + 1).max(1),
-        })
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            if !changed[idx] || visited[idx] {
+                continue;
+            }
+            visited[idx] = true;
+            queue.push_back((x, y));
+
+            let mut min_x = x as u32;
+            let mut min_y = y as u32;
+            let mut max_x = x as u32;
+            let mut max_y = y as u32;
+            while let Some((cx, cy)) = queue.pop_front() {
+                min_x = min_x.min(cx as u32);
+                min_y = min_y.min(cy as u32);
+                max_x = max_x.max(cx as u32);
+                max_y = max_y.max(cy as u32);
+                for (nx, ny) in neighbors4(cx, cy, width, height) {
+                    let nidx = ny * width + nx;
+                    if changed[nidx] && !visited[nidx] {
+                        visited[nidx] = true;
+                        queue.push_back((nx, ny));
+                    }
+                }
+            }
+            regions.push(ThumbRegion {
+                x: min_x,
+                y: min_y,
+                width: max_x.saturating_sub(min_x).saturating_add(1).max(1),
+                height: max_y.saturating_sub(min_y).saturating_add(1).max(1),
+            });
+        }
     }
+    regions
+}
+
+fn neighbors4(x: usize, y: usize, width: usize, height: usize) -> [(usize, usize); 4] {
+    let left = (x.saturating_sub(1), y);
+    let up = (x, y.saturating_sub(1));
+    let right = ((x + 1).min(width.saturating_sub(1)), y);
+    let down = (x, (y + 1).min(height.saturating_sub(1)));
+    [left, up, right, down]
 }
 
 pub fn changed_pixel_count(prev: &GrayThumbnail, curr: &GrayThumbnail, threshold: u8) -> usize {
@@ -271,7 +318,7 @@ pub fn upscale_region(
 
 #[cfg(test)]
 mod tests {
-    use super::{GrayThumbnail, ThumbRegion, changed_pixel_count, diff_region};
+    use super::{GrayThumbnail, ThumbRegion, changed_pixel_count, diff_region, diff_regions};
 
     #[test]
     fn detects_changed_region() {
@@ -330,5 +377,43 @@ mod tests {
             pixels: curr_pixels,
         };
         assert_eq!(changed_pixel_count(&prev, &curr, 8), 2);
+    }
+
+    #[test]
+    fn detects_multiple_changed_regions() {
+        let prev = GrayThumbnail {
+            width: 6,
+            height: 4,
+            pixels: vec![0; 24],
+        };
+        let mut curr_pixels = vec![0; 24];
+        curr_pixels[1] = 255; // x=1,y=0
+        curr_pixels[22] = 255; // x=4,y=3
+        let curr = GrayThumbnail {
+            width: 6,
+            height: 4,
+            pixels: curr_pixels,
+        };
+        let mut regions = diff_regions(&prev, &curr, 8);
+        regions.sort_by_key(|r| (r.y, r.x));
+        assert_eq!(regions.len(), 2);
+        assert_eq!(
+            regions[0],
+            ThumbRegion {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1
+            }
+        );
+        assert_eq!(
+            regions[1],
+            ThumbRegion {
+                x: 4,
+                y: 3,
+                width: 1,
+                height: 1
+            }
+        );
     }
 }

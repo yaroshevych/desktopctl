@@ -18,7 +18,7 @@ use desktop_core::{
     ipc::{read_framed_json, socket_path, write_framed_json},
     protocol::{Command, ObserveOptions, ObserveUntil, RequestEnvelope, ResponseEnvelope},
 };
-use image::{ImageFormat, Rgba, RgbaImage, imageops::crop_imm};
+use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 
 #[cfg(target_os = "macos")]
@@ -41,6 +41,9 @@ const OBSERVE_QUIET_FRAMES: u32 = 2;
 const OBSERVE_DIFF_THRESHOLD: u8 = 8;
 const OBSERVE_THUMB_WIDTH: u32 = 96;
 const OBSERVE_THUMB_HEIGHT: u32 = 54;
+const OBSERVE_REGION_PAD_PX: f64 = 14.0;
+const OBSERVE_MIN_THUMB_COMPONENT_AREA: u32 = 2;
+const OBSERVE_OCR_PAD_PX: f64 = 40.0;
 
 #[derive(Debug, Clone, Default)]
 struct RequestContext {
@@ -52,6 +55,15 @@ struct RequestContext {
 struct ObserveStartState {
     active_window_id: Option<String>,
     focused_element_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ObserveEndState {
+    focus_changed: bool,
+    focused_element_id: Option<String>,
+    active_window_changed: bool,
+    active_window_id: Option<String>,
+    active_window_bounds: Option<desktop_core::protocol::Bounds>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -554,7 +566,10 @@ fn execute_with_context(
                 point.x, point.y
             ));
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, None)?,
+            );
             Ok(result)
         }
         Command::PointerScroll { dx, dy, observe } => {
@@ -565,7 +580,10 @@ fn execute_with_context(
             backend.scroll_wheel(dx, dy)?;
             trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, None)?,
+            );
             Ok(result)
         }
         Command::PointerDrag {
@@ -594,40 +612,78 @@ fn execute_with_context(
             ));
             Ok(json!({}))
         }
-        Command::UiType { text, observe } => {
+        Command::UiType {
+            text,
+            observe,
+            active_window,
+            active_window_id,
+        } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let observe_start = capture_observe_start_state(&observe);
+            let observe_scope =
+                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             backend.type_text(&text)?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
+            );
             Ok(result)
         }
-        Command::KeyHotkey { hotkey, observe } => {
+        Command::KeyHotkey {
+            hotkey,
+            observe,
+            active_window,
+            active_window_id,
+        } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let observe_start = capture_observe_start_state(&observe);
+            let observe_scope =
+                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             backend.press_hotkey(&hotkey)?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
+            );
             Ok(result)
         }
-        Command::KeyEnter { observe } => {
+        Command::KeyEnter {
+            observe,
+            active_window,
+            active_window_id,
+        } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let observe_start = capture_observe_start_state(&observe);
+            let observe_scope =
+                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             backend.press_enter()?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
+            );
             Ok(result)
         }
-        Command::KeyEscape { observe } => {
+        Command::KeyEscape {
+            observe,
+            active_window,
+            active_window_id,
+        } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let observe_start = capture_observe_start_state(&observe);
+            let observe_scope =
+                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             backend.press_escape()?;
             let mut result = json!({});
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
+            );
             Ok(result)
         }
         Command::ScreenCapture {
@@ -939,7 +995,10 @@ fn execute_with_context(
                 active_window_id.as_deref(),
                 request_context,
             )?;
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, None)?,
+            );
             Ok(result)
         }
         Command::PointerClickId {
@@ -955,7 +1014,10 @@ fn execute_with_context(
                 active_window_id.as_deref(),
                 request_context,
             )?;
-            append_observe_payload(&mut result, observe_after_action(&observe, &observe_start)?);
+            append_observe_payload(
+                &mut result,
+                observe_after_action(&observe, &observe_start, None)?,
+            );
             Ok(result)
         }
         Command::PointerClickToken { token } => click_token_target(token),
@@ -1170,6 +1232,26 @@ fn assert_active_window_id_matches(
         )));
     }
     Ok(active)
+}
+
+fn resolve_observe_scope_bounds(
+    active_window: bool,
+    active_window_id: Option<&str>,
+) -> Result<Option<desktop_core::protocol::Bounds>, AppError> {
+    if active_window_id.is_some() && !active_window {
+        return Err(AppError::invalid_argument(
+            "active window id requires --active-window",
+        ));
+    }
+    if !active_window {
+        return Ok(None);
+    }
+    let target = if let Some(reference) = active_window_id {
+        assert_active_window_id_matches(reference)?
+    } else {
+        resolve_active_window_target()?
+    };
+    Ok(Some(target.bounds))
 }
 
 fn attach_window_ref_to_payload(payload: &mut desktop_core::protocol::TokenizePayload) {
@@ -2081,26 +2163,27 @@ fn focused_element_id_from_ax() -> Option<String> {
     })
 }
 
-fn observe_transition_state(
-    start_state: &ObserveStartState,
-) -> (bool, Option<String>, bool, Option<String>) {
-    let active_window_id = resolve_active_window_target()
-        .ok()
+fn observe_transition_state(start_state: &ObserveStartState) -> ObserveEndState {
+    let active_window = resolve_active_window_target().ok();
+    let active_window_id = active_window
+        .as_ref()
         .and_then(|window| window.window_ref.clone());
     let focused_element_id = focused_element_id_from_ax();
     let active_window_changed = active_window_id != start_state.active_window_id;
     let focus_changed = focused_element_id != start_state.focused_element_id;
-    (
+    ObserveEndState {
         focus_changed,
         focused_element_id,
         active_window_changed,
         active_window_id,
-    )
+        active_window_bounds: active_window.map(|window| window.bounds),
+    }
 }
 
 fn observe_after_action(
     options: &ObserveOptions,
     start_state: &ObserveStartState,
+    observe_scope: Option<&desktop_core::protocol::Bounds>,
 ) -> Result<Option<Value>, AppError> {
     if !options.enabled {
         return Ok(None);
@@ -2110,36 +2193,54 @@ fn observe_after_action(
     let mut prev_thumb =
         vision::diff::thumbnail_from_rgba(&prev.image, OBSERVE_THUMB_WIDTH, OBSERVE_THUMB_HEIGHT);
     let mut last_capture = prev;
-    let start_tokens = observe_tokens_for_region(&last_capture, None).0;
+    let start_capture = last_capture.clone();
     let mut changed_any = false;
+    let mut last_change_at: Option<Instant> = None;
     let mut quiet_frames = 0u32;
-    let mut region_union: Option<desktop_core::protocol::Bounds> = None;
-    let mut samples = 0u32;
-    let timeout = Duration::from_millis(options.timeout_ms.max(20));
+    let mut changed_regions: Vec<desktop_core::protocol::Bounds> = Vec::new();
+    let effective_timeout_ms = options.timeout_ms.max(options.settle_ms).max(20);
+    let timeout = Duration::from_millis(effective_timeout_ms);
+    let mut sample_count = 0u64;
+    let mut diff_ms_total = 0u64;
 
     loop {
         if start.elapsed() >= timeout {
             let (tokens, ax_available, ax_count) =
-                observe_tokens_for_region(&last_capture, region_union.as_ref());
-            let tokens_delta = diff_observe_tokens(&start_tokens, &tokens);
-            let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
-                observe_transition_state(start_state);
+                observe_tokens_for_regions(&last_capture, &changed_regions);
+            let raw_tokens = tokens;
+            let end_state = observe_transition_state(start_state);
+            let regions = normalize_observe_regions(
+                &changed_regions,
+                end_state.active_window_bounds.as_ref(),
+            );
+            let start_tokens = observe_tokens_for_regions(&start_capture, &changed_regions).0;
+            let tokens_delta = normalize_observe_tokens_delta(
+                diff_observe_tokens(&start_tokens, &raw_tokens),
+                end_state.active_window_bounds.as_ref(),
+            );
+            let settle_ms = start.elapsed().as_millis() as u64;
+            trace::log(format!(
+                "observe:settle outcome=timeout settle_ms={} samples={} diff_ms_total={} regions={}",
+                settle_ms,
+                sample_count,
+                diff_ms_total,
+                changed_regions.len()
+            ));
             return Ok(Some(json!({
                 "changed": changed_any,
-                "regions": region_union.into_iter().collect::<Vec<_>>(),
-                "tokens": tokens,
+                "regions": regions,
                 "tokens_delta": tokens_delta,
-                "focus_changed": focus_changed,
-                "focused_element_id": focused_element_id,
-                "active_window_changed": active_window_changed,
-                "active_window_id": active_window_id,
+                "focus_changed": end_state.focus_changed,
+                "focused_element_id": end_state.focused_element_id,
+                "active_window_changed": end_state.active_window_changed,
+                "active_window_id": end_state.active_window_id,
                 "ax": {
                     "available": ax_available,
                     "count": ax_count
                 },
                 "stability": "timeout",
-                "elapsed_ms": start.elapsed().as_millis() as u64,
-                "samples": samples
+                "elapsed_ms": settle_ms,
+                "settle_ms": settle_ms
             })));
         }
         thread::sleep(Duration::from_millis(OBSERVE_SAMPLE_INTERVAL_MS));
@@ -2149,99 +2250,159 @@ fn observe_after_action(
             OBSERVE_THUMB_WIDTH,
             OBSERVE_THUMB_HEIGHT,
         );
-        samples += 1;
-        if let Some(changed_region) =
-            vision::diff::diff_region(&prev_thumb, &curr_thumb, OBSERVE_DIFF_THRESHOLD)
-        {
+        sample_count += 1;
+        let diff_started = Instant::now();
+        let frame_regions =
+            vision::diff::diff_regions(&prev_thumb, &curr_thumb, OBSERVE_DIFF_THRESHOLD);
+        diff_ms_total += diff_started.elapsed().as_millis() as u64;
+        let significant_regions: Vec<_> = frame_regions
+            .into_iter()
+            .filter(|region| {
+                region.width.saturating_mul(region.height).max(1)
+                    >= OBSERVE_MIN_THUMB_COMPONENT_AREA
+            })
+            .collect();
+        if !significant_regions.is_empty() {
             changed_any = true;
+            last_change_at = Some(Instant::now());
             quiet_frames = 0;
-            let upscaled = vision::diff::upscale_region(
-                changed_region,
-                curr.frame.width,
-                curr.frame.height,
-                curr_thumb.width,
-                curr_thumb.height,
-            );
-            region_union = Some(merge_bounds(region_union.as_ref(), &upscaled));
+            for changed_region in significant_regions {
+                let upscaled = vision::diff::upscale_region(
+                    changed_region,
+                    curr.frame.width,
+                    curr.frame.height,
+                    curr_thumb.width,
+                    curr_thumb.height,
+                );
+                let padded = pad_bounds(upscaled, OBSERVE_REGION_PAD_PX);
+                if let Some(clipped) = clip_to_scope(&padded, observe_scope) {
+                    merge_region_into_list(&mut changed_regions, clipped);
+                }
+            }
             if options.until == ObserveUntil::FirstChange {
                 let (tokens, ax_available, ax_count) =
-                    observe_tokens_for_region(&curr, region_union.as_ref());
-                let tokens_delta = diff_observe_tokens(&start_tokens, &tokens);
-                let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
-                    observe_transition_state(start_state);
+                    observe_tokens_for_regions(&curr, &changed_regions);
+                let raw_tokens = tokens;
+                let end_state = observe_transition_state(start_state);
+                let regions = normalize_observe_regions(
+                    &changed_regions,
+                    end_state.active_window_bounds.as_ref(),
+                );
+                let start_tokens = observe_tokens_for_regions(&start_capture, &changed_regions).0;
+                let tokens_delta = normalize_observe_tokens_delta(
+                    diff_observe_tokens(&start_tokens, &raw_tokens),
+                    end_state.active_window_bounds.as_ref(),
+                );
+                let settle_ms = start.elapsed().as_millis() as u64;
+                trace::log(format!(
+                    "observe:settle outcome=first_change settle_ms={} samples={} diff_ms_total={} regions={}",
+                    settle_ms,
+                    sample_count,
+                    diff_ms_total,
+                    changed_regions.len()
+                ));
                 return Ok(Some(json!({
                     "changed": true,
-                    "regions": region_union.into_iter().collect::<Vec<_>>(),
-                    "tokens": tokens,
+                    "regions": regions,
                     "tokens_delta": tokens_delta,
-                    "focus_changed": focus_changed,
-                    "focused_element_id": focused_element_id,
-                    "active_window_changed": active_window_changed,
-                    "active_window_id": active_window_id,
+                    "focus_changed": end_state.focus_changed,
+                    "focused_element_id": end_state.focused_element_id,
+                    "active_window_changed": end_state.active_window_changed,
+                    "active_window_id": end_state.active_window_id,
                     "ax": {
                         "available": ax_available,
                         "count": ax_count
                     },
                     "stability": "settled",
-                    "elapsed_ms": start.elapsed().as_millis() as u64,
-                    "samples": samples
+                    "elapsed_ms": settle_ms,
+                    "settle_ms": settle_ms
                 })));
             }
         } else {
             quiet_frames += 1;
             if changed_any {
                 if quiet_frames >= OBSERVE_QUIET_FRAMES {
+                    if let Some(last_change) = last_change_at {
+                        if last_change.elapsed() < Duration::from_millis(options.settle_ms) {
+                            last_capture = curr;
+                            prev_thumb = curr_thumb;
+                            continue;
+                        }
+                    }
                     let (tokens, ax_available, ax_count) =
-                        observe_tokens_for_region(&curr, region_union.as_ref());
-                    let tokens_delta = diff_observe_tokens(&start_tokens, &tokens);
-                    let (
-                        focus_changed,
-                        focused_element_id,
-                        active_window_changed,
-                        active_window_id,
-                    ) = observe_transition_state(start_state);
+                        observe_tokens_for_regions(&curr, &changed_regions);
+                    let raw_tokens = tokens;
+                    let end_state = observe_transition_state(start_state);
+                    let regions = normalize_observe_regions(
+                        &changed_regions,
+                        end_state.active_window_bounds.as_ref(),
+                    );
+                    let start_tokens =
+                        observe_tokens_for_regions(&start_capture, &changed_regions).0;
+                    let tokens_delta = normalize_observe_tokens_delta(
+                        diff_observe_tokens(&start_tokens, &raw_tokens),
+                        end_state.active_window_bounds.as_ref(),
+                    );
+                    let settle_ms = start.elapsed().as_millis() as u64;
+                    trace::log(format!(
+                        "observe:settle outcome=settled settle_ms={} samples={} diff_ms_total={} regions={}",
+                        settle_ms,
+                        sample_count,
+                        diff_ms_total,
+                        changed_regions.len()
+                    ));
                     return Ok(Some(json!({
                         "changed": true,
-                        "regions": region_union.into_iter().collect::<Vec<_>>(),
-                        "tokens": tokens,
+                        "regions": regions,
                         "tokens_delta": tokens_delta,
-                        "focus_changed": focus_changed,
-                        "focused_element_id": focused_element_id,
-                        "active_window_changed": active_window_changed,
-                        "active_window_id": active_window_id,
+                        "focus_changed": end_state.focus_changed,
+                        "focused_element_id": end_state.focused_element_id,
+                        "active_window_changed": end_state.active_window_changed,
+                        "active_window_id": end_state.active_window_id,
                         "ax": {
                             "available": ax_available,
                             "count": ax_count
                         },
                         "stability": "settled",
-                        "elapsed_ms": start.elapsed().as_millis() as u64,
-                        "samples": samples
+                        "elapsed_ms": settle_ms,
+                        "settle_ms": settle_ms
                     })));
                 }
             } else if options.until == ObserveUntil::Stable && quiet_frames >= OBSERVE_QUIET_FRAMES
             {
-                let (focus_changed, focused_element_id, active_window_changed, active_window_id) =
-                    observe_transition_state(start_state);
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                if elapsed_ms < options.settle_ms {
+                    last_capture = curr;
+                    prev_thumb = curr_thumb;
+                    continue;
+                }
+                let end_state = observe_transition_state(start_state);
+                trace::log(format!(
+                    "observe:settle outcome=no_change settle_ms={} samples={} diff_ms_total={} regions={}",
+                    elapsed_ms,
+                    sample_count,
+                    diff_ms_total,
+                    changed_regions.len()
+                ));
                 return Ok(Some(json!({
                     "changed": false,
                     "regions": [],
-                    "tokens": [],
                     "tokens_delta": {
                         "added": [],
                         "removed": [],
                         "changed": []
                     },
-                    "focus_changed": focus_changed,
-                    "focused_element_id": focused_element_id,
-                    "active_window_changed": active_window_changed,
-                    "active_window_id": active_window_id,
+                    "focus_changed": end_state.focus_changed,
+                    "focused_element_id": end_state.focused_element_id,
+                    "active_window_changed": end_state.active_window_changed,
+                    "active_window_id": end_state.active_window_id,
                     "ax": {
                         "available": false,
                         "count": 0
                     },
                     "stability": "no_change",
-                    "elapsed_ms": start.elapsed().as_millis() as u64,
-                    "samples": samples
+                    "elapsed_ms": elapsed_ms,
+                    "settle_ms": elapsed_ms
                 })));
             }
         }
@@ -2250,71 +2411,242 @@ fn observe_after_action(
     }
 }
 
-fn observe_tokens_for_region(
+fn observe_tokens_for_regions(
     capture: &vision::types::CapturedImage,
-    region: Option<&desktop_core::protocol::Bounds>,
+    regions: &[desktop_core::protocol::Bounds],
 ) -> (Vec<Value>, bool, usize) {
+    let observe_started = Instant::now();
     let mut tokens: Vec<Value> = Vec::new();
+    let (ax_available, ax_elements) = match platform::ax::collect_frontmost_window_elements() {
+        Ok(items) => (true, items),
+        Err(_) => (false, Vec::new()),
+    };
 
-    if let Some(region) = region {
-        if let Some((ix, iy, iw, ih)) = logical_bounds_to_image_rect(
-            region,
-            capture.image.width(),
-            capture.image.height(),
-            capture.frame.width,
-            capture.frame.height,
-        ) {
-            let iw = (iw - ix).max(0) as u32;
-            let ih = (ih - iy).max(0) as u32;
-            if iw > 1 && ih > 1 {
-                let cropped = crop_imm(&capture.image, ix as u32, iy as u32, iw, ih).to_image();
-                if let Ok(texts) = vision::ocr::recognize_text(&cropped) {
-                    let scale_x = region.width / iw as f64;
-                    let scale_y = region.height / ih as f64;
+    let mut ocr_regions = Vec::new();
+    let mut ocr_tokens = 0usize;
+    let ocr_started = Instant::now();
+    if !regions.is_empty() {
+        for (idx, core_region) in regions.iter().enumerate() {
+            let dynamic_pad = observe_adaptive_ocr_pad(core_region, &ax_elements);
+            let padded = pad_bounds(core_region.clone(), dynamic_pad);
+            if let Some((x0, y0, x1, y1)) = logical_bounds_to_image_rect(
+                &padded,
+                capture.image.width(),
+                capture.image.height(),
+                capture.frame.width,
+                capture.frame.height,
+            ) {
+                let crop_w = (x1 - x0).max(0) as u32;
+                let crop_h = (y1 - y0).max(0) as u32;
+                if crop_w <= 1 || crop_h <= 1 {
+                    continue;
+                }
+                let crop =
+                    image::imageops::crop_imm(&capture.image, x0 as u32, y0 as u32, crop_w, crop_h)
+                        .to_image();
+                dump_observe_region_screenshot(
+                    &crop,
+                    capture.frame.snapshot_id,
+                    idx,
+                    core_region,
+                    &padded,
+                );
+                if let Ok(texts) = vision::ocr::recognize_text(&crop) {
+                    let sx = padded.width.max(1.0) / crop_w.max(1) as f64;
+                    let sy = padded.height.max(1.0) / crop_h.max(1) as f64;
+                    let mut emitted = 0usize;
                     for text in texts {
                         if text.text.trim().is_empty() {
                             continue;
                         }
                         let logical_bounds = desktop_core::protocol::Bounds {
-                            x: region.x + text.bounds.x * scale_x,
-                            y: region.y + text.bounds.y * scale_y,
-                            width: text.bounds.width * scale_x,
-                            height: text.bounds.height * scale_y,
+                            x: padded.x + text.bounds.x * sx,
+                            y: padded.y + text.bounds.y * sy,
+                            width: text.bounds.width * sx,
+                            height: text.bounds.height * sy,
                         };
+                        // Keep only OCR boxes that overlap the core changed region.
+                        if iou(core_region, &logical_bounds) <= 0.01 {
+                            continue;
+                        }
                         tokens.push(json!({
                             "source": "vision_ocr",
                             "text": text.text,
+                            "confidence": text.confidence,
                             "bbox": [logical_bounds.x, logical_bounds.y, logical_bounds.width, logical_bounds.height]
                         }));
+                        emitted += 1;
                     }
+                    ocr_tokens += emitted;
+                    ocr_regions.push(format!(
+                        "#{idx}:core=({:.0},{:.0},{:.0},{:.0}) pad_px={:.1} pad=({:.0},{:.0},{:.0},{:.0}) crop={}x{} emitted={}",
+                        core_region.x,
+                        core_region.y,
+                        core_region.width,
+                        core_region.height,
+                        dynamic_pad,
+                        padded.x,
+                        padded.y,
+                        padded.width,
+                        padded.height,
+                        crop_w,
+                        crop_h,
+                        emitted
+                    ));
                 }
             }
         }
     }
+    let ocr_elapsed = ocr_started.elapsed().as_millis() as u64;
+    trace::log(format!(
+        "observe:ocr elapsed_ms={} regions={} tokens={} details={}",
+        ocr_elapsed,
+        regions.len(),
+        ocr_tokens,
+        ocr_regions.join(" | ")
+    ));
 
-    let mut ax_available = false;
+    let ax_started = Instant::now();
     let mut ax_count = 0usize;
-    if let Ok(ax_elements) = platform::ax::collect_frontmost_window_elements() {
-        ax_available = true;
-        for ax in ax_elements {
-            if let Some(region) = region {
-                if iou(region, &ax.bounds) <= 0.01 {
-                    continue;
-                }
-            }
-            let id = vision::ax_merge::primary_id_for_ax(&ax)
-                .unwrap_or_else(|| format!("ax_{}", ax.role.to_ascii_lowercase()));
-            tokens.push(json!({
-                "id": id,
-                "source": format!("accessibility_ax:{}", ax.role),
-                "text": ax.text,
-                "bbox": [ax.bounds.x, ax.bounds.y, ax.bounds.width, ax.bounds.height]
-            }));
-            ax_count += 1;
+    for ax in ax_elements {
+        if !regions.is_empty() && !regions.iter().any(|region| iou(region, &ax.bounds) > 0.01) {
+            continue;
         }
+        let id = vision::ax_merge::primary_id_for_ax(&ax)
+            .unwrap_or_else(|| format!("ax_{}", ax.role.to_ascii_lowercase()));
+        tokens.push(json!({
+            "id": id,
+            "source": format!("accessibility_ax:{}", ax.role),
+            "text": ax.text,
+            "bbox": [ax.bounds.x, ax.bounds.y, ax.bounds.width, ax.bounds.height]
+        }));
+        ax_count += 1;
     }
+    let ax_elapsed = ax_started.elapsed().as_millis() as u64;
+    let total_elapsed = observe_started.elapsed().as_millis() as u64;
+    trace::log(format!(
+        "observe:tokens elapsed_ms={} ocr_ms={} ax_ms={} total_tokens={} ax_count={}",
+        total_elapsed,
+        ocr_elapsed,
+        ax_elapsed,
+        tokens.len(),
+        ax_count
+    ));
 
     (tokens, ax_available, ax_count)
+}
+
+fn dump_observe_region_screenshot(
+    image: &RgbaImage,
+    snapshot_id: u64,
+    region_idx: usize,
+    core_region: &desktop_core::protocol::Bounds,
+    padded_region: &desktop_core::protocol::Bounds,
+) {
+    let dir = PathBuf::from("/tmp/desktopctl-observe-crops");
+    if let Err(err) = fs::create_dir_all(&dir) {
+        trace::log(format!("observe:dump mkdir_failed err={err}"));
+        return;
+    }
+    let file_name = format!(
+        "snap{}_r{}_core_{}_{}_{}_{}_pad_{}_{}_{}_{}.png",
+        snapshot_id,
+        region_idx,
+        round_nonnegative_i64(core_region.x),
+        round_nonnegative_i64(core_region.y),
+        round_nonnegative_i64(core_region.width),
+        round_nonnegative_i64(core_region.height),
+        round_nonnegative_i64(padded_region.x),
+        round_nonnegative_i64(padded_region.y),
+        round_nonnegative_i64(padded_region.width),
+        round_nonnegative_i64(padded_region.height)
+    );
+    let out_path = dir.join(file_name);
+    if let Err(err) = image.save_with_format(&out_path, ImageFormat::Png) {
+        trace::log(format!(
+            "observe:dump write_failed path={} err={err}",
+            out_path.display()
+        ));
+    }
+}
+
+fn observe_adaptive_ocr_pad(
+    core_region: &desktop_core::protocol::Bounds,
+    ax_elements: &[platform::ax::AxElement],
+) -> f64 {
+    let mut dims: Vec<f64> = ax_elements
+        .iter()
+        .filter(|ax| {
+            iou(core_region, &ax.bounds) > 0.01
+                || iou(&inflate_bounds(core_region, 100.0), &ax.bounds) > 0.01
+        })
+        .filter(|ax| {
+            matches!(
+                ax.role.as_str(),
+                "AXTextField"
+                    | "AXTextArea"
+                    | "AXButton"
+                    | "AXCheckBox"
+                    | "AXRadioButton"
+                    | "AXPopUpButton"
+            )
+        })
+        .map(|ax| ax.bounds.width.min(ax.bounds.height))
+        .filter(|dim| *dim >= 8.0 && *dim <= 240.0)
+        .collect();
+    if dims.is_empty() {
+        return OBSERVE_OCR_PAD_PX;
+    }
+    dims.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let min_dim = dims[0];
+    (min_dim * 1.5).clamp(16.0, 96.0)
+}
+
+fn clip_to_scope(
+    bounds: &desktop_core::protocol::Bounds,
+    scope: Option<&desktop_core::protocol::Bounds>,
+) -> Option<desktop_core::protocol::Bounds> {
+    let Some(scope) = scope else {
+        return Some(bounds.clone());
+    };
+    let x1 = bounds.x.max(scope.x);
+    let y1 = bounds.y.max(scope.y);
+    let x2 = (bounds.x + bounds.width).min(scope.x + scope.width);
+    let y2 = (bounds.y + bounds.height).min(scope.y + scope.height);
+    let w = x2 - x1;
+    let h = y2 - y1;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some(desktop_core::protocol::Bounds {
+        x: x1,
+        y: y1,
+        width: w,
+        height: h,
+    })
+}
+
+fn merge_region_into_list(
+    regions: &mut Vec<desktop_core::protocol::Bounds>,
+    incoming: desktop_core::protocol::Bounds,
+) {
+    for region in regions.iter_mut() {
+        if iou(region, &incoming) > 0.0 {
+            let merged = merge_bounds(Some(&region.clone()), &incoming);
+            *region = merged;
+            return;
+        }
+    }
+    regions.push(incoming);
+}
+
+fn pad_bounds(bounds: desktop_core::protocol::Bounds, pad: f64) -> desktop_core::protocol::Bounds {
+    desktop_core::protocol::Bounds {
+        x: (bounds.x - pad).max(0.0),
+        y: (bounds.y - pad).max(0.0),
+        width: bounds.width + pad * 2.0,
+        height: bounds.height + pad * 2.0,
+    }
 }
 
 fn diff_observe_tokens(before: &[Value], after: &[Value]) -> Value {
@@ -2366,6 +2698,106 @@ fn diff_observe_tokens(before: &[Value], after: &[Value]) -> Value {
     })
 }
 
+fn normalize_observe_regions(
+    regions: &[desktop_core::protocol::Bounds],
+    origin: Option<&desktop_core::protocol::Bounds>,
+) -> Vec<Value> {
+    regions
+        .iter()
+        .map(|bounds| relative_bounds_json(bounds, origin))
+        .collect()
+}
+
+fn normalize_observe_tokens_delta(
+    mut delta: Value,
+    origin: Option<&desktop_core::protocol::Bounds>,
+) -> Value {
+    for key in ["added", "removed"] {
+        if let Some(items) = delta.get_mut(key).and_then(Value::as_array_mut) {
+            for token in items {
+                rewrite_token_bbox_relative(token, origin);
+            }
+        }
+    }
+    if let Some(items) = delta.get_mut("changed").and_then(Value::as_array_mut) {
+        for entry in items {
+            if let Some(before) = entry.get_mut("before") {
+                rewrite_token_bbox_relative(before, origin);
+            }
+            if let Some(after) = entry.get_mut("after") {
+                rewrite_token_bbox_relative(after, origin);
+            }
+        }
+    }
+    delta
+}
+
+fn rewrite_token_bbox_relative(token: &mut Value, origin: Option<&desktop_core::protocol::Bounds>) {
+    let Some(bbox) = token.get("bbox").and_then(Value::as_array) else {
+        return;
+    };
+    if bbox.len() != 4 {
+        return;
+    }
+    let x = bbox[0].as_f64().unwrap_or(0.0);
+    let y = bbox[1].as_f64().unwrap_or(0.0);
+    let w = bbox[2].as_f64().unwrap_or(0.0);
+    let h = bbox[3].as_f64().unwrap_or(0.0);
+    let rel = relative_bounds(
+        &desktop_core::protocol::Bounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        },
+        origin,
+    );
+    if let Some(obj) = token.as_object_mut() {
+        obj.insert(
+            "bbox".to_string(),
+            json!([
+                round_nonnegative_i64(rel.x),
+                round_nonnegative_i64(rel.y),
+                round_nonnegative_i64(rel.width),
+                round_nonnegative_i64(rel.height)
+            ]),
+        );
+    }
+}
+
+fn relative_bounds_json(
+    bounds: &desktop_core::protocol::Bounds,
+    origin: Option<&desktop_core::protocol::Bounds>,
+) -> Value {
+    let rel = relative_bounds(bounds, origin);
+    json!({
+        "x": round_nonnegative_i64(rel.x),
+        "y": round_nonnegative_i64(rel.y),
+        "width": round_nonnegative_i64(rel.width),
+        "height": round_nonnegative_i64(rel.height)
+    })
+}
+
+fn relative_bounds(
+    bounds: &desktop_core::protocol::Bounds,
+    origin: Option<&desktop_core::protocol::Bounds>,
+) -> desktop_core::protocol::Bounds {
+    let mut out = bounds.clone();
+    if let Some(window) = origin {
+        out.x -= window.x;
+        out.y -= window.y;
+    }
+    out.x = out.x.max(0.0);
+    out.y = out.y.max(0.0);
+    out.width = out.width.max(0.0);
+    out.height = out.height.max(0.0);
+    out
+}
+
+fn round_nonnegative_i64(value: f64) -> i64 {
+    value.round().max(0.0) as i64
+}
+
 fn observe_token_key(token: &Value) -> String {
     if let Some(id) = token.get("id").and_then(Value::as_str) {
         if !id.trim().is_empty() {
@@ -2377,8 +2809,27 @@ fn observe_token_key(token: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let text = token.get("text").and_then(Value::as_str).unwrap_or("");
-    let bbox = token.get("bbox").cloned().unwrap_or_else(|| json!([]));
-    format!("fallback:{source}:{text}:{bbox}")
+    let bbox_key = quantized_bbox_key(token.get("bbox").and_then(Value::as_array));
+    format!("fallback:{source}:{text}:{bbox_key}")
+}
+
+fn quantized_bbox_key(bbox: Option<&Vec<Value>>) -> String {
+    let Some(bbox) = bbox else {
+        return "[]".to_string();
+    };
+    if bbox.len() != 4 {
+        return "[]".to_string();
+    }
+    let q = |v: Option<f64>| -> i64 {
+        let n = v.unwrap_or(0.0);
+        // Tolerate small OCR jitter by quantizing to 8px grid.
+        (n / 8.0).round() as i64
+    };
+    let x = q(bbox[0].as_f64());
+    let y = q(bbox[1].as_f64());
+    let w = q(bbox[2].as_f64());
+    let h = q(bbox[3].as_f64());
+    format!("{x},{y},{w},{h}")
 }
 
 fn observe_token_semantic_equal(a: &Value, b: &Value) -> bool {

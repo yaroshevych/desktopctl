@@ -7,6 +7,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const API_VERSION: &str = "1";
 
 const DEFAULT_OBSERVE_TIMEOUT_MS: u64 = 300;
+const DEFAULT_OBSERVE_SETTLE_MS: u64 = 650;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
@@ -109,19 +110,35 @@ pub enum Command {
         text: String,
         #[serde(default)]
         observe: ObserveOptions,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     KeyHotkey {
         hotkey: String,
         #[serde(default)]
         observe: ObserveOptions,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     KeyEnter {
         #[serde(default)]
         observe: ObserveOptions,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     KeyEscape {
         #[serde(default)]
         observe: ObserveOptions,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
     },
     WaitText {
         text: String,
@@ -200,6 +217,10 @@ pub struct ObserveOptions {
     pub enabled: bool,
     pub until: ObserveUntil,
     pub timeout_ms: u64,
+    #[serde(default = "default_observe_settle_ms")]
+    pub settle_ms: u64,
+    #[serde(default)]
+    pub save_crops: bool,
 }
 
 impl Default for ObserveOptions {
@@ -208,8 +229,14 @@ impl Default for ObserveOptions {
             enabled: true,
             until: ObserveUntil::Stable,
             timeout_ms: DEFAULT_OBSERVE_TIMEOUT_MS,
+            settle_ms: DEFAULT_OBSERVE_SETTLE_MS,
+            save_crops: false,
         }
     }
+}
+
+fn default_observe_settle_ms() -> u64 {
+    DEFAULT_OBSERVE_SETTLE_MS
 }
 
 impl Command {

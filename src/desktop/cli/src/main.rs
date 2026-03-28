@@ -768,6 +768,10 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                             observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
                             i += 2;
                         }
+                        "--observe-settle-ms" => {
+                            observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
+                            i += 2;
+                        }
                         flag => {
                             return Err(AppError::invalid_argument(format!(
                                 "unknown flag for pointer click --text: {flag}",
@@ -830,6 +834,10 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                             observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
                             i += 2;
                         }
+                        "--observe-settle-ms" => {
+                            observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
+                            i += 2;
+                        }
                         flag => {
                             return Err(AppError::invalid_argument(format!(
                                 "unknown flag for pointer click --id: {flag}",
@@ -888,6 +896,11 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                         i += 2;
                         continue;
                     }
+                    if token == "--observe-settle-ms" {
+                        observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
+                        i += 2;
+                        continue;
+                    }
                     if token.starts_with("--") {
                         return Err(AppError::invalid_argument(format!(
                             "unknown flag for pointer click: {}",
@@ -899,7 +912,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 }
                 if positional.len() != 2 {
                     return Err(AppError::invalid_argument(
-                        "usage: desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] <x> <y>",
+                        "usage: desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] <x> <y>",
                     ));
                 }
                 let x = parse_u32(Some(positional[0]), "x")?;
@@ -958,6 +971,10 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                         observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
                         i += 2;
                     }
+                    "--observe-settle-ms" => {
+                        observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
+                        i += 2;
+                    }
                     flag => {
                         return Err(AppError::invalid_argument(format!(
                             "unknown flag for pointer scroll: {flag}"
@@ -981,22 +998,39 @@ fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
             let text = args.get(1).cloned().ok_or_else(|| {
                 AppError::invalid_argument("missing text: desktopctl keyboard type \"text\"")
             })?;
-            let observe = parse_observe_options(&args[2..], "keyboard type")?;
-            Ok(Command::UiType { text, observe })
+            let (observe, active_window, active_window_id) =
+                parse_observe_and_active_window_options(&args[2..], "keyboard type")?;
+            Ok(Command::UiType {
+                text,
+                observe,
+                active_window,
+                active_window_id,
+            })
         }
         "press" => {
             let key = args.get(1).cloned().ok_or_else(|| {
                 AppError::invalid_argument("missing key: desktopctl keyboard press enter")
             })?;
-            let observe = parse_observe_options(&args[2..], "keyboard press")?;
+            let (observe, active_window, active_window_id) =
+                parse_observe_and_active_window_options(&args[2..], "keyboard press")?;
             if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
-                Ok(Command::KeyEnter { observe })
+                Ok(Command::KeyEnter {
+                    observe,
+                    active_window,
+                    active_window_id,
+                })
             } else if key.eq_ignore_ascii_case("escape") || key.eq_ignore_ascii_case("esc") {
-                Ok(Command::KeyEscape { observe })
+                Ok(Command::KeyEscape {
+                    observe,
+                    active_window,
+                    active_window_id,
+                })
             } else {
                 Ok(Command::KeyHotkey {
                     hotkey: key,
                     observe,
+                    active_window,
+                    active_window_id,
                 })
             }
         }
@@ -1004,8 +1038,13 @@ fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
     }
 }
 
-fn parse_observe_options(args: &[String], command_name: &str) -> Result<ObserveOptions, AppError> {
+fn parse_observe_and_active_window_options(
+    args: &[String],
+    command_name: &str,
+) -> Result<(ObserveOptions, bool, Option<String>), AppError> {
     let mut observe = ObserveOptions::default();
+    let mut active_window = false;
+    let mut active_window_id: Option<String> = None;
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -1030,6 +1069,26 @@ fn parse_observe_options(args: &[String], command_name: &str) -> Result<ObserveO
                 observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
                 i += 2;
             }
+            "--observe-settle-ms" => {
+                observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
+                i += 2;
+            }
+            "--active-window" => {
+                active_window = true;
+                if let Some(value) = args.get(i + 1) {
+                    if !value.starts_with("--") {
+                        if value.trim().is_empty() {
+                            return Err(AppError::invalid_argument(
+                                "active window id must not be empty",
+                            ));
+                        }
+                        active_window_id = Some(value.clone());
+                        i += 2;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
             flag => {
                 return Err(AppError::invalid_argument(format!(
                     "unknown flag for {command_name}: {flag}"
@@ -1037,7 +1096,12 @@ fn parse_observe_options(args: &[String], command_name: &str) -> Result<ObserveO
             }
         }
     }
-    Ok(observe)
+    if active_window_id.is_some() && !active_window {
+        return Err(AppError::invalid_argument(
+            "active window id requires --active-window",
+        ));
+    }
+    Ok((observe, active_window, active_window_id))
 }
 
 fn parse_observe_until(value: &str) -> Result<ObserveUntil, AppError> {
@@ -1104,14 +1168,14 @@ fn usage() -> &'static str {
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
   desktopctl pointer click [--absolute] <x> <y>
-  desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] <x> <y>
-  desktopctl pointer click --text <text> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
-  desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+  desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] <x> <y>
+  desktopctl pointer click --text <text> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+  desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer click --token <n>
-  desktopctl pointer scroll <dx> <dy> [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+  desktopctl pointer scroll <dx> <dy> [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
-  desktopctl keyboard type \"text\" [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
-  desktopctl keyboard press <key-or-hotkey> [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]"
+  desktopctl keyboard type \"text\" [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+  desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]"
 }
 
 fn send_request_with_autostart(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
