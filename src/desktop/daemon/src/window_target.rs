@@ -35,16 +35,13 @@ pub(crate) fn resolve_frontmost_snapshot() -> FrontmostSnapshot {
     }
 
     let app_hint = app.as_deref();
-    let listed = list_frontmost_app_windows()
-        .ok()
-        .and_then(|windows| {
-            preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
-        })
-        .or_else(|| {
-            list_windows().ok().and_then(|windows| {
-                preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
-            })
-        });
+    let listed_frontmost = list_frontmost_app_windows().ok().and_then(|windows| {
+        preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
+    });
+    let listed_all = list_windows().ok().and_then(|windows| {
+        preferred_window_for_capture(&windows, app_hint).map(|window| window.bounds.clone())
+    });
+    let listed = prefer_larger_bounds(listed_frontmost, listed_all);
 
     let bounds = match (direct, listed) {
         (Some(direct), Some(listed))
@@ -86,6 +83,21 @@ pub(crate) fn resolve_frontmost_snapshot() -> FrontmostSnapshot {
     };
 
     FrontmostSnapshot { app, bounds }
+}
+
+fn prefer_larger_bounds(first: Option<Bounds>, second: Option<Bounds>) -> Option<Bounds> {
+    match (first, second) {
+        (Some(a), Some(b)) => {
+            if window_area(&b) > window_area(&a) {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        }
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 pub(crate) fn frontmost_window_bounds() -> Option<Bounds> {

@@ -614,11 +614,7 @@ fn execute_with_context(
                 let base = if let Some(reference) = active_window_id.as_deref() {
                     assert_active_window_id_matches(reference)?.bounds
                 } else {
-                    window_target::frontmost_window_bounds().ok_or_else(|| {
-                        AppError::target_not_found(
-                            "frontmost window not found; ensure a standard app window is focused",
-                        )
-                    })?
+                    resolve_active_window_target()?.bounds
                 };
                 Some(resolve_capture_region_bounds(base, region.as_ref())?)
             } else if region.is_some() {
@@ -714,33 +710,17 @@ fn execute_with_context(
                         ));
                     }
                     let frontmost_window = if let Some(reference) = active_window_id.as_deref() {
-                        Some(assert_active_window_id_matches(reference)?)
+                        assert_active_window_id_matches(reference)?
                     } else {
-                        None
+                        resolve_active_window_target()?
                     };
-                    let bounds = if let Some(window) = frontmost_window.as_ref() {
-                        window.bounds.clone()
-                    } else {
-                        window_target::frontmost_window_bounds().ok_or_else(|| {
-                            AppError::target_not_found(
-                                "frontmost window bounds unavailable for --active-window",
-                            )
-                        })?
-                    };
+                    let bounds = frontmost_window.bounds.clone();
                     let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
-                    let app = frontmost_window
-                        .as_ref()
-                        .map(|window| window.app.clone())
-                        .or_else(window_target::frontmost_app_name);
-                    let title = frontmost_window
-                        .as_ref()
-                        .map(|window| window.title.clone())
+                    let app = Some(frontmost_window.app.clone());
+                    let title = Some(frontmost_window.title.clone())
                         .or_else(|| app.clone())
                         .unwrap_or_else(|| "active_window".to_string());
-                    let window_query = frontmost_window
-                        .as_ref()
-                        .map(|window| window.id.clone())
-                        .unwrap_or_else(|| "frontmost:1".to_string());
+                    let window_query = frontmost_window.id.clone();
                     let mut payload =
                         vision::pipeline::tokenize_window(vision::pipeline::TokenizeWindowMeta {
                             id: window_query,
@@ -748,10 +728,8 @@ fn execute_with_context(
                             app,
                             bounds,
                         })?;
-                    if let (Some(first), Some(window)) =
-                        (payload.windows.first_mut(), frontmost_window.as_ref())
-                    {
-                        first.window_ref = window.window_ref.clone();
+                    if let Some(first) = payload.windows.first_mut() {
+                        first.window_ref = frontmost_window.window_ref.clone();
                     }
                     payload
                 } else if window_query.is_none() {
@@ -1070,6 +1048,62 @@ fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]) {
     }
 }
 
+fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, AppError> {
+    let snapshot = window_target::resolve_frontmost_snapshot();
+    let app_hint = snapshot.app.as_deref();
+    let target_bounds = snapshot.bounds.as_ref();
+
+    let mut windows = window_target::list_windows()?;
+    enrich_window_refs(&mut windows);
+
+    let selected = windows
+        .iter()
+        .filter(|window| window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0)
+        .filter(|window| {
+            app_hint
+                .map(|app| window.app.eq_ignore_ascii_case(app))
+                .unwrap_or(true)
+        })
+        .max_by(|a, b| {
+            let sa = active_window_candidate_score(a, target_bounds);
+            let sb = active_window_candidate_score(b, target_bounds);
+            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .cloned();
+
+    selected.ok_or_else(|| {
+        AppError::target_not_found(
+            "frontmost window not found; ensure a standard app window is focused",
+        )
+    })
+}
+
+fn active_window_candidate_score(
+    window: &platform::windowing::WindowInfo,
+    target_bounds: Option<&desktop_core::protocol::Bounds>,
+) -> f64 {
+    let area = (window.bounds.width.max(0.0) * window.bounds.height.max(0.0)).max(0.0);
+    let (overlap_bonus, container_bonus) = target_bounds
+        .map(|target| {
+            let overlap = iou(&window.bounds, target) * 10.0;
+            let contains = window.bounds.x <= target.x
+                && window.bounds.y <= target.y
+                && (window.bounds.x + window.bounds.width) >= (target.x + target.width)
+                && (window.bounds.y + window.bounds.height) >= (target.y + target.height);
+            let target_area = (target.width.max(0.0) * target.height.max(0.0)).max(1.0);
+            let area_ratio = area / target_area;
+            let container = if contains && area_ratio >= 2.0 {
+                20.0 + area_ratio.min(20.0)
+            } else {
+                0.0
+            };
+            (overlap, container)
+        })
+        .unwrap_or((0.0, 0.0));
+    let frontmost_bonus = if window.frontmost { 0.5 } else { 0.0 };
+    overlap_bonus + container_bonus + frontmost_bonus + area.sqrt() * 0.01
+}
+
 fn assert_active_window_id_matches(
     reference: &str,
 ) -> Result<platform::windowing::WindowInfo, AppError> {
@@ -1079,9 +1113,7 @@ fn assert_active_window_id_matches(
             "active window id must not be empty",
         ));
     }
-    let mut windows = window_target::list_frontmost_app_windows()?;
-    enrich_window_refs(&mut windows);
-    let active = window_target::resolve_tokenize_window_target(&windows, None)?;
+    let active = resolve_active_window_target()?;
     let active_ref = active
         .window_ref
         .clone()
