@@ -83,6 +83,10 @@ test-regression:
   cd {{workspace_dir}} && cargo test -p desktopctld --manifest-path {{manifest_path}} --test fixtures_contract -- --nocapture
   cd {{workspace_dir}} && cargo test -p desktopctld --manifest-path {{manifest_path}} --test text_field_button_labels -- --nocapture --test-threads=1
   just -f {{workspace_dir}}/Justfile test-compile
+  just -f {{workspace_dir}}/Justfile check-cli-reference
+
+check-cli-reference:
+  "{{workspace_dir}}/scripts/dev/check_cli_reference.sh"
 
 test-smoke:
   cd {{workspace_dir}} && \
