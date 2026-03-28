@@ -696,10 +696,10 @@ fn execute(command: Command) -> Result<Value, AppError> {
             if let Err(err) = overlay::update_from_tokenize(&payload) {
                 trace::log(format!("execute:screen_tokenize:overlay_update_warn {err}"));
             }
+            let element_count: usize = payload.windows.iter().map(|w| w.elements.len()).sum();
             trace::log(format!(
-                "execute:screen_tokenize:ok snapshot_id={} tokens={}",
-                payload.snapshot_id,
-                payload.tokens.len()
+                "execute:screen_tokenize:ok snapshot_id={} elements={}",
+                payload.snapshot_id, element_count
             ));
             Ok(serde_json::to_value(payload).map_err(|err| {
                 AppError::internal(format!("failed to encode token payload: {err}"))
@@ -2591,7 +2591,6 @@ mod tests {
         let payload = TokenizePayload {
             snapshot_id: 1,
             timestamp: "1".to_string(),
-            tokens: vec![],
             image: Some(TokenizeImage {
                 path: "<memory>".to_string(),
                 width: 200,
@@ -2642,7 +2641,6 @@ mod tests {
         let payload = TokenizePayload {
             snapshot_id: 1,
             timestamp: "1".to_string(),
-            tokens: vec![],
             image: Some(TokenizeImage {
                 path: "<memory>".to_string(),
                 width: 100,

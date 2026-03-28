@@ -13,7 +13,7 @@ use std::{
 
 use desktop_core::{
     error::AppError,
-    protocol::{Bounds, TokenEntry, TokenizePayload, TokenizeWindow},
+    protocol::{Bounds, TokenizePayload, TokenizeWindow},
 };
 use dispatch2::DispatchQueue;
 use objc2::{MainThreadMarker, MainThreadOnly, class, msg_send, rc::Retained, runtime::AnyObject};
@@ -248,23 +248,22 @@ pub fn update_from_tokenize(payload: &TokenizePayload) -> Result<(), AppError> {
         return Ok(());
     }
 
-    if !payload.tokens.is_empty() {
-        let avg = payload
-            .tokens
-            .iter()
-            .map(|t| t.confidence as f64)
-            .sum::<f64>()
-            / payload.tokens.len() as f64;
-        let _ = confidence_changed(avg as f32);
+    let (sum, count) = payload
+        .windows
+        .iter()
+        .flat_map(|window| window.elements.iter())
+        .filter_map(|element| element.confidence.map(|v| v as f64))
+        .fold((0.0_f64, 0_usize), |(sum, count), v| (sum + v, count + 1));
+    if count > 0 {
+        let _ = confidence_changed((sum / count as f64) as f32);
     } else {
         let _ = confidence_changed(1.0);
     }
 
     let rects = overlay_rects_from_payload(payload);
     trace::log(format!(
-        "overlay:update windows={} tokens={} rects={}",
+        "overlay:update windows={} rects={}",
         payload.windows.len(),
-        payload.tokens.len(),
         rects.len()
     ));
     dispatch_main(move || {
@@ -889,17 +888,7 @@ fn overlay_rects_from_payload(payload: &TokenizePayload) -> Vec<OverlayRect> {
             break;
         }
     }
-    let mut used_token_fallback = false;
-    if out.is_empty() && !payload.tokens.is_empty() {
-        if let Some(window) = payload.windows.first() {
-            append_token_rects(window, &payload.tokens, image_w, image_h, &mut out);
-            used_token_fallback = true;
-        }
-    }
     out.truncate(MAX_OVERLAY_RECTS);
-    if used_token_fallback {
-        trace::log("overlay:update using_token_fallback");
-    }
     out
 }
 
@@ -1012,37 +1001,6 @@ fn should_suppress_inner_text_overlay_bbox(inner: &[f64; 4], outer: &[f64; 4]) -
     let center_in = bbox_center_inside(inner, outer);
     let clearly_smaller = outer[2] >= inner[2] + 8.0 && outer[3] >= inner[3] + 8.0;
     center_in && mostly_inside && clearly_smaller
-}
-
-fn append_token_rects(
-    window: &TokenizeWindow,
-    tokens: &[TokenEntry],
-    image_w: Option<f64>,
-    image_h: Option<f64>,
-    out: &mut Vec<OverlayRect>,
-) {
-    let anchor_bounds = window.os_bounds.as_ref().unwrap_or(&window.bounds);
-    let img_w = image_w.unwrap_or(window.bounds.width).max(1.0);
-    let img_h = image_h.unwrap_or(window.bounds.height).max(1.0);
-    let sx = (anchor_bounds.width / img_w).max(0.0001);
-    let sy = (anchor_bounds.height / img_h).max(0.0001);
-    for token in tokens {
-        let width = token.bounds.width * sx;
-        let height = token.bounds.height * sy;
-        if width < 2.0 || height < 2.0 {
-            continue;
-        }
-        out.push(OverlayRect {
-            x: anchor_bounds.x + (token.bounds.x * sx),
-            y: anchor_bounds.y + (token.bounds.y * sy),
-            width,
-            height,
-            kind: OverlayKind::Text,
-        });
-        if out.len() >= MAX_OVERLAY_RECTS {
-            break;
-        }
-    }
 }
 
 fn lock_glow_model() -> std::sync::MutexGuard<'static, GlowModel> {

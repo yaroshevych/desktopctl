@@ -304,8 +304,6 @@ pub struct TokenEntry {
 pub struct TokenizePayload {
     pub snapshot_id: u64,
     pub timestamp: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tokens: Vec<TokenEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<TokenizeImage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

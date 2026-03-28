@@ -349,7 +349,6 @@ fn tokenize_from_snapshot(
     Ok(TokenizePayload {
         snapshot_id,
         timestamp,
-        tokens: raw_tokens,
         image: Some(image_meta),
         windows,
     })
@@ -924,7 +923,6 @@ mod tests {
         let payload = TokenizePayload {
             snapshot_id: 1,
             timestamp: "1".to_string(),
-            tokens: vec![],
             image: Some(TokenizeImage {
                 path: source_path.display().to_string(),
                 width: 180,
@@ -990,7 +988,6 @@ mod tests {
         let payload = TokenizePayload {
             snapshot_id: 1,
             timestamp: "1".to_string(),
-            tokens: vec![],
             image: Some(TokenizeImage {
                 path: source_path.display().to_string(),
                 width: 180,

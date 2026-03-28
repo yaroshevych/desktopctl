@@ -298,7 +298,6 @@ mod tests {
             desktop_core::protocol::TokenizePayload {
                 snapshot_id: 42,
                 timestamp: "ts".to_string(),
-                tokens: Vec::new(),
                 image: None,
                 windows: Vec::new(),
             },
