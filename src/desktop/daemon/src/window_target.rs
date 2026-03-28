@@ -145,7 +145,7 @@ pub(crate) fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
     platform::windowing::list_windows()
 }
 
-fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
+pub(crate) fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
     platform::windowing::list_frontmost_app_windows()
 }
 
@@ -266,6 +266,7 @@ mod tests {
     fn test_window(pid: i64, index: u32, app: &str, title: &str) -> WindowInfo {
         WindowInfo {
             id: format!("{pid}:{index}"),
+            window_ref: None,
             pid,
             index,
             app: app.to_string(),

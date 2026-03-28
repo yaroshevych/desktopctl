@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
     pub id: String,
+    pub window_ref: Option<String>,
     pub pid: i64,
     pub index: u32,
     pub app: String,
@@ -15,7 +16,7 @@ pub struct WindowInfo {
 
 impl WindowInfo {
     pub fn as_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "id": self.id,
             "pid": self.pid,
             "index": self.index,
@@ -24,7 +25,11 @@ impl WindowInfo {
             "bounds": self.bounds,
             "frontmost": self.frontmost,
             "visible": self.visible
-        })
+        });
+        if let Some(window_ref) = self.window_ref.as_ref() {
+            value["window_ref"] = Value::String(window_ref.clone());
+        }
+        value
     }
 }
 
@@ -261,6 +266,7 @@ fn parse_window_line(line: &str) -> Option<WindowInfo> {
 
     Some(WindowInfo {
         id: format!("{pid}:{index}"),
+        window_ref: None,
         pid,
         index,
         app,

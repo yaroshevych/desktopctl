@@ -1033,6 +1033,7 @@ mod tests {
     fn append_window_rects_marks_bordered_text_and_drops_inner_text() {
         let window = TokenizeWindow {
             id: "win_1".to_string(),
+            window_ref: None,
             title: "t".to_string(),
             app: None,
             bounds: Bounds {

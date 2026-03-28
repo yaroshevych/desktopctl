@@ -40,7 +40,8 @@ desktopctl screen screenshot [--out <path>] [--overlay] [--active-window] [--reg
 # region is relative to the selected screenshot target (display or active window)
 
 # tokenize current screen/window into structured OCR + UI elements
-desktopctl screen tokenize [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
+desktopctl screen tokenize [--overlay <path>] [--active-window [<uuid>]] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
+# optionally target a previously issued opaque window reference
 # element ids are semantic and predictable (examples: button_7, button_add, text_settings)
 # region is relative to the selected tokenize target (window or screenshot)
 
@@ -62,8 +63,8 @@ desktopctl pointer up <x> <y>
 
 # click pointer by coordinate, OCR text, element id, or token
 desktopctl pointer click <x> <y>
-desktopctl pointer click --text <text> [--active-window]
-desktopctl pointer click --id <element_id> --active-window
+desktopctl pointer click --text <text> [--active-window [<uuid>]]
+desktopctl pointer click --id <element_id> --active-window [<uuid>]
 desktopctl pointer click --token <n>
 
 # scroll pointer viewport/content by signed deltas (positive dy scrolls down)

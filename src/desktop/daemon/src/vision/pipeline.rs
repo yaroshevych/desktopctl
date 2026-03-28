@@ -464,6 +464,7 @@ fn build_window_elements(
             .as_ref()
             .map(|meta| meta.id.clone())
             .unwrap_or_else(|| "win_0001".to_string()),
+        window_ref: None,
         title,
         app,
         bounds,
@@ -1033,6 +1034,7 @@ mod tests {
             }),
             windows: vec![TokenizeWindow {
                 id: "win_0001".to_string(),
+                window_ref: None,
                 title: "Sample".to_string(),
                 app: Some("Sample".to_string()),
                 bounds: Bounds {
@@ -1100,6 +1102,7 @@ mod tests {
             }),
             windows: vec![TokenizeWindow {
                 id: "win_0001".to_string(),
+                window_ref: None,
                 title: "Sample".to_string(),
                 app: Some("Sample".to_string()),
                 bounds: Bounds {

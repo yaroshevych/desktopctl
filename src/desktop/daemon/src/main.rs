@@ -9,6 +9,7 @@ mod replay;
 mod request_store;
 mod trace;
 mod vision;
+mod window_refs;
 mod window_target;
 
 #[cfg(target_os = "macos")]
@@ -332,6 +333,7 @@ fn start_overlay_live_loop() {
                     window_id: None,
                     screenshot_path: None,
                     active_window: false,
+                    active_window_ref: None,
                     region: None,
                 },
             );

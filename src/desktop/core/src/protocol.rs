@@ -71,11 +71,15 @@ pub enum Command {
         text: String,
         #[serde(default)]
         active_window: bool,
+        #[serde(default)]
+        active_window_ref: Option<String>,
     },
     PointerClickId {
         id: String,
         #[serde(default)]
         active_window: bool,
+        #[serde(default)]
+        active_window_ref: Option<String>,
     },
     PointerClickToken {
         token: u32,
@@ -123,6 +127,8 @@ pub enum Command {
         screenshot_path: Option<String>,
         #[serde(default)]
         active_window: bool,
+        #[serde(default)]
+        active_window_ref: Option<String>,
         #[serde(default)]
         region: Option<Bounds>,
     },
@@ -335,6 +341,8 @@ pub struct TokenizeImage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizeWindow {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_ref: Option<String>,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,

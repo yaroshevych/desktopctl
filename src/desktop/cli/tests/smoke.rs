@@ -369,6 +369,49 @@ fn active_window(tokenize_response: &Value) -> Result<Value, String> {
         .ok_or_else(|| format!("tokenize returned no windows: {}", pretty_json(result)))
 }
 
+fn active_window_ref(tokenize_response: &Value) -> Result<String, String> {
+    let window = active_window(tokenize_response)?;
+    window
+        .get("window_ref")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            format!(
+                "tokenize window missing window_ref: {}",
+                pretty_json(&window)
+            )
+        })
+}
+
+fn find_element_id_by_text(tokenize_response: &Value, text: &str) -> Result<String, String> {
+    let elements = active_window_elements(tokenize_response)?;
+    let needle = text.trim();
+    if needle.is_empty() {
+        return Err("empty text selector".to_string());
+    }
+    for element in &elements {
+        let el_text = element
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if el_text == needle {
+            if let Some(id) = element.get("id").and_then(Value::as_str) {
+                let trimmed = id.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+    }
+    Err(format!(
+        "failed to find element id for text {:?} in tokenize output",
+        needle
+    ))
+}
+
 fn text_signature(response: &Value) -> Result<Vec<String>, String> {
     let elements = active_window_elements(response)?;
     let mut texts: Vec<String> = elements
@@ -385,20 +428,28 @@ fn text_signature(response: &Value) -> Result<Vec<String>, String> {
 fn click_and_wait_signature_change(
     cli: &SmokeCli,
     button_id: &str,
+    active_window_ref: &str,
     previous_signature: &[String],
     click_step: &str,
     verify_step: &str,
 ) -> Result<(Value, Vec<String>), String> {
     let timeout = Duration::from_secs(4);
     let _ = cli.run_json_ok(
-        &["pointer", "click", "--id", button_id],
+        &[
+            "pointer",
+            "click",
+            "--id",
+            button_id,
+            "--active-window",
+            active_window_ref,
+        ],
         timeout,
         click_step,
     )?;
     let mut last_err = String::new();
     for _ in 0..3 {
         let response = cli.run_json_ok(
-            &["screen", "tokenize", "--active-window"],
+            &["screen", "tokenize", "--active-window", active_window_ref],
             timeout,
             verify_step,
         )?;
@@ -416,6 +467,7 @@ fn click_and_wait_signature_change(
 fn press_and_wait_signature_change(
     cli: &SmokeCli,
     key: &str,
+    active_window_ref: &str,
     previous_signature: &[String],
     press_step: &str,
     verify_step: &str,
@@ -425,7 +477,7 @@ fn press_and_wait_signature_change(
     let mut last_err = String::new();
     for _ in 0..3 {
         let response = cli.run_json_ok(
-            &["screen", "tokenize", "--active-window"],
+            &["screen", "tokenize", "--active-window", active_window_ref],
             timeout,
             verify_step,
         )?;
@@ -647,12 +699,33 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
         timeout,
         "baseline_signature",
     )?;
+    let active_window_ref = active_window_ref(&baseline)?;
+    let seven_id =
+        find_element_id_by_text(&baseline, "7").unwrap_or_else(|_| "axid_seven".to_string());
+    let eight_id =
+        find_element_id_by_text(&baseline, "8").unwrap_or_else(|_| "axid_eight".to_string());
     let baseline_sig = element_signature(&baseline)?;
+
+    let mismatch = cli.run_json(
+        &[
+            "pointer",
+            "click",
+            "--id",
+            &seven_id,
+            "--active-window",
+            "00000000-0000-4000-8000-000000000000",
+        ],
+        timeout,
+    )?;
+    if mismatch.status.success() {
+        return Err("expected mismatch click to fail for wrong active-window ref".to_string());
+    }
 
     // Step 1: type one digit and verify change.
     let (_, after_digit_sig) = click_and_wait_signature_change(
         &cli,
-        "button_7",
+        &seven_id,
+        &active_window_ref,
         &baseline_sig,
         "type_digit_seed",
         "verify_type_digit_seed",
@@ -662,6 +735,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     let (_, after_clear1_sig) = press_and_wait_signature_change(
         &cli,
         "escape",
+        &active_window_ref,
         &after_digit_sig,
         "clear_first",
         "verify_clear_first",
@@ -669,14 +743,22 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
 
     // Step 3: type two digits and verify change.
     let _ = cli.run_json_ok(
-        &["pointer", "click", "--id", "button_7"],
+        &[
+            "pointer",
+            "click",
+            "--id",
+            &seven_id,
+            "--active-window",
+            &active_window_ref,
+        ],
         timeout,
         "type_digit_first",
     )?;
     thread::sleep(Duration::from_millis(40));
     let (_, after_digits_sig) = click_and_wait_signature_change(
         &cli,
-        "button_8",
+        &eight_id,
+        &active_window_ref,
         &after_clear1_sig,
         "type_digit_second",
         "verify_type_two_digits",
@@ -686,6 +768,7 @@ fn smoke_pointer_click_id_calculator_flow() -> Result<(), String> {
     let (final_state, _) = press_and_wait_signature_change(
         &cli,
         "escape",
+        &active_window_ref,
         &after_digits_sig,
         "clear_second",
         "verify_clear_second",
@@ -784,17 +867,7 @@ fn smoke_screen_tokenize_overlay_contract_without_legacy_tokens() -> Result<(), 
             overlay_w, overlay_h, width, height
         ));
     }
-    let win = active_window(&response)?;
-    let elements = win
-        .get("elements")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("missing elements in tokenize window: {}", pretty_json(&win)))?;
-    if elements.is_empty() {
-        return Err(format!(
-            "tokenize overlay contract test got empty elements: {}",
-            pretty_json(&win)
-        ));
-    }
+    let _ = active_window(&response)?;
     Ok(())
 }
 

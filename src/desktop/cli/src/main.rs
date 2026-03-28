@@ -419,6 +419,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             let mut window_id: Option<String> = None;
             let mut screenshot_path: Option<String> = None;
             let mut active_window = false;
+            let mut active_window_ref: Option<String> = None;
             let mut region: Option<desktop_core::protocol::Bounds> = None;
             let mut i = 1;
             while i < args.len() {
@@ -458,6 +459,18 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     }
                     "--active-window" => {
                         active_window = true;
+                        if let Some(value) = args.get(i + 1) {
+                            if !value.starts_with("--") {
+                                if value.trim().is_empty() {
+                                    return Err(AppError::invalid_argument(
+                                        "active window ref must not be empty",
+                                    ));
+                                }
+                                active_window_ref = Some(value.clone());
+                                i += 2;
+                                continue;
+                            }
+                        }
                         i += 1;
                     }
                     "--region" => {
@@ -500,11 +513,17 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--active-window cannot be combined with --screenshot for screen tokenize",
                 ));
             }
+            if active_window_ref.is_some() && !active_window {
+                return Err(AppError::invalid_argument(
+                    "active window ref requires --active-window",
+                ));
+            }
             Ok(Command::ScreenTokenize {
                 overlay_out_path,
                 window_id,
                 screenshot_path,
                 active_window,
+                active_window_ref,
                 region,
             })
         }
@@ -663,45 +682,86 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
             if args.len() >= 2 && args[1] == "--text" {
                 let text = args.get(2).cloned().ok_or_else(|| {
                     AppError::invalid_argument(
-                        "usage: desktopctl pointer click --text <text> [--active-window]",
+                        "usage: desktopctl pointer click --text <text> [--active-window [<uuid>]]",
                     )
                 })?;
                 let mut active_window = false;
-                for token in args.iter().skip(3) {
-                    if token == "--active-window" {
-                        active_window = true;
-                        continue;
+                let mut active_window_ref: Option<String> = None;
+                let mut i = 3usize;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--active-window" => {
+                            active_window = true;
+                            if let Some(value) = args.get(i + 1) {
+                                if !value.starts_with("--") {
+                                    if value.trim().is_empty() {
+                                        return Err(AppError::invalid_argument(
+                                            "active window ref must not be empty",
+                                        ));
+                                    }
+                                    active_window_ref = Some(value.clone());
+                                    i += 2;
+                                    continue;
+                                }
+                            }
+                            i += 1;
+                        }
+                        flag => {
+                            return Err(AppError::invalid_argument(format!(
+                                "unknown flag for pointer click --text: {flag}",
+                            )));
+                        }
                     }
-                    return Err(AppError::invalid_argument(format!(
-                        "unknown flag for pointer click --text: {token}",
-                    )));
                 }
                 Ok(Command::PointerClickText {
                     text,
                     active_window,
+                    active_window_ref,
                 })
             } else if args.len() >= 2 && args[1] == "--id" {
                 let id = args.get(2).cloned().ok_or_else(|| {
                     AppError::invalid_argument(
-                        "usage: desktopctl pointer click --id <element_id> --active-window",
+                        "usage: desktopctl pointer click --id <element_id> --active-window [<uuid>]",
                     )
                 })?;
                 let mut active_window = false;
-                for token in args.iter().skip(3) {
-                    if token == "--active-window" {
-                        active_window = true;
-                        continue;
+                let mut active_window_ref: Option<String> = None;
+                let mut i = 3usize;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--active-window" => {
+                            active_window = true;
+                            if let Some(value) = args.get(i + 1) {
+                                if !value.starts_with("--") {
+                                    if value.trim().is_empty() {
+                                        return Err(AppError::invalid_argument(
+                                            "active window ref must not be empty",
+                                        ));
+                                    }
+                                    active_window_ref = Some(value.clone());
+                                    i += 2;
+                                    continue;
+                                }
+                            }
+                            i += 1;
+                        }
+                        flag => {
+                            return Err(AppError::invalid_argument(format!(
+                                "unknown flag for pointer click --id: {flag}",
+                            )));
+                        }
                     }
-                    return Err(AppError::invalid_argument(format!(
-                        "unknown flag for pointer click --id: {token}",
-                    )));
                 }
                 if !active_window {
                     return Err(AppError::invalid_argument(
                         "pointer click --id requires --active-window",
                     ));
                 }
-                Ok(Command::PointerClickId { id, active_window })
+                Ok(Command::PointerClickId {
+                    id,
+                    active_window,
+                    active_window_ref,
+                })
             } else if args.len() >= 2 && args[1] == "--token" {
                 let token = parse_u32(args.get(2), "token")?;
                 Ok(Command::PointerClickToken { token })
@@ -816,7 +876,7 @@ fn usage() -> &'static str {
   desktopctl window focus --title <text>
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window] [--region <x> <y> <width> <height>]
     note: --region is relative to the selected active-window/display target
-  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
+  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<uuid>]] [--window <id>] [--screenshot <path>] [--region <x> <y> <width> <height>]
     note: --window cannot be combined with --screenshot
     note: --active-window cannot be combined with --window or --screenshot
     note: --region is relative to the selected window/screenshot target
@@ -839,8 +899,8 @@ fn usage() -> &'static str {
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
   desktopctl pointer click [--absolute] <x> <y>
-  desktopctl pointer click --text <text> [--active-window]
-  desktopctl pointer click --id <element_id> --active-window
+  desktopctl pointer click --text <text> [--active-window [<uuid>]]
+  desktopctl pointer click --id <element_id> --active-window [<uuid>]
   desktopctl pointer click --token <n>
   desktopctl pointer scroll <dx> <dy>
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
@@ -1378,12 +1438,14 @@ mod tests {
                 window_id,
                 screenshot_path,
                 active_window,
+                active_window_ref,
                 region,
             } => {
                 assert_eq!(overlay_out_path.as_deref(), Some("/tmp/tokens.overlay.png"));
                 assert!(window_id.is_none());
                 assert!(screenshot_path.is_none());
                 assert!(!active_window);
+                assert!(active_window_ref.is_none());
                 assert!(region.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1405,13 +1467,48 @@ mod tests {
                 window_id,
                 screenshot_path,
                 active_window,
+                active_window_ref,
                 region,
             } => {
                 assert!(overlay_out_path.is_none());
                 assert_eq!(window_id.as_deref(), Some("777:3"));
                 assert!(screenshot_path.is_none());
                 assert!(!active_window);
+                assert!(active_window_ref.is_none());
                 assert!(region.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_tokenize_with_active_window_ref() {
+        let args = vec![
+            "screen".to_string(),
+            "tokenize".to_string(),
+            "--active-window".to_string(),
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        ];
+        let command =
+            parse_command(&args).expect("screen tokenize --active-window <uuid> should parse");
+        match command {
+            Command::ScreenTokenize {
+                active_window,
+                active_window_ref,
+                window_id,
+                screenshot_path,
+                region,
+                overlay_out_path,
+            } => {
+                assert!(active_window);
+                assert_eq!(
+                    active_window_ref.as_deref(),
+                    Some("550e8400-e29b-41d4-a716-446655440000")
+                );
+                assert!(window_id.is_none());
+                assert!(screenshot_path.is_none());
+                assert!(region.is_none());
+                assert!(overlay_out_path.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1431,12 +1528,14 @@ mod tests {
                 window_id,
                 screenshot_path,
                 active_window,
+                active_window_ref,
                 region,
             } => {
                 assert!(overlay_out_path.is_none());
                 assert!(window_id.is_none());
                 assert!(screenshot_path.is_none());
                 assert!(active_window);
+                assert!(active_window_ref.is_none());
                 assert!(region.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
@@ -1614,9 +1713,11 @@ mod tests {
             Command::PointerClickText {
                 text,
                 active_window,
+                active_window_ref,
             } => {
                 assert_eq!(text, "DesktopCtl");
                 assert!(active_window);
+                assert!(active_window_ref.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1633,9 +1734,14 @@ mod tests {
         ];
         let command = parse_command(&args).expect("pointer click --id should parse");
         match command {
-            Command::PointerClickId { id, active_window } => {
+            Command::PointerClickId {
+                id,
+                active_window,
+                active_window_ref,
+            } => {
                 assert_eq!(id, "button_0018");
                 assert!(active_window);
+                assert!(active_window_ref.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -1652,6 +1758,35 @@ mod tests {
         let err =
             parse_command(&args).expect_err("pointer click --id must require --active-window");
         assert!(err.message.contains("requires --active-window"));
+    }
+
+    #[test]
+    fn parses_pointer_click_id_with_active_window_ref() {
+        let args = vec![
+            "pointer".to_string(),
+            "click".to_string(),
+            "--id".to_string(),
+            "axid_nine".to_string(),
+            "--active-window".to_string(),
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        ];
+        let command =
+            parse_command(&args).expect("pointer click --id with active window ref should parse");
+        match command {
+            Command::PointerClickId {
+                id,
+                active_window,
+                active_window_ref,
+            } => {
+                assert_eq!(id, "axid_nine");
+                assert!(!active_window);
+                assert_eq!(
+                    active_window_ref.as_deref(),
+                    Some("550e8400-e29b-41d4-a716-446655440000")
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

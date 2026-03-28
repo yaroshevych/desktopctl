@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 #[cfg(target_os = "macos")]
 use crate::overlay;
 use crate::{
-    clipboard, permissions, platform, recording, replay, request_store, trace, vision,
+    clipboard, permissions, platform, recording, replay, request_store, trace, vision, window_refs,
     window_target,
 };
 
@@ -428,7 +428,8 @@ fn execute_with_context(
         Command::WindowList => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let windows = window_target::list_windows()?;
+            let mut windows = window_target::list_windows()?;
+            enrich_window_refs(&mut windows);
             Ok(json!({
                 "windows": windows.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
             }))
@@ -436,7 +437,8 @@ fn execute_with_context(
         Command::WindowBounds { title } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let windows = window_target::list_windows()?;
+            let mut windows = window_target::list_windows()?;
+            enrich_window_refs(&mut windows);
             let selected = window_target::select_window_candidate(&windows, &title)?;
             Ok(json!({
                 "window": selected.as_json()
@@ -445,7 +447,8 @@ fn execute_with_context(
         Command::WindowFocus { title } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let windows = window_target::list_windows()?;
+            let mut windows = window_target::list_windows()?;
+            enrich_window_refs(&mut windows);
             let selected = window_target::select_window_candidate(&windows, &title)?;
             platform::apps::focus_window(selected)?;
             Ok(json!({
@@ -661,6 +664,7 @@ fn execute_with_context(
             window_id,
             screenshot_path,
             active_window,
+            active_window_ref,
             region,
         } => {
             trace::log("execute:screen_tokenize:start");
@@ -688,27 +692,58 @@ fn execute_with_context(
                 permissions::ensure_screen_recording_permission()?;
                 let backend = new_backend()?;
                 backend.check_accessibility_permission()?;
+                if active_window_ref.is_some() && !active_window {
+                    return Err(AppError::invalid_argument(
+                        "active window ref requires --active-window",
+                    ));
+                }
                 if active_window {
                     if window_id.is_some() {
                         return Err(AppError::invalid_argument(
                             "--active-window cannot be combined with --window for screen tokenize",
                         ));
                     }
-                    let bounds = window_target::frontmost_window_bounds().ok_or_else(|| {
-                        AppError::target_not_found(
-                            "frontmost window bounds unavailable for --active-window",
-                        )
-                    })?;
-                    let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
-                    let app = window_target::frontmost_app_name();
-                    let title = app.clone().unwrap_or_else(|| "active_window".to_string());
-                    let window_meta = vision::pipeline::TokenizeWindowMeta {
-                        id: "frontmost:1".to_string(),
-                        title,
-                        app,
-                        bounds,
+                    let frontmost_window = if let Some(reference) = active_window_ref.as_deref() {
+                        Some(assert_active_window_ref_matches(reference)?)
+                    } else {
+                        None
                     };
-                    vision::pipeline::tokenize_window(window_meta)?
+                    let bounds = if let Some(window) = frontmost_window.as_ref() {
+                        window.bounds.clone()
+                    } else {
+                        window_target::frontmost_window_bounds().ok_or_else(|| {
+                            AppError::target_not_found(
+                                "frontmost window bounds unavailable for --active-window",
+                            )
+                        })?
+                    };
+                    let bounds = resolve_tokenize_region_bounds(bounds, region.as_ref())?;
+                    let app = frontmost_window
+                        .as_ref()
+                        .map(|window| window.app.clone())
+                        .or_else(window_target::frontmost_app_name);
+                    let title = frontmost_window
+                        .as_ref()
+                        .map(|window| window.title.clone())
+                        .or_else(|| app.clone())
+                        .unwrap_or_else(|| "active_window".to_string());
+                    let window_id = frontmost_window
+                        .as_ref()
+                        .map(|window| window.id.clone())
+                        .unwrap_or_else(|| "frontmost:1".to_string());
+                    let mut payload =
+                        vision::pipeline::tokenize_window(vision::pipeline::TokenizeWindowMeta {
+                            id: window_id,
+                            title,
+                            app,
+                            bounds,
+                        })?;
+                    if let (Some(first), Some(window)) =
+                        (payload.windows.first_mut(), frontmost_window.as_ref())
+                    {
+                        first.window_ref = window.window_ref.clone();
+                    }
+                    payload
                 } else if window_id.is_none() {
                     let overlay_window_bounds = {
                         #[cfg(target_os = "macos")]
@@ -745,7 +780,8 @@ fn execute_with_context(
                         };
                         vision::pipeline::tokenize_window(window_meta)?
                     } else {
-                        let windows = window_target::list_windows()?;
+                        let mut windows = window_target::list_windows()?;
+                        enrich_window_refs(&mut windows);
                         let target = window_target::resolve_tokenize_window_target(&windows, None)?;
                         let bounds =
                             resolve_tokenize_region_bounds(target.bounds.clone(), region.as_ref())?;
@@ -755,10 +791,15 @@ fn execute_with_context(
                             app: Some(target.app.clone()),
                             bounds,
                         };
-                        vision::pipeline::tokenize_window(window_meta)?
+                        let mut payload = vision::pipeline::tokenize_window(window_meta)?;
+                        if let Some(first) = payload.windows.first_mut() {
+                            first.window_ref = target.window_ref.clone();
+                        }
+                        payload
                     }
                 } else {
-                    let windows = window_target::list_windows()?;
+                    let mut windows = window_target::list_windows()?;
+                    enrich_window_refs(&mut windows);
                     let target = window_target::resolve_tokenize_window_target(
                         &windows,
                         window_id.as_deref(),
@@ -771,11 +812,16 @@ fn execute_with_context(
                         app: Some(target.app.clone()),
                         bounds,
                     };
-                    vision::pipeline::tokenize_window(window_meta)?
+                    let mut payload = vision::pipeline::tokenize_window(window_meta)?;
+                    if let Some(first) = payload.windows.first_mut() {
+                        first.window_ref = target.window_ref.clone();
+                    }
+                    payload
                 }
             };
             let mut payload = payload;
             if !screenshot_mode {
+                attach_window_ref_to_payload(&mut payload);
                 backfill_tokenize_window_positions(&mut payload);
             }
             if let Some(path_raw) = overlay_out_path {
@@ -859,10 +905,23 @@ fn execute_with_context(
         Command::PointerClickText {
             text,
             active_window,
-        } => click_text_target(&text, active_window, request_context),
-        Command::PointerClickId { id, active_window } => {
-            click_element_id_target(&id, active_window, request_context)
-        }
+            active_window_ref,
+        } => click_text_target(
+            &text,
+            active_window,
+            active_window_ref.as_deref(),
+            request_context,
+        ),
+        Command::PointerClickId {
+            id,
+            active_window,
+            active_window_ref,
+        } => click_element_id_target(
+            &id,
+            active_window,
+            active_window_ref.as_deref(),
+            request_context,
+        ),
         Command::PointerClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -991,6 +1050,99 @@ fn resolve_relative_region_bounds(
     })
 }
 
+fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]) {
+    for window in windows {
+        if window.window_ref.is_none() {
+            window.window_ref = Some(window_refs::issue_for_window(window));
+        }
+    }
+}
+
+fn assert_active_window_ref_matches(
+    reference: &str,
+) -> Result<platform::windowing::WindowInfo, AppError> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::invalid_argument(
+            "active window ref must not be empty",
+        ));
+    }
+    let mut windows = window_target::list_frontmost_app_windows()?;
+    enrich_window_refs(&mut windows);
+    let active = window_target::resolve_tokenize_window_target(&windows, None)?;
+    let active_ref = active
+        .window_ref
+        .clone()
+        .ok_or_else(|| AppError::target_not_found("active window reference is unavailable"))?;
+    if active_ref != trimmed {
+        return Err(AppError::target_not_found(format!(
+            "active window does not match requested ref \"{trimmed}\""
+        )));
+    }
+    Ok(active)
+}
+
+fn attach_window_ref_to_payload(payload: &mut desktop_core::protocol::TokenizePayload) {
+    let Some(first) = payload.windows.first_mut() else {
+        return;
+    };
+    if first.window_ref.is_some() {
+        return;
+    }
+    let Some(target_bounds) = first
+        .os_bounds
+        .as_ref()
+        .cloned()
+        .or_else(|| Some(first.bounds.clone()))
+    else {
+        return;
+    };
+
+    let mut windows = match window_target::list_frontmost_app_windows() {
+        Ok(items) => items,
+        Err(_) => return,
+    };
+    enrich_window_refs(&mut windows);
+    let app_hint = first.app.as_deref();
+    let title_hint = first.title.as_str();
+    let selected = windows
+        .iter()
+        .filter(|window| window.bounds.width > 8.0 && window.bounds.height > 8.0 && window.visible)
+        .max_by(|a, b| {
+            let sa = window_match_score(a, &target_bounds, app_hint, title_hint);
+            let sb = window_match_score(b, &target_bounds, app_hint, title_hint);
+            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    if let Some(window) = selected {
+        first.window_ref = window.window_ref.clone();
+    }
+}
+
+fn window_match_score(
+    window: &platform::windowing::WindowInfo,
+    target_bounds: &desktop_core::protocol::Bounds,
+    app_hint: Option<&str>,
+    title_hint: &str,
+) -> f64 {
+    let overlap = iou(&window.bounds, target_bounds);
+    let area_delta = ((window.bounds.width - target_bounds.width).abs()
+        + (window.bounds.height - target_bounds.height).abs())
+    .min(2000.0);
+    let mut score = overlap * 10.0 - area_delta * 0.002;
+    if let Some(app) = app_hint {
+        if window.app.eq_ignore_ascii_case(app) {
+            score += 1.0;
+        }
+    }
+    if !title_hint.trim().is_empty() && window.title.eq_ignore_ascii_case(title_hint) {
+        score += 0.4;
+    }
+    if window.frontmost {
+        score += 0.25;
+    }
+    score
+}
+
 fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::TokenizePayload) {
     if payload.windows.is_empty()
         || payload
@@ -1021,9 +1173,18 @@ fn backfill_tokenize_window_positions(payload: &mut desktop_core::protocol::Toke
 fn click_text_target(
     query: &str,
     active_window: bool,
+    active_window_ref: Option<&str>,
     request_context: &RequestContext,
 ) -> Result<Value, AppError> {
+    if active_window_ref.is_some() && !active_window {
+        return Err(AppError::invalid_argument(
+            "active window ref requires --active-window",
+        ));
+    }
     if active_window {
+        if let Some(reference) = active_window_ref {
+            assert_active_window_ref_matches(reference)?;
+        }
         if let Some(result) = try_click_text_active_window_ax(query)? {
             return Ok(result);
         }
@@ -1202,12 +1363,16 @@ struct TokenizeClickElementCandidate {
 fn click_element_id_target(
     id: &str,
     active_window: bool,
+    active_window_ref: Option<&str>,
     request_context: &RequestContext,
 ) -> Result<Value, AppError> {
     if !active_window {
         return Err(AppError::invalid_argument(
             "pointer click --id requires --active-window",
         ));
+    }
+    if let Some(reference) = active_window_ref {
+        assert_active_window_ref_matches(reference)?;
     }
     permissions::ensure_screen_recording_permission()?;
     let needle = id.trim();
@@ -2415,6 +2580,7 @@ mod tests {
             }),
             windows: vec![TokenizeWindow {
                 id: "frontmost:1".to_string(),
+                window_ref: None,
                 title: "Calculator".to_string(),
                 app: Some("Calculator".to_string()),
                 bounds: Bounds {
@@ -2466,6 +2632,7 @@ mod tests {
             }),
             windows: vec![TokenizeWindow {
                 id: "frontmost:1".to_string(),
+                window_ref: None,
                 title: "Calculator".to_string(),
                 app: Some("Calculator".to_string()),
                 bounds: Bounds {
@@ -2518,6 +2685,7 @@ mod tests {
             }),
             windows: vec![TokenizeWindow {
                 id: "frontmost:1".to_string(),
+                window_ref: None,
                 title: "Notes".to_string(),
                 app: Some("Notes".to_string()),
                 bounds: Bounds {
