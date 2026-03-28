@@ -1,7 +1,7 @@
 use desktop_core::{
     error::{AppError, ErrorCode},
     ipc,
-    protocol::{Command, RequestEnvelope, ResponseEnvelope},
+    protocol::{Command, ObserveOptions, ObserveUntil, RequestEnvelope, ResponseEnvelope},
 };
 use std::{
     fs::OpenOptions,
@@ -727,6 +727,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 })?;
                 let mut active_window = false;
                 let mut active_window_id: Option<String> = None;
+                let mut observe = ObserveOptions::default();
                 let mut i = 3usize;
                 while i < args.len() {
                     match args[i].as_str() {
@@ -745,6 +746,27 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                                 }
                             }
                             i += 1;
+                        }
+                        "--observe" => {
+                            observe.enabled = true;
+                            i += 1;
+                        }
+                        "--no-observe" => {
+                            observe.enabled = false;
+                            i += 1;
+                        }
+                        "--observe-until" => {
+                            let value = args.get(i + 1).ok_or_else(|| {
+                                AppError::invalid_argument(
+                                    "missing value for --observe-until (stable|change|first-change)",
+                                )
+                            })?;
+                            observe.until = parse_observe_until(value)?;
+                            i += 2;
+                        }
+                        "--observe-timeout" => {
+                            observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
+                            i += 2;
                         }
                         flag => {
                             return Err(AppError::invalid_argument(format!(
@@ -757,6 +779,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     text,
                     active_window,
                     active_window_id,
+                    observe,
                 })
             } else if args.len() >= 2 && args[1] == "--id" {
                 let id = args.get(2).cloned().ok_or_else(|| {
@@ -766,6 +789,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 })?;
                 let mut active_window = false;
                 let mut active_window_id: Option<String> = None;
+                let mut observe = ObserveOptions::default();
                 let mut i = 3usize;
                 while i < args.len() {
                     match args[i].as_str() {
@@ -784,6 +808,27 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                                 }
                             }
                             i += 1;
+                        }
+                        "--observe" => {
+                            observe.enabled = true;
+                            i += 1;
+                        }
+                        "--no-observe" => {
+                            observe.enabled = false;
+                            i += 1;
+                        }
+                        "--observe-until" => {
+                            let value = args.get(i + 1).ok_or_else(|| {
+                                AppError::invalid_argument(
+                                    "missing value for --observe-until (stable|change|first-change)",
+                                )
+                            })?;
+                            observe.until = parse_observe_until(value)?;
+                            i += 2;
+                        }
+                        "--observe-timeout" => {
+                            observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
+                            i += 2;
                         }
                         flag => {
                             return Err(AppError::invalid_argument(format!(
@@ -801,16 +846,46 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     id,
                     active_window,
                     active_window_id,
+                    observe,
                 })
             } else if args.len() >= 2 && args[1] == "--token" {
                 let token = parse_u32(args.get(2), "token")?;
                 Ok(Command::PointerClickToken { token })
             } else {
                 let mut absolute = false;
+                let mut observe = ObserveOptions::default();
                 let mut positional: Vec<&String> = Vec::new();
-                for token in args.iter().skip(1) {
+                let mut i = 1usize;
+                while i < args.len() {
+                    let token = &args[i];
                     if token == "--absolute" {
                         absolute = true;
+                        i += 1;
+                        continue;
+                    }
+                    if token == "--observe" {
+                        observe.enabled = true;
+                        i += 1;
+                        continue;
+                    }
+                    if token == "--no-observe" {
+                        observe.enabled = false;
+                        i += 1;
+                        continue;
+                    }
+                    if token == "--observe-until" {
+                        let value = args.get(i + 1).ok_or_else(|| {
+                            AppError::invalid_argument(
+                                "missing value for --observe-until (stable|change|first-change)",
+                            )
+                        })?;
+                        observe.until = parse_observe_until(value)?;
+                        i += 2;
+                        continue;
+                    }
+                    if token == "--observe-timeout" {
+                        observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
+                        i += 2;
                         continue;
                     }
                     if token.starts_with("--") {
@@ -820,15 +895,21 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                         )));
                     }
                     positional.push(token);
+                    i += 1;
                 }
                 if positional.len() != 2 {
                     return Err(AppError::invalid_argument(
-                        "usage: desktopctl pointer click [--absolute] <x> <y>",
+                        "usage: desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] <x> <y>",
                     ));
                 }
                 let x = parse_u32(Some(positional[0]), "x")?;
                 let y = parse_u32(Some(positional[1]), "y")?;
-                Ok(Command::PointerClick { x, y, absolute })
+                Ok(Command::PointerClick {
+                    x,
+                    y,
+                    absolute,
+                    observe,
+                })
             }
         }
         "drag" => {
@@ -852,7 +933,39 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
         "scroll" => {
             let dx = parse_i32(args.get(1), "dx")?;
             let dy = parse_i32(args.get(2), "dy")?;
-            Ok(Command::PointerScroll { dx, dy })
+            let mut observe = ObserveOptions::default();
+            let mut i = 3usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--observe" => {
+                        observe.enabled = true;
+                        i += 1;
+                    }
+                    "--no-observe" => {
+                        observe.enabled = false;
+                        i += 1;
+                    }
+                    "--observe-until" => {
+                        let value = args.get(i + 1).ok_or_else(|| {
+                            AppError::invalid_argument(
+                                "missing value for --observe-until (stable|change|first-change)",
+                            )
+                        })?;
+                        observe.until = parse_observe_until(value)?;
+                        i += 2;
+                    }
+                    "--observe-timeout" => {
+                        observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for pointer scroll: {flag}"
+                        )));
+                    }
+                }
+            }
+            Ok(Command::PointerScroll { dx, dy, observe })
         }
         _ => Err(AppError::invalid_argument(usage())),
     }
@@ -868,21 +981,73 @@ fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
             let text = args.get(1).cloned().ok_or_else(|| {
                 AppError::invalid_argument("missing text: desktopctl keyboard type \"text\"")
             })?;
-            Ok(Command::UiType { text })
+            let observe = parse_observe_options(&args[2..], "keyboard type")?;
+            Ok(Command::UiType { text, observe })
         }
         "press" => {
             let key = args.get(1).cloned().ok_or_else(|| {
                 AppError::invalid_argument("missing key: desktopctl keyboard press enter")
             })?;
+            let observe = parse_observe_options(&args[2..], "keyboard press")?;
             if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
-                Ok(Command::KeyEnter)
+                Ok(Command::KeyEnter { observe })
             } else if key.eq_ignore_ascii_case("escape") || key.eq_ignore_ascii_case("esc") {
-                Ok(Command::KeyEscape)
+                Ok(Command::KeyEscape { observe })
             } else {
-                Ok(Command::KeyHotkey { hotkey: key })
+                Ok(Command::KeyHotkey {
+                    hotkey: key,
+                    observe,
+                })
             }
         }
         _ => Err(AppError::invalid_argument(usage())),
+    }
+}
+
+fn parse_observe_options(args: &[String], command_name: &str) -> Result<ObserveOptions, AppError> {
+    let mut observe = ObserveOptions::default();
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--observe" => {
+                observe.enabled = true;
+                i += 1;
+            }
+            "--no-observe" => {
+                observe.enabled = false;
+                i += 1;
+            }
+            "--observe-until" => {
+                let value = args.get(i + 1).ok_or_else(|| {
+                    AppError::invalid_argument(
+                        "missing value for --observe-until (stable|change|first-change)",
+                    )
+                })?;
+                observe.until = parse_observe_until(value)?;
+                i += 2;
+            }
+            "--observe-timeout" => {
+                observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
+                i += 2;
+            }
+            flag => {
+                return Err(AppError::invalid_argument(format!(
+                    "unknown flag for {command_name}: {flag}"
+                )));
+            }
+        }
+    }
+    Ok(observe)
+}
+
+fn parse_observe_until(value: &str) -> Result<ObserveUntil, AppError> {
+    match value {
+        "stable" => Ok(ObserveUntil::Stable),
+        "change" => Ok(ObserveUntil::Change),
+        "first-change" => Ok(ObserveUntil::FirstChange),
+        _ => Err(AppError::invalid_argument(format!(
+            "invalid --observe-until value: {value} (expected stable|change|first-change)"
+        ))),
     }
 }
 
@@ -939,13 +1104,14 @@ fn usage() -> &'static str {
   desktopctl pointer down <x> <y>
   desktopctl pointer up <x> <y>
   desktopctl pointer click [--absolute] <x> <y>
-  desktopctl pointer click --text <text> [--active-window [<id>]]
-  desktopctl pointer click --id <element_id> --active-window [<id>]
+  desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] <x> <y>
+  desktopctl pointer click --text <text> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+  desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
   desktopctl pointer click --token <n>
-  desktopctl pointer scroll <dx> <dy>
+  desktopctl pointer scroll <dx> <dy> [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
-  desktopctl keyboard type \"text\"
-  desktopctl keyboard press <key-or-hotkey>"
+  desktopctl keyboard type \"text\" [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]
+  desktopctl keyboard press <key-or-hotkey> [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>]"
 }
 
 fn send_request_with_autostart(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {

@@ -6,6 +6,8 @@ use crate::error::{AppError, ErrorCode};
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const API_VERSION: &str = "1";
 
+const DEFAULT_OBSERVE_TIMEOUT_MS: u64 = 300;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub protocol_version: u32,
@@ -66,6 +68,8 @@ pub enum Command {
         y: u32,
         #[serde(default)]
         absolute: bool,
+        #[serde(default)]
+        observe: ObserveOptions,
     },
     PointerClickText {
         text: String,
@@ -73,6 +77,8 @@ pub enum Command {
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,
+        #[serde(default)]
+        observe: ObserveOptions,
     },
     PointerClickId {
         id: String,
@@ -80,6 +86,8 @@ pub enum Command {
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,
+        #[serde(default)]
+        observe: ObserveOptions,
     },
     PointerClickToken {
         token: u32,
@@ -87,6 +95,8 @@ pub enum Command {
     PointerScroll {
         dx: i32,
         dy: i32,
+        #[serde(default)]
+        observe: ObserveOptions,
     },
     PointerDrag {
         x1: u32,
@@ -97,12 +107,22 @@ pub enum Command {
     },
     UiType {
         text: String,
+        #[serde(default)]
+        observe: ObserveOptions,
     },
     KeyHotkey {
         hotkey: String,
+        #[serde(default)]
+        observe: ObserveOptions,
     },
-    KeyEnter,
-    KeyEscape,
+    KeyEnter {
+        #[serde(default)]
+        observe: ObserveOptions,
+    },
+    KeyEscape {
+        #[serde(default)]
+        observe: ObserveOptions,
+    },
     WaitText {
         text: String,
         timeout_ms: u64,
@@ -167,6 +187,31 @@ pub enum Command {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObserveUntil {
+    Stable,
+    Change,
+    FirstChange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserveOptions {
+    pub enabled: bool,
+    pub until: ObserveUntil,
+    pub timeout_ms: u64,
+}
+
+impl Default for ObserveOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            until: ObserveUntil::Stable,
+            timeout_ms: DEFAULT_OBSERVE_TIMEOUT_MS,
+        }
+    }
+}
+
 impl Command {
     pub fn name(&self) -> &'static str {
         match self {
@@ -189,8 +234,8 @@ impl Command {
             Command::PointerDrag { .. } => "pointer_drag",
             Command::UiType { .. } => "type",
             Command::KeyHotkey { .. } => "key_hotkey",
-            Command::KeyEnter => "key_enter",
-            Command::KeyEscape => "key_escape",
+            Command::KeyEnter { .. } => "key_enter",
+            Command::KeyEscape { .. } => "key_escape",
             Command::WaitText { .. } => "wait_text",
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenTokenize { .. } => "screen_tokenize",

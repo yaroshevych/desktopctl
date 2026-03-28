@@ -16,7 +16,7 @@ use desktop_core::{
     automation::{Point, new_backend},
     error::AppError,
     ipc::{read_framed_json, socket_path, write_framed_json},
-    protocol::{Command, RequestEnvelope, ResponseEnvelope},
+    protocol::{Command, ObserveOptions, ObserveUntil, RequestEnvelope, ResponseEnvelope},
 };
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
@@ -36,6 +36,11 @@ const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
 const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
 #[cfg(target_os = "macos")]
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
+const OBSERVE_SAMPLE_INTERVAL_MS: u64 = 40;
+const OBSERVE_QUIET_FRAMES: u32 = 2;
+const OBSERVE_DIFF_THRESHOLD: u8 = 8;
+const OBSERVE_THUMB_WIDTH: u32 = 96;
+const OBSERVE_THUMB_HEIGHT: u32 = 54;
 
 #[derive(Debug, Clone, Default)]
 struct RequestContext {
@@ -389,8 +394,8 @@ fn command_requires_privacy_signal(command: &Command) -> bool {
             | Command::PointerDrag { .. }
             | Command::UiType { .. }
             | Command::KeyHotkey { .. }
-            | Command::KeyEnter
-            | Command::KeyEscape
+            | Command::KeyEnter { .. }
+            | Command::KeyEscape { .. }
     )
 }
 
@@ -523,7 +528,12 @@ fn execute_with_context(
             trace::log(format!("pointer_up:ok x={x} y={y}"));
             Ok(json!({}))
         }
-        Command::PointerClick { x, y, absolute } => {
+        Command::PointerClick {
+            x,
+            y,
+            absolute,
+            observe,
+        } => {
             trace::log(format!(
                 "pointer_click:start x={x} y={y} absolute={absolute}"
             ));
@@ -536,15 +546,19 @@ fn execute_with_context(
                 "pointer_click:ok x={} y={} absolute={absolute}",
                 point.x, point.y
             ));
-            Ok(json!({}))
+            let mut result = json!({});
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
         }
-        Command::PointerScroll { dx, dy } => {
+        Command::PointerScroll { dx, dy, observe } => {
             trace::log(format!("pointer_scroll:start dx={dx} dy={dy}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             backend.scroll_wheel(dx, dy)?;
             trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
-            Ok(json!({}))
+            let mut result = json!({});
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
         }
         Command::PointerDrag {
             x1,
@@ -572,29 +586,37 @@ fn execute_with_context(
             ));
             Ok(json!({}))
         }
-        Command::UiType { text } => {
+        Command::UiType { text, observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             backend.type_text(&text)?;
-            Ok(json!({}))
+            let mut result = json!({});
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
         }
-        Command::KeyHotkey { hotkey } => {
+        Command::KeyHotkey { hotkey, observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             backend.press_hotkey(&hotkey)?;
-            Ok(json!({}))
+            let mut result = json!({});
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
         }
-        Command::KeyEnter => {
+        Command::KeyEnter { observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             backend.press_enter()?;
-            Ok(json!({}))
+            let mut result = json!({});
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
         }
-        Command::KeyEscape => {
+        Command::KeyEscape { observe } => {
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             backend.press_escape()?;
-            Ok(json!({}))
+            let mut result = json!({});
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
         }
         Command::ScreenCapture {
             out_path,
@@ -896,22 +918,32 @@ fn execute_with_context(
             text,
             active_window,
             active_window_id,
-        } => click_text_target(
-            &text,
-            active_window,
-            active_window_id.as_deref(),
-            request_context,
-        ),
+            observe,
+        } => {
+            let mut result = click_text_target(
+                &text,
+                active_window,
+                active_window_id.as_deref(),
+                request_context,
+            )?;
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
+        }
         Command::PointerClickId {
             id,
             active_window,
             active_window_id,
-        } => click_element_id_target(
-            &id,
-            active_window,
-            active_window_id.as_deref(),
-            request_context,
-        ),
+            observe,
+        } => {
+            let mut result = click_element_id_target(
+                &id,
+                active_window,
+                active_window_id.as_deref(),
+                request_context,
+            )?;
+            append_observe_payload(&mut result, observe_after_action(&observe)?);
+            Ok(result)
+        }
         Command::PointerClickToken { token } => click_token_target(token),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
@@ -1998,6 +2030,115 @@ fn perform_click_at(x: u32, y: u32) -> Result<(), AppError> {
     backend.left_click(point)?;
     trace::log("perform_click:left_click ok");
     Ok(())
+}
+
+fn append_observe_payload(result: &mut Value, observe: Option<Value>) {
+    let Some(observe) = observe else {
+        return;
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert("observe".to_string(), observe);
+    }
+}
+
+fn observe_after_action(options: &ObserveOptions) -> Result<Option<Value>, AppError> {
+    if !options.enabled {
+        return Ok(None);
+    }
+    let start = Instant::now();
+    let prev = vision::capture::capture_screen_png(None)?;
+    let mut prev_thumb =
+        vision::diff::thumbnail_from_rgba(&prev.image, OBSERVE_THUMB_WIDTH, OBSERVE_THUMB_HEIGHT);
+    let mut changed_any = false;
+    let mut quiet_frames = 0u32;
+    let mut region_union: Option<desktop_core::protocol::Bounds> = None;
+    let mut samples = 0u32;
+    let timeout = Duration::from_millis(options.timeout_ms.max(20));
+
+    loop {
+        if start.elapsed() >= timeout {
+            return Ok(Some(json!({
+                "changed": changed_any,
+                "regions": region_union.into_iter().collect::<Vec<_>>(),
+                "stability": "timeout",
+                "elapsed_ms": start.elapsed().as_millis() as u64,
+                "samples": samples
+            })));
+        }
+        thread::sleep(Duration::from_millis(OBSERVE_SAMPLE_INTERVAL_MS));
+        let curr = vision::capture::capture_screen_png(None)?;
+        let curr_thumb = vision::diff::thumbnail_from_rgba(
+            &curr.image,
+            OBSERVE_THUMB_WIDTH,
+            OBSERVE_THUMB_HEIGHT,
+        );
+        samples += 1;
+        if let Some(changed_region) =
+            vision::diff::diff_region(&prev_thumb, &curr_thumb, OBSERVE_DIFF_THRESHOLD)
+        {
+            changed_any = true;
+            quiet_frames = 0;
+            let upscaled = vision::diff::upscale_region(
+                changed_region,
+                curr.frame.width,
+                curr.frame.height,
+                curr_thumb.width,
+                curr_thumb.height,
+            );
+            region_union = Some(merge_bounds(region_union.as_ref(), &upscaled));
+            if options.until == ObserveUntil::FirstChange {
+                return Ok(Some(json!({
+                    "changed": true,
+                    "regions": region_union.into_iter().collect::<Vec<_>>(),
+                    "stability": "settled",
+                    "elapsed_ms": start.elapsed().as_millis() as u64,
+                    "samples": samples
+                })));
+            }
+        } else {
+            quiet_frames += 1;
+            if changed_any {
+                if quiet_frames >= OBSERVE_QUIET_FRAMES {
+                    return Ok(Some(json!({
+                        "changed": true,
+                        "regions": region_union.into_iter().collect::<Vec<_>>(),
+                        "stability": "settled",
+                        "elapsed_ms": start.elapsed().as_millis() as u64,
+                        "samples": samples
+                    })));
+                }
+            } else if options.until == ObserveUntil::Stable && quiet_frames >= OBSERVE_QUIET_FRAMES
+            {
+                return Ok(Some(json!({
+                    "changed": false,
+                    "regions": [],
+                    "stability": "no_change",
+                    "elapsed_ms": start.elapsed().as_millis() as u64,
+                    "samples": samples
+                })));
+            }
+        }
+        prev_thumb = curr_thumb;
+    }
+}
+
+fn merge_bounds(
+    existing: Option<&desktop_core::protocol::Bounds>,
+    incoming: &desktop_core::protocol::Bounds,
+) -> desktop_core::protocol::Bounds {
+    let Some(existing) = existing else {
+        return incoming.clone();
+    };
+    let x1 = existing.x.min(incoming.x);
+    let y1 = existing.y.min(incoming.y);
+    let x2 = (existing.x + existing.width).max(incoming.x + incoming.width);
+    let y2 = (existing.y + existing.height).max(incoming.y + incoming.height);
+    desktop_core::protocol::Bounds {
+        x: x1,
+        y: y1,
+        width: (x2 - x1).max(1.0),
+        height: (y2 - y1).max(1.0),
+    }
 }
 
 fn verify_click_postcondition(
