@@ -236,3 +236,45 @@ fn is_response_envelope_shape(value: &serde_json::Value) -> bool {
     obj.get("ok").and_then(serde_json::Value::as_bool).is_some()
         && (obj.contains_key("result") || obj.contains_key("error"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render_response;
+    use desktop_core::protocol::{Command, ResponseEnvelope};
+    use serde_json::json;
+
+    #[test]
+    fn request_response_passthrough_uses_embedded_envelope_shape() {
+        let command = Command::RequestResponse {
+            request_id: "stored-1".to_string(),
+        };
+        let response = ResponseEnvelope::success(
+            "outer-req",
+            json!({
+                "ok": true,
+                "api_version": "1",
+                "request_id": "inner-req",
+                "result": { "message": "from-store" }
+            }),
+        );
+
+        let rendered = render_response(&command, &response, true);
+        assert_eq!(rendered["request_id"], "inner-req");
+        assert_eq!(rendered["result"]["message"], "from-store");
+        assert!(rendered.get("hint").is_none());
+    }
+
+    #[test]
+    fn window_list_renders_static_hint() {
+        let command = Command::WindowList;
+        let response = ResponseEnvelope::success("r1", json!({ "windows": [] }));
+
+        let rendered = render_response(&command, &response, false);
+        assert_eq!(
+            rendered["hint"],
+            "compact output with | jq '.result.windows[] | \"\\\\(.id) \\\\(.visible) \\\\(.title)\"'"
+        );
+        assert_eq!(rendered["ok"], true);
+        assert_eq!(rendered["result"]["windows"], json!([]));
+    }
+}
