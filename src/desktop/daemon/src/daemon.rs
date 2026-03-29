@@ -1553,11 +1553,12 @@ fn append_tokenize_text_dump(value: &mut Value) {
         if dump.trim().is_empty() {
             continue;
         }
-        let mut header = format!("window: {title}");
+        let mut header_lines = vec![format!("window title: {title}")];
         if !app.trim().is_empty() {
-            header.push_str(&format!(" ({app})"));
+            header_lines.push(format!("window app: {app}"));
         }
-        chunks.push(format!("{header}\n{dump}"));
+        header_lines.push(dump);
+        chunks.push(header_lines.join("\n"));
     }
     if chunks.is_empty() {
         return;
@@ -1573,6 +1574,14 @@ struct TextDumpEntry {
     text: String,
     x: f64,
     y: f64,
+    width: f64,
+}
+
+struct TextDumpColumn {
+    entries: Vec<TextDumpEntry>,
+    min_x: f64,
+    max_x: f64,
+    likely_scrollable: bool,
 }
 
 fn build_window_text_dump(elements: &[Value]) -> String {
@@ -1599,6 +1608,7 @@ fn build_window_text_dump(elements: &[Value]) -> String {
             text: cleaned,
             x,
             y,
+            width: w,
         });
     }
     if entries.is_empty() {
@@ -1606,28 +1616,58 @@ fn build_window_text_dump(elements: &[Value]) -> String {
     }
 
     entries.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
-    let mut columns: Vec<Vec<TextDumpEntry>> = Vec::new();
+    let mut columns: Vec<TextDumpColumn> = Vec::new();
     let column_split = 140.0;
     for entry in entries {
         if let Some(last_col) = columns.last_mut() {
-            let last_x = last_col.last().map(|e| e.x).unwrap_or(entry.x);
+            let last_x = last_col.entries.last().map(|e| e.x).unwrap_or(entry.x);
             if (entry.x - last_x).abs() <= column_split {
-                last_col.push(entry);
+                last_col.min_x = last_col.min_x.min(entry.x);
+                last_col.max_x = last_col.max_x.max(entry.x + entry.width);
+                last_col.entries.push(entry);
                 continue;
             }
         }
-        columns.push(vec![entry]);
+        columns.push(TextDumpColumn {
+            min_x: entry.x,
+            max_x: entry.x + entry.width,
+            entries: vec![entry],
+            likely_scrollable: false,
+        });
+    }
+
+    for column in &mut columns {
+        column.likely_scrollable = elements.iter().any(|el| {
+            let Some(obj) = el.as_object() else {
+                return false;
+            };
+            if !element_scrollability_hint(obj) {
+                return false;
+            }
+            let Some(bbox) = obj.get("bbox").and_then(Value::as_array) else {
+                return false;
+            };
+            if bbox.len() != 4 {
+                return false;
+            }
+            let x = bbox[0].as_f64().unwrap_or(0.0);
+            let w = bbox[2].as_f64().unwrap_or(0.0).max(0.0);
+            let left = x;
+            let right = x + w;
+            right >= (column.min_x - 12.0) && left <= (column.max_x + 12.0)
+        });
     }
 
     let mut out_lines: Vec<String> = Vec::new();
     for (idx, mut col) in columns.into_iter().enumerate() {
-        col.sort_by(|a, b| a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x)));
-        let heading = column_heading(idx);
+        col.entries
+            .sort_by(|a, b| a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x)));
+        let heading = column_heading(idx, col.likely_scrollable);
         out_lines.push(heading);
         out_lines.push("---".to_string());
         let mut seen = HashSet::<String>::new();
         let mut emitted = 0usize;
-        for entry in col {
+        for entry in col.entries {
             let norm = entry.text.to_ascii_lowercase();
             if !seen.insert(norm) {
                 continue;
@@ -1643,12 +1683,37 @@ fn build_window_text_dump(elements: &[Value]) -> String {
     out_lines.join("\n").trim().to_string()
 }
 
-fn column_heading(idx: usize) -> String {
-    match idx {
+fn column_heading(idx: usize, scrollable: bool) -> String {
+    let base = match idx {
         0 => "left column".to_string(),
         1 => "right column".to_string(),
         _ => format!("column {}", idx + 1),
+    };
+    if scrollable {
+        format!("{base} (scrollable)")
+    } else {
+        base
     }
+}
+
+fn element_scrollability_hint(obj: &serde_json::Map<String, Value>) -> bool {
+    if obj
+        .get("scrollable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let source = obj
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    source.contains("AXScrollArea")
+        || source.contains("AXOutline")
+        || source.contains("AXTable")
+        || source.contains("AXList")
+        || source.contains("AXTextArea")
+        || source.contains("AXSplitGroup")
 }
 
 fn compact_text_dump_text(input: &str) -> String {
