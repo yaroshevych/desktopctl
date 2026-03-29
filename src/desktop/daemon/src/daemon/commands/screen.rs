@@ -91,6 +91,7 @@ pub(crate) fn tokenize(
 ) -> Result<Value, AppError> {
     trace::log("execute:screen_tokenize:start");
     let screenshot_mode = screenshot_path.is_some();
+    let mut bound_hint_active_window_id: Option<String> = None;
     let payload = if let Some(path_raw) = screenshot_path {
         if window_query.is_some() {
             return Err(AppError::invalid_argument(
@@ -118,6 +119,7 @@ pub(crate) fn tokenize(
             active_window,
             active_window_id.as_deref(),
         )?;
+        bound_hint_active_window_id = guard.bound_active_window_id.clone();
         if active_window {
             if window_query.is_some() {
                 return Err(AppError::invalid_argument(
@@ -253,8 +255,12 @@ pub(crate) fn tokenize(
     ));
     let mut value = serde_json::to_value(payload)
         .map_err(|err| AppError::internal(format!("failed to encode token payload: {err}")))?;
-    super::super::append_tokenize_text_dump(&mut value);
     super::super::remap_tokenize_window_id_field(&mut value);
+    super::super::append_tokenize_text_dump(&mut value);
+    super::super::append_tokenize_new_window_hint(
+        &mut value,
+        bound_hint_active_window_id.as_deref(),
+    );
     Ok(value)
 }
 

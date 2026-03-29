@@ -1,11 +1,11 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -50,6 +50,8 @@ const OBSERVE_THUMB_HEIGHT: u32 = 54;
 const OBSERVE_REGION_PAD_PX: f64 = 14.0;
 const OBSERVE_MIN_THUMB_COMPONENT_AREA: u32 = 2;
 const OBSERVE_OCR_PAD_PX: f64 = 40.0;
+static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Default)]
 struct RequestContext {
@@ -1001,6 +1003,175 @@ fn append_tokenize_text_dump(value: &mut Value) {
     let text_dump = chunks.join("\n\n");
     if let Some(obj) = value.as_object_mut() {
         obj.insert("text_dump".to_string(), Value::String(text_dump));
+    }
+}
+
+fn append_tokenize_new_window_hint(value: &mut Value, active_window_id: Option<&str>) {
+    let Some(windows) = value.get("windows").and_then(Value::as_array) else {
+        return;
+    };
+    if windows.is_empty() {
+        return;
+    }
+
+    let mut payload_windows: Vec<(String, String, bool, Option<String>)> = Vec::new();
+    let payload_app = windows.iter().find_map(|window| {
+        window
+            .as_object()
+            .and_then(|obj| obj.get("app"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string())
+    });
+    for window in windows {
+        let Some(obj) = window.as_object() else {
+            continue;
+        };
+        let Some(id) = obj
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string())
+        else {
+            continue;
+        };
+        let title = obj
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("untitled")
+            .to_string();
+        payload_windows.push((id, title, false, None));
+    }
+
+    let mut hint_context: Option<String> = None;
+    let mut state_key: Option<String> = None;
+    let mut current_windows: Vec<(String, String, bool, Option<String>)> = Vec::new();
+
+    if let Ok(mut all_windows) = window_target::list_windows() {
+        enrich_window_refs(&mut all_windows);
+        let anchor_ref = active_window_id
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string());
+        let anchor = anchor_ref.as_deref().and_then(|id| {
+            all_windows
+                .iter()
+                .find(|window| window.window_ref.as_deref() == Some(id))
+        });
+        let app = anchor
+            .map(|window| window.app.clone())
+            .or_else(|| payload_app.clone());
+
+        if let Some(app) = app {
+            let app_key = app.to_lowercase();
+            hint_context = Some(format!("app {app}"));
+            state_key = Some(match anchor_ref {
+                Some(id) => format!("active_window:{id}"),
+                None => format!("app:{app_key}"),
+            });
+            current_windows = all_windows
+                .into_iter()
+                .filter(|window| window.app.eq_ignore_ascii_case(&app))
+                .filter_map(|window| {
+                    window.window_ref.map(|window_ref| {
+                        (
+                            window_ref,
+                            if window.title.trim().is_empty() {
+                                "untitled".to_string()
+                            } else {
+                                window.title
+                            },
+                            window.modal.unwrap_or(false),
+                            window.parent_id,
+                        )
+                    })
+                })
+                .collect();
+        }
+    }
+
+    if current_windows.is_empty() {
+        current_windows = payload_windows;
+        if state_key.is_none() {
+            if let Some(app) = payload_app {
+                state_key = Some(format!("app:{}", app.to_lowercase()));
+                hint_context = Some(format!("app {app}"));
+            } else {
+                state_key = Some("payload_windows".to_string());
+            }
+        }
+        if hint_context.is_none() {
+            hint_context = Some("current view".to_string());
+        }
+    }
+    let current_ids: HashSet<String> = current_windows
+        .iter()
+        .map(|(id, _, _, _)| id.clone())
+        .collect();
+    if current_ids.is_empty() {
+        return;
+    }
+
+    let Some(state_key) = state_key else {
+        return;
+    };
+    let lock = TOKENIZE_WINDOW_HINT_STATE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut state = match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let previous_ids = state.get(&state_key).cloned().unwrap_or_default();
+    state.insert(state_key, current_ids.clone());
+    drop(state);
+
+    if previous_ids.is_empty() {
+        return;
+    }
+
+    let mut new_windows: Vec<(String, String, bool, Option<String>)> = current_windows
+        .into_iter()
+        .filter(|(id, _, _, _)| !previous_ids.contains(id))
+        .collect();
+    if new_windows.is_empty() {
+        return;
+    }
+    new_windows.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+
+    let summary = new_windows
+        .iter()
+        .take(3)
+        .map(|(id, title, is_modal, parent_id)| {
+            if *is_modal {
+                format!("{title} ({id}, modal)")
+            } else if let Some(parent) = parent_id.as_deref().filter(|v| !v.trim().is_empty()) {
+                format!("{title} ({id}, parent={parent})")
+            } else {
+                format!("{title} ({id})")
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(", ");
+    let suffix = if new_windows.len() > 3 {
+        format!(" (+{} more)", new_windows.len() - 3)
+    } else {
+        String::new()
+    };
+    let context = hint_context.unwrap_or_else(|| "app".to_string());
+    let hint = format!(
+        "new window detected for {context}: {summary}{suffix}. If this is a modal dialog, target the new window id instead of the previous --active-window id."
+    );
+
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("hint".to_string(), Value::String(hint.clone()));
+        let updated_dump = match obj.get("text_dump").and_then(Value::as_str) {
+            Some(existing) if !existing.trim().is_empty() => format!("hint: {hint}\n\n{existing}"),
+            _ => format!("hint: {hint}"),
+        };
+        obj.insert("text_dump".to_string(), Value::String(updated_dump));
     }
 }
 
