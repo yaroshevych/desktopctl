@@ -76,9 +76,16 @@ fn request_screen_recording_permission_prompt() -> bool {
     unsafe { CGRequestScreenCaptureAccess() }
 }
 
-fn open_screen_recording_settings() -> bool {
+pub fn open_screen_recording_settings() -> bool {
     let status = ProcessCommand::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .status();
+    matches!(status, Ok(s) if s.success())
+}
+
+pub fn open_accessibility_settings() -> bool {
+    let status = ProcessCommand::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .status();
     matches!(status, Ok(s) if s.success())
 }
