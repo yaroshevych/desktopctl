@@ -56,6 +56,8 @@ pub enum Command {
         x: u32,
         y: u32,
         #[serde(default)]
+        absolute: bool,
+        #[serde(default)]
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,

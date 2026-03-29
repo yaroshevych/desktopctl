@@ -530,15 +530,29 @@ fn execute_with_context(
         Command::PointerMove {
             x,
             y,
+            absolute,
             active_window,
             active_window_id,
         } => {
-            trace::log(format!("pointer_move:start x={x} y={y}"));
+            trace::log(format!(
+                "pointer_move:start x={x} y={y} absolute={absolute}"
+            ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
-            backend.move_mouse(Point::new(x, y))?;
-            trace::log(format!("pointer_move:ok x={x} y={y}"));
+            let point = resolve_pointer_click_point(
+                x,
+                y,
+                absolute,
+                active_window,
+                active_window_id.as_deref(),
+                request_context,
+            )?;
+            backend.move_mouse(point)?;
+            trace::log(format!(
+                "pointer_move:ok x={} y={} absolute={absolute}",
+                point.x, point.y
+            ));
             Ok(json!({}))
         }
         Command::PointerDown {
@@ -1143,7 +1157,7 @@ fn resolve_pointer_click_point(
     } else {
         click_scope_window_bounds(request_context).ok_or_else(|| {
             AppError::target_not_found(
-                "frontmost window bounds unavailable for relative pointer click; use --absolute",
+                "frontmost window bounds unavailable for relative pointer action; use --absolute",
             )
         })?
     };

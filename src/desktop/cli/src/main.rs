@@ -704,13 +704,54 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
 
     match args[0].as_str() {
         "move" => {
-            let x = parse_u32(args.get(1), "x")?;
-            let y = parse_u32(args.get(2), "y")?;
-            let (active_window, active_window_id) =
-                parse_active_window_options(&args[3..], "pointer move")?;
+            let mut absolute = false;
+            let mut active_window = false;
+            let mut active_window_id: Option<String> = None;
+            let mut positional: Vec<&String> = Vec::new();
+            let mut i = 1usize;
+            while i < args.len() {
+                let token = &args[i];
+                if token == "--absolute" {
+                    absolute = true;
+                    i += 1;
+                    continue;
+                }
+                if token == "--active-window" {
+                    active_window = true;
+                    if let Some(value) = args.get(i + 1) {
+                        if !value.starts_with("--") {
+                            if value.trim().is_empty() {
+                                return Err(AppError::invalid_argument(
+                                    "active window id must not be empty",
+                                ));
+                            }
+                            active_window_id = Some(value.clone());
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+                if token.starts_with("--") {
+                    return Err(AppError::invalid_argument(format!(
+                        "unknown flag for pointer move: {token}"
+                    )));
+                }
+                positional.push(token);
+                i += 1;
+            }
+            if positional.len() != 2 {
+                return Err(AppError::invalid_argument(
+                    "usage: desktopctl pointer move [--absolute] <x> <y> [--active-window [<id>]]",
+                ));
+            }
+            let x = parse_u32(Some(positional[0]), "x")?;
+            let y = parse_u32(Some(positional[1]), "y")?;
             Ok(Command::PointerMove {
                 x,
                 y,
+                absolute,
                 active_window,
                 active_window_id,
             })
@@ -1305,7 +1346,7 @@ fn usage() -> &'static str {
   desktopctl replay record [--duration <ms>]
   desktopctl replay record --stop
   desktopctl replay load <session_dir>
-  desktopctl pointer move <x> <y> [--active-window [<id>]]
+  desktopctl pointer move [--absolute] <x> <y> [--active-window [<id>]]
   desktopctl pointer down <x> <y> [--active-window [<id>]]
   desktopctl pointer up <x> <y> [--active-window [<id>]]
   desktopctl pointer click [--absolute] <x> <y> [--active-window [<id>]]
@@ -2350,13 +2391,38 @@ mod tests {
             Command::PointerMove {
                 x,
                 y,
+                absolute,
                 active_window,
                 active_window_id,
             } => {
                 assert_eq!(x, 10);
                 assert_eq!(y, 20);
+                assert!(!absolute);
                 assert!(active_window);
                 assert_eq!(active_window_id.as_deref(), Some("abc123"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_move_absolute() {
+        let command =
+            parse_command(&["pointer", "move", "--absolute", "400", "500"].map(str::to_string))
+                .expect("pointer move --absolute should parse");
+        match command {
+            Command::PointerMove {
+                x,
+                y,
+                absolute,
+                active_window,
+                active_window_id,
+            } => {
+                assert_eq!(x, 400);
+                assert_eq!(y, 500);
+                assert!(absolute);
+                assert!(!active_window);
+                assert!(active_window_id.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
