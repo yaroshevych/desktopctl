@@ -458,83 +458,28 @@ fn execute_with_context(
             absolute,
             active_window,
             active_window_id,
-        } => {
-            trace::log(format!(
-                "pointer_move:start x={x} y={y} absolute={absolute}"
-            ));
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
-            let point = resolve_pointer_click_point(
-                x,
-                y,
-                absolute,
-                active_window,
-                bound_active_window_id.as_deref(),
-                request_context,
-            )?;
-            if let Some(reference) = bound_active_window_id.as_deref() {
-                let _ = assert_active_window_id_matches(reference)?;
-            }
-            backend.move_mouse(point)?;
-            trace::log(format!(
-                "pointer_move:ok x={} y={} absolute={absolute}",
-                point.x, point.y
-            ));
-            Ok(json!({}))
-        }
+        } => commands::input::pointer_move(
+            x,
+            y,
+            absolute,
+            active_window,
+            active_window_id,
+            request_context,
+        ),
         Command::PointerDown {
             x,
             y,
             button,
             active_window,
             active_window_id,
-        } => {
-            trace::log(format!("pointer_down:start x={x} y={y}"));
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
-            if let Some(reference) = bound_active_window_id.as_deref() {
-                let _ = assert_active_window_id_matches(reference)?;
-            }
-            let point = Point::new(x, y);
-            backend.move_mouse(point)?;
-            match button {
-                PointerButton::Left => backend.left_down(point)?,
-                PointerButton::Right => backend.right_down(point)?,
-            }
-            trace::log(format!("pointer_down:ok x={x} y={y}"));
-            Ok(json!({}))
-        }
+        } => commands::input::pointer_down(x, y, button, active_window, active_window_id),
         Command::PointerUp {
             x,
             y,
             button,
             active_window,
             active_window_id,
-        } => {
-            trace::log(format!("pointer_up:start x={x} y={y}"));
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
-            if let Some(reference) = bound_active_window_id.as_deref() {
-                let _ = assert_active_window_id_matches(reference)?;
-            }
-            let point = Point::new(x, y);
-            backend.move_mouse(point)?;
-            match button {
-                PointerButton::Left => backend.left_up(point)?,
-                PointerButton::Right => backend.right_up(point)?,
-            }
-            trace::log(format!("pointer_up:ok x={x} y={y}"));
-            Ok(json!({}))
-        }
+        } => commands::input::pointer_up(x, y, button, active_window, active_window_id),
         Command::PointerClick {
             x,
             y,
@@ -543,44 +488,16 @@ fn execute_with_context(
             observe,
             active_window,
             active_window_id,
-        } => {
-            trace::log(format!(
-                "pointer_click:start x={x} y={y} absolute={absolute}"
-            ));
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let observe_start = capture_observe_start_state(&observe);
-            let observe_scope =
-                resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
-            let point = resolve_pointer_click_point(
-                x,
-                y,
-                absolute,
-                active_window,
-                bound_active_window_id.as_deref(),
-                request_context,
-            )?;
-            if let Some(reference) = bound_active_window_id.as_deref() {
-                let _ = assert_active_window_id_matches(reference)?;
-            }
-            backend.move_mouse(point)?;
-            match button {
-                PointerButton::Left => backend.left_click(point)?,
-                PointerButton::Right => backend.right_click(point)?,
-            }
-            trace::log(format!(
-                "pointer_click:ok x={} y={} absolute={absolute}",
-                point.x, point.y
-            ));
-            let mut result = json!({});
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-            );
-            Ok(result)
-        }
+        } => commands::input::pointer_click(
+            x,
+            y,
+            absolute,
+            button,
+            observe,
+            active_window,
+            active_window_id,
+            request_context,
+        ),
         Command::PointerScroll {
             id,
             dx,
@@ -588,45 +505,15 @@ fn execute_with_context(
             observe,
             active_window,
             active_window_id,
-        } => {
-            trace::log(format!(
-                "pointer_scroll:start id={:?} dx={dx} dy={dy}",
-                id.as_deref()
-            ));
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let observe_start = capture_observe_start_state(&observe);
-            let observe_scope =
-                resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
-            if let Some(element_id) = id.as_deref() {
-                let target = resolve_element_id_target(
-                    element_id,
-                    active_window,
-                    bound_active_window_id.as_deref(),
-                    request_context,
-                )?;
-                let center = center_point(&target.bounds);
-                backend.move_mouse(center)?;
-            }
-            if let Some(reference) = bound_active_window_id.as_deref() {
-                let _ = assert_active_window_id_matches(reference)?;
-            }
-            backend.scroll_wheel(dx, dy)?;
-            trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
-            let mut result = json!({});
-            if let Some(element_id) = id {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.insert("id".to_string(), json!(element_id));
-                }
-            }
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-            );
-            Ok(result)
-        }
+        } => commands::input::pointer_scroll(
+            id,
+            dx,
+            dy,
+            observe,
+            active_window,
+            active_window_id,
+            request_context,
+        ),
         Command::PointerDrag {
             x1,
             y1,
@@ -636,105 +523,30 @@ fn execute_with_context(
             active_window,
             active_window_id,
         } => {
-            trace::log(format!(
-                "pointer_drag:start from=({}, {}) to=({}, {}) hold_ms={}",
-                x1, y1, x2, y2, hold_ms
-            ));
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
-            if let Some(reference) = bound_active_window_id.as_deref() {
-                let _ = assert_active_window_id_matches(reference)?;
-            }
-            let start = Point::new(x1, y1);
-            let end = Point::new(x2, y2);
-            backend.move_mouse(start)?;
-            backend.left_down(start)?;
-            backend.sleep_ms(hold_ms.max(30));
-            backend.left_drag(end)?;
-            backend.left_up(end)?;
-            trace::log(format!(
-                "pointer_drag:ok from=({}, {}) to=({}, {}) hold_ms={}",
-                x1, y1, x2, y2, hold_ms
-            ));
-            Ok(json!({}))
+            commands::input::pointer_drag(x1, y1, x2, y2, hold_ms, active_window, active_window_id)
         }
         Command::UiType {
             text,
             observe,
             active_window,
             active_window_id,
-        } => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let observe_start = capture_observe_start_state(&observe);
-            let observe_scope =
-                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
-            backend.type_text(&text)?;
-            let mut result = json!({});
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-            );
-            Ok(result)
-        }
+        } => commands::input::key_type(text, observe, active_window, active_window_id),
         Command::KeyHotkey {
             hotkey,
             observe,
             active_window,
             active_window_id,
-        } => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let observe_start = capture_observe_start_state(&observe);
-            let observe_scope =
-                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
-            backend.press_hotkey(&hotkey)?;
-            let mut result = json!({});
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-            );
-            Ok(result)
-        }
+        } => commands::input::key_hotkey(hotkey, observe, active_window, active_window_id),
         Command::KeyEnter {
             observe,
             active_window,
             active_window_id,
-        } => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let observe_start = capture_observe_start_state(&observe);
-            let observe_scope =
-                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
-            backend.press_enter()?;
-            let mut result = json!({});
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-            );
-            Ok(result)
-        }
+        } => commands::input::key_enter(observe, active_window, active_window_id),
         Command::KeyEscape {
             observe,
             active_window,
             active_window_id,
-        } => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let observe_start = capture_observe_start_state(&observe);
-            let observe_scope =
-                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
-            backend.press_escape()?;
-            let mut result = json!({});
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-            );
-            Ok(result)
-        }
+        } => commands::input::key_escape(observe, active_window, active_window_id),
         Command::ScreenCapture {
             out_path,
             overlay,
