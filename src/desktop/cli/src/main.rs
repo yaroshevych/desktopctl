@@ -55,23 +55,20 @@ fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
     let response = send_request_with_autostart(&request)?;
 
     let mut prefix_fields: Vec<(String, String)> = Vec::new();
+    let mut eligible_hints: Vec<String> = Vec::new();
     if supports_active_window && !has_explicit_active_window_id {
-        prefix_fields.push(("tip".to_string(), active_window_tip_message()));
+        eligible_hints.push(active_window_tip_message());
     }
-    for (idx, hint) in json_hints.iter().enumerate() {
-        let key = if idx == 0 {
-            "hint".to_string()
-        } else {
-            format!("hint_{}", idx + 1)
-        };
-        prefix_fields.push((key, (*hint).to_string()));
+    for hint in &json_hints {
+        eligible_hints.push((*hint).to_string());
     }
     if response_contains_unknown_checked(&response) {
-        let hint_key = next_hint_key(&prefix_fields);
-        prefix_fields.push((
-            hint_key,
+        eligible_hints.push(
             "toggle control state (checkbox/radio/switch) is unknown; verify with a small-area screenshot around that control".to_string(),
-        ));
+        );
+    }
+    if let Some(hint) = pick_random_hint(&eligible_hints) {
+        prefix_fields.push(("hint".to_string(), hint));
     }
     let rendered =
         render_response_with_prefix_fields(&response, &prefix_fields, passthrough_stored_response);
@@ -248,24 +245,24 @@ fn render_response_with_prefix_fields(
     serde_json::Value::Object(out)
 }
 
-fn next_hint_key(prefix_fields: &[(String, String)]) -> String {
-    let hint_count = prefix_fields
-        .iter()
-        .filter(|(k, _)| k == "hint" || k.starts_with("hint_"))
-        .count();
-    if hint_count == 0 {
-        "hint".to_string()
-    } else {
-        format!("hint_{}", hint_count + 1)
-    }
-}
-
 fn response_contains_unknown_checked(response: &ResponseEnvelope) -> bool {
     let value = match response {
         ResponseEnvelope::Success(success) => &success.result,
         ResponseEnvelope::Error(error) => &error.error.details.clone().unwrap_or_default(),
     };
     value_contains_unknown_checked(value)
+}
+
+fn pick_random_hint(hints: &[String]) -> Option<String> {
+    if hints.is_empty() {
+        return None;
+    }
+    let idx = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as usize)
+        % hints.len();
+    Some(hints[idx].clone())
 }
 
 fn value_contains_unknown_checked(value: &serde_json::Value) -> bool {
