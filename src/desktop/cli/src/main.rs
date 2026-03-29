@@ -45,6 +45,7 @@ fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
     let supports_active_window = command_supports_active_window(&command);
     let has_explicit_active_window_id = command_has_explicit_active_window_id(&command);
     let json_hints = command_json_hints(&command);
+    let passthrough_stored_response = matches!(command, Command::RequestResponse { .. });
     let request = RequestEnvelope::new(request_id.to_string(), command);
     trace_log(format!(
         "run:request_start request_id={} command={}",
@@ -65,7 +66,8 @@ fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
         };
         prefix_fields.push((key, (*hint).to_string()));
     }
-    let rendered = render_response_with_prefix_fields(&response, &prefix_fields);
+    let rendered =
+        render_response_with_prefix_fields(&response, &prefix_fields, passthrough_stored_response);
     println!(
         "{}",
         serde_json::to_string_pretty(&rendered).unwrap_or_else(|_| "{}".to_string())
@@ -157,7 +159,7 @@ fn command_json_hints(command: &Command) -> Vec<&'static str> {
     match command {
         Command::WindowList => {
             vec![
-                "compact output with | jq '.windows[] | \"\\\\(.id) \\\\(.visible) \\\\(.title)\"'",
+                "compact output with | jq '.result.windows[] | \"\\\\(.id) \\\\(.visible) \\\\(.title)\"'",
             ]
         }
         Command::ScreenCapture { .. } => vec![
@@ -215,18 +217,36 @@ fn resolve_frontmost_window_id() -> Option<String> {
 fn render_response_with_prefix_fields(
     response: &ResponseEnvelope,
     prefix_fields: &[(String, String)],
+    passthrough_stored_response: bool,
 ) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     for (key, value) in prefix_fields {
         out.insert(key.clone(), serde_json::Value::String(value.clone()));
     }
-    let raw = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
+    let raw = if passthrough_stored_response {
+        match response {
+            ResponseEnvelope::Success(success) if is_response_envelope_shape(&success.result) => {
+                success.result.clone()
+            }
+            _ => serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({})),
+        }
+    } else {
+        serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}))
+    };
     if let Some(obj) = raw.as_object() {
         for (k, v) in obj {
             out.insert(k.clone(), v.clone());
         }
     }
     serde_json::Value::Object(out)
+}
+
+fn is_response_envelope_shape(value: &serde_json::Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    obj.get("ok").and_then(serde_json::Value::as_bool).is_some()
+        && (obj.contains_key("result") || obj.contains_key("error"))
 }
 
 fn parse_command(args: &[String]) -> Result<Command, AppError> {
@@ -1542,7 +1562,7 @@ fn usage() -> &'static str {
   desktopctl app show <application>
   desktopctl app isolate <application>
   desktopctl window list
-    hint: compact output with | jq '.windows[] | \"\\(.id) \\(.visible) \\(.title)\"'
+    hint: compact output with | jq '.result.windows[] | \"\\(.id) \\(.visible) \\(.title)\"'
   desktopctl window bounds (--title <text> | --id <id>)
   desktopctl window focus (--title <text> | --id <id>)
     hint: when starting, the focused window likely belongs to AI agent, get its ID with tokenise command, then open/focus target window, and in the end of the session focus AI agent window again
