@@ -4,7 +4,6 @@ use std::{
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -24,11 +23,12 @@ use desktop_core::{
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 
+mod commands;
+
 #[cfg(target_os = "macos")]
 use crate::overlay;
 use crate::{
-    clipboard, permissions, platform, recording, replay, request_store, trace, vision, window_refs,
-    window_target,
+    permissions, platform, recording, request_store, trace, vision, window_refs, window_target,
 };
 
 #[cfg(target_os = "macos")]
@@ -440,95 +440,18 @@ fn execute_with_context(
 ) -> Result<Value, AppError> {
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
-        Command::AppHide { name } => {
-            trace::log(format!("app_hide:start name={name}"));
-            let state = platform::apps::hide_application(&name)?;
-            trace::log(format!("app_hide:ok name={name} state={state}"));
-            Ok(json!({ "app": name, "state": state }))
-        }
-        Command::AppShow { name } => {
-            trace::log(format!("app_show:start name={name}"));
-            platform::apps::show_application(&name)?;
-            trace::log(format!("app_show:ok name={name}"));
-            Ok(json!({ "app": name, "state": "shown" }))
-        }
-        Command::AppIsolate { name } => {
-            trace::log(format!("app_isolate:start name={name}"));
-            let hidden = platform::apps::isolate_application(&name)?;
-            let _ = wait_for_open_app(&name, 6_000);
-            trace::log(format!("app_isolate:ok name={name} hidden={hidden}"));
-            Ok(json!({ "app": name, "state": "isolated", "hidden_apps": hidden }))
-        }
-        Command::WindowList => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let mut windows = window_target::list_windows()?;
-            enrich_window_refs(&mut windows);
-            Ok(json!({
-                "windows": windows.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
-            }))
-        }
-        Command::WindowBounds { title } => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let mut windows = window_target::list_windows()?;
-            enrich_window_refs(&mut windows);
-            let selected = window_target::select_window_candidate(&windows, &title)?;
-            Ok(json!({
-                "window": selected.as_json()
-            }))
-        }
-        Command::WindowFocus { title } => {
-            let backend = new_backend()?;
-            backend.check_accessibility_permission()?;
-            let mut windows = window_target::list_windows()?;
-            enrich_window_refs(&mut windows);
-            let selected = window_target::select_window_candidate(&windows, &title)?;
-            platform::apps::focus_window(selected)?;
-            Ok(json!({
-                "window": selected.as_json(),
-                "focused": true
-            }))
-        }
+        Command::AppHide { name } => commands::app::hide(name),
+        Command::AppShow { name } => commands::app::show(name),
+        Command::AppIsolate { name } => commands::app::isolate(name),
+        Command::WindowList => commands::window::list(),
+        Command::WindowBounds { title } => commands::window::bounds(title),
+        Command::WindowFocus { title } => commands::window::focus(title),
         Command::OpenApp {
             name,
             args,
             wait,
             timeout_ms,
-        } => {
-            let mut cmd = ProcessCommand::new("open");
-            cmd.arg("-a").arg(&name);
-            if !args.is_empty() {
-                cmd.args(&args);
-            }
-
-            let output = cmd.output().map_err(|err| {
-                AppError::backend_unavailable(format!("failed to invoke open: {err}"))
-            })?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return Err(AppError::internal(stderr));
-            }
-
-            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-            let script = format!(r#"tell application "{escaped}" to activate"#);
-            let activate = ProcessCommand::new("osascript")
-                .arg("-e")
-                .arg(script)
-                .output()
-                .map_err(|err| {
-                    AppError::backend_unavailable(format!("failed to run osascript: {err}"))
-                })?;
-            if !activate.status.success() {
-                let stderr = String::from_utf8_lossy(&activate.stderr).trim().to_string();
-                return Err(AppError::internal(stderr));
-            }
-
-            if wait {
-                wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
-            }
-            Ok(json!({}))
-        }
+        } => commands::app::open(name, args, wait, timeout_ms),
         Command::PointerMove {
             x,
             y,
@@ -1157,55 +1080,26 @@ fn execute_with_context(
             );
             Ok(result)
         }
-        Command::ClipboardRead => {
-            let text = clipboard::read_clipboard()?;
-            Ok(json!({ "text": text }))
-        }
-        Command::ClipboardWrite { text } => {
-            clipboard::write_clipboard(&text)?;
-            Ok(json!({ "written": true }))
-        }
-        Command::PermissionsCheck => {
-            let payload = desktop_core::protocol::PermissionsPayload {
-                accessibility: desktop_core::protocol::PermissionState {
-                    granted: permissions::accessibility_granted(),
-                    remediation: (!permissions::accessibility_granted())
-                        .then(|| permissions::accessibility_remediation().to_string()),
-                },
-                screen_recording: desktop_core::protocol::PermissionState {
-                    granted: permissions::screen_recording_granted(),
-                    remediation: (!permissions::screen_recording_granted())
-                        .then(|| permissions::screen_recording_remediation().to_string()),
-                },
-            };
-            Ok(serde_json::to_value(payload).map_err(|err| {
-                AppError::internal(format!("failed to encode permissions payload: {err}"))
-            })?)
-        }
-        Command::DebugSnapshot => vision::debug::write_debug_snapshot(),
-        Command::RequestShow { request_id } => request_store::show(&request_id),
-        Command::RequestList { limit } => request_store::list(limit),
+        Command::ClipboardRead => commands::misc::clipboard_read(),
+        Command::ClipboardWrite { text } => commands::misc::clipboard_write(text),
+        Command::PermissionsCheck => commands::misc::permissions_check(),
+        Command::DebugSnapshot => commands::misc::debug_snapshot(),
+        Command::RequestShow { request_id } => commands::misc::request_show(request_id),
+        Command::RequestList { limit } => commands::misc::request_list(limit),
         Command::RequestScreenshot {
             request_id,
             out_path,
-        } => request_store::screenshot(&request_id, out_path),
-        Command::RequestResponse { request_id } => request_store::response(&request_id),
+        } => commands::misc::request_screenshot(request_id, out_path),
+        Command::RequestResponse { request_id } => commands::misc::request_response(request_id),
         Command::RequestSearch {
             text,
             limit,
             command,
-        } => request_store::search(&text, limit, command.as_deref()),
+        } => commands::misc::request_search(text, limit, command),
         Command::ReplayRecord { duration_ms, stop } => {
-            if stop {
-                recording::stop_recording()
-            } else {
-                recording::start_recording(duration_ms)
-            }
+            commands::misc::replay_record(duration_ms, stop)
         }
-        Command::ReplayLoad { session_dir } => {
-            let session_dir = replay::parse_session_dir(&session_dir)?;
-            replay::load_session(&session_dir)
-        }
+        Command::ReplayLoad { session_dir } => commands::misc::replay_load(session_dir),
     }
 }
 
@@ -1301,7 +1195,7 @@ fn resolve_relative_region_bounds(
     })
 }
 
-fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]) {
+pub(super) fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]) {
     for window in windows {
         if window.window_ref.is_none() {
             window.window_ref = Some(window_refs::issue_for_window(window));
@@ -2480,7 +2374,7 @@ fn wait_for_text(
     }
 }
 
-fn wait_for_open_app(app_name: &str, timeout_ms: u64) -> Result<(), AppError> {
+pub(super) fn wait_for_open_app(app_name: &str, timeout_ms: u64) -> Result<(), AppError> {
     let needle = app_name.to_lowercase();
     let start = Instant::now();
     loop {
