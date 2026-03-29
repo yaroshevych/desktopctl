@@ -332,7 +332,7 @@ fn start_overlay_live_loop() {
                     overlay_out_path: None,
                     window_query: None,
                     screenshot_path: None,
-                    active_window: false,
+                    active_window: true,
                     active_window_id: None,
                     region: None,
                 },
