@@ -1289,6 +1289,7 @@ fn usage() -> &'static str {
     note: --window-query cannot be combined with --screenshot
     note: --active-window cannot be combined with --window-query or --screenshot
     note: --region is relative to the selected window/screenshot target
+    hint: first tokenize response includes request_id; reuse it with `desktopctl request response <request_id>`
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read
@@ -1313,8 +1314,10 @@ fn usage() -> &'static str {
   desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer click --token <n> [--active-window [<id>]]
   desktopctl pointer scroll <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+    hint: before scroll, move pointer into the target scroll area
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms] [--active-window [<id>]]
   desktopctl keyboard type \"text\" [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+    hint: to replace existing field content, send `desktopctl keyboard press cmd+a` before typing
   desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]"
 }
 
