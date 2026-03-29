@@ -1427,10 +1427,13 @@ fn usage() -> &'static str {
   desktopctl pointer click [--absolute] [--button <left|right>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] [--active-window [<id>]] <x> <y>
     note: prefer pointer click x y when you have coordinates
   desktopctl pointer click --text <text> [--button <left|right>] [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+    hint: use --button right to open context menus
   desktopctl pointer click --id <element_id> --active-window [<id>] [--button <left|right>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+    hint: id might change after screen update, either re-tokenize, or use x y for clicks
   desktopctl pointer scroll <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer scroll --id <element_id> <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
     hint: before scroll, move pointer into the target scroll area
+    hint: scroll direction uses command deltas (`dy > 0` down, `dy < 0` up), independent of macOS natural/classic mode
     hint: for long lists, repeat scroll -> tokenize; save each request_id and inspect later via `desktopctl request response <request_id>`
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms] [--active-window [<id>]]
   desktopctl keyboard type \"text\" [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
