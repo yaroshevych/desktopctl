@@ -540,15 +540,20 @@ fn execute_with_context(
             ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
+            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
             let point = resolve_pointer_click_point(
                 x,
                 y,
                 absolute,
                 active_window,
-                active_window_id.as_deref(),
+                bound_active_window_id.as_deref(),
                 request_context,
             )?;
+            if let Some(reference) = bound_active_window_id.as_deref() {
+                let _ = assert_active_window_id_matches(reference)?;
+            }
             backend.move_mouse(point)?;
             trace::log(format!(
                 "pointer_move:ok x={} y={} absolute={absolute}",
@@ -566,7 +571,12 @@ fn execute_with_context(
             trace::log(format!("pointer_down:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
+            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
+            if let Some(reference) = bound_active_window_id.as_deref() {
+                let _ = assert_active_window_id_matches(reference)?;
+            }
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
             match button {
@@ -586,7 +596,12 @@ fn execute_with_context(
             trace::log(format!("pointer_up:start x={x} y={y}"));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
+            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
+            if let Some(reference) = bound_active_window_id.as_deref() {
+                let _ = assert_active_window_id_matches(reference)?;
+            }
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
             match button {
@@ -610,17 +625,22 @@ fn execute_with_context(
             ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
             let observe_start = capture_observe_start_state(&observe);
             let observe_scope =
-                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+                resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
             let point = resolve_pointer_click_point(
                 x,
                 y,
                 absolute,
                 active_window,
-                active_window_id.as_deref(),
+                bound_active_window_id.as_deref(),
                 request_context,
             )?;
+            if let Some(reference) = bound_active_window_id.as_deref() {
+                let _ = assert_active_window_id_matches(reference)?;
+            }
             backend.move_mouse(point)?;
             match button {
                 PointerButton::Left => backend.left_click(point)?,
@@ -651,18 +671,23 @@ fn execute_with_context(
             ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
             let observe_start = capture_observe_start_state(&observe);
             let observe_scope =
-                resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+                resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
             if let Some(element_id) = id.as_deref() {
                 let target = resolve_element_id_target(
                     element_id,
                     active_window,
-                    active_window_id.as_deref(),
+                    bound_active_window_id.as_deref(),
                     request_context,
                 )?;
                 let center = center_point(&target.bounds);
                 backend.move_mouse(center)?;
+            }
+            if let Some(reference) = bound_active_window_id.as_deref() {
+                let _ = assert_active_window_id_matches(reference)?;
             }
             backend.scroll_wheel(dx, dy)?;
             trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
@@ -693,7 +718,12 @@ fn execute_with_context(
             ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
-            let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
+            let _ = resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
+            if let Some(reference) = bound_active_window_id.as_deref() {
+                let _ = assert_active_window_id_matches(reference)?;
+            }
             let start = Point::new(x1, y1);
             let end = Point::new(x2, y2);
             backend.move_mouse(start)?;
@@ -1086,12 +1116,14 @@ fn execute_with_context(
             active_window_id,
             observe,
         } => {
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
             let observe_start = capture_observe_start_state(&observe);
             let mut result = click_text_target(
                 &text,
                 button,
                 active_window,
-                active_window_id.as_deref(),
+                bound_active_window_id.as_deref(),
                 request_context,
             )?;
             append_observe_payload(
@@ -1107,12 +1139,14 @@ fn execute_with_context(
             active_window_id,
             observe,
         } => {
+            let bound_active_window_id =
+                bind_active_window_reference(active_window, active_window_id.as_deref())?;
             let observe_start = capture_observe_start_state(&observe);
             let mut result = click_element_id_target(
                 &id,
                 button,
                 active_window,
-                active_window_id.as_deref(),
+                bound_active_window_id.as_deref(),
                 request_context,
             )?;
             append_observe_payload(
@@ -1343,6 +1377,29 @@ fn assert_active_window_id_matches(
         )));
     }
     Ok(active)
+}
+
+fn bind_active_window_reference(
+    active_window: bool,
+    active_window_id: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    if active_window_id.is_some() && !active_window {
+        return Err(AppError::invalid_argument(
+            "active window id requires --active-window",
+        ));
+    }
+    if !active_window {
+        return Ok(None);
+    }
+    let target = if let Some(reference) = active_window_id {
+        assert_active_window_id_matches(reference)?
+    } else {
+        resolve_active_window_target()?
+    };
+    let bound = target
+        .window_ref
+        .ok_or_else(|| AppError::target_not_found("active window id is unavailable"))?;
+    Ok(Some(bound))
 }
 
 fn resolve_observe_scope_bounds(

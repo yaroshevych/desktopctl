@@ -1414,6 +1414,7 @@ fn usage() -> &'static str {
   desktopctl request show <request_id>
   desktopctl request screenshot <request_id> [--out <path>]
   desktopctl request response <request_id>
+    hint: use it to re-read output of previous commands, like tokenize, without perf penalty
   desktopctl replay record [--duration <ms>]
   desktopctl replay record --stop
   desktopctl replay load <session_dir>
@@ -1424,6 +1425,7 @@ fn usage() -> &'static str {
   desktopctl pointer up <x> <y> [--button <left|right>] [--active-window [<id>]]
   desktopctl pointer click [--absolute] [--button <left|right>] <x> <y> [--active-window [<id>]]
   desktopctl pointer click [--absolute] [--button <left|right>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] [--active-window [<id>]] <x> <y>
+    note: prefer pointer click x y when you have coordinates
   desktopctl pointer click --text <text> [--button <left|right>] [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer click --id <element_id> --active-window [<id>] [--button <left|right>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer scroll <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
