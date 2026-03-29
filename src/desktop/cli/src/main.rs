@@ -535,6 +535,51 @@ fn parse_request(args: &[String]) -> Result<Command, AppError> {
             })?;
             Ok(Command::RequestResponse { request_id })
         }
+        "search" => {
+            let text = args.get(1).cloned().ok_or_else(|| {
+                AppError::invalid_argument(
+                    "usage: desktopctl request search <text> [--limit <n>] [--command <screen_tokenize|...>]",
+                )
+            })?;
+            if text.trim().is_empty() {
+                return Err(AppError::invalid_argument(
+                    "request search query must not be empty",
+                ));
+            }
+            let mut limit: Option<u64> = None;
+            let mut command: Option<String> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--limit" => {
+                        limit = Some(parse_u64(args.get(i + 1), "limit")?);
+                        i += 2;
+                    }
+                    "--command" => {
+                        let value = args.get(i + 1).ok_or_else(|| {
+                            AppError::invalid_argument("missing value for --command")
+                        })?;
+                        if value.trim().is_empty() {
+                            return Err(AppError::invalid_argument(
+                                "request search --command value must not be empty",
+                            ));
+                        }
+                        command = Some(value.clone());
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for request search: {flag}"
+                        )));
+                    }
+                }
+            }
+            Ok(Command::RequestSearch {
+                text,
+                limit,
+                command,
+            })
+        }
         _ => Err(AppError::invalid_argument(usage())),
     }
 }
@@ -1589,6 +1634,7 @@ fn usage() -> &'static str {
   desktopctl request list [--limit <n>]
   desktopctl request screenshot <request_id> [--out <path>]
   desktopctl request response <request_id>
+  desktopctl request search <text> [--limit <n>] [--command <screen_tokenize|...>]
     hint: use it to re-read output of previous commands, like tokenize, without perf penalty
   desktopctl replay record [--duration <ms>]
   desktopctl replay record --stop
@@ -2399,6 +2445,32 @@ mod tests {
             .expect("request response should parse");
         match response {
             Command::RequestResponse { request_id } => assert_eq!(request_id, "req-3"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let search = parse_command(
+            &[
+                "request",
+                "search",
+                "Add task",
+                "--limit",
+                "10",
+                "--command",
+                "screen_tokenize",
+            ]
+            .map(str::to_string),
+        )
+        .expect("request search should parse");
+        match search {
+            Command::RequestSearch {
+                text,
+                limit,
+                command,
+            } => {
+                assert_eq!(text, "Add task");
+                assert_eq!(limit, Some(10));
+                assert_eq!(command.as_deref(), Some("screen_tokenize"));
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

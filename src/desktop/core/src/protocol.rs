@@ -242,6 +242,13 @@ pub enum Command {
     RequestResponse {
         request_id: String,
     },
+    RequestSearch {
+        text: String,
+        #[serde(default)]
+        limit: Option<u64>,
+        #[serde(default)]
+        command: Option<String>,
+    },
     ReplayRecord {
         duration_ms: u64,
         stop: bool,
@@ -323,6 +330,7 @@ impl Command {
             Command::RequestList { .. } => "request_list",
             Command::RequestScreenshot { .. } => "request_screenshot",
             Command::RequestResponse { .. } => "request_response",
+            Command::RequestSearch { .. } => "request_search",
             Command::ReplayRecord { stop: true, .. } => "replay_record_stop",
             Command::ReplayRecord { stop: false, .. } => "replay_record_start",
             Command::ReplayLoad { .. } => "replay_load",

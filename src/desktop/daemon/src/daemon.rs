@@ -1190,6 +1190,11 @@ fn execute_with_context(
             out_path,
         } => request_store::screenshot(&request_id, out_path),
         Command::RequestResponse { request_id } => request_store::response(&request_id),
+        Command::RequestSearch {
+            text,
+            limit,
+            command,
+        } => request_store::search(&text, limit, command.as_deref()),
         Command::ReplayRecord { duration_ms, stop } => {
             if stop {
                 recording::stop_recording()
