@@ -21,6 +21,7 @@ impl ElementBuilder {
                 text: None,
                 text_truncated: None,
                 confidence: None,
+                scrollable: None,
                 source: String::new(),
             },
         }
@@ -117,7 +118,28 @@ pub fn finalize_elements(elements: &mut [TokenizeElement]) {
         if element.source.trim().is_empty() {
             element.source = "unknown".to_string();
         }
+        if element.scrollable.is_none()
+            && element
+                .source
+                .strip_prefix("accessibility_ax:")
+                .is_some_and(is_ax_scrollable_role)
+        {
+            element.scrollable = Some(true);
+        }
     }
+}
+
+fn is_ax_scrollable_role(role: &str) -> bool {
+    matches!(
+        role,
+        "AXScrollArea"
+            | "AXScrollBar"
+            | "AXList"
+            | "AXTable"
+            | "AXOutline"
+            | "AXWebArea"
+            | "AXCollectionView"
+    )
 }
 
 fn sanitize_text(input: &str) -> (String, bool) {
@@ -390,6 +412,7 @@ mod tests {
             text: text.map(ToString::to_string),
             text_truncated: None,
             confidence: None,
+            scrollable: None,
             source: source.to_string(),
         }
     }
@@ -420,6 +443,17 @@ mod tests {
         assert_eq!(elements[0].id, "button_7");
         assert_eq!(elements[1].id, "button_7_2");
         assert_eq!(elements[2].id, "button_7_3");
+    }
+
+    #[test]
+    fn finalize_elements_marks_ax_scroll_roles_as_scrollable() {
+        let mut elements = vec![
+            el("accessibility_ax:AXScrollArea", "", None, None, 10.0),
+            el("accessibility_ax:AXButton", "", Some("OK"), None, 20.0),
+        ];
+        finalize_elements(&mut elements);
+        assert_eq!(elements[0].scrollable, Some(true));
+        assert_eq!(elements[1].scrollable, None);
     }
 
     #[test]

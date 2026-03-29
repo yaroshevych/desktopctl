@@ -301,6 +301,7 @@ mod tests {
             text: text.map(ToString::to_string),
             text_truncated: None,
             confidence: None,
+            scrollable: None,
             source: source.to_string(),
         }
     }

@@ -1053,6 +1053,7 @@ mod tests {
                         text: Some("Hello".to_string()),
                         text_truncated: None,
                         confidence: Some(0.99),
+                        scrollable: None,
                         source: "vision_ocr".to_string(),
                     },
                     TokenizeElement {
@@ -1063,6 +1064,7 @@ mod tests {
                         text: Some("Allow".to_string()),
                         text_truncated: None,
                         confidence: Some(1.0),
+                        scrollable: None,
                         source: "sat_control_v1".to_string(),
                     },
                 ],
@@ -1121,6 +1123,7 @@ mod tests {
                         text: Some("Allow".to_string()),
                         text_truncated: None,
                         confidence: Some(1.0),
+                        scrollable: None,
                         source: "sat_control_v1".to_string(),
                     },
                     TokenizeElement {
@@ -1131,6 +1134,7 @@ mod tests {
                         text: Some("Allow".to_string()),
                         text_truncated: None,
                         confidence: Some(1.0),
+                        scrollable: None,
                         source: "vision_ocr".to_string(),
                     },
                 ],

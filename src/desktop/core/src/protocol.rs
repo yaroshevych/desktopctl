@@ -474,6 +474,8 @@ pub struct TokenizeElement {
     pub text_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scrollable: Option<bool>,
     pub source: String,
 }
 
