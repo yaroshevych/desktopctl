@@ -1,4 +1,5 @@
 use std::{
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
 };
@@ -19,14 +20,11 @@ use super::{
     ax_merge::{AxMergeMetrics, merge_elements},
     capture::capture_screen_png,
     coord_map::CoordMap,
-    diff::{changed_pixel_count, diff_region, thumbnail_from_rgba, upscale_region},
+    diff::{diff_region, thumbnail_from_rgba, upscale_region},
     element_normalizer::{ElementBuilder, finalize_elements},
     ocr::recognize_text,
     state::with_state,
 };
-
-const TOKENIZE_FASTPATH_DIFF_THRESHOLD: u8 = 8;
-const TOKENIZE_FASTPATH_MAX_CHANGED_PIXELS: usize = 6;
 
 #[derive(Debug, Clone)]
 pub struct CaptureResult {
@@ -201,20 +199,16 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let mut captured = capture_screen_png(None)?;
     crop_capture_to_bounds(&mut captured, &window_meta.bounds)?;
     let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
+    let fingerprint = frame_fingerprint(&captured.image);
 
-    if let Some((prev_thumb, cached_payload)) =
+    if let Some((prev_fingerprint, cached_payload)) =
         with_state(|state| state.cached_tokenize_payload(&cache_key))?
     {
-        let changed = changed_pixel_count(&prev_thumb, &thumb, TOKENIZE_FASTPATH_DIFF_THRESHOLD);
-        if changed <= TOKENIZE_FASTPATH_MAX_CHANGED_PIXELS {
-            trace::log(format!(
-                "pipeline:tokenize:window_fastpath cache_hit changed_pixels={changed}"
-            ));
+        if prev_fingerprint == fingerprint {
+            trace::log("pipeline:tokenize:window_fastpath cache_hit fingerprint_equal");
             return Ok(cached_payload);
         }
-        trace::log(format!(
-            "pipeline:tokenize:window_fastpath cache_miss changed_pixels={changed}"
-        ));
+        trace::log("pipeline:tokenize:window_fastpath cache_miss fingerprint_changed");
     }
 
     let texts = recognize_text(&captured.image)?;
@@ -260,8 +254,16 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
         capture.image_path.as_deref(),
         Some(window_meta),
     )?;
-    with_state(|state| state.update_tokenize_cache(cache_key, thumb, payload.clone()))?;
+    with_state(|state| state.update_tokenize_cache(cache_key, fingerprint, payload.clone()))?;
     Ok(payload)
+}
+
+fn frame_fingerprint(image: &image::RgbaImage) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    image.width().hash(&mut hasher);
+    image.height().hash(&mut hasher);
+    image.as_raw().hash(&mut hasher);
+    hasher.finish()
 }
 
 fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {

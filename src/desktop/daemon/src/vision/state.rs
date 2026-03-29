@@ -35,7 +35,7 @@ pub struct VisionState {
     latest_frame_png: Option<Vec<u8>>,
     latest_thumbnail: Option<GrayThumbnail>,
     latest_tokenize_cache_key: Option<String>,
-    latest_tokenize_thumbnail: Option<GrayThumbnail>,
+    latest_tokenize_fingerprint: Option<u64>,
     latest_tokenize_payload: Option<TokenizePayload>,
     events: VecDeque<VisionEvent>,
     frames: VecDeque<PathBuf>,
@@ -52,7 +52,7 @@ impl VisionState {
             latest_frame_png: None,
             latest_thumbnail: None,
             latest_tokenize_cache_key: None,
-            latest_tokenize_thumbnail: None,
+            latest_tokenize_fingerprint: None,
             latest_tokenize_payload: None,
             events: VecDeque::new(),
             frames: VecDeque::new(),
@@ -76,10 +76,7 @@ impl VisionState {
         self.latest_frame_png.clone()
     }
 
-    pub fn cached_tokenize_payload(
-        &self,
-        cache_key: &str,
-    ) -> Option<(GrayThumbnail, TokenizePayload)> {
+    pub fn cached_tokenize_payload(&self, cache_key: &str) -> Option<(u64, TokenizePayload)> {
         let key_matches = self
             .latest_tokenize_cache_key
             .as_ref()
@@ -88,19 +85,19 @@ impl VisionState {
         if !key_matches {
             return None;
         }
-        let thumb = self.latest_tokenize_thumbnail.as_ref()?.clone();
+        let fingerprint = self.latest_tokenize_fingerprint?;
         let payload = self.latest_tokenize_payload.as_ref()?.clone();
-        Some((thumb, payload))
+        Some((fingerprint, payload))
     }
 
     pub fn update_tokenize_cache(
         &mut self,
         cache_key: String,
-        thumbnail: GrayThumbnail,
+        fingerprint: u64,
         payload: TokenizePayload,
     ) {
         self.latest_tokenize_cache_key = Some(cache_key);
-        self.latest_tokenize_thumbnail = Some(thumbnail);
+        self.latest_tokenize_fingerprint = Some(fingerprint);
         self.latest_tokenize_payload = Some(payload);
     }
 
@@ -286,11 +283,7 @@ mod tests {
         let mut state = VisionState::new();
         state.update_tokenize_cache(
             "window:dictionary".to_string(),
-            GrayThumbnail {
-                width: 2,
-                height: 2,
-                pixels: vec![1, 2, 3, 4],
-            },
+            42,
             desktop_core::protocol::TokenizePayload {
                 snapshot_id: 42,
                 timestamp: "ts".to_string(),

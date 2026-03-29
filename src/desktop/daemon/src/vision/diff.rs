@@ -282,6 +282,7 @@ fn neighbors4(x: usize, y: usize, width: usize, height: usize) -> [(usize, usize
     [left, up, right, down]
 }
 
+#[cfg(test)]
 pub fn changed_pixel_count(prev: &GrayThumbnail, curr: &GrayThumbnail, threshold: u8) -> usize {
     if prev.width != curr.width
         || prev.height != curr.height
