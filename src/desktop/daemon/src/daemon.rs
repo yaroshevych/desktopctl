@@ -726,9 +726,20 @@ fn resolve_relative_region_bounds(
 }
 
 pub(super) fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]) {
-    for window in windows {
+    for window in windows.iter_mut() {
         if window.window_ref.is_none() {
             window.window_ref = Some(window_refs::issue_for_window(window));
+        }
+    }
+    let id_to_ref: std::collections::HashMap<String, String> = windows
+        .iter()
+        .filter_map(|window| window.window_ref.clone().map(|r| (window.id.clone(), r)))
+        .collect();
+    for window in windows.iter_mut() {
+        if let Some(parent_internal) = window.parent_id.clone() {
+            if let Some(parent_ref) = id_to_ref.get(&parent_internal) {
+                window.parent_id = Some(parent_ref.clone());
+            }
         }
     }
 }

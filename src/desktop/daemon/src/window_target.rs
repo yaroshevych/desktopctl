@@ -304,6 +304,7 @@ mod tests {
         WindowInfo {
             id: format!("{pid}:{index}"),
             window_ref: None,
+            parent_id: None,
             pid,
             index,
             app: app.to_string(),
@@ -316,6 +317,7 @@ mod tests {
             },
             frontmost: false,
             visible: true,
+            modal: None,
         }
     }
 
