@@ -315,6 +315,24 @@ fn parse_request(args: &[String]) -> Result<Command, AppError> {
         return Err(AppError::invalid_argument(usage()));
     }
     match args[0].as_str() {
+        "list" => {
+            let mut limit: Option<u64> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--limit" => {
+                        limit = Some(parse_u64(args.get(i + 1), "limit")?);
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for request list: {flag}"
+                        )));
+                    }
+                }
+            }
+            Ok(Command::RequestList { limit })
+        }
         "show" => {
             let request_id = args.get(1).cloned().ok_or_else(|| {
                 AppError::invalid_argument("usage: desktopctl request show <request_id>")
@@ -1391,17 +1409,20 @@ fn usage() -> &'static str {
   desktopctl app show <application>
   desktopctl app isolate <application>
   desktopctl window list [--json]
+    hint: compact output with | jq '.windows[] | \"\\(.id) \\(.visible) \\(.title)\"'
   desktopctl window bounds (--title <text> | --id <id>) [--json]
   desktopctl window focus (--title <text> | --id <id>)
     hint: when starting, the focused window likely belongs to AI agent, get its ID with tokenise command, then open/focus target window, and in the end of the session focus AI agent window again
+    hint: after focusing, use --active-window <id> on subsequent commands to ensure they target the correct window
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
     note: --region is relative to the selected active-window/display target
-    hint: prefer `screen tokenize` for automation flows; use screenshot mainly for visual artifacts/debug
+    hint: prefer `screen tokenize` for automation flows; use screenshot as last resort for visual artifacts/debug
   desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
     note: --window-query cannot be combined with --screenshot
     note: --active-window cannot be combined with --window-query or --screenshot
     note: --region is relative to the selected window/screenshot target
     hint: tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`
+    hint: compact output with | jq -r '.result.text_dump'
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read
@@ -1412,6 +1433,7 @@ fn usage() -> &'static str {
   desktopctl debug overlay stop
   desktopctl debug snapshot
   desktopctl request show <request_id>
+  desktopctl request list [--limit <n>]
   desktopctl request screenshot <request_id> [--out <path>]
   desktopctl request response <request_id>
     hint: use it to re-read output of previous commands, like tokenize, without perf penalty
@@ -2202,6 +2224,13 @@ mod tests {
 
     #[test]
     fn parses_request_commands() {
+        let list = parse_command(&["request", "list", "--limit", "5"].map(str::to_string))
+            .expect("request list should parse");
+        match list {
+            Command::RequestList { limit } => assert_eq!(limit, Some(5)),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
         let show = parse_command(&["request", "show", "req-1"].map(str::to_string))
             .expect("request show should parse");
         match show {

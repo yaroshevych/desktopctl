@@ -87,6 +87,38 @@ pub fn show(request_id: &str) -> Result<Value, AppError> {
     }))
 }
 
+pub fn list(limit: Option<u64>) -> Result<Value, AppError> {
+    let mut store = request_store()
+        .lock()
+        .map_err(|_| AppError::internal("request store lock poisoned"))?;
+    let now_ms = now_millis();
+    prune_expired(&mut store, now_ms);
+    let max_entries = limit.unwrap_or(MAX_REQUEST_ENTRIES as u64).max(1) as usize;
+    let entries: Vec<Value> = store
+        .entries
+        .iter()
+        .rev()
+        .take(max_entries)
+        .map(|entry| {
+            let ok = entry
+                .response
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            json!({
+                "request_id": entry.request_id,
+                "command": entry.command,
+                "timestamp": entry.timestamp,
+                "ok": ok,
+                "has_screenshot": entry.screenshot_png.is_some()
+            })
+        })
+        .collect();
+    Ok(json!({
+        "entries": entries
+    }))
+}
+
 pub fn response(request_id: &str) -> Result<Value, AppError> {
     let store = request_store()
         .lock()

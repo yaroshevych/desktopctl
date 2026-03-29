@@ -231,6 +231,10 @@ pub enum Command {
     RequestShow {
         request_id: String,
     },
+    RequestList {
+        #[serde(default)]
+        limit: Option<u64>,
+    },
     RequestScreenshot {
         request_id: String,
         out_path: Option<String>,
@@ -316,6 +320,7 @@ impl Command {
             Command::PermissionsCheck => "permissions_check",
             Command::DebugSnapshot => "debug_snapshot",
             Command::RequestShow { .. } => "request_show",
+            Command::RequestList { .. } => "request_list",
             Command::RequestScreenshot { .. } => "request_screenshot",
             Command::RequestResponse { .. } => "request_response",
             Command::ReplayRecord { stop: true, .. } => "replay_record_stop",

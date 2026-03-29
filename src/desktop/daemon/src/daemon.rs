@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
@@ -1051,6 +1052,7 @@ fn execute_with_context(
             let mut value = serde_json::to_value(payload).map_err(|err| {
                 AppError::internal(format!("failed to encode token payload: {err}"))
             })?;
+            append_tokenize_text_dump(&mut value);
             remap_tokenize_window_id_field(&mut value);
             Ok(value)
         }
@@ -1182,6 +1184,7 @@ fn execute_with_context(
         }
         Command::DebugSnapshot => vision::debug::write_debug_snapshot(),
         Command::RequestShow { request_id } => request_store::show(&request_id),
+        Command::RequestList { limit } => request_store::list(limit),
         Command::RequestScreenshot {
             request_id,
             out_path,
@@ -1527,6 +1530,148 @@ fn remap_tokenize_window_id_field(value: &mut Value) {
             }
         }
     }
+}
+
+fn append_tokenize_text_dump(value: &mut Value) {
+    let Some(windows) = value.get("windows").and_then(Value::as_array) else {
+        return;
+    };
+    let mut chunks: Vec<String> = Vec::new();
+    for window in windows {
+        let Some(window_obj) = window.as_object() else {
+            continue;
+        };
+        let title = window_obj
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("window");
+        let app = window_obj.get("app").and_then(Value::as_str).unwrap_or("");
+        let Some(elements) = window_obj.get("elements").and_then(Value::as_array) else {
+            continue;
+        };
+        let dump = build_window_text_dump(elements);
+        if dump.trim().is_empty() {
+            continue;
+        }
+        let mut header = format!("window: {title}");
+        if !app.trim().is_empty() {
+            header.push_str(&format!(" ({app})"));
+        }
+        chunks.push(format!("{header}\n{dump}"));
+    }
+    if chunks.is_empty() {
+        return;
+    }
+    let text_dump = chunks.join("\n\n");
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("text_dump".to_string(), Value::String(text_dump));
+    }
+}
+
+#[derive(Clone)]
+struct TextDumpEntry {
+    text: String,
+    x: f64,
+    y: f64,
+}
+
+fn build_window_text_dump(elements: &[Value]) -> String {
+    let mut entries: Vec<TextDumpEntry> = Vec::new();
+    for el in elements {
+        let Some(obj) = el.as_object() else { continue };
+        let Some(text_raw) = obj.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(bbox) = obj.get("bbox").and_then(Value::as_array) else {
+            continue;
+        };
+        if bbox.len() != 4 {
+            continue;
+        }
+        let x = bbox[0].as_f64().unwrap_or(0.0);
+        let y = bbox[1].as_f64().unwrap_or(0.0);
+        let w = bbox[2].as_f64().unwrap_or(0.0);
+        let cleaned = compact_text_dump_text(text_raw);
+        if cleaned.is_empty() || w <= 2.0 {
+            continue;
+        }
+        entries.push(TextDumpEntry {
+            text: cleaned,
+            x,
+            y,
+        });
+    }
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    entries.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
+    let mut columns: Vec<Vec<TextDumpEntry>> = Vec::new();
+    let column_split = 140.0;
+    for entry in entries {
+        if let Some(last_col) = columns.last_mut() {
+            let last_x = last_col.last().map(|e| e.x).unwrap_or(entry.x);
+            if (entry.x - last_x).abs() <= column_split {
+                last_col.push(entry);
+                continue;
+            }
+        }
+        columns.push(vec![entry]);
+    }
+
+    let mut out_lines: Vec<String> = Vec::new();
+    for (idx, mut col) in columns.into_iter().enumerate() {
+        col.sort_by(|a, b| a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x)));
+        let heading = column_heading(idx);
+        out_lines.push(heading);
+        out_lines.push("---".to_string());
+        let mut seen = HashSet::<String>::new();
+        let mut emitted = 0usize;
+        for entry in col {
+            let norm = entry.text.to_ascii_lowercase();
+            if !seen.insert(norm) {
+                continue;
+            }
+            out_lines.push(entry.text);
+            emitted += 1;
+            if emitted >= 40 {
+                break;
+            }
+        }
+        out_lines.push(String::new());
+    }
+    out_lines.join("\n").trim().to_string()
+}
+
+fn column_heading(idx: usize) -> String {
+    match idx {
+        0 => "left column".to_string(),
+        1 => "right column".to_string(),
+        _ => format!("column {}", idx + 1),
+    }
+}
+
+fn compact_text_dump_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(160));
+    let mut last_was_space = false;
+    for ch in input.chars() {
+        let mapped = if ch.is_whitespace() { ' ' } else { ch };
+        if mapped == ' ' {
+            if last_was_space {
+                continue;
+            }
+            last_was_space = true;
+            out.push(' ');
+            continue;
+        }
+        last_was_space = false;
+        out.push(mapped);
+        if out.len() >= 160 {
+            out.push('…');
+            break;
+        }
+    }
+    out.trim().to_string()
 }
 
 fn click_text_target(
@@ -2735,7 +2880,12 @@ fn observe_tokens_for_regions(
     if !regions.is_empty() {
         for (idx, core_region) in regions.iter().enumerate() {
             let dynamic_pad = observe_adaptive_ocr_pad(core_region, &ax_elements);
-            let padded = pad_bounds(core_region.clone(), dynamic_pad);
+            let (padded, applied_pad) = expand_bounds_with_pad_clamped(
+                core_region,
+                dynamic_pad,
+                capture.frame.width as f64,
+                capture.frame.height as f64,
+            );
             if let Some((x0, y0, x1, y1)) = logical_bounds_to_image_rect(
                 &padded,
                 capture.image.width(),
@@ -2786,12 +2936,16 @@ fn observe_tokens_for_regions(
                     }
                     ocr_tokens += emitted;
                     ocr_regions.push(format!(
-                        "#{idx}:core=({:.0},{:.0},{:.0},{:.0}) pad_px={:.1} pad=({:.0},{:.0},{:.0},{:.0}) crop={}x{} emitted={}",
+                        "#{idx}:core=({:.0},{:.0},{:.0},{:.0}) pad_req={:.1} pad_applied=(l:{:.1},r:{:.1},t:{:.1},b:{:.1}) pad=({:.0},{:.0},{:.0},{:.0}) crop={}x{} emitted={}",
                         core_region.x,
                         core_region.y,
                         core_region.width,
                         core_region.height,
                         dynamic_pad,
+                        applied_pad.left,
+                        applied_pad.right,
+                        applied_pad.top,
+                        applied_pad.bottom,
                         padded.x,
                         padded.y,
                         padded.width,
@@ -2841,6 +2995,47 @@ fn observe_tokens_for_regions(
     ));
 
     (tokens, ax_available, ax_count)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AppliedPadding {
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+}
+
+fn expand_bounds_with_pad_clamped(
+    core: &desktop_core::protocol::Bounds,
+    pad: f64,
+    frame_width: f64,
+    frame_height: f64,
+) -> (desktop_core::protocol::Bounds, AppliedPadding) {
+    let core_x1 = core.x.max(0.0);
+    let core_y1 = core.y.max(0.0);
+    let core_x2 = (core.x + core.width).max(core_x1);
+    let core_y2 = (core.y + core.height).max(core_y1);
+
+    let x1 = (core_x1 - pad).max(0.0).min(frame_width);
+    let y1 = (core_y1 - pad).max(0.0).min(frame_height);
+    let x2 = (core_x2 + pad).min(frame_width).max(0.0);
+    let y2 = (core_y2 + pad).min(frame_height).max(0.0);
+
+    let applied = AppliedPadding {
+        left: (core_x1 - x1).max(0.0),
+        right: (x2 - core_x2).max(0.0),
+        top: (core_y1 - y1).max(0.0),
+        bottom: (y2 - core_y2).max(0.0),
+    };
+    (
+        desktop_core::protocol::Bounds {
+            x: x1,
+            y: y1,
+            width: (x2 - x1).max(0.0),
+            height: (y2 - y1).max(0.0),
+        },
+        applied,
+    )
 }
 
 fn dump_observe_region_screenshot(
