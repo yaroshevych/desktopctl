@@ -734,7 +734,12 @@ pub(super) fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]
 }
 
 fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, AppError> {
-    let snapshot = window_target::resolve_frontmost_snapshot();
+    let snapshot_raw = window_target::resolve_frontmost_snapshot_raw();
+    let snapshot = if snapshot_raw.bounds.is_some() {
+        snapshot_raw
+    } else {
+        window_target::resolve_frontmost_snapshot()
+    };
     let app_hint = snapshot.app.as_deref();
     let target_bounds = snapshot.bounds.as_ref();
 
@@ -768,25 +773,15 @@ fn active_window_candidate_score(
     target_bounds: Option<&desktop_core::protocol::Bounds>,
 ) -> f64 {
     let area = (window.bounds.width.max(0.0) * window.bounds.height.max(0.0)).max(0.0);
-    let (overlap_bonus, container_bonus) = target_bounds
+    let overlap_bonus = target_bounds
         .map(|target| {
-            let overlap = iou(&window.bounds, target) * 10.0;
-            let contains = window.bounds.x <= target.x
-                && window.bounds.y <= target.y
-                && (window.bounds.x + window.bounds.width) >= (target.x + target.width)
-                && (window.bounds.y + window.bounds.height) >= (target.y + target.height);
-            let target_area = (target.width.max(0.0) * target.height.max(0.0)).max(1.0);
-            let area_ratio = area / target_area;
-            let container = if contains && area_ratio >= 2.0 {
-                20.0 + area_ratio.min(20.0)
-            } else {
-                0.0
-            };
-            (overlap, container)
+            // Prioritize geometric overlap with raw frontmost bounds. Avoid
+            // rewarding large container windows, which hides modal dialogs.
+            iou(&window.bounds, target) * 10.0
         })
-        .unwrap_or((0.0, 0.0));
+        .unwrap_or(0.0);
     let frontmost_bonus = if window.frontmost { 0.5 } else { 0.0 };
-    overlap_bonus + container_bonus + frontmost_bonus + area.sqrt() * 0.01
+    overlap_bonus + frontmost_bonus + area.sqrt() * 0.01
 }
 
 fn assert_active_window_id_matches(
