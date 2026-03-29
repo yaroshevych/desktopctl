@@ -26,6 +26,9 @@ pub trait Automation {
     fn left_drag(&self, point: Point) -> Result<(), AppError>;
     fn left_up(&self, point: Point) -> Result<(), AppError>;
     fn left_click(&self, point: Point) -> Result<(), AppError>;
+    fn right_down(&self, point: Point) -> Result<(), AppError>;
+    fn right_up(&self, point: Point) -> Result<(), AppError>;
+    fn right_click(&self, point: Point) -> Result<(), AppError>;
     fn scroll_wheel(&self, dx: i32, dy: i32) -> Result<(), AppError>;
     fn sleep_ms(&self, ms: u64) {
         thread::sleep(Duration::from_millis(ms));

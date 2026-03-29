@@ -9,6 +9,14 @@ pub const API_VERSION: &str = "1";
 const DEFAULT_OBSERVE_TIMEOUT_MS: u64 = 300;
 const DEFAULT_OBSERVE_SETTLE_MS: u64 = 650;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PointerButton {
+    #[default]
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub protocol_version: u32,
@@ -66,6 +74,8 @@ pub enum Command {
         x: u32,
         y: u32,
         #[serde(default)]
+        button: PointerButton,
+        #[serde(default)]
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,
@@ -73,6 +83,8 @@ pub enum Command {
     PointerUp {
         x: u32,
         y: u32,
+        #[serde(default)]
+        button: PointerButton,
         #[serde(default)]
         active_window: bool,
         #[serde(default)]
@@ -84,6 +96,8 @@ pub enum Command {
         #[serde(default)]
         absolute: bool,
         #[serde(default)]
+        button: PointerButton,
+        #[serde(default)]
         observe: ObserveOptions,
         #[serde(default)]
         active_window: bool,
@@ -93,6 +107,8 @@ pub enum Command {
     PointerClickText {
         text: String,
         #[serde(default)]
+        button: PointerButton,
+        #[serde(default)]
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,
@@ -101,6 +117,8 @@ pub enum Command {
     },
     PointerClickId {
         id: String,
+        #[serde(default)]
+        button: PointerButton,
         #[serde(default)]
         active_window: bool,
         #[serde(default)]

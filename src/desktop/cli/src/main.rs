@@ -1,7 +1,9 @@
 use desktop_core::{
     error::{AppError, ErrorCode},
     ipc,
-    protocol::{Command, ObserveOptions, ObserveUntil, RequestEnvelope, ResponseEnvelope},
+    protocol::{
+        Command, ObserveOptions, ObserveUntil, PointerButton, RequestEnvelope, ResponseEnvelope,
+    },
 };
 use std::{
     fs::OpenOptions,
@@ -759,11 +761,43 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
         "down" => {
             let x = parse_u32(args.get(1), "x")?;
             let y = parse_u32(args.get(2), "y")?;
-            let (active_window, active_window_id) =
-                parse_active_window_options(&args[3..], "pointer down")?;
+            let mut active_window = false;
+            let mut active_window_id: Option<String> = None;
+            let mut button = PointerButton::Left;
+            let mut i = 3usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--active-window" => {
+                        active_window = true;
+                        if let Some(value) = args.get(i + 1) {
+                            if !value.starts_with("--") {
+                                if value.trim().is_empty() {
+                                    return Err(AppError::invalid_argument(
+                                        "active window id must not be empty",
+                                    ));
+                                }
+                                active_window_id = Some(value.clone());
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                    "--button" => {
+                        button = parse_pointer_button(args.get(i + 1))?;
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for pointer down: {flag}"
+                        )));
+                    }
+                }
+            }
             Ok(Command::PointerDown {
                 x,
                 y,
+                button,
                 active_window,
                 active_window_id,
             })
@@ -771,11 +805,43 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
         "up" => {
             let x = parse_u32(args.get(1), "x")?;
             let y = parse_u32(args.get(2), "y")?;
-            let (active_window, active_window_id) =
-                parse_active_window_options(&args[3..], "pointer up")?;
+            let mut active_window = false;
+            let mut active_window_id: Option<String> = None;
+            let mut button = PointerButton::Left;
+            let mut i = 3usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--active-window" => {
+                        active_window = true;
+                        if let Some(value) = args.get(i + 1) {
+                            if !value.starts_with("--") {
+                                if value.trim().is_empty() {
+                                    return Err(AppError::invalid_argument(
+                                        "active window id must not be empty",
+                                    ));
+                                }
+                                active_window_id = Some(value.clone());
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                    "--button" => {
+                        button = parse_pointer_button(args.get(i + 1))?;
+                        i += 2;
+                    }
+                    flag => {
+                        return Err(AppError::invalid_argument(format!(
+                            "unknown flag for pointer up: {flag}"
+                        )));
+                    }
+                }
+            }
             Ok(Command::PointerUp {
                 x,
                 y,
+                button,
                 active_window,
                 active_window_id,
             })
@@ -789,6 +855,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 })?;
                 let mut active_window = false;
                 let mut active_window_id: Option<String> = None;
+                let mut button = PointerButton::Left;
                 let mut observe = ObserveOptions::default();
                 let mut i = 3usize;
                 while i < args.len() {
@@ -808,6 +875,10 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                                 }
                             }
                             i += 1;
+                        }
+                        "--button" => {
+                            button = parse_pointer_button(args.get(i + 1))?;
+                            i += 2;
                         }
                         "--observe" => {
                             observe.enabled = true;
@@ -843,6 +914,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 }
                 Ok(Command::PointerClickText {
                     text,
+                    button,
                     active_window,
                     active_window_id,
                     observe,
@@ -855,6 +927,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 })?;
                 let mut active_window = false;
                 let mut active_window_id: Option<String> = None;
+                let mut button = PointerButton::Left;
                 let mut observe = ObserveOptions::default();
                 let mut i = 3usize;
                 while i < args.len() {
@@ -874,6 +947,10 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                                 }
                             }
                             i += 1;
+                        }
+                        "--button" => {
+                            button = parse_pointer_button(args.get(i + 1))?;
+                            i += 2;
                         }
                         "--observe" => {
                             observe.enabled = true;
@@ -914,12 +991,14 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 }
                 Ok(Command::PointerClickId {
                     id,
+                    button,
                     active_window,
                     active_window_id,
                     observe,
                 })
             } else {
                 let mut absolute = false;
+                let mut button = PointerButton::Left;
                 let mut observe = ObserveOptions::default();
                 let mut active_window = false;
                 let mut active_window_id: Option<String> = None;
@@ -979,6 +1058,11 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                         i += 1;
                         continue;
                     }
+                    if token == "--button" {
+                        button = parse_pointer_button(args.get(i + 1))?;
+                        i += 2;
+                        continue;
+                    }
                     if token.starts_with("--") {
                         return Err(AppError::invalid_argument(format!(
                             "unknown flag for pointer click: {}",
@@ -999,6 +1083,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     x,
                     y,
                     absolute,
+                    button,
                     observe,
                     active_window,
                     active_window_id,
@@ -1140,39 +1225,17 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
     }
 }
 
-fn parse_active_window_options(
-    args: &[String],
-    command_name: &str,
-) -> Result<(bool, Option<String>), AppError> {
-    let mut active_window = false;
-    let mut active_window_id: Option<String> = None;
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--active-window" => {
-                active_window = true;
-                if let Some(value) = args.get(i + 1) {
-                    if !value.starts_with("--") {
-                        if value.trim().is_empty() {
-                            return Err(AppError::invalid_argument(
-                                "active window id must not be empty",
-                            ));
-                        }
-                        active_window_id = Some(value.clone());
-                        i += 2;
-                        continue;
-                    }
-                }
-                i += 1;
-            }
-            flag => {
-                return Err(AppError::invalid_argument(format!(
-                    "unknown flag for {command_name}: {flag}"
-                )));
-            }
-        }
+fn parse_pointer_button(value: Option<&String>) -> Result<PointerButton, AppError> {
+    let value = value.ok_or_else(|| {
+        AppError::invalid_argument("missing value for --button (expected left|right)")
+    })?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" => Ok(PointerButton::Left),
+        "right" => Ok(PointerButton::Right),
+        other => Err(AppError::invalid_argument(format!(
+            "invalid --button value: {other} (expected left|right)"
+        ))),
     }
-    Ok((active_window, active_window_id))
 }
 
 fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
@@ -1356,13 +1419,13 @@ fn usage() -> &'static str {
   desktopctl replay load <session_dir>
   desktopctl pointer move [--absolute] <x> <y> [--active-window [<id>]]
     hint: use relative coordinates by default, it works better with tokenize
-  desktopctl pointer down <x> <y> [--active-window [<id>]]
+  desktopctl pointer down <x> <y> [--button <left|right>] [--active-window [<id>]]
     hint: include --active-window [<id>] to avoid acting in the wrong window (get id via window list or screen tokenize)
-  desktopctl pointer up <x> <y> [--active-window [<id>]]
-  desktopctl pointer click [--absolute] <x> <y> [--active-window [<id>]]
-  desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] [--active-window [<id>]] <x> <y>
-  desktopctl pointer click --text <text> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
-  desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+  desktopctl pointer up <x> <y> [--button <left|right>] [--active-window [<id>]]
+  desktopctl pointer click [--absolute] [--button <left|right>] <x> <y> [--active-window [<id>]]
+  desktopctl pointer click [--absolute] [--button <left|right>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] [--active-window [<id>]] <x> <y>
+  desktopctl pointer click --text <text> [--button <left|right>] [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+  desktopctl pointer click --id <element_id> --active-window [<id>] [--button <left|right>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer scroll <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer scroll --id <element_id> <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
     hint: before scroll, move pointer into the target scroll area
@@ -1370,6 +1433,7 @@ fn usage() -> &'static str {
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms] [--active-window [<id>]]
   desktopctl keyboard type \"text\" [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
     hint: to replace existing field content, send `desktopctl keyboard press cmd+a` before typing
+    hint: press enter, or click outside (app-dependent) of text area to apply your change
   desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
     hint: common keys: delete, left/right/up/down, tab, home/end, pageup/pagedown, f1..f12 (hotkeys like cmd+left also supported)"
 }
@@ -1598,7 +1662,7 @@ mod tests {
     use super::{parse_command, send_request_with_hooks};
     use desktop_core::{
         error::{AppError, ErrorCode},
-        protocol::{Command, RequestEnvelope, ResponseEnvelope},
+        protocol::{Command, PointerButton, RequestEnvelope, ResponseEnvelope},
     };
     use std::sync::{
         Arc,
@@ -2280,6 +2344,61 @@ mod tests {
                     active_window_id.as_deref(),
                     Some("550e8400-e29b-41d4-a716-446655440000")
                 );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_click_with_right_button() {
+        let command = parse_command(
+            &[
+                "pointer",
+                "click",
+                "--button",
+                "right",
+                "10",
+                "20",
+                "--active-window",
+            ]
+            .map(str::to_string),
+        )
+        .expect("pointer click --button right should parse");
+        match command {
+            Command::PointerClick {
+                x,
+                y,
+                button,
+                active_window,
+                ..
+            } => {
+                assert_eq!(x, 10);
+                assert_eq!(y, 20);
+                assert!(matches!(button, PointerButton::Right));
+                assert!(active_window);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_click_id_with_right_button() {
+        let command = parse_command(
+            &[
+                "pointer",
+                "click",
+                "--id",
+                "button_7",
+                "--active-window",
+                "--button",
+                "right",
+            ]
+            .map(str::to_string),
+        )
+        .expect("pointer click --id --button right should parse");
+        match command {
+            Command::PointerClickId { button, .. } => {
+                assert!(matches!(button, PointerButton::Right));
             }
             other => panic!("unexpected command: {other:?}"),
         }

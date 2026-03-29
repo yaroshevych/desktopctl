@@ -75,6 +75,27 @@ impl Automation for StubAutomation {
         )))
     }
 
+    fn right_down(&self, _point: Point) -> Result<(), AppError> {
+        Err(AppError::backend_unavailable(format!(
+            "unsupported platform: {}",
+            std::env::consts::OS
+        )))
+    }
+
+    fn right_up(&self, _point: Point) -> Result<(), AppError> {
+        Err(AppError::backend_unavailable(format!(
+            "unsupported platform: {}",
+            std::env::consts::OS
+        )))
+    }
+
+    fn right_click(&self, _point: Point) -> Result<(), AppError> {
+        Err(AppError::backend_unavailable(format!(
+            "unsupported platform: {}",
+            std::env::consts::OS
+        )))
+    }
+
     fn scroll_wheel(&self, _dx: i32, _dy: i32) -> Result<(), AppError> {
         Err(AppError::backend_unavailable(format!(
             "unsupported platform: {}",

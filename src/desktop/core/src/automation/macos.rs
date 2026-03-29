@@ -55,19 +55,19 @@ impl Automation for MacosAutomation {
     }
 
     fn move_mouse(&self, point: Point) -> Result<(), AppError> {
-        post_mouse_event(CGEventType::MouseMoved, point)
+        post_mouse_event(CGEventType::MouseMoved, point, CGMouseButton::Left)
     }
 
     fn left_down(&self, point: Point) -> Result<(), AppError> {
-        post_mouse_event(CGEventType::LeftMouseDown, point)
+        post_mouse_event(CGEventType::LeftMouseDown, point, CGMouseButton::Left)
     }
 
     fn left_drag(&self, point: Point) -> Result<(), AppError> {
-        post_mouse_event(CGEventType::LeftMouseDragged, point)
+        post_mouse_event(CGEventType::LeftMouseDragged, point, CGMouseButton::Left)
     }
 
     fn left_up(&self, point: Point) -> Result<(), AppError> {
-        post_mouse_event(CGEventType::LeftMouseUp, point)
+        post_mouse_event(CGEventType::LeftMouseUp, point, CGMouseButton::Left)
     }
 
     fn left_click(&self, point: Point) -> Result<(), AppError> {
@@ -75,12 +75,29 @@ impl Automation for MacosAutomation {
         self.left_up(point)
     }
 
+    fn right_down(&self, point: Point) -> Result<(), AppError> {
+        post_mouse_event(CGEventType::RightMouseDown, point, CGMouseButton::Right)
+    }
+
+    fn right_up(&self, point: Point) -> Result<(), AppError> {
+        post_mouse_event(CGEventType::RightMouseUp, point, CGMouseButton::Right)
+    }
+
+    fn right_click(&self, point: Point) -> Result<(), AppError> {
+        self.right_down(point)?;
+        self.right_up(point)
+    }
+
     fn scroll_wheel(&self, dx: i32, dy: i32) -> Result<(), AppError> {
         post_scroll_event(dx, dy)
     }
 }
 
-fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppError> {
+fn post_mouse_event(
+    event_type: CGEventType,
+    point: Point,
+    button: CGMouseButton,
+) -> Result<(), AppError> {
     let cg_point = to_core_graphics_point(point);
     let bounds = CGDisplay::main().bounds();
     trace_mouse(format!(
@@ -99,7 +116,7 @@ fn post_mouse_event(event_type: CGEventType, point: Point) -> Result<(), AppErro
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| AppError::backend_unavailable("failed to create CoreGraphics event source"))?;
 
-    let event = CGEvent::new_mouse_event(source, event_type, cg_point, CGMouseButton::Left)
+    let event = CGEvent::new_mouse_event(source, event_type, cg_point, button)
         .map_err(|_| AppError::backend_unavailable("failed to create mouse event"))?;
 
     event.post(CGEventTapLocation::HID);

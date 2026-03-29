@@ -16,7 +16,9 @@ use desktop_core::{
     automation::{Point, new_backend},
     error::AppError,
     ipc::{read_framed_json, socket_path, write_framed_json},
-    protocol::{Command, ObserveOptions, ObserveUntil, RequestEnvelope, ResponseEnvelope},
+    protocol::{
+        Command, ObserveOptions, ObserveUntil, PointerButton, RequestEnvelope, ResponseEnvelope,
+    },
 };
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
@@ -557,6 +559,7 @@ fn execute_with_context(
         Command::PointerDown {
             x,
             y,
+            button,
             active_window,
             active_window_id,
         } => {
@@ -566,13 +569,17 @@ fn execute_with_context(
             let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
-            backend.left_down(point)?;
+            match button {
+                PointerButton::Left => backend.left_down(point)?,
+                PointerButton::Right => backend.right_down(point)?,
+            }
             trace::log(format!("pointer_down:ok x={x} y={y}"));
             Ok(json!({}))
         }
         Command::PointerUp {
             x,
             y,
+            button,
             active_window,
             active_window_id,
         } => {
@@ -582,7 +589,10 @@ fn execute_with_context(
             let _ = resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
             let point = Point::new(x, y);
             backend.move_mouse(point)?;
-            backend.left_up(point)?;
+            match button {
+                PointerButton::Left => backend.left_up(point)?,
+                PointerButton::Right => backend.right_up(point)?,
+            }
             trace::log(format!("pointer_up:ok x={x} y={y}"));
             Ok(json!({}))
         }
@@ -590,6 +600,7 @@ fn execute_with_context(
             x,
             y,
             absolute,
+            button,
             observe,
             active_window,
             active_window_id,
@@ -611,7 +622,10 @@ fn execute_with_context(
                 request_context,
             )?;
             backend.move_mouse(point)?;
-            backend.left_click(point)?;
+            match button {
+                PointerButton::Left => backend.left_click(point)?,
+                PointerButton::Right => backend.right_click(point)?,
+            }
             trace::log(format!(
                 "pointer_click:ok x={} y={} absolute={absolute}",
                 point.x, point.y
@@ -1067,6 +1081,7 @@ fn execute_with_context(
         } => wait_for_text(&text, timeout_ms, interval_ms, disappear),
         Command::PointerClickText {
             text,
+            button,
             active_window,
             active_window_id,
             observe,
@@ -1074,6 +1089,7 @@ fn execute_with_context(
             let observe_start = capture_observe_start_state(&observe);
             let mut result = click_text_target(
                 &text,
+                button,
                 active_window,
                 active_window_id.as_deref(),
                 request_context,
@@ -1086,6 +1102,7 @@ fn execute_with_context(
         }
         Command::PointerClickId {
             id,
+            button,
             active_window,
             active_window_id,
             observe,
@@ -1093,6 +1110,7 @@ fn execute_with_context(
             let observe_start = capture_observe_start_state(&observe);
             let mut result = click_element_id_target(
                 &id,
+                button,
                 active_window,
                 active_window_id.as_deref(),
                 request_context,
@@ -1456,6 +1474,7 @@ fn remap_tokenize_window_id_field(value: &mut Value) {
 
 fn click_text_target(
     query: &str,
+    button: PointerButton,
     active_window: bool,
     active_window_id: Option<&str>,
     request_context: &RequestContext,
@@ -1469,7 +1488,7 @@ fn click_text_target(
         if let Some(reference) = active_window_id {
             assert_active_window_id_matches(reference)?;
         }
-        if let Some(result) = try_click_text_active_window_ax(query)? {
+        if let Some(result) = try_click_text_active_window_ax(query, button)? {
             return Ok(result);
         }
         let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
@@ -1500,11 +1519,13 @@ fn click_text_target(
             target.bounds.width,
             target.bounds.height
         ));
-        perform_click(&target.bounds)?;
+        let click_point = perform_click(&target.bounds, button)?;
         return Ok(json!({
             "snapshot_id": payload.snapshot_id,
             "text": target.text,
-            "bounds": target.bounds
+            "bounds": target.bounds,
+            "x": click_point.x,
+            "y": click_point.y
         }));
     }
 
@@ -1572,16 +1593,21 @@ fn click_text_target(
         target.bounds.width,
         target.bounds.height
     ));
-    perform_click(&target.bounds)?;
+    let click_point = perform_click(&target.bounds, button)?;
 
     Ok(json!({
         "snapshot_id": capture.snapshot.snapshot_id,
         "text": target.text,
-        "bounds": target.bounds
+        "bounds": target.bounds,
+        "x": click_point.x,
+        "y": click_point.y
     }))
 }
 
-fn try_click_text_active_window_ax(query: &str) -> Result<Option<Value>, AppError> {
+fn try_click_text_active_window_ax(
+    query: &str,
+    button: PointerButton,
+) -> Result<Option<Value>, AppError> {
     let ax_elements = match platform::ax::collect_frontmost_window_elements() {
         Ok(items) => items,
         Err(err) => {
@@ -1623,11 +1649,13 @@ fn try_click_text_active_window_ax(query: &str) -> Result<Option<Value>, AppErro
                 target.bounds.width,
                 target.bounds.height
             ));
-            perform_click(&target.bounds)?;
+            let click_point = perform_click(&target.bounds, button)?;
             Ok(Some(json!({
                 "snapshot_id": 0,
                 "text": target.text,
-                "bounds": target.bounds
+                "bounds": target.bounds,
+                "x": click_point.x,
+                "y": click_point.y
             })))
         }
         Err(err) if matches!(err.code, desktop_core::error::ErrorCode::TargetNotFound) => Ok(None),
@@ -1646,6 +1674,7 @@ struct TokenizeClickElementCandidate {
 
 fn click_element_id_target(
     id: &str,
+    button: PointerButton,
     active_window: bool,
     active_window_id: Option<&str>,
     request_context: &RequestContext,
@@ -1664,7 +1693,7 @@ fn click_element_id_target(
         return Err(AppError::invalid_argument("empty element id selector"));
     }
     if is_ax_element_id(needle) {
-        if let Some(result) = try_click_ax_element_id_target(needle)? {
+        if let Some(result) = try_click_ax_element_id_target(needle, button)? {
             return Ok(result);
         }
     }
@@ -1712,11 +1741,13 @@ fn click_element_id_target(
         target.bounds.height,
         compact_for_log(target.text.as_deref().unwrap_or(""))
     ));
-    perform_click(&target.bounds)?;
+    let click_point = perform_click(&target.bounds, button)?;
     Ok(json!({
         "id": target.id.clone(),
         "text": target.text.clone(),
         "bounds": target.bounds.clone(),
+        "x": click_point.x,
+        "y": click_point.y,
         "source": target.source.clone()
     }))
 }
@@ -1859,7 +1890,10 @@ fn resolve_ax_element_id_target(
     Ok(Some(matches[0].clone()))
 }
 
-fn try_click_ax_element_id_target(needle: &str) -> Result<Option<Value>, AppError> {
+fn try_click_ax_element_id_target(
+    needle: &str,
+    button: PointerButton,
+) -> Result<Option<Value>, AppError> {
     let ax_elements = match platform::ax::collect_frontmost_window_elements() {
         Ok(items) => items,
         Err(err) => {
@@ -1931,11 +1965,13 @@ fn try_click_ax_element_id_target(needle: &str) -> Result<Option<Value>, AppErro
         target.bounds.height,
         compact_for_log(target.text.as_deref().unwrap_or(""))
     ));
-    perform_click(&target.bounds)?;
+    let click_point = perform_click(&target.bounds, button)?;
     Ok(Some(json!({
         "id": target.id.clone(),
         "text": target.text.clone(),
         "bounds": target.bounds.clone(),
+        "x": click_point.x,
+        "y": click_point.y,
         "source": target.source.clone()
     })))
 }
@@ -2306,17 +2342,20 @@ fn trace_ranked_candidates(
     }
 }
 
-fn perform_click(bounds: &desktop_core::protocol::Bounds) -> Result<(), AppError> {
+fn perform_click(
+    bounds: &desktop_core::protocol::Bounds,
+    button: PointerButton,
+) -> Result<Point, AppError> {
     let center_x = (bounds.x + bounds.width / 2.0).max(0.0).round() as u32;
     let center_y = (bounds.y + bounds.height / 2.0).max(0.0).round() as u32;
     trace::log(format!(
         "perform_click:point bounds=({}, {}, {}, {}) center=({}, {})",
         bounds.x, bounds.y, bounds.width, bounds.height, center_x, center_y
     ));
-    perform_click_at(center_x, center_y)
+    perform_click_at(center_x, center_y, button)
 }
 
-fn perform_click_at(x: u32, y: u32) -> Result<(), AppError> {
+fn perform_click_at(x: u32, y: u32, button: PointerButton) -> Result<Point, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
     let point = Point::new(x, y);
@@ -2324,10 +2363,19 @@ fn perform_click_at(x: u32, y: u32) -> Result<(), AppError> {
     backend.move_mouse(point)?;
     trace::log("perform_click:move ok");
     thread::sleep(Duration::from_millis(60));
-    trace::log("perform_click:left_click start");
-    backend.left_click(point)?;
-    trace::log("perform_click:left_click ok");
-    Ok(())
+    match button {
+        PointerButton::Left => {
+            trace::log("perform_click:left_click start");
+            backend.left_click(point)?;
+            trace::log("perform_click:left_click ok");
+        }
+        PointerButton::Right => {
+            trace::log("perform_click:right_click start");
+            backend.right_click(point)?;
+            trace::log("perform_click:right_click ok");
+        }
+    }
+    Ok(point)
 }
 
 fn append_observe_payload(result: &mut Value, observe: Option<Value>) {
