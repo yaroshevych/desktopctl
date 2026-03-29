@@ -3310,184 +3310,55 @@ fn normalize_observe_tokens_delta(
 
 fn build_observe_tokens_delta_text_dump(tokens_delta: &Value) -> String {
     let mut sections = Vec::new();
-    sections.push(format_observe_delta_section(
+    sections.push(format_observe_token_dump_section(
         "added",
         tokens_delta.get("added").and_then(Value::as_array),
     ));
-    sections.push(format_observe_delta_section(
+    sections.push(format_observe_token_dump_section(
         "removed",
         tokens_delta.get("removed").and_then(Value::as_array),
     ));
-    sections.push(format_observe_changed_section(
-        "changed",
-        tokens_delta.get("changed").and_then(Value::as_array),
+    let (changed_before, changed_after) = observe_changed_token_sides(tokens_delta);
+    sections.push(format_observe_token_dump_section(
+        "changed_before",
+        Some(&changed_before),
+    ));
+    sections.push(format_observe_token_dump_section(
+        "changed_after",
+        Some(&changed_after),
     ));
     sections.join("\n\n")
 }
 
-fn format_observe_delta_section(label: &str, items: Option<&Vec<Value>>) -> String {
+fn format_observe_token_dump_section(label: &str, items: Option<&Vec<Value>>) -> String {
     let mut lines = vec![format!("{label}:"), "---".to_string()];
-    let mut emitted = 0usize;
     if let Some(values) = items {
-        let mut sorted = values.clone();
-        sort_observe_tokens_by_position(&mut sorted);
-        for value in &sorted {
-            if emitted >= 24 {
-                break;
-            }
-            lines.push(format_observe_token_line(value));
-            emitted += 1;
+        let dump = build_window_text_dump(values);
+        if !dump.trim().is_empty() {
+            lines.push(dump);
         }
     }
-    if emitted == 0 {
+    if lines.len() == 2 {
         lines.push("(none)".to_string());
     }
     lines.join("\n")
 }
 
-fn format_observe_changed_section(label: &str, items: Option<&Vec<Value>>) -> String {
-    let mut lines = vec![format!("{label}:"), "---".to_string()];
-    let mut emitted = 0usize;
-    if let Some(values) = items {
-        let mut sorted = values.clone();
-        sort_observe_changed_by_position(&mut sorted);
-        for value in &sorted {
-            if emitted >= 24 {
-                break;
-            }
-            let before = value.get("before").unwrap_or(&Value::Null);
-            let after = value.get("after").unwrap_or(&Value::Null);
-            let before_text = observe_token_text_compact(before);
-            let after_text = observe_token_text_compact(after);
-            let before_id = observe_token_id(before);
-            let after_id = observe_token_id(after);
-            let id = if !after_id.is_empty() {
-                after_id
-            } else {
-                before_id
-            };
-            let source = observe_token_source(after);
-            let bbox = observe_token_bbox(after).or_else(|| observe_token_bbox(before));
-            let mut line = String::new();
-            if !id.is_empty() {
-                line.push_str(&id);
-            } else {
-                line.push_str("(no-id)");
-            }
-            if !source.is_empty() {
-                line.push_str(&format!(" [{source}]"));
-            }
-            if let Some((x, y, w, h)) = bbox {
-                line.push_str(&format!(
-                    " @{},{} {}x{}",
-                    round_nonnegative_i64(x),
-                    round_nonnegative_i64(y),
-                    round_nonnegative_i64(w),
-                    round_nonnegative_i64(h)
-                ));
-            }
-            line.push_str(&format!(" \"{}\" -> \"{}\"", before_text, after_text));
-            lines.push(line);
-            emitted += 1;
+fn observe_changed_token_sides(tokens_delta: &Value) -> (Vec<Value>, Vec<Value>) {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let Some(changed) = tokens_delta.get("changed").and_then(Value::as_array) else {
+        return (before, after);
+    };
+    for entry in changed {
+        if let Some(item) = entry.get("before") {
+            before.push(item.clone());
+        }
+        if let Some(item) = entry.get("after") {
+            after.push(item.clone());
         }
     }
-    if emitted == 0 {
-        lines.push("(none)".to_string());
-    }
-    lines.join("\n")
-}
-
-fn format_observe_token_line(token: &Value) -> String {
-    let mut out = String::new();
-    let id = observe_token_id(token);
-    if !id.is_empty() {
-        out.push_str(&id);
-    } else {
-        out.push_str("(no-id)");
-    }
-    let source = observe_token_source(token);
-    if !source.is_empty() {
-        out.push_str(&format!(" [{source}]"));
-    }
-    if let Some((x, y, w, h)) = observe_token_bbox(token) {
-        out.push_str(&format!(
-            " @{},{} {}x{}",
-            round_nonnegative_i64(x),
-            round_nonnegative_i64(y),
-            round_nonnegative_i64(w),
-            round_nonnegative_i64(h)
-        ));
-    }
-    let text = observe_token_text_compact(token);
-    if !text.is_empty() {
-        out.push_str(&format!(" \"{text}\""));
-    }
-    out
-}
-
-fn observe_token_id(token: &Value) -> String {
-    token
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
-fn observe_token_source(token: &Value) -> String {
-    token
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
-fn observe_token_text_compact(token: &Value) -> String {
-    let text = token
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    compact_text_dump_text(text)
-}
-
-fn observe_token_bbox(token: &Value) -> Option<(f64, f64, f64, f64)> {
-    let bbox = token.get("bbox").and_then(Value::as_array)?;
-    if bbox.len() != 4 {
-        return None;
-    }
-    Some((
-        bbox[0].as_f64().unwrap_or(0.0),
-        bbox[1].as_f64().unwrap_or(0.0),
-        bbox[2].as_f64().unwrap_or(0.0),
-        bbox[3].as_f64().unwrap_or(0.0),
-    ))
-}
-
-fn observe_token_sort_key(token: &Value) -> (i64, i64, String, String) {
-    let (x, y, _, _) = observe_token_bbox(token).unwrap_or((0.0, 0.0, 0.0, 0.0));
-    (
-        round_nonnegative_i64(y),
-        round_nonnegative_i64(x),
-        observe_token_id(token),
-        observe_token_text_compact(token),
-    )
-}
-
-fn sort_observe_tokens_by_position(tokens: &mut [Value]) {
-    tokens.sort_by_key(observe_token_sort_key);
-}
-
-fn sort_observe_changed_by_position(changed: &mut [Value]) {
-    changed.sort_by_key(|entry| {
-        let after = entry.get("after").unwrap_or(&Value::Null);
-        let before = entry.get("before").unwrap_or(&Value::Null);
-        if entry.get("after").is_some() {
-            observe_token_sort_key(after)
-        } else {
-            observe_token_sort_key(before)
-        }
-    });
+    (before, after)
 }
 
 fn rewrite_token_bbox_relative(token: &mut Value, origin: Option<&desktop_core::protocol::Bounds>) {
