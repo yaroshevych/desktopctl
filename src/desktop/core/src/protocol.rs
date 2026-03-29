@@ -116,6 +116,8 @@ pub enum Command {
         active_window_id: Option<String>,
     },
     PointerScroll {
+        #[serde(default)]
+        id: Option<String>,
         dx: i32,
         dy: i32,
         #[serde(default)]

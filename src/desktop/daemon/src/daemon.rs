@@ -625,21 +625,40 @@ fn execute_with_context(
             Ok(result)
         }
         Command::PointerScroll {
+            id,
             dx,
             dy,
             observe,
             active_window,
             active_window_id,
         } => {
-            trace::log(format!("pointer_scroll:start dx={dx} dy={dy}"));
+            trace::log(format!(
+                "pointer_scroll:start id={:?} dx={dx} dy={dy}",
+                id.as_deref()
+            ));
             let backend = new_backend()?;
             backend.check_accessibility_permission()?;
             let observe_start = capture_observe_start_state(&observe);
             let observe_scope =
                 resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+            if let Some(element_id) = id.as_deref() {
+                let target = resolve_element_id_target(
+                    element_id,
+                    active_window,
+                    active_window_id.as_deref(),
+                    request_context,
+                )?;
+                let center = center_point(&target.bounds);
+                backend.move_mouse(center)?;
+            }
             backend.scroll_wheel(dx, dy)?;
             trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
             let mut result = json!({});
+            if let Some(element_id) = id {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("id".to_string(), json!(element_id));
+                }
+            }
             append_observe_payload(
                 &mut result,
                 observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
@@ -1710,6 +1729,140 @@ fn click_element_id_target(
 
 fn is_ax_element_id(id: &str) -> bool {
     id.starts_with("axid_") || id.starts_with("axp_")
+}
+
+fn center_point(bounds: &desktop_core::protocol::Bounds) -> Point {
+    let x = (bounds.x + bounds.width * 0.5).round().max(0.0) as u32;
+    let y = (bounds.y + bounds.height * 0.5).round().max(0.0) as u32;
+    Point::new(x, y)
+}
+
+fn resolve_element_id_target(
+    id: &str,
+    active_window: bool,
+    active_window_id: Option<&str>,
+    request_context: &RequestContext,
+) -> Result<TokenizeClickElementCandidate, AppError> {
+    if let Some(reference) = active_window_id {
+        assert_active_window_id_matches(reference)?;
+    }
+    let needle = id.trim();
+    if needle.is_empty() {
+        return Err(AppError::invalid_argument("empty element id selector"));
+    }
+
+    if let Some(target) = resolve_ax_element_id_target(needle)? {
+        return Ok(target);
+    }
+
+    let bounds = if active_window {
+        let target = if let Some(reference) = active_window_id {
+            assert_active_window_id_matches(reference)?
+        } else {
+            resolve_active_window_target()?
+        };
+        target.bounds
+    } else {
+        click_scope_window_bounds(request_context).ok_or_else(|| {
+            AppError::target_not_found("frontmost window bounds unavailable for element id lookup")
+        })?
+    };
+    let app = request_frontmost_app(request_context);
+    let window_meta = vision::pipeline::TokenizeWindowMeta {
+        id: "frontmost:1".to_string(),
+        title: app.clone().unwrap_or_else(|| "active_window".to_string()),
+        app,
+        bounds,
+    };
+    let payload = vision::pipeline::tokenize_window(window_meta)?;
+    let candidates = tokenize_payload_elements_for_click(&payload);
+    let total_candidates = candidates.len();
+    let matches: Vec<TokenizeClickElementCandidate> = candidates
+        .into_iter()
+        .filter(|element| element.id == needle)
+        .collect();
+    trace::log(format!(
+        "element_id_lookup:candidates id=\"{}\" total={} matched={}",
+        compact_for_log(needle),
+        total_candidates,
+        matches.len()
+    ));
+    if matches.is_empty() {
+        return Err(AppError::target_not_found(format!(
+            "element id \"{needle}\" was not found in frontmost window"
+        )));
+    }
+    if matches.len() > 1 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple elements matched id \"{needle}\""
+        )));
+    }
+    Ok(matches[0].clone())
+}
+
+fn resolve_ax_element_id_target(
+    needle: &str,
+) -> Result<Option<TokenizeClickElementCandidate>, AppError> {
+    let ax_elements = match platform::ax::collect_frontmost_window_elements() {
+        Ok(items) => items,
+        Err(err) => {
+            trace::log(format!("element_id_lookup:ax_warn {err}"));
+            return Ok(None);
+        }
+    };
+    if ax_elements.is_empty() {
+        return Ok(None);
+    }
+
+    let mut elements: Vec<desktop_core::protocol::TokenizeElement> = ax_elements
+        .iter()
+        .map(|ax| {
+            vision::element_normalizer::ElementBuilder::new()
+                .id(vision::ax_merge::primary_id_for_ax(ax))
+                .kind("")
+                .bbox(ax.bounds.clone())
+                .has_border(None)
+                .text(ax.text.clone())
+                .confidence(None)
+                .source(format!("accessibility_ax:{}", ax.role))
+                .build()
+        })
+        .collect();
+    vision::element_normalizer::finalize_elements(&mut elements);
+    let candidates: Vec<TokenizeClickElementCandidate> = elements
+        .into_iter()
+        .map(|element| TokenizeClickElementCandidate {
+            id: element.id,
+            text: element.text,
+            bounds: desktop_core::protocol::Bounds {
+                x: element.bbox[0],
+                y: element.bbox[1],
+                width: element.bbox[2],
+                height: element.bbox[3],
+            },
+            source: element.source,
+        })
+        .collect();
+    let total_candidates = candidates.len();
+    let matches: Vec<TokenizeClickElementCandidate> = candidates
+        .into_iter()
+        .filter(|element| element.id == needle)
+        .collect();
+    trace::log(format!(
+        "element_id_lookup:ax_candidates id=\"{}\" total={} matched={}",
+        compact_for_log(needle),
+        total_candidates,
+        matches.len()
+    ));
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() > 1 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple AX elements matched id \"{needle}\""
+        )));
+    }
+    Ok(Some(matches[0].clone()))
 }
 
 fn try_click_ax_element_id_target(needle: &str) -> Result<Option<Value>, AppError> {

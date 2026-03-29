@@ -1066,12 +1066,26 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
             })
         }
         "scroll" => {
-            let dx = parse_i32(args.get(1), "dx")?;
-            let dy = parse_i32(args.get(2), "dy")?;
+            let mut id: Option<String> = None;
+            let (dx_idx, dy_idx, mut i) = if args.len() >= 2 && args[1] == "--id" {
+                let element_id = args.get(2).cloned().ok_or_else(|| {
+                    AppError::invalid_argument(
+                        "usage: desktopctl pointer scroll --id <element_id> <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]",
+                    )
+                })?;
+                if element_id.trim().is_empty() {
+                    return Err(AppError::invalid_argument("empty element id selector"));
+                }
+                id = Some(element_id);
+                (3usize, 4usize, 5usize)
+            } else {
+                (1usize, 2usize, 3usize)
+            };
+            let dx = parse_i32(args.get(dx_idx), "dx")?;
+            let dy = parse_i32(args.get(dy_idx), "dy")?;
             let mut observe = ObserveOptions::default();
             let mut active_window = false;
             let mut active_window_id: Option<String> = None;
-            let mut i = 3usize;
             while i < args.len() {
                 match args[i].as_str() {
                     "--active-window" => {
@@ -1123,6 +1137,7 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 }
             }
             Ok(Command::PointerScroll {
+                id,
                 dx,
                 dy,
                 observe,
@@ -1355,6 +1370,7 @@ fn usage() -> &'static str {
   desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer click --token <n> [--active-window [<id>]]
   desktopctl pointer scroll <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+  desktopctl pointer scroll --id <element_id> <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
     hint: before scroll, move pointer into the target scroll area
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms] [--active-window [<id>]]
   desktopctl keyboard type \"text\" [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
@@ -2373,9 +2389,45 @@ mod tests {
         let command = parse_command(&["pointer", "scroll", "0", "-320"].map(str::to_string))
             .expect("pointer scroll should parse");
         match command {
-            Command::PointerScroll { dx, dy, .. } => {
+            Command::PointerScroll { id, dx, dy, .. } => {
+                assert!(id.is_none());
                 assert_eq!(dx, 0);
                 assert_eq!(dy, -320);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pointer_scroll_by_id() {
+        let command = parse_command(
+            &[
+                "pointer",
+                "scroll",
+                "--id",
+                "axid_ns_7",
+                "0",
+                "420",
+                "--active-window",
+                "abc123",
+            ]
+            .map(str::to_string),
+        )
+        .expect("pointer scroll --id should parse");
+        match command {
+            Command::PointerScroll {
+                id,
+                dx,
+                dy,
+                active_window,
+                active_window_id,
+                ..
+            } => {
+                assert_eq!(id.as_deref(), Some("axid_ns_7"));
+                assert_eq!(dx, 0);
+                assert_eq!(dy, 420);
+                assert!(active_window);
+                assert_eq!(active_window_id.as_deref(), Some("abc123"));
             }
             other => panic!("unexpected command: {other:?}"),
         }
