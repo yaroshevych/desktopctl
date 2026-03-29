@@ -3,12 +3,6 @@
 - Global `--json` CLI flag for machine-readable responses, which include `request_id`
 - Daemon keeps a rolling artifact buffer for recent requests, incl. request, response, and screenshot
 
-## Global Output Mode
-```bash
-# global machine-readable envelope mode (includes ok, request_id, result/error)
-desktopctl --json <command...>
-```
-
 ## Observe Mode (Action Feedback)
 ```bash
 # pointer/keyboard actions observe UI change by default
@@ -81,13 +75,14 @@ desktopctl pointer move <x> <y>
 desktopctl pointer down <x> <y>
 desktopctl pointer up <x> <y>
 
-# click pointer by coordinate, OCR text, element id, or token
+# click pointer by coordinate, OCR text, or element id
 desktopctl pointer click <x> <y> [--absolute]
 desktopctl pointer click --text <text>
 desktopctl pointer click --id <element_id> --active-window [<id>]
 
 # scroll pointer viewport/content by signed deltas (positive dy scrolls down)
 desktopctl pointer scroll <dx> <dy>
+desktopctl pointer scroll --id <element_id> <dx> <dy>
 
 # drag pointer between coordinates
 desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms]
@@ -140,11 +135,17 @@ desktopctl replay load <session_dir>
 # show stored metadata for one request
 desktopctl request show <request_id>
 
+# list recent stored requests
+desktopctl request list [--limit <n>]
+
 # export stored screenshot for one request
 desktopctl request screenshot <request_id> [--out <path>]
 
 # return stored response envelope for one request
 desktopctl request response <request_id>
+
+# fuzzy search over stored tokenize responses
+desktopctl request search <text> [--limit <n>] [--command <screen_tokenize|...>]
 ```
 
 ## Exit Codes

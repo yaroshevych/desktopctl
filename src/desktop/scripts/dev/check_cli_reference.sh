@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-USAGE_SRC="${REPO_ROOT}/src/desktop/cli/src/main.rs"
+USAGE_SRC="${REPO_ROOT}/src/desktop/cli/src/usage.rs"
 CLI_MD="${REPO_ROOT}/CLI.md"
 
 if [[ ! -f "${USAGE_SRC}" ]]; then
@@ -22,9 +22,12 @@ normalize_lines() {
   perl -pe '
     s/\\"/"/g;
     s/\[[^\]]*\]//g;
+    s/[\[\]]//g;
+    s/\(--title <text> \| --id <id>\)/--title <text>/g;
     s/ --json//g;
     s/ --absolute//g;
     s/ --duration <ms>//g;
+    s/(desktopctl window (?:bounds|focus)) --id <id>/$1 --title <text>/g;
     s/(<[^>]+>)"$/$1/;
     s/[[:blank:]]+/ /g;
     s/^[[:blank:]]+|[[:blank:]]+$//g;
@@ -32,12 +35,12 @@ normalize_lines() {
 }
 
 extract_usage_commands() {
-  awk '/fn usage\(\)/,/^}/' "${USAGE_SRC}" \
+  awk '/usage\(\)/,/^}/' "${USAGE_SRC}" \
     | sed -n 's/^[[:space:]]*desktopctl /desktopctl /p'
 }
 
 extract_cli_md_commands() {
-  grep '^desktopctl ' "${CLI_MD}"
+  grep '^desktopctl ' "${CLI_MD}" | grep -v 'desktopctl <command...>'
 }
 
 extract_usage_commands | normalize_lines > "${tmpdir}/usage.txt"
