@@ -573,51 +573,8 @@ fn execute_with_context(
             overlay_token_updates_enabled,
         ),
         Command::ScreenFindText { text, all } => commands::screen::find_text(text, all),
-        Command::OverlayStart { duration_ms } => {
-            #[cfg(target_os = "macos")]
-            {
-                PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
-                let started = overlay::start_overlay()?;
-                if let Some(ms) = duration_ms {
-                    let stop_after = ms.max(1);
-                    thread::spawn(move || {
-                        thread::sleep(Duration::from_millis(stop_after));
-                        if let Err(err) = overlay::stop_overlay() {
-                            trace::log(format!(
-                                "overlay:auto_stop err duration_ms={} error={}",
-                                stop_after, err
-                            ));
-                        } else {
-                            trace::log(format!("overlay:auto_stop ok duration_ms={stop_after}"));
-                        }
-                    });
-                }
-                return Ok(json!({
-                    "overlay_running": true,
-                    "started": started,
-                    "duration_ms": duration_ms
-                }));
-            }
-            #[allow(unreachable_code)]
-            Err(AppError::backend_unavailable(
-                "overlay is supported only on macOS",
-            ))
-        }
-        Command::OverlayStop => {
-            #[cfg(target_os = "macos")]
-            {
-                PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
-                let stopped = overlay::stop_overlay()?;
-                return Ok(json!({
-                    "overlay_running": false,
-                    "stopped": stopped
-                }));
-            }
-            #[allow(unreachable_code)]
-            Err(AppError::backend_unavailable(
-                "overlay is supported only on macOS",
-            ))
-        }
+        Command::OverlayStart { duration_ms } => commands::overlay::start(duration_ms),
+        Command::OverlayStop => commands::overlay::stop(),
         Command::WaitText {
             text,
             timeout_ms,
@@ -630,46 +587,28 @@ fn execute_with_context(
             active_window,
             active_window_id,
             observe,
-        } => {
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let observe_start = capture_observe_start_state(&observe);
-            let mut result = click_text_target(
-                &text,
-                button,
-                active_window,
-                bound_active_window_id.as_deref(),
-                request_context,
-            )?;
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, None)?,
-            );
-            Ok(result)
-        }
+        } => commands::pointer::click_text(
+            text,
+            button,
+            active_window,
+            active_window_id,
+            observe,
+            request_context,
+        ),
         Command::PointerClickId {
             id,
             button,
             active_window,
             active_window_id,
             observe,
-        } => {
-            let bound_active_window_id =
-                bind_active_window_reference(active_window, active_window_id.as_deref())?;
-            let observe_start = capture_observe_start_state(&observe);
-            let mut result = click_element_id_target(
-                &id,
-                button,
-                active_window,
-                bound_active_window_id.as_deref(),
-                request_context,
-            )?;
-            append_observe_payload(
-                &mut result,
-                observe_after_action(&observe, &observe_start, None)?,
-            );
-            Ok(result)
-        }
+        } => commands::pointer::click_id(
+            id,
+            button,
+            active_window,
+            active_window_id,
+            observe,
+            request_context,
+        ),
         Command::ClipboardRead => commands::misc::clipboard_read(),
         Command::ClipboardWrite { text } => commands::misc::clipboard_write(text),
         Command::PermissionsCheck => commands::misc::permissions_check(),
