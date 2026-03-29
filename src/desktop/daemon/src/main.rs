@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+mod about;
 mod clipboard;
 mod daemon;
 #[cfg(target_os = "macos")]
@@ -73,7 +75,7 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use tray_icon::{
         TrayIconBuilder,
-        menu::{Menu, MenuEvent, MenuItem},
+        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
 
     let mtm = MainThreadMarker::new().ok_or_else(|| {
@@ -94,15 +96,25 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
 
     let menu = Menu::new();
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
+    let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
     menu.append(&toggle_overlay)
+        .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&about)
+        .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&PredefinedMenuItem::separator())
         .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
     menu.append(&quit)
         .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
 
     let toggle_overlay_id = toggle_overlay.id().clone();
+    let about_id = about.id().clone();
     let quit_id = quit.id().clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if event.id == about_id {
+            about::show();
+            return;
+        }
         if event.id == toggle_overlay_id {
             trace::log("menubar:toggle_overlay click");
             let result = if overlay::is_active() {
