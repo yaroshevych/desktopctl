@@ -15,37 +15,32 @@ use std::{
 };
 
 fn main() {
-    let raw_args: Vec<String> = std::env::args().skip(1).collect();
-    let (json_output, args) = strip_global_json_flag(raw_args);
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let request_id = next_request_id();
-    match run(&args, json_output, &request_id) {
+    match run(&args, &request_id) {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            if json_output {
-                let payload = serde_json::json!({
-                    "ok": false,
-                    "request_id": request_id,
-                    "error": {
-                        "code": err.code,
-                        "message": err.message,
-                        "retryable": err.retryable,
-                        "command": err.command,
-                        "debug_ref": err.debug_ref,
-                    }
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
-                );
-            } else {
-                eprintln!("error: {err}");
-            }
+            let payload = serde_json::json!({
+                "ok": false,
+                "request_id": request_id,
+                "error": {
+                    "code": err.code,
+                    "message": err.message,
+                    "retryable": err.retryable,
+                    "command": err.command,
+                    "debug_ref": err.debug_ref,
+                }
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+            );
             std::process::exit(map_error_code(&err.code));
         }
     }
 }
 
-fn run(args: &[String], json_output: bool, request_id: &str) -> Result<i32, AppError> {
+fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
     let command = parse_command(args)?;
     let supports_active_window = command_supports_active_window(&command);
     let has_explicit_active_window_id = command_has_explicit_active_window_id(&command);
@@ -58,49 +53,28 @@ fn run(args: &[String], json_output: bool, request_id: &str) -> Result<i32, AppE
     ));
     let response = send_request_with_autostart(&request)?;
 
-    if json_output {
-        let mut prefix_fields: Vec<(String, String)> = Vec::new();
-        if supports_active_window && !has_explicit_active_window_id {
-            prefix_fields.push(("tip".to_string(), active_window_tip_message()));
-        }
-        for (idx, hint) in json_hints.iter().enumerate() {
-            let key = if idx == 0 {
-                "hint".to_string()
-            } else {
-                format!("hint_{}", idx + 1)
-            };
-            prefix_fields.push((key, (*hint).to_string()));
-        }
-        let rendered = render_response_with_prefix_fields(&response, &prefix_fields);
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&rendered).unwrap_or_else(|_| "{}".to_string())
-        );
-        let code = match response {
-            ResponseEnvelope::Success(_) => 0,
-            ResponseEnvelope::Error(err) => map_error_code(&err.error.code),
+    let mut prefix_fields: Vec<(String, String)> = Vec::new();
+    if supports_active_window && !has_explicit_active_window_id {
+        prefix_fields.push(("tip".to_string(), active_window_tip_message()));
+    }
+    for (idx, hint) in json_hints.iter().enumerate() {
+        let key = if idx == 0 {
+            "hint".to_string()
+        } else {
+            format!("hint_{}", idx + 1)
         };
-        return Ok(code);
+        prefix_fields.push((key, (*hint).to_string()));
     }
-
-    match response {
-        ResponseEnvelope::Success(success) => {
-            if let Some(message) = success.result.get("message").and_then(|v| v.as_str()) {
-                println!("{message}");
-            } else if success.result != serde_json::json!({}) {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&success.result)
-                        .unwrap_or_else(|_| "{}".to_string())
-                );
-            }
-            Ok(0)
-        }
-        ResponseEnvelope::Error(err) => Err(AppError::new(err.error.code, err.error.message)
-            .with_retryable(err.error.retryable)
-            .with_command(err.error.command)
-            .with_debug_ref(err.error.debug_ref)),
-    }
+    let rendered = render_response_with_prefix_fields(&response, &prefix_fields);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&rendered).unwrap_or_else(|_| "{}".to_string())
+    );
+    let code = match response {
+        ResponseEnvelope::Success(_) => 0,
+        ResponseEnvelope::Error(err) => map_error_code(&err.error.code),
+    };
+    Ok(code)
 }
 
 fn command_supports_active_window(command: &Command) -> bool {
@@ -306,29 +280,27 @@ fn parse_app(args: &[String]) -> Result<Command, AppError> {
 fn parse_window(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
         return Err(AppError::invalid_argument(
-            "usage: desktopctl window list [--json] | desktopctl window bounds (--title <text> | --id <id>) [--json] | desktopctl window focus (--title <text> | --id <id>)",
+            "usage: desktopctl window list | desktopctl window bounds (--title <text> | --id <id>) | desktopctl window focus (--title <text> | --id <id>)",
         ));
     }
 
     match args[0].as_str() {
         "list" => {
-            if args.len() > 1 && args[1] != "--json" {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl window list [--json]",
-                ));
+            if args.len() > 1 {
+                return Err(AppError::invalid_argument("usage: desktopctl window list"));
             }
             Ok(Command::WindowList)
         }
         "bounds" => {
             if args.len() < 3 {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds (--title <text> | --id <id>) [--json]",
+                    "usage: desktopctl window bounds (--title <text> | --id <id>)",
                 ));
             }
             let selector_flag = args[1].as_str();
             if selector_flag != "--title" && selector_flag != "--id" {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds (--title <text> | --id <id>) [--json]",
+                    "usage: desktopctl window bounds (--title <text> | --id <id>)",
                 ));
             }
             let query = args[2].clone();
@@ -343,9 +315,9 @@ fn parse_window(args: &[String]) -> Result<Command, AppError> {
                     selector_flag
                 )));
             }
-            if args.len() > 3 && args[3] != "--json" {
+            if args.len() > 3 {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds (--title <text> | --id <id>) [--json]",
+                    "usage: desktopctl window bounds (--title <text> | --id <id>)",
                 ));
             }
             Ok(Command::WindowBounds { title: query })
@@ -377,7 +349,7 @@ fn parse_window(args: &[String]) -> Result<Command, AppError> {
             Ok(Command::WindowFocus { title: query })
         }
         _ => Err(AppError::invalid_argument(
-            "usage: desktopctl window list [--json] | desktopctl window bounds (--title <text> | --id <id>) [--json] | desktopctl window focus (--title <text> | --id <id>)",
+            "usage: desktopctl window list | desktopctl window bounds (--title <text> | --id <id>) | desktopctl window focus (--title <text> | --id <id>)",
         )),
     }
 }
@@ -650,13 +622,10 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--json" => {
-                        i += 1;
-                    }
                     "--overlay" => {
                         let path = args.get(i + 1).ok_or_else(|| {
                             AppError::invalid_argument(
-                                "missing value for --overlay: desktopctl screen tokenize [--json] [--overlay <path>]",
+                                "missing value for --overlay: desktopctl screen tokenize [--overlay <path>]",
                             )
                         })?;
                         overlay_out_path = Some(path.clone());
@@ -665,7 +634,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--window-query" => {
                         let id = args.get(i + 1).ok_or_else(|| {
                             AppError::invalid_argument(
-                                "missing value for --window-query: desktopctl screen tokenize [--json] [--overlay <path>] [--window-query <text>] [--screenshot <path>]",
+                                "missing value for --window-query: desktopctl screen tokenize [--overlay <path>] [--window-query <text>] [--screenshot <path>]",
                             )
                         })?;
                         if id.trim().is_empty() {
@@ -679,7 +648,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--screenshot" => {
                         let path = args.get(i + 1).ok_or_else(|| {
                             AppError::invalid_argument(
-                                "missing value for --screenshot: desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>]",
+                                "missing value for --screenshot: desktopctl screen tokenize [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>]",
                             )
                         })?;
                         screenshot_path = Some(path.clone());
@@ -758,7 +727,7 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
         "find" => {
             if args.len() < 3 || args[1] != "--text" {
                 return Err(AppError::invalid_argument(
-                    "usage: desktopctl screen find --text <text> [--all] [--json]",
+                    "usage: desktopctl screen find --text <text> [--all]",
                 ));
             }
             let text = args[2].clone();
@@ -768,9 +737,6 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                 match args[i].as_str() {
                     "--all" => {
                         all = true;
-                        i += 1;
-                    }
-                    "--json" => {
                         i += 1;
                     }
                     flag => {
@@ -1571,27 +1537,26 @@ fn parse_i32(value: Option<&String>, field: &str) -> Result<i32, AppError> {
 
 fn usage() -> &'static str {
     "usage:
-  desktopctl --json <command...>
   desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl app hide <application>
   desktopctl app show <application>
   desktopctl app isolate <application>
-  desktopctl window list [--json]
+  desktopctl window list
     hint: compact output with | jq '.windows[] | \"\\(.id) \\(.visible) \\(.title)\"'
-  desktopctl window bounds (--title <text> | --id <id>) [--json]
+  desktopctl window bounds (--title <text> | --id <id>)
   desktopctl window focus (--title <text> | --id <id>)
     hint: when starting, the focused window likely belongs to AI agent, get its ID with tokenise command, then open/focus target window, and in the end of the session focus AI agent window again
     hint: after focusing, use --active-window <id> on subsequent commands to ensure they target the correct window
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
     note: --region is relative to the selected active-window/display target
     hint: prefer `screen tokenize` for automation flows; use screenshot as last resort for visual artifacts/debug
-  desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
+  desktopctl screen tokenize [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
     note: --window-query cannot be combined with --screenshot
     note: --active-window cannot be combined with --window-query or --screenshot
     note: --region is relative to the selected window/screenshot target
     hint: tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`
     hint: compact output with | jq -r '.result.text_dump'
-  desktopctl screen find --text <text> [--all] [--json]
+  desktopctl screen find --text <text> [--all]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read
   desktopctl clipboard write <text>
@@ -1668,15 +1633,6 @@ where
             ));
             Err(err)
         }
-    }
-}
-
-fn strip_global_json_flag(mut args: Vec<String>) -> (bool, Vec<String>) {
-    if let Some(pos) = args.iter().position(|arg| arg == "--json") {
-        args.remove(pos);
-        (true, args)
-    } else {
-        (false, args)
     }
 }
 
@@ -1924,7 +1880,6 @@ mod tests {
             "--text".to_string(),
             "DesktopCtl".to_string(),
             "--all".to_string(),
-            "--json".to_string(),
         ];
         let command = parse_command(&args).expect("screen find should parse");
         match command {
@@ -2179,7 +2134,6 @@ mod tests {
         let args = vec![
             "screen".to_string(),
             "tokenize".to_string(),
-            "--json".to_string(),
             "--overlay".to_string(),
             "/tmp/tokens.overlay.png".to_string(),
         ];
@@ -2642,17 +2596,16 @@ mod tests {
 
     #[test]
     fn parses_window_list() {
-        let command = parse_command(&["window", "list", "--json"].map(str::to_string))
+        let command = parse_command(&["window", "list"].map(str::to_string))
             .expect("window list should parse");
         assert!(matches!(command, Command::WindowList));
     }
 
     #[test]
     fn parses_window_bounds_with_title() {
-        let command = parse_command(
-            &["window", "bounds", "--title", "Calculator", "--json"].map(str::to_string),
-        )
-        .expect("window bounds should parse");
+        let command =
+            parse_command(&["window", "bounds", "--title", "Calculator"].map(str::to_string))
+                .expect("window bounds should parse");
         match command {
             Command::WindowBounds { title } => assert_eq!(title, "Calculator"),
             other => panic!("unexpected command: {other:?}"),
@@ -2672,9 +2625,8 @@ mod tests {
 
     #[test]
     fn parses_window_bounds_with_id() {
-        let command =
-            parse_command(&["window", "bounds", "--id", "35a5c9", "--json"].map(str::to_string))
-                .expect("window bounds by id should parse");
+        let command = parse_command(&["window", "bounds", "--id", "35a5c9"].map(str::to_string))
+            .expect("window bounds by id should parse");
         match command {
             Command::WindowBounds { title } => assert_eq!(title, "35a5c9"),
             other => panic!("unexpected command: {other:?}"),
