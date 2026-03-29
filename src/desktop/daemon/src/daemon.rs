@@ -24,6 +24,7 @@ use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
 
 mod commands;
+mod guards;
 
 #[cfg(target_os = "macos")]
 use crate::overlay;

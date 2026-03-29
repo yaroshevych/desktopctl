@@ -20,23 +20,17 @@ pub(crate) fn pointer_move(
     ));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let bound_active_window_id =
-        super::super::bind_active_window_reference(active_window, active_window_id.as_deref())?;
-    let _ = super::super::resolve_observe_scope_bounds(
-        active_window,
-        bound_active_window_id.as_deref(),
-    )?;
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let point = super::super::resolve_pointer_click_point(
         x,
         y,
         absolute,
         active_window,
-        bound_active_window_id.as_deref(),
+        guard.bound_active_window_id.as_deref(),
         request_context,
     )?;
-    if let Some(reference) = bound_active_window_id.as_deref() {
-        let _ = super::super::assert_active_window_id_matches(reference)?;
-    }
+    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     backend.move_mouse(point)?;
     trace::log(format!(
         "pointer_move:ok x={} y={} absolute={absolute}",
@@ -55,15 +49,9 @@ pub(crate) fn pointer_down(
     trace::log(format!("pointer_down:start x={x} y={y}"));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let bound_active_window_id =
-        super::super::bind_active_window_reference(active_window, active_window_id.as_deref())?;
-    let _ = super::super::resolve_observe_scope_bounds(
-        active_window,
-        bound_active_window_id.as_deref(),
-    )?;
-    if let Some(reference) = bound_active_window_id.as_deref() {
-        let _ = super::super::assert_active_window_id_matches(reference)?;
-    }
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     let point = Point::new(x, y);
     backend.move_mouse(point)?;
     match button {
@@ -84,15 +72,9 @@ pub(crate) fn pointer_up(
     trace::log(format!("pointer_up:start x={x} y={y}"));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let bound_active_window_id =
-        super::super::bind_active_window_reference(active_window, active_window_id.as_deref())?;
-    let _ = super::super::resolve_observe_scope_bounds(
-        active_window,
-        bound_active_window_id.as_deref(),
-    )?;
-    if let Some(reference) = bound_active_window_id.as_deref() {
-        let _ = super::super::assert_active_window_id_matches(reference)?;
-    }
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     let point = Point::new(x, y);
     backend.move_mouse(point)?;
     match button {
@@ -118,24 +100,18 @@ pub(crate) fn pointer_click(
     ));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let bound_active_window_id =
-        super::super::bind_active_window_reference(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::capture_observe_start_state(&observe);
-    let observe_scope = super::super::resolve_observe_scope_bounds(
-        active_window,
-        bound_active_window_id.as_deref(),
-    )?;
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    let observe_start = super::super::guards::capture_observe_start(&observe);
     let point = super::super::resolve_pointer_click_point(
         x,
         y,
         absolute,
         active_window,
-        bound_active_window_id.as_deref(),
+        guard.bound_active_window_id.as_deref(),
         request_context,
     )?;
-    if let Some(reference) = bound_active_window_id.as_deref() {
-        let _ = super::super::assert_active_window_id_matches(reference)?;
-    }
+    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     backend.move_mouse(point)?;
     match button {
         PointerButton::Left => backend.left_click(point)?,
@@ -146,10 +122,12 @@ pub(crate) fn pointer_click(
         point.x, point.y
     ));
     let mut result = json!({});
-    super::super::append_observe_payload(
+    super::super::guards::append_observe(
         &mut result,
-        super::super::observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-    );
+        &observe,
+        &observe_start,
+        guard.observe_scope.as_ref(),
+    )?;
     Ok(result)
 }
 
@@ -168,26 +146,20 @@ pub(crate) fn pointer_scroll(
     ));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let bound_active_window_id =
-        super::super::bind_active_window_reference(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::capture_observe_start_state(&observe);
-    let observe_scope = super::super::resolve_observe_scope_bounds(
-        active_window,
-        bound_active_window_id.as_deref(),
-    )?;
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    let observe_start = super::super::guards::capture_observe_start(&observe);
     if let Some(element_id) = id.as_deref() {
         let target = super::super::resolve_element_id_target(
             element_id,
             active_window,
-            bound_active_window_id.as_deref(),
+            guard.bound_active_window_id.as_deref(),
             request_context,
         )?;
         let center = super::super::center_point(&target.bounds);
         backend.move_mouse(center)?;
     }
-    if let Some(reference) = bound_active_window_id.as_deref() {
-        let _ = super::super::assert_active_window_id_matches(reference)?;
-    }
+    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     backend.scroll_wheel(dx, dy)?;
     trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
     let mut result = json!({});
@@ -196,10 +168,12 @@ pub(crate) fn pointer_scroll(
             obj.insert("id".to_string(), json!(element_id));
         }
     }
-    super::super::append_observe_payload(
+    super::super::guards::append_observe(
         &mut result,
-        super::super::observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-    );
+        &observe,
+        &observe_start,
+        guard.observe_scope.as_ref(),
+    )?;
     Ok(result)
 }
 
@@ -218,15 +192,9 @@ pub(crate) fn pointer_drag(
     ));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let bound_active_window_id =
-        super::super::bind_active_window_reference(active_window, active_window_id.as_deref())?;
-    let _ = super::super::resolve_observe_scope_bounds(
-        active_window,
-        bound_active_window_id.as_deref(),
-    )?;
-    if let Some(reference) = bound_active_window_id.as_deref() {
-        let _ = super::super::assert_active_window_id_matches(reference)?;
-    }
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     let start = Point::new(x1, y1);
     let end = Point::new(x2, y2);
     backend.move_mouse(start)?;
@@ -249,15 +217,17 @@ pub(crate) fn key_type(
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let observe_start = super::super::capture_observe_start_state(&observe);
-    let observe_scope =
-        super::super::resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    let observe_start = super::super::guards::capture_observe_start(&observe);
     backend.type_text(&text)?;
     let mut result = json!({});
-    super::super::append_observe_payload(
+    super::super::guards::append_observe(
         &mut result,
-        super::super::observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-    );
+        &observe,
+        &observe_start,
+        guard.observe_scope.as_ref(),
+    )?;
     Ok(result)
 }
 
@@ -269,15 +239,17 @@ pub(crate) fn key_hotkey(
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let observe_start = super::super::capture_observe_start_state(&observe);
-    let observe_scope =
-        super::super::resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    let observe_start = super::super::guards::capture_observe_start(&observe);
     backend.press_hotkey(&hotkey)?;
     let mut result = json!({});
-    super::super::append_observe_payload(
+    super::super::guards::append_observe(
         &mut result,
-        super::super::observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-    );
+        &observe,
+        &observe_start,
+        guard.observe_scope.as_ref(),
+    )?;
     Ok(result)
 }
 
@@ -288,15 +260,17 @@ pub(crate) fn key_enter(
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let observe_start = super::super::capture_observe_start_state(&observe);
-    let observe_scope =
-        super::super::resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    let observe_start = super::super::guards::capture_observe_start(&observe);
     backend.press_enter()?;
     let mut result = json!({});
-    super::super::append_observe_payload(
+    super::super::guards::append_observe(
         &mut result,
-        super::super::observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-    );
+        &observe,
+        &observe_start,
+        guard.observe_scope.as_ref(),
+    )?;
     Ok(result)
 }
 
@@ -307,14 +281,16 @@ pub(crate) fn key_escape(
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    let observe_start = super::super::capture_observe_start_state(&observe);
-    let observe_scope =
-        super::super::resolve_observe_scope_bounds(active_window, active_window_id.as_deref())?;
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    let observe_start = super::super::guards::capture_observe_start(&observe);
     backend.press_escape()?;
     let mut result = json!({});
-    super::super::append_observe_payload(
+    super::super::guards::append_observe(
         &mut result,
-        super::super::observe_after_action(&observe, &observe_start, observe_scope.as_ref())?,
-    );
+        &observe,
+        &observe_start,
+        guard.observe_scope.as_ref(),
+    )?;
     Ok(result)
 }
