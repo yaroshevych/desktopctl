@@ -754,7 +754,7 @@ fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, App
     let app_hint = snapshot.app.as_deref();
     let target_bounds = snapshot.bounds.as_ref();
 
-    let mut windows = window_target::list_windows()?;
+    let mut windows = window_target::list_windows_basic()?;
     enrich_window_refs(&mut windows);
 
     let selected = windows

@@ -165,6 +165,10 @@ pub(crate) fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
     platform::windowing::list_windows()
 }
 
+pub(crate) fn list_windows_basic() -> Result<Vec<WindowInfo>, AppError> {
+    platform::windowing::list_windows_basic()
+}
+
 pub(crate) fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
     platform::windowing::list_frontmost_app_windows()
 }

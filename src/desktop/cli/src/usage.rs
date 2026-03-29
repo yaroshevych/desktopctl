@@ -5,11 +5,12 @@ pub(crate) fn usage() -> &'static str {
   desktopctl app show <application>
   desktopctl app isolate <application>
   desktopctl window list
-    hint: compact output with | jq '.result.windows[] | \"\\(.id) \\(.visible) \\(.title)\"'
+    hint: compact output with | jq '.result.windows[] | \"\\(.id) \\(.parent_id // \"-\") \\(.modal) \\(.visible) \\(.title)\"'
   desktopctl window bounds (--title <text> | --id <id>)
   desktopctl window focus (--title <text> | --id <id>)
     hint: when starting, the focused window likely belongs to AI agent, get its ID with tokenise command, then open/focus target window, and in the end of the session focus AI agent window again
     hint: after focusing, use --active-window <id> on subsequent commands to ensure they target the correct window
+    hint: for modal dialogs, get IDs via `desktopctl window list`; pass dialog id to act inside dialog, or parent id to act on main window
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
     note: --region is relative to the selected active-window/display target
     hint: prefer `screen tokenize` for automation flows; use screenshot as last resort for visual artifacts/debug

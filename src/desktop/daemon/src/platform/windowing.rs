@@ -115,6 +115,22 @@ pub fn frontmost_window_context() -> Option<FrontmostWindowContext> {
 
 #[cfg(target_os = "macos")]
 pub fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
+    let mut windows = list_windows_coregraphics()?;
+    if let Ok(frontmost_windows) = list_frontmost_app_windows() {
+        merge_frontmost_windows(&mut windows, frontmost_windows);
+    }
+    windows.sort_by(|a, b| {
+        b.frontmost
+            .cmp(&a.frontmost)
+            .then_with(|| a.app.to_lowercase().cmp(&b.app.to_lowercase()))
+            .then_with(|| a.index.cmp(&b.index))
+    });
+    augment_with_ax_metadata(&mut windows);
+    Ok(windows)
+}
+
+#[cfg(target_os = "macos")]
+fn list_windows_coregraphics() -> Result<Vec<WindowInfo>, AppError> {
     use core_foundation::{
         base::{CFType, TCFType},
         boolean::CFBoolean,
@@ -232,17 +248,6 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
         });
     }
 
-    if let Ok(frontmost_windows) = list_frontmost_app_windows() {
-        merge_frontmost_windows(&mut windows, frontmost_windows);
-    }
-
-    windows.sort_by(|a, b| {
-        b.frontmost
-            .cmp(&a.frontmost)
-            .then_with(|| a.app.to_lowercase().cmp(&b.app.to_lowercase()))
-            .then_with(|| a.index.cmp(&b.index))
-    });
-    augment_with_ax_metadata(&mut windows);
     Ok(windows)
 }
 
@@ -252,6 +257,27 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
         "unsupported platform: {}",
         std::env::consts::OS
     )))
+}
+
+#[cfg(target_os = "macos")]
+pub fn list_windows_basic() -> Result<Vec<WindowInfo>, AppError> {
+    finalize_basic_window_list(list_windows_coregraphics()?)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn list_windows_basic() -> Result<Vec<WindowInfo>, AppError> {
+    list_windows()
+}
+
+#[cfg(target_os = "macos")]
+fn finalize_basic_window_list(mut windows: Vec<WindowInfo>) -> Result<Vec<WindowInfo>, AppError> {
+    windows.sort_by(|a, b| {
+        b.frontmost
+            .cmp(&a.frontmost)
+            .then_with(|| a.app.to_lowercase().cmp(&b.app.to_lowercase()))
+            .then_with(|| a.index.cmp(&b.index))
+    });
+    Ok(windows)
 }
 
 #[cfg(target_os = "macos")]
