@@ -16,13 +16,10 @@ pub(crate) fn screenshot(
 ) -> Result<Value, AppError> {
     trace::log("execute:screen_capture:start");
     permissions::ensure_screen_recording_permission()?;
-    if active_window_id.is_some() && !active_window {
-        return Err(AppError::invalid_argument(
-            "active window id requires --active-window",
-        ));
-    }
+    let guard =
+        super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let capture_bounds = if active_window {
-        let base = if let Some(reference) = active_window_id.as_deref() {
+        let base = if let Some(reference) = guard.bound_active_window_id.as_deref() {
             super::super::assert_active_window_id_matches(reference)?.bounds
         } else {
             super::super::resolve_active_window_target()?.bounds
@@ -117,18 +114,18 @@ pub(crate) fn tokenize(
         permissions::ensure_screen_recording_permission()?;
         let backend = new_backend()?;
         backend.check_accessibility_permission()?;
-        if active_window_id.is_some() && !active_window {
-            return Err(AppError::invalid_argument(
-                "active window id requires --active-window",
-            ));
-        }
+        let guard = super::super::guards::prepare_active_window(
+            active_window,
+            active_window_id.as_deref(),
+        )?;
         if active_window {
             if window_query.is_some() {
                 return Err(AppError::invalid_argument(
                     "--active-window cannot be combined with --window-query for screen tokenize",
                 ));
             }
-            let frontmost_window = if let Some(reference) = active_window_id.as_deref() {
+            let frontmost_window = if let Some(reference) = guard.bound_active_window_id.as_deref()
+            {
                 super::super::assert_active_window_id_matches(reference)?
             } else {
                 super::super::resolve_active_window_target()?
