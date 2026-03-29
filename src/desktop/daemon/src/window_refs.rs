@@ -11,6 +11,7 @@ use crate::platform::windowing::WindowInfo;
 const WINDOW_REF_TTL: Duration = Duration::from_secs(10 * 60);
 const WINDOW_REF_MAX: usize = 1024;
 const WINDOW_ID_LEN: usize = 6;
+const WINDOW_APP_PREFIX_MAX_LEN: usize = 32;
 
 #[derive(Clone)]
 struct Entry {
@@ -79,9 +80,11 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
         }
         return existing;
     }
+    let app_prefix = normalized_app_prefix(&window.app);
     let ref_id = loop {
         // Opaque short id for CLI ergonomics; retry if collision exists in live buffer.
-        let candidate = Uuid::new_v4().simple().to_string()[..WINDOW_ID_LEN].to_string();
+        let suffix = Uuid::new_v4().simple().to_string()[..WINDOW_ID_LEN].to_string();
+        let candidate = format!("{app_prefix}_{suffix}");
         if !store.by_ref.contains_key(&candidate) {
             break candidate;
         }
@@ -96,4 +99,81 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
         },
     );
     ref_id
+}
+
+fn normalized_app_prefix(app: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+
+    for c in app.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_was_sep = false;
+        } else if !last_was_sep && !out.is_empty() {
+            out.push('_');
+            last_was_sep = true;
+        }
+        if out.len() >= WINDOW_APP_PREFIX_MAX_LEN {
+            break;
+        }
+    }
+
+    while out.ends_with('_') {
+        out.pop();
+    }
+
+    if out.is_empty() {
+        "window".to_string()
+    } else {
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desktop_core::protocol::Bounds;
+
+    fn sample_window(app: &str) -> WindowInfo {
+        WindowInfo {
+            id: "native-1".to_string(),
+            window_ref: None,
+            parent_id: None,
+            pid: 123,
+            index: 0,
+            app: app.to_string(),
+            title: "title".to_string(),
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            frontmost: true,
+            visible: true,
+            modal: None,
+        }
+    }
+
+    #[test]
+    fn normalizes_app_name_for_window_ref_prefix() {
+        assert_eq!(normalized_app_prefix("System Settings"), "system_settings");
+        assert_eq!(normalized_app_prefix(" Xcode 16.2 "), "xcode_16_2");
+        assert_eq!(normalized_app_prefix("   "), "window");
+    }
+
+    #[test]
+    fn issued_window_ref_uses_app_prefix_and_short_suffix() {
+        let window = sample_window("System Settings");
+        let issued = issue_for_window(&window);
+        let parts: Vec<&str> = issued.split('_').collect();
+        assert!(parts.len() >= 2);
+        assert_eq!(parts.last().map(|s| s.len()), Some(WINDOW_ID_LEN));
+        assert!(
+            parts
+                .last()
+                .is_some_and(|s| s.chars().all(|c| c.is_ascii_hexdigit()))
+        );
+        assert!(issued.starts_with("system_settings_"));
+    }
 }
