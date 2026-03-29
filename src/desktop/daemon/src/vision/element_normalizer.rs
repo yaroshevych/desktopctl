@@ -1,4 +1,4 @@
-use desktop_core::protocol::{Bounds, TokenizeElement};
+use desktop_core::protocol::{Bounds, ToggleState, TokenizeElement};
 use std::collections::HashMap;
 
 const MAX_ELEMENT_TEXT_CHARS: usize = 8192;
@@ -22,6 +22,7 @@ impl ElementBuilder {
                 text_truncated: None,
                 confidence: None,
                 scrollable: None,
+                checked: None,
                 source: String::new(),
             },
         }
@@ -72,6 +73,11 @@ impl ElementBuilder {
 
     pub fn confidence(mut self, confidence: Option<f32>) -> Self {
         self.element.confidence = confidence;
+        self
+    }
+
+    pub fn checked(mut self, checked: Option<ToggleState>) -> Self {
+        self.element.checked = checked;
         self
     }
 
@@ -413,6 +419,7 @@ mod tests {
             text_truncated: None,
             confidence: None,
             scrollable: None,
+            checked: None,
             source: source.to_string(),
         }
     }

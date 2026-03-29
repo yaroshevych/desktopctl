@@ -503,7 +503,18 @@ pub struct TokenizeElement {
     pub confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scrollable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<ToggleState>,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToggleState {
+    True,
+    False,
+    Mixed,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

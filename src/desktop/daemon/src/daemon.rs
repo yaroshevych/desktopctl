@@ -2121,6 +2121,7 @@ fn resolve_ax_element_id_target(
                 .has_border(None)
                 .text(ax.text.clone())
                 .confidence(None)
+                .checked(ax.checked)
                 .source(format!("accessibility_ax:{}", ax.role))
                 .build()
         })
@@ -2187,6 +2188,7 @@ fn try_click_ax_element_id_target(
                 .has_border(None)
                 .text(ax.text.clone())
                 .confidence(None)
+                .checked(ax.checked)
                 .source(format!("accessibility_ax:{}", ax.role))
                 .build()
         })
@@ -3058,6 +3060,7 @@ fn observe_tokens_for_regions(
             "id": id,
             "source": format!("accessibility_ax:{}", ax.role),
             "text": ax.text,
+            "checked": ax.checked,
             "bbox": [ax.bounds.x, ax.bounds.y, ax.bounds.width, ax.bounds.height]
         }));
         ax_count += 1;
@@ -3473,7 +3476,9 @@ fn observe_token_semantic_equal(a: &Value, b: &Value) -> bool {
     let b_bbox = b.get("bbox").cloned().unwrap_or_else(|| json!([]));
     let a_source = a.get("source").cloned().unwrap_or(Value::Null);
     let b_source = b.get("source").cloned().unwrap_or(Value::Null);
-    a_text == b_text && a_bbox == b_bbox && a_source == b_source
+    let a_checked = a.get("checked").cloned().unwrap_or(Value::Null);
+    let b_checked = b.get("checked").cloned().unwrap_or(Value::Null);
+    a_text == b_text && a_bbox == b_bbox && a_source == b_source && a_checked == b_checked
 }
 
 fn merge_bounds(
@@ -4120,6 +4125,7 @@ mod tests {
                     text_truncated: None,
                     confidence: None,
                     scrollable: None,
+                    checked: None,
                     source: "accessibility_ax:AXButton".to_string(),
                 }],
             }],
@@ -4173,6 +4179,7 @@ mod tests {
                     text_truncated: None,
                     confidence: Some(0.9),
                     scrollable: None,
+                    checked: None,
                     source: "accessibility_ax:AXButton".to_string(),
                 }],
             }],
@@ -4222,6 +4229,7 @@ mod tests {
                     text_truncated: None,
                     confidence: Some(0.99),
                     scrollable: None,
+                    checked: None,
                     source: "vision_ocr".to_string(),
                 }],
             }],

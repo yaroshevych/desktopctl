@@ -1053,6 +1053,7 @@ mod tests {
                     text_truncated: None,
                     confidence: Some(1.0),
                     scrollable: None,
+                    checked: None,
                     source: "sat_control_v1".to_string(),
                 },
                 TokenizeElement {
@@ -1064,6 +1065,7 @@ mod tests {
                     text_truncated: None,
                     confidence: Some(1.0),
                     scrollable: None,
+                    checked: None,
                     source: "vision_ocr".to_string(),
                 },
                 TokenizeElement {
@@ -1075,6 +1077,7 @@ mod tests {
                     text_truncated: None,
                     confidence: Some(1.0),
                     scrollable: None,
+                    checked: None,
                     source: "vision_ocr".to_string(),
                 },
             ],

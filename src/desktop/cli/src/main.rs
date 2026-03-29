@@ -66,6 +66,13 @@ fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
         };
         prefix_fields.push((key, (*hint).to_string()));
     }
+    if response_contains_unknown_checked(&response) {
+        let hint_key = next_hint_key(&prefix_fields);
+        prefix_fields.push((
+            hint_key,
+            "toggle control state (checkbox/radio/switch) is unknown; verify with a small-area screenshot around that control".to_string(),
+        ));
+    }
     let rendered =
         render_response_with_prefix_fields(&response, &prefix_fields, passthrough_stored_response);
     println!(
@@ -239,6 +246,43 @@ fn render_response_with_prefix_fields(
         }
     }
     serde_json::Value::Object(out)
+}
+
+fn next_hint_key(prefix_fields: &[(String, String)]) -> String {
+    let hint_count = prefix_fields
+        .iter()
+        .filter(|(k, _)| k == "hint" || k.starts_with("hint_"))
+        .count();
+    if hint_count == 0 {
+        "hint".to_string()
+    } else {
+        format!("hint_{}", hint_count + 1)
+    }
+}
+
+fn response_contains_unknown_checked(response: &ResponseEnvelope) -> bool {
+    let value = match response {
+        ResponseEnvelope::Success(success) => &success.result,
+        ResponseEnvelope::Error(error) => &error.error.details.clone().unwrap_or_default(),
+    };
+    value_contains_unknown_checked(value)
+}
+
+fn value_contains_unknown_checked(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("checked")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| s.eq_ignore_ascii_case("unknown"))
+            {
+                return true;
+            }
+            map.values().any(value_contains_unknown_checked)
+        }
+        serde_json::Value::Array(items) => items.iter().any(value_contains_unknown_checked),
+        _ => false,
+    }
 }
 
 fn is_response_envelope_shape(value: &serde_json::Value) -> bool {

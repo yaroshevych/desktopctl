@@ -1,4 +1,7 @@
-use desktop_core::{error::AppError, protocol::Bounds};
+use desktop_core::{
+    error::AppError,
+    protocol::{Bounds, ToggleState},
+};
 
 #[derive(Debug, Clone)]
 pub struct AxElement {
@@ -6,10 +9,12 @@ pub struct AxElement {
     pub text: Option<String>,
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
+    pub checked: Option<ToggleState>,
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use crate::trace;
     use accessibility::{AXAttribute, AXUIElement, AXUIElementAttributes};
     use accessibility_sys::{
         AXValueGetType, AXValueGetValue, AXValueRef, kAXFocusedApplicationAttribute,
@@ -19,9 +24,14 @@ mod macos {
     use core_foundation::{
         attributed_string::{CFAttributedString, CFAttributedStringGetString},
         base::{CFType, TCFType},
+        boolean::CFBoolean,
+        number::CFNumber,
         string::CFString,
     };
-    use desktop_core::{error::AppError, protocol::Bounds};
+    use desktop_core::{
+        error::AppError,
+        protocol::{Bounds, ToggleState},
+    };
     use std::ffi::c_void;
 
     use super::AxElement;
@@ -91,11 +101,13 @@ mod macos {
         });
         let text = element_label(&focused, &role);
         let ax_identifier = element_identifier(&focused);
+        let checked = element_toggle_state(&focused, &role);
         Ok(Some(AxElement {
             role,
             text,
             bounds,
             ax_identifier,
+            checked,
         }))
     }
 
@@ -105,11 +117,13 @@ mod macos {
                 if let Some(bounds) = element_bounds(element) {
                     let text = element_label(element, &role);
                     let ax_identifier = element_identifier(element);
+                    let checked = element_toggle_state(element, &role);
                     out.push(AxElement {
                         role,
                         text,
                         bounds,
                         ax_identifier,
+                        checked,
                     });
                 }
             }
@@ -140,7 +154,98 @@ mod macos {
                 | "AXValueIndicator"
                 | "AXIncrementor"
                 | "AXSplitter"
+                | "AXSwitch"
         )
+    }
+
+    fn element_toggle_state(element: &AXUIElement, role: &str) -> Option<ToggleState> {
+        if !matches!(role, "AXCheckBox" | "AXRadioButton" | "AXSwitch") {
+            return None;
+        }
+        let Ok(value) = element.attribute(&AXAttribute::value()) else {
+            trace::log(format!("ax:toggle_state role={role} value=missing"));
+            return Some(ToggleState::Unknown);
+        };
+        if let Some(v) = value.downcast::<CFBoolean>() {
+            let checked = bool::from(v);
+            trace::log(format!(
+                "ax:toggle_state role={role} value_kind=bool checked={checked}"
+            ));
+            return Some(if checked {
+                ToggleState::True
+            } else {
+                ToggleState::False
+            });
+        }
+        if let Some(v) = value.downcast::<CFNumber>() {
+            let raw = v.to_i64().or_else(|| v.to_f64().map(|n| n.round() as i64));
+            if let Some(n) = raw {
+                if n <= 0 {
+                    trace::log(format!(
+                        "ax:toggle_state role={role} value_kind=number raw={n} checked=false"
+                    ));
+                    return Some(ToggleState::False);
+                }
+                if n == 1 {
+                    trace::log(format!(
+                        "ax:toggle_state role={role} value_kind=number raw={n} checked=true"
+                    ));
+                    return Some(ToggleState::True);
+                }
+                trace::log(format!(
+                    "ax:toggle_state role={role} value_kind=number raw={n} mixed=true"
+                ));
+                return Some(ToggleState::Mixed);
+            }
+        }
+        if let Some(raw_text) = cf_type_text_raw(&value) {
+            if let Some(state) = parse_toggle_text_state(&raw_text) {
+                trace::log(format!(
+                    "ax:toggle_state role={role} value_kind=text raw=\"{}\" raw_dbg={:?} checked={:?}",
+                    raw_text.replace('\n', " "),
+                    raw_text,
+                    state
+                ));
+                return Some(state);
+            }
+            trace::log(format!(
+                "ax:toggle_state role={role} value_kind=text raw=\"{}\" raw_dbg={:?} parsed=none",
+                raw_text.replace('\n', " "),
+                raw_text
+            ));
+        }
+        trace::log(format!(
+            "ax:toggle_state role={role} value_kind={} parsed=none",
+            cf_type_kind(&value)
+        ));
+        Some(ToggleState::Unknown)
+    }
+
+    fn cf_type_kind(value: &CFType) -> &'static str {
+        if value.instance_of::<CFBoolean>() {
+            "bool"
+        } else if value.instance_of::<CFNumber>() {
+            "number"
+        } else if value.instance_of::<CFString>() {
+            "string"
+        } else if value.instance_of::<CFAttributedString>() {
+            "attributed_string"
+        } else {
+            "other"
+        }
+    }
+
+    fn parse_toggle_text_state(raw: &str) -> Option<ToggleState> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return None;
+        }
+        match normalized.as_str() {
+            "0" | "false" | "off" | "unchecked" | "no" => Some(ToggleState::False),
+            "1" | "true" | "on" | "checked" | "yes" => Some(ToggleState::True),
+            "2" | "mixed" | "indeterminate" | "partially checked" => Some(ToggleState::Mixed),
+            _ => None,
+        }
     }
 
     fn element_label(element: &AXUIElement, role: &str) -> Option<String> {
@@ -340,6 +445,24 @@ mod macos {
                 let text = unsafe { CFString::wrap_under_get_rule(string_ref) }.to_string();
                 let trimmed = text.trim().to_string();
                 return (!trimmed.is_empty()).then_some(trimmed);
+            }
+        }
+        None
+    }
+
+    fn cf_type_text_raw(value: &CFType) -> Option<String> {
+        if value.instance_of::<CFString>() {
+            return Some(
+                unsafe { CFString::wrap_under_get_rule(value.as_CFTypeRef() as _) }.to_string(),
+            );
+        }
+        if value.instance_of::<CFAttributedString>() {
+            let attributed =
+                unsafe { CFAttributedString::wrap_under_get_rule(value.as_CFTypeRef() as _) };
+            let string_ref =
+                unsafe { CFAttributedStringGetString(attributed.as_concrete_TypeRef()) };
+            if !string_ref.is_null() {
+                return Some(unsafe { CFString::wrap_under_get_rule(string_ref) }.to_string());
             }
         }
         None

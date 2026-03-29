@@ -77,6 +77,7 @@ pub fn merge_elements(
                 .has_border(None)
                 .text(merged_text.or(existing_text))
                 .confidence(None)
+                .checked(ax.checked)
                 .source(format!("accessibility_ax:{}", ax.role))
                 .build();
             metrics.ax_replaced += 1;
@@ -91,6 +92,7 @@ pub fn merge_elements(
                 .has_border(None)
                 .text(merged_text)
                 .confidence(None)
+                .checked(ax.checked)
                 .source(format!("accessibility_ax:{}", ax.role))
                 .build(),
         );
@@ -302,6 +304,7 @@ mod tests {
             text_truncated: None,
             confidence: None,
             scrollable: None,
+            checked: None,
             source: source.to_string(),
         }
     }
@@ -345,6 +348,7 @@ mod tests {
                 height: 80.0,
             },
             ax_identifier: None,
+            checked: None,
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -394,6 +398,7 @@ mod tests {
                 height: 30.0,
             },
             ax_identifier: None,
+            checked: None,
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -436,6 +441,7 @@ mod tests {
                 height: 40.0,
             },
             ax_identifier: None,
+            checked: None,
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -469,6 +475,7 @@ mod tests {
                 height: 10.0,
             },
             ax_identifier: Some("SaveButtonMain".to_string()),
+            checked: None,
         };
         let id = primary_id_for_ax(&ax).expect("id");
         assert_eq!(id, "axid_savebuttonmain");
