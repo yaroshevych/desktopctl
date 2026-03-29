@@ -625,10 +625,6 @@ fn build_unified_text_elements(
     elements
 }
 
-pub fn token(n: u32) -> Result<Option<TokenEntry>, AppError> {
-    with_state(|state| state.token(n))
-}
-
 pub fn write_tokenize_overlay(
     payload: &TokenizePayload,
     out_path: &std::path::Path,

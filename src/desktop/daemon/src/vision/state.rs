@@ -108,10 +108,6 @@ impl VisionState {
         &self.token_map
     }
 
-    pub fn token(&self, n: u32) -> Option<TokenEntry> {
-        self.token_map.get(&n).cloned()
-    }
-
     pub fn replace_token_map(&mut self, tokens: Vec<TokenEntry>) {
         self.token_map.clear();
         for token in tokens {

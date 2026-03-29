@@ -918,15 +918,6 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     active_window_id,
                     observe,
                 })
-            } else if args.len() >= 2 && args[1] == "--token" {
-                let token = parse_u32(args.get(2), "token")?;
-                let (active_window, active_window_id) =
-                    parse_active_window_options(&args[3..], "pointer click --token")?;
-                Ok(Command::PointerClickToken {
-                    token,
-                    active_window,
-                    active_window_id,
-                })
             } else {
                 let mut absolute = false;
                 let mut observe = ObserveOptions::default();
@@ -1339,13 +1330,15 @@ fn usage() -> &'static str {
   desktopctl window list [--json]
   desktopctl window bounds (--title <text> | --id <id>) [--json]
   desktopctl window focus (--title <text> | --id <id>)
+    hint: when starting, the focused window likely belongs to AI agent, get its ID with tokenise command, then open/focus target window, and in the end of the session focus AI agent window again
   desktopctl screen screenshot [--out <path>] [--overlay] [--active-window [<id>]] [--region <x> <y> <width> <height>]
     note: --region is relative to the selected active-window/display target
+    hint: prefer `screen tokenize` for automation flows; use screenshot mainly for visual artifacts/debug
   desktopctl screen tokenize [--json] [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
     note: --window-query cannot be combined with --screenshot
     note: --active-window cannot be combined with --window-query or --screenshot
     note: --region is relative to the selected window/screenshot target
-    hint: first tokenize response includes request_id; reuse it with `desktopctl request response <request_id>`
+    hint: tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`
   desktopctl screen find --text <text> [--all] [--json]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read
@@ -1362,20 +1355,23 @@ fn usage() -> &'static str {
   desktopctl replay record --stop
   desktopctl replay load <session_dir>
   desktopctl pointer move [--absolute] <x> <y> [--active-window [<id>]]
+    hint: use relative coordinates by default, it works better with tokenize
   desktopctl pointer down <x> <y> [--active-window [<id>]]
+    hint: include --active-window [<id>] to avoid acting in the wrong window (get id via window list or screen tokenize)
   desktopctl pointer up <x> <y> [--active-window [<id>]]
   desktopctl pointer click [--absolute] <x> <y> [--active-window [<id>]]
   desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] [--active-window [<id>]] <x> <y>
   desktopctl pointer click --text <text> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer click --id <element_id> --active-window [<id>] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
-  desktopctl pointer click --token <n> [--active-window [<id>]]
   desktopctl pointer scroll <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
   desktopctl pointer scroll --id <element_id> <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
     hint: before scroll, move pointer into the target scroll area
+    hint: for long lists, repeat scroll -> tokenize; save each request_id and inspect later via `desktopctl request response <request_id>`
   desktopctl pointer drag <x1> <y1> <x2> <y2> [hold_ms] [--active-window [<id>]]
   desktopctl keyboard type \"text\" [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
     hint: to replace existing field content, send `desktopctl keyboard press cmd+a` before typing
-  desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]"
+  desktopctl keyboard press <key-or-hotkey> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]
+    hint: common keys: delete, left/right/up/down, tab, home/end, pageup/pagedown, f1..f12 (hotkeys like cmd+left also supported)"
 }
 
 fn send_request_with_autostart(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
@@ -2375,16 +2371,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_pointer_click_token() {
-        let token = parse_command(&["pointer", "click", "--token", "42"].map(str::to_string))
-            .expect("pointer click --token should parse");
-        match token {
-            Command::PointerClickToken { token, .. } => assert_eq!(token, 42),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
     fn parses_pointer_scroll() {
         let command = parse_command(&["pointer", "scroll", "0", "-320"].map(str::to_string))
             .expect("pointer scroll should parse");
@@ -2475,34 +2461,6 @@ mod tests {
                 assert!(absolute);
                 assert!(!active_window);
                 assert!(active_window_id.is_none());
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_pointer_click_token_with_active_window() {
-        let command = parse_command(
-            &[
-                "pointer",
-                "click",
-                "--token",
-                "7",
-                "--active-window",
-                "abc123",
-            ]
-            .map(str::to_string),
-        )
-        .expect("pointer click --token with active-window should parse");
-        match command {
-            Command::PointerClickToken {
-                token,
-                active_window,
-                active_window_id,
-            } => {
-                assert_eq!(token, 7);
-                assert!(active_window);
-                assert_eq!(active_window_id.as_deref(), Some("abc123"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -108,13 +108,6 @@ pub enum Command {
         #[serde(default)]
         observe: ObserveOptions,
     },
-    PointerClickToken {
-        token: u32,
-        #[serde(default)]
-        active_window: bool,
-        #[serde(default)]
-        active_window_id: Option<String>,
-    },
     PointerScroll {
         #[serde(default)]
         id: Option<String>,
@@ -288,7 +281,6 @@ impl Command {
             Command::PointerClick { .. } => "pointer_click",
             Command::PointerClickText { .. } => "pointer_click_text",
             Command::PointerClickId { .. } => "pointer_click_id",
-            Command::PointerClickToken { .. } => "pointer_click_token",
             Command::PointerScroll { .. } => "pointer_scroll",
             Command::PointerDrag { .. } => "pointer_drag",
             Command::UiType { .. } => "type",

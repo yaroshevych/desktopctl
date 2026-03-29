@@ -165,7 +165,7 @@ fn applescript_hotkey(input: &str) -> Result<String, AppError> {
         .map(str::trim)
         .filter(|x| !x.is_empty())
         .collect();
-    if parts.len() < 2 {
+    if parts.is_empty() {
         return Err(AppError::invalid_argument(format!(
             "invalid hotkey format: {input}"
         )));
@@ -188,22 +188,83 @@ fn applescript_hotkey(input: &str) -> Result<String, AppError> {
         .collect::<Result<Vec<&str>, AppError>>()?;
 
     let using = modifiers.join(", ");
-    let script = match *key {
-        "space" => format!(r#"tell application "System Events" to key code 49 using {{{using}}}"#),
-        "enter" | "return" => {
-            format!(r#"tell application "System Events" to key code 36 using {{{using}}}"#)
-        }
-        k if k.len() == 1 => {
-            format!(r#"tell application "System Events" to keystroke "{k}" using {{{using}}}"#)
-        }
-        _ => {
-            return Err(AppError::invalid_argument(format!(
-                "invalid hotkey format: {input}"
-            )));
-        }
+    let using_clause = if using.is_empty() {
+        String::new()
+    } else {
+        format!(" using {{{using}}}")
+    };
+    let script = if let Some(code) = keycode_for_name(key) {
+        format!(r#"tell application "System Events" to key code {code}{using_clause}"#)
+    } else if key.len() == 1 {
+        format!(r#"tell application "System Events" to keystroke "{key}"{using_clause}"#)
+    } else {
+        return Err(AppError::invalid_argument(format!(
+            "invalid hotkey format: {input}"
+        )));
     };
 
     Ok(script)
+}
+
+fn keycode_for_name(name: &str) -> Option<u16> {
+    match name {
+        "space" => Some(49),
+        "tab" => Some(48),
+        "enter" | "return" => Some(36),
+        "escape" | "esc" => Some(53),
+        "delete" | "backspace" => Some(51),
+        "forwarddelete" | "forward_delete" | "del" => Some(117),
+        "left" | "leftarrow" | "left_arrow" => Some(123),
+        "right" | "rightarrow" | "right_arrow" => Some(124),
+        "down" | "downarrow" | "down_arrow" => Some(125),
+        "up" | "uparrow" | "up_arrow" => Some(126),
+        "home" => Some(115),
+        "end" => Some(119),
+        "pageup" | "page_up" => Some(116),
+        "pagedown" | "page_down" => Some(121),
+        "f1" => Some(122),
+        "f2" => Some(120),
+        "f3" => Some(99),
+        "f4" => Some(118),
+        "f5" => Some(96),
+        "f6" => Some(97),
+        "f7" => Some(98),
+        "f8" => Some(100),
+        "f9" => Some(101),
+        "f10" => Some(109),
+        "f11" => Some(103),
+        "f12" => Some(111),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::applescript_hotkey;
+
+    #[test]
+    fn hotkey_supports_standalone_delete() {
+        let script = applescript_hotkey("delete").expect("delete should parse");
+        assert_eq!(script, r#"tell application "System Events" to key code 51"#);
+    }
+
+    #[test]
+    fn hotkey_supports_arrow_with_modifier() {
+        let script = applescript_hotkey("cmd+left").expect("cmd+left should parse");
+        assert_eq!(
+            script,
+            r#"tell application "System Events" to key code 123 using {command down}"#
+        );
+    }
+
+    #[test]
+    fn hotkey_supports_single_char_without_modifier() {
+        let script = applescript_hotkey("a").expect("single key should parse");
+        assert_eq!(
+            script,
+            r#"tell application "System Events" to keystroke "a""#
+        );
+    }
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]

@@ -416,7 +416,6 @@ fn command_requires_privacy_signal(command: &Command) -> bool {
             | Command::PointerClick { .. }
             | Command::PointerClickText { .. }
             | Command::PointerClickId { .. }
-            | Command::PointerClickToken { .. }
             | Command::PointerScroll { .. }
             | Command::PointerDrag { .. }
             | Command::UiType { .. }
@@ -1104,11 +1103,6 @@ fn execute_with_context(
             );
             Ok(result)
         }
-        Command::PointerClickToken {
-            token,
-            active_window,
-            active_window_id,
-        } => click_token_target(token, active_window, active_window_id.as_deref()),
         Command::ClipboardRead => {
             let text = clipboard::read_clipboard()?;
             Ok(json!({ "text": text }))
@@ -2135,45 +2129,6 @@ fn screen_layout_summary() -> Result<Value, AppError> {
     }))
 }
 
-fn click_token_target(
-    token_id: u32,
-    active_window: bool,
-    active_window_id: Option<&str>,
-) -> Result<Value, AppError> {
-    if let Some(reference) = active_window_id {
-        if !active_window {
-            return Err(AppError::invalid_argument(
-                "active window id requires --active-window",
-            ));
-        }
-        assert_active_window_id_matches(reference)?;
-    } else if active_window {
-        let _ = resolve_active_window_target()?;
-    }
-    let token = vision::pipeline::token(token_id)?.ok_or_else(|| {
-        AppError::target_not_found(format!(
-            "token {token_id} not found; run `screen tokenize --json` first"
-        ))
-    })?;
-    trace::log(format!(
-        "ui_click_token:selected token={} text=\"{}\" confidence={:.3} bounds=({}, {}, {}, {})",
-        token_id,
-        token.text,
-        token.confidence,
-        token.bounds.x,
-        token.bounds.y,
-        token.bounds.width,
-        token.bounds.height
-    ));
-    perform_click(&token.bounds)?;
-    verify_click_postcondition(&token.text, &token.bounds, 1_200)?;
-    Ok(json!({
-        "token": token_id,
-        "text": token.text,
-        "bounds": token.bounds
-    }))
-}
-
 fn wait_for_text(
     query: &str,
     timeout_ms: u64,
@@ -3108,35 +3063,6 @@ fn merge_bounds(
     }
 }
 
-fn verify_click_postcondition(
-    query: &str,
-    original_bounds: &desktop_core::protocol::Bounds,
-    timeout_ms: u64,
-) -> Result<(), AppError> {
-    let start = Instant::now();
-    while start.elapsed().as_millis() as u64 <= timeout_ms {
-        let capture = vision::pipeline::capture_and_update(None)?;
-        let texts = normalize_snapshot_texts_to_display(
-            &capture.snapshot.texts,
-            capture.image.width(),
-            capture.image.height(),
-            capture.snapshot.display.width,
-            capture.snapshot.display.height,
-        );
-        let still_present = texts.iter().any(|text| {
-            text_matches_query(&text.text, query)
-                && iou(&inflate_bounds(original_bounds, 6.0), &text.bounds) > 0.35
-        });
-        if !still_present {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(120));
-    }
-    Err(AppError::postcondition_failed(format!(
-        "postcondition failed: \"{query}\" still present at target location after click"
-    )))
-}
-
 fn inflate_bounds(
     bounds: &desktop_core::protocol::Bounds,
     pad: f64,
@@ -3177,19 +3103,6 @@ fn compact_for_log(value: &str) -> String {
         normalized.push_str("...");
     }
     normalized
-}
-
-fn text_matches_query(candidate: &str, query: &str) -> bool {
-    let q = query.trim();
-    if q.is_empty() {
-        return false;
-    }
-    if candidate.to_lowercase().contains(&q.to_lowercase()) {
-        return true;
-    }
-    let q_confusable = normalize_confusable_text(q);
-    let candidate_confusable = normalize_confusable_text(candidate);
-    !q_confusable.is_empty() && candidate_confusable.contains(&q_confusable)
 }
 
 fn normalize_confusable_text(value: &str) -> String {
