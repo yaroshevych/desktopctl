@@ -11,11 +11,11 @@ use std::{
 
 use dispatch2::DispatchQueue;
 use objc2::{
-    ClassType, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, rc::Retained,
-    runtime::AnyObject, sel,
+    ClassType, MainThreadMarker, MainThreadOnly, Message, class, define_class, msg_send,
+    rc::Retained, runtime::AnyObject, sel,
 };
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSColor, NSFont, NSTextField, NSView, NSWindow,
+    NSBackingStoreType, NSButton, NSColor, NSControlSize, NSFont, NSTextField, NSView, NSWindow,
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
@@ -23,17 +23,18 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
 use crate::permissions;
 
 const WEBSITE_URL: &str = "https://desktopctl.com";
-const W: f64 = 1000.0;
-const H: f64 = 735.0;
-const LX: f64 = 46.0;
-const BTN_W: f64 = 352.0;
-const BTN_H: f64 = 40.0;
-const RX: f64 = 438.0;
-const RW: f64 = W - RX - 46.0;
-// Vertical centers for rows (macOS coordinates, y=0 at bottom).
-const CY_CLI: f64 = 575.0;
-const CY_AX: f64 = 435.0;
-const CY_SR: f64 = 295.0;
+const W: f64 = 520.0;
+const H: f64 = 380.0;
+const MIN_W: f64 = 520.0;
+const MIN_H: f64 = 380.0;
+const OUTER_MARGIN: f64 = 16.0;
+const COLUMN_GAP: f64 = 16.0;
+const BUTTON_W: f64 = 190.0;
+const BUTTON_H: f64 = 52.0;
+const ROW_TOP: f64 = 16.0;
+const ROW_GAP: f64 = 14.0;
+const CONTENT_TOP_FROM_BUTTON: f64 = 10.0;
+const CLOSE_BOTTOM_INSET: f64 = 8.0;
 
 // Button action target.
 define_class!(
@@ -81,6 +82,28 @@ struct DialogState {
     active: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Copy)]
+struct RowStatusSpec {
+    granted: bool,
+    status_granted: &'static str,
+    status_not_granted: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct RowSpec {
+    name: &'static str,
+    verb: &'static str,
+    explanation: &'static str,
+    action: objc2::runtime::Sel,
+    status: Option<RowStatusSpec>,
+}
+
+struct BuiltRow {
+    btn: Retained<NSButton>,
+    status: Option<Retained<NSTextField>>,
+    exp: Retained<NSTextField>,
+}
+
 impl Drop for DialogState {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Relaxed);
@@ -94,6 +117,152 @@ impl Drop for DialogState {
 
 thread_local! {
     static DIALOG: RefCell<Option<DialogState>> = RefCell::new(None);
+}
+
+fn set_autolayout<T: Message + ?Sized>(view: &T) {
+    unsafe {
+        let _: () = msg_send![view, setTranslatesAutoresizingMaskIntoConstraints: false];
+    }
+}
+
+fn set_large_button(button: &NSButton) {
+    unsafe {
+        let _: () = msg_send![button, setControlSize: NSControlSize::Large];
+    }
+}
+
+fn set_active(constraint: *mut AnyObject) {
+    unsafe {
+        let _: () = msg_send![constraint, setActive: true];
+    }
+}
+
+fn eq_anchor(anchor: *mut AnyObject, to_anchor: *mut AnyObject, constant: f64) {
+    let constraint: *mut AnyObject = unsafe {
+        if constant == 0.0 {
+            msg_send![anchor, constraintEqualToAnchor: to_anchor]
+        } else {
+            msg_send![anchor, constraintEqualToAnchor: to_anchor, constant: constant]
+        }
+    };
+    set_active(constraint);
+}
+
+fn const_anchor(anchor: *mut AnyObject, constant: f64) {
+    let constraint: *mut AnyObject =
+        unsafe { msg_send![anchor, constraintEqualToConstant: constant] };
+    set_active(constraint);
+}
+
+fn layout_row(
+    cv: &NSView,
+    btn: &NSButton,
+    status: Option<&NSTextField>,
+    exp: &NSTextField,
+    prev_exp: Option<&NSTextField>,
+    top_constant: f64,
+) {
+    let cv_top: *mut AnyObject = unsafe { msg_send![cv, topAnchor] };
+    let cv_trailing: *mut AnyObject = unsafe { msg_send![cv, trailingAnchor] };
+    let cv_leading: *mut AnyObject = unsafe { msg_send![cv, leadingAnchor] };
+
+    let btn_top: *mut AnyObject = unsafe { msg_send![btn, topAnchor] };
+    let btn_leading: *mut AnyObject = unsafe { msg_send![btn, leadingAnchor] };
+    let btn_width: *mut AnyObject = unsafe { msg_send![btn, widthAnchor] };
+    let btn_height: *mut AnyObject = unsafe { msg_send![btn, heightAnchor] };
+    let btn_trailing: *mut AnyObject = unsafe { msg_send![btn, trailingAnchor] };
+
+    if let Some(prev) = prev_exp {
+        let prev_bottom: *mut AnyObject = unsafe { msg_send![prev, bottomAnchor] };
+        eq_anchor(btn_top, prev_bottom, top_constant);
+    } else {
+        eq_anchor(btn_top, cv_top, top_constant);
+    }
+    eq_anchor(btn_leading, cv_leading, OUTER_MARGIN);
+    const_anchor(btn_width, BUTTON_W);
+    const_anchor(btn_height, BUTTON_H);
+
+    let exp_top: *mut AnyObject = unsafe { msg_send![exp, topAnchor] };
+    let exp_leading: *mut AnyObject = unsafe { msg_send![exp, leadingAnchor] };
+    let exp_trailing: *mut AnyObject = unsafe { msg_send![exp, trailingAnchor] };
+    if let Some(status) = status {
+        let status_top: *mut AnyObject = unsafe { msg_send![status, topAnchor] };
+        let status_leading: *mut AnyObject = unsafe { msg_send![status, leadingAnchor] };
+        let status_trailing: *mut AnyObject = unsafe { msg_send![status, trailingAnchor] };
+        eq_anchor(status_top, btn_top, CONTENT_TOP_FROM_BUTTON);
+        eq_anchor(status_leading, btn_trailing, COLUMN_GAP);
+        eq_anchor(status_trailing, cv_trailing, -OUTER_MARGIN);
+
+        let status_bottom: *mut AnyObject = unsafe { msg_send![status, bottomAnchor] };
+        eq_anchor(exp_top, status_bottom, 2.0);
+        eq_anchor(exp_leading, status_leading, 0.0);
+        eq_anchor(exp_trailing, status_trailing, 0.0);
+    } else {
+        eq_anchor(exp_top, btn_top, CONTENT_TOP_FROM_BUTTON);
+        eq_anchor(exp_leading, btn_trailing, COLUMN_GAP);
+        eq_anchor(exp_trailing, cv_trailing, -OUTER_MARGIN);
+    }
+}
+
+fn layout_close_button(cv: &NSView, close_btn: &NSButton, last_content: &NSTextField) {
+    let cv_bottom: *mut AnyObject = unsafe { msg_send![cv, bottomAnchor] };
+    let cv_trailing: *mut AnyObject = unsafe { msg_send![cv, trailingAnchor] };
+    let last_bottom: *mut AnyObject = unsafe { msg_send![last_content, bottomAnchor] };
+
+    let close_top: *mut AnyObject = unsafe { msg_send![close_btn, topAnchor] };
+    let close_bottom: *mut AnyObject = unsafe { msg_send![close_btn, bottomAnchor] };
+    let close_trailing: *mut AnyObject = unsafe { msg_send![close_btn, trailingAnchor] };
+    let close_width: *mut AnyObject = unsafe { msg_send![close_btn, widthAnchor] };
+    let close_height: *mut AnyObject = unsafe { msg_send![close_btn, heightAnchor] };
+    eq_anchor(close_top, last_bottom, ROW_GAP + 8.0);
+    eq_anchor(close_bottom, cv_bottom, -CLOSE_BOTTOM_INSET);
+    eq_anchor(close_trailing, cv_trailing, -OUTER_MARGIN);
+    const_anchor(close_width, 100.0);
+    const_anchor(close_height, BUTTON_H);
+}
+
+fn autosize_window_to_content(window: &NSWindow, cv: &NSView) {
+    unsafe {
+        let _: () = msg_send![cv, layoutSubtreeIfNeeded];
+        let fitting: NSSize = msg_send![cv, fittingSize];
+        let target = NSSize::new(fitting.width.max(MIN_W), fitting.height.max(MIN_H));
+        let _: () = msg_send![window, setContentSize: target];
+    }
+}
+
+fn build_row(cv: &NSView, target: &AnyObject, mtm: MainThreadMarker, spec: RowSpec) -> BuiltRow {
+    let (btn, status, exp) = unsafe {
+        dialog_row(
+            cv,
+            spec.name,
+            spec.verb,
+            spec.explanation,
+            spec.action,
+            target,
+            spec.status
+                .map(|s| (s.granted, s.status_granted, s.status_not_granted)),
+            mtm,
+        )
+    };
+    BuiltRow { btn, status, exp }
+}
+
+fn set_row_enabled(row: &BuiltRow, enabled: bool) {
+    row.btn.setEnabled(enabled);
+}
+
+fn set_row_autolayout(row: &BuiltRow) {
+    set_autolayout(&*row.btn);
+    if let Some(status) = row.status.as_ref() {
+        set_autolayout(&**status);
+    }
+    set_autolayout(&*row.exp);
+}
+
+fn row_status_ref(row: &BuiltRow) -> &NSTextField {
+    row.status
+        .as_deref()
+        .expect("row should include a status label")
 }
 
 pub fn show() {
@@ -145,97 +314,128 @@ fn show_on_main() {
             usingBlock: &*close_block
         ];
 
-        // --- Agent Tool row ---
-        let (cli_btn, cli_status) = permission_row(
+        let cli_row = build_row(
             &cv,
-            "Agent Tool",
-            "Install",
-            "Your AI agent uses this tool to see and control your desktop. Once installed, agents can open apps, click buttons, type text, and wait for results",
-            sel!(installAgentTool:),
             target,
-            cli,
-            CY_CLI,
             mtm,
-            "● Installed",
-            "● Not Installed",
+            RowSpec {
+                name: "Agent Tool",
+                verb: "Install",
+                explanation: "Your AI agent uses this tool to see and control your desktop. Once installed, agents can open apps, click buttons, type text, and wait for results — working through any application on your Mac without manual help.",
+                action: sel!(installAgentTool:),
+                status: Some(RowStatusSpec {
+                    granted: cli,
+                    status_granted: "● Installed",
+                    status_not_granted: "● Not Installed",
+                }),
+            },
         );
-        cli_btn.setEnabled(!cli);
+        set_row_enabled(&cli_row, !cli);
 
-        // --- Accessibility row ---
-        let (ax_btn, ax_status) = permission_row(
+        let ax_row = build_row(
             &cv,
-            "Accessibility",
-            "Grant",
-            "Lets agents read what's on screen and interact with it — buttons, inputs, menus, and more. Without this, agents can see the screen but",
-            sel!(grantAccessibility:),
             target,
-            ax,
-            CY_AX,
             mtm,
-            "● Granted",
-            "● Not Granted",
+            RowSpec {
+                name: "Accessibility",
+                verb: "Grant",
+                explanation: "Lets agents read what's on screen and interact with it — buttons, inputs, menus, and more. Without this, agents can see the screen but cannot understand or act on what's in it.\n\nNote: if DesktopCtl is already in the list of allowed apps, remove and add it again.",
+                action: sel!(grantAccessibility:),
+                status: Some(RowStatusSpec {
+                    granted: ax,
+                    status_granted: "● Granted",
+                    status_not_granted: "● Not Granted",
+                }),
+            },
         );
-        ax_btn.setEnabled(!ax);
+        set_row_enabled(&ax_row, !ax);
 
-        // --- Screen Recording row ---
-        let (sr_btn, sr_status) = permission_row(
+        let sr_row = build_row(
             &cv,
-            "Screen Recording",
-            "Grant",
-            "Lets agents see your screen so they can navigate apps visually. All processing happens on your Mac. Nothing is uploaded or sent to your AI",
-            sel!(grantScreenRecording:),
             target,
-            sr,
-            CY_SR,
             mtm,
-            "● Granted",
-            "● Not Granted",
+            RowSpec {
+                name: "Screen Recording",
+                verb: "Grant",
+                explanation: "Lets agents see your screen so they can navigate apps visually. All processing happens on your Mac. Nothing is uploaded or sent to your AI provider unless you explicitly ask it to.\n\nNote: if DesktopCtl is already in the list of allowed apps, remove and add it again.",
+                action: sel!(grantScreenRecording:),
+                status: Some(RowStatusSpec {
+                    granted: sr,
+                    status_granted: "● Granted",
+                    status_not_granted: "● Not Granted",
+                }),
+            },
         );
-        sr_btn.setEnabled(!sr);
+        set_row_enabled(&sr_row, !sr);
 
-        // --- Website / privacy row ---
-        let website_btn = NSButton::buttonWithTitle_target_action(
-            &NSString::from_str("Website ↗"),
-            Some(target),
-            Some(sel!(openWebsite:)),
+        let website_row = build_row(
+            &cv,
+            target,
             mtm,
+            RowSpec {
+                name: "Website ↗",
+                verb: "",
+                explanation: "Learn more about how DesktopCtl works, what agents can do with it, and how to get started.",
+                action: sel!(openWebsite:),
+                status: None,
+            },
         );
-        website_btn.setFrame(NSRect::new(
-            NSPoint::new(LX, 138.0),
-            NSSize::new(232.0, BTN_H),
-        ));
-        cv.addSubview(&website_btn);
-
-        let privacy = NSTextField::wrappingLabelWithString(
-            &NSString::from_str(
-                "Learn more about how DesktopCtl works, what agents can do with it, and how to get started.",
-            ),
-            mtm,
-        );
-        privacy.setFrame(NSRect::new(
-            NSPoint::new(328.0, 118.0),
-            NSSize::new(560.0, 80.0),
-        ));
-        privacy.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-        cv.addSubview(&privacy);
 
         // --- Close button (bottom right) ---
         let close_btn =
             NSButton::buttonWithTitle_target_action(&NSString::from_str("Close"), None, None, mtm);
-        close_btn.setFrame(NSRect::new(
-            NSPoint::new(W - 198.0, 34.0),
-            NSSize::new(152.0, BTN_H),
-        ));
+        set_large_button(&close_btn);
         let _: () = msg_send![&*close_btn, setTarget: &*window];
         let _: () = msg_send![&*close_btn, setAction: sel!(performClose:)];
         cv.addSubview(&close_btn);
 
-        let cli_btn_raw = &*cli_btn as *const _ as *mut AnyObject;
-        let cli_status_raw = &*cli_status as *const _ as *mut AnyObject;
-        let ax_btn_raw = &*ax_btn as *const _ as *mut AnyObject;
-        let ax_status_raw = &*ax_status as *const _ as *mut AnyObject;
-        let sr_btn_raw = &*sr_btn as *const _ as *mut AnyObject;
-        let sr_status_raw = &*sr_status as *const _ as *mut AnyObject;
+        set_row_autolayout(&cli_row);
+        set_row_autolayout(&ax_row);
+        set_row_autolayout(&sr_row);
+        set_row_autolayout(&website_row);
+        set_autolayout(&*close_btn);
+
+        layout_row(
+            &cv,
+            &cli_row.btn,
+            cli_row.status.as_deref(),
+            &cli_row.exp,
+            None,
+            ROW_TOP,
+        );
+        layout_row(
+            &cv,
+            &ax_row.btn,
+            ax_row.status.as_deref(),
+            &ax_row.exp,
+            Some(&cli_row.exp),
+            ROW_GAP,
+        );
+        layout_row(
+            &cv,
+            &sr_row.btn,
+            sr_row.status.as_deref(),
+            &sr_row.exp,
+            Some(&ax_row.exp),
+            ROW_GAP,
+        );
+        layout_row(
+            &cv,
+            &website_row.btn,
+            website_row.status.as_deref(),
+            &website_row.exp,
+            Some(&sr_row.exp),
+            ROW_GAP,
+        );
+        layout_close_button(&cv, &close_btn, &website_row.exp);
+        autosize_window_to_content(&window, &cv);
+
+        let cli_btn_raw = &*cli_row.btn as *const _ as *mut AnyObject;
+        let cli_status_raw = row_status_ref(&cli_row) as *const _ as *mut AnyObject;
+        let ax_btn_raw = &*ax_row.btn as *const _ as *mut AnyObject;
+        let ax_status_raw = row_status_ref(&ax_row) as *const _ as *mut AnyObject;
+        let sr_btn_raw = &*sr_row.btn as *const _ as *mut AnyObject;
+        let sr_status_raw = row_status_ref(&sr_row) as *const _ as *mut AnyObject;
 
         let active = Arc::new(AtomicBool::new(true));
         let active_thread = Arc::clone(&active);
@@ -345,23 +545,28 @@ unsafe fn refresh_row(
 }
 
 // Returns (button, status_label).
-unsafe fn permission_row(
+unsafe fn dialog_row(
     cv: &NSView,
     name: &str,
     verb: &str,
     explanation: &str,
     action: objc2::runtime::Sel,
     target: &AnyObject,
-    granted: bool,
-    center_y: f64,
+    status: Option<(bool, &str, &str)>,
     mtm: MainThreadMarker,
-    status_granted: &str,
-    status_not_granted: &str,
-) -> (Retained<NSButton>, Retained<NSTextField>) {
-    let btn_label = if granted {
-        format!("{name} ✓")
+) -> (
+    Retained<NSButton>,
+    Option<Retained<NSTextField>>,
+    Retained<NSTextField>,
+) {
+    let btn_label = if let Some((granted, _, _)) = status {
+        if granted {
+            format!("{name} ✓")
+        } else {
+            format!("{verb} {name}")
+        }
     } else {
-        format!("{verb} {name}")
+        name.to_string()
     };
     let btn = unsafe {
         NSButton::buttonWithTitle_target_action(
@@ -371,40 +576,34 @@ unsafe fn permission_row(
             mtm,
         )
     };
-    btn.setFrame(NSRect::new(
-        NSPoint::new(LX, center_y - (BTN_H / 2.0)),
-        NSSize::new(BTN_W, BTN_H),
-    ));
+    set_large_button(&btn);
     cv.addSubview(&btn);
 
-    let status_text = if granted {
-        status_granted
+    let status = if let Some((granted, status_granted, status_not_granted)) = status {
+        let status_text = if granted {
+            status_granted
+        } else {
+            status_not_granted
+        };
+        let status = NSTextField::labelWithString(&NSString::from_str(status_text), mtm);
+        status.setFont(Some(&NSFont::boldSystemFontOfSize(17.0)));
+        let color = if granted {
+            NSColor::systemGreenColor()
+        } else {
+            NSColor::systemOrangeColor()
+        };
+        status.setTextColor(Some(&color));
+        cv.addSubview(&status);
+        Some(status)
     } else {
-        status_not_granted
+        None
     };
-    let status = NSTextField::labelWithString(&NSString::from_str(status_text), mtm);
-    status.setFrame(NSRect::new(
-        NSPoint::new(RX, center_y + 20.0),
-        NSSize::new(RW, 36.0),
-    ));
-    status.setFont(Some(&NSFont::boldSystemFontOfSize(17.0)));
-    let color = if granted {
-        NSColor::systemGreenColor()
-    } else {
-        NSColor::systemOrangeColor()
-    };
-    status.setTextColor(Some(&color));
-    cv.addSubview(&status);
 
     let exp = NSTextField::wrappingLabelWithString(&NSString::from_str(explanation), mtm);
-    exp.setFrame(NSRect::new(
-        NSPoint::new(RX, center_y - 66.0),
-        NSSize::new(RW, 78.0),
-    ));
-    exp.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    exp.setFont(Some(&NSFont::systemFontOfSize(12.0)));
     cv.addSubview(&exp);
 
-    (btn, status)
+    (btn, status, exp)
 }
 
 fn cli_in_path() -> bool {
