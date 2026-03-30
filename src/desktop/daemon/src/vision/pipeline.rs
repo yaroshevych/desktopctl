@@ -2,6 +2,7 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
+    thread,
 };
 
 use desktop_core::{
@@ -211,7 +212,10 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
         trace::log("pipeline:tokenize:window_fastpath cache_miss fingerprint_changed");
     }
 
+    let ax_meta = window_meta.clone();
+    let ax_handle = thread::spawn(move || detect_ax_elements(Some(&ax_meta)));
     let texts = recognize_text(&captured.image)?;
+    let ax_elements = ax_handle.join().unwrap_or_else(|_| Vec::new());
     let frame = captured.frame;
     let image = captured.image;
     let image_path = frame.image_path.clone();
@@ -253,6 +257,7 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
         &capture.image,
         capture.image_path.as_deref(),
         Some(window_meta),
+        Some(ax_elements),
     )?;
     with_state(|state| state.update_tokenize_cache(cache_key, fingerprint, payload.clone()))?;
     Ok(payload)
@@ -322,7 +327,7 @@ pub fn tokenize_screenshot(
         focused_app: window_meta.as_ref().and_then(|meta| meta.app.clone()),
         texts,
     };
-    tokenize_from_snapshot(snapshot, &rgba, Some(screenshot_path), window_meta)
+    tokenize_from_snapshot(snapshot, &rgba, Some(screenshot_path), window_meta, None)
 }
 
 fn screenshot_region_crop_rect(
@@ -366,6 +371,7 @@ fn tokenize_from_snapshot(
     rgba: &image::RgbaImage,
     image_path: Option<&Path>,
     window_meta: Option<TokenizeWindowMeta>,
+    ax_elements: Option<Vec<super::ax::AxElement>>,
 ) -> Result<TokenizePayload, AppError> {
     let raw_tokens: Vec<TokenEntry> = snapshot
         .texts
@@ -380,7 +386,8 @@ fn tokenize_from_snapshot(
         .collect();
     let snapshot_id = snapshot.snapshot_id;
     let timestamp = snapshot.timestamp.clone();
-    let (image_meta, windows) = build_window_elements(&snapshot, rgba, image_path, window_meta)?;
+    let (image_meta, windows) =
+        build_window_elements(&snapshot, rgba, image_path, window_meta, ax_elements)?;
     with_state(|state| state.replace_token_map(raw_tokens.clone()))?;
     trace::log(format!(
         "pipeline:tokenize:ok snapshot_id={} tokens={}",
@@ -400,11 +407,13 @@ fn build_window_elements(
     rgba: &image::RgbaImage,
     image_path: Option<&Path>,
     window_meta: Option<TokenizeWindowMeta>,
+    ax_elements_prefetched: Option<Vec<super::ax::AxElement>>,
 ) -> Result<(TokenizeImage, Vec<TokenizeWindow>), AppError> {
     let width = rgba.width();
     let height = rgba.height();
     let mut elements = detect_vision_elements(snapshot, rgba);
-    let ax_elements = detect_ax_elements(window_meta.as_ref());
+    let ax_elements =
+        ax_elements_prefetched.unwrap_or_else(|| detect_ax_elements(window_meta.as_ref()));
     let ax_metrics = merge_elements_stage(
         &mut elements,
         window_meta.as_ref(),
