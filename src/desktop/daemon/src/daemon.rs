@@ -351,16 +351,35 @@ fn maybe_start_privacy_overlay(command: &Command, context: &RequestContext) -> b
         Ok(started) => {
             if started {
                 PRIVACY_OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
-                let (mode, bounds) = if let Some(bounds) = request_frontmost_bounds(context) {
-                    (overlay::WatchMode::WindowMode, Some(bounds))
+                if matches!(command, Command::ScreenTokenize { .. }) {
+                    let command_name = command.name().to_string();
+                    let context = context.clone();
+                    thread::spawn(move || {
+                        let (mode, bounds) =
+                            if let Some(bounds) = request_frontmost_bounds(&context) {
+                                (overlay::WatchMode::WindowMode, Some(bounds))
+                            } else {
+                                (overlay::WatchMode::DesktopMode, None)
+                            };
+                        if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
+                            trace::log(format!(
+                                "overlay:privacy_auto_start mode_warn command={} err={err}",
+                                command_name
+                            ));
+                        }
+                    });
                 } else {
-                    (overlay::WatchMode::DesktopMode, None)
-                };
-                if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
-                    trace::log(format!(
-                        "overlay:privacy_auto_start mode_warn command={} err={err}",
-                        command.name()
-                    ));
+                    let (mode, bounds) = if let Some(bounds) = request_frontmost_bounds(context) {
+                        (overlay::WatchMode::WindowMode, Some(bounds))
+                    } else {
+                        (overlay::WatchMode::DesktopMode, None)
+                    };
+                    if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
+                        trace::log(format!(
+                            "overlay:privacy_auto_start mode_warn command={} err={err}",
+                            command.name()
+                        ));
+                    }
                 }
             }
             trace::log(format!(
