@@ -1,8 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::{OnceLock, mpsc},
-    time::Instant,
-};
+use std::{path::PathBuf, sync::mpsc, time::Instant};
 
 use desktop_core::{automation::new_backend, error::AppError, protocol::Bounds};
 use serde_json::{Value, json};
@@ -10,50 +6,6 @@ use serde_json::{Value, json};
 #[cfg(target_os = "macos")]
 use crate::overlay;
 use crate::{permissions, platform, trace, vision, window_refs, window_target};
-
-enum HintPrefetchJob {
-    CollectByReference {
-        reference: String,
-        reply: mpsc::Sender<Option<super::super::TokenizeHintSnapshot>>,
-    },
-    CollectFromWindows {
-        reference: String,
-        app_windows: Vec<platform::windowing::WindowInfo>,
-        reply: mpsc::Sender<Option<super::super::TokenizeHintSnapshot>>,
-    },
-}
-
-fn hint_prefetch_pool_sender() -> mpsc::Sender<HintPrefetchJob> {
-    static HINT_PREFETCH_POOL: OnceLock<mpsc::Sender<HintPrefetchJob>> = OnceLock::new();
-    HINT_PREFETCH_POOL
-        .get_or_init(|| {
-            let (tx, rx) = mpsc::channel::<HintPrefetchJob>();
-            std::thread::spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    match job {
-                        HintPrefetchJob::CollectByReference { reference, reply } => {
-                            let snapshot =
-                                super::super::collect_tokenize_new_window_hint_snapshot(&reference);
-                            let _ = reply.send(snapshot);
-                        }
-                        HintPrefetchJob::CollectFromWindows {
-                            reference,
-                            app_windows,
-                            reply,
-                        } => {
-                            let snapshot = super::super::collect_tokenize_new_window_hint_snapshot_from_windows(
-                                &reference,
-                                app_windows,
-                            );
-                            let _ = reply.send(snapshot);
-                        }
-                    }
-                }
-            });
-            tx
-        })
-        .clone()
-}
 
 fn resolve_active_window_from_app_windows(
     reference: &str,
@@ -226,16 +178,15 @@ pub(crate) fn tokenize(
                     let reference = reference.to_string();
                     let (reply_tx, reply_rx) =
                         mpsc::channel::<Option<super::super::TokenizeHintSnapshot>>();
-                    if hint_prefetch_pool_sender()
-                        .send(HintPrefetchJob::CollectFromWindows {
-                            reference,
-                            app_windows,
-                            reply: reply_tx,
-                        })
-                        .is_ok()
-                    {
-                        hint_snapshot_prefetch_rx = Some(reply_rx);
-                    }
+                    std::thread::spawn(move || {
+                        let snapshot =
+                            super::super::collect_tokenize_new_window_hint_snapshot_from_windows(
+                                &reference,
+                                app_windows,
+                            );
+                        let _ = reply_tx.send(snapshot);
+                    });
+                    hint_snapshot_prefetch_rx = Some(reply_rx);
                 }
             }
         }
@@ -273,15 +224,13 @@ pub(crate) fn tokenize(
                 {
                     let (reply_tx, reply_rx) =
                         mpsc::channel::<Option<super::super::TokenizeHintSnapshot>>();
-                    if hint_prefetch_pool_sender()
-                        .send(HintPrefetchJob::CollectByReference {
-                            reference: reference.to_string(),
-                            reply: reply_tx,
-                        })
-                        .is_ok()
-                    {
-                        hint_snapshot_prefetch_rx = Some(reply_rx);
-                    }
+                    let reference = reference.to_string();
+                    std::thread::spawn(move || {
+                        let snapshot =
+                            super::super::collect_tokenize_new_window_hint_snapshot(&reference);
+                        let _ = reply_tx.send(snapshot);
+                    });
+                    hint_snapshot_prefetch_rx = Some(reply_rx);
                 }
             }
             let bounds = frontmost_window.bounds.clone();
