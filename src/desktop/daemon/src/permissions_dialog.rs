@@ -23,15 +23,17 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
 use crate::permissions;
 
 const WEBSITE_URL: &str = "https://desktopctl.com";
-const W: f64 = 500.0;
-const H: f64 = 340.0;
-// Right column: starts 12px past the button right edge (16 + 190 + 12 = 218).
-const RX: f64 = 218.0;
-const RW: f64 = W - RX - 16.0;
-// Vertical centres for the three permission rows (macOS coords, y=0 at bottom).
-const CY_CLI: f64 = 286.0;
-const CY_AX: f64 = 216.0;
-const CY_SR: f64 = 146.0;
+const W: f64 = 1000.0;
+const H: f64 = 735.0;
+const LX: f64 = 46.0;
+const BTN_W: f64 = 352.0;
+const BTN_H: f64 = 40.0;
+const RX: f64 = 438.0;
+const RW: f64 = W - RX - 46.0;
+// Vertical centers for rows (macOS coordinates, y=0 at bottom).
+const CY_CLI: f64 = 575.0;
+const CY_AX: f64 = 435.0;
+const CY_SR: f64 = 295.0;
 
 // Button action target.
 define_class!(
@@ -148,7 +150,7 @@ fn show_on_main() {
             &cv,
             "Agent Tool",
             "Install",
-            "AI agents use this CLI tool to control the desktop.",
+            "Your AI agent uses this tool to see and control your desktop. Once installed, agents can open apps, click buttons, type text, and wait for results",
             sel!(installAgentTool:),
             target,
             cli,
@@ -164,7 +166,7 @@ fn show_on_main() {
             &cv,
             "Accessibility",
             "Grant",
-            "Controls mouse, keyboard input, and reads UI element state across all apps.",
+            "Lets agents read what's on screen and interact with it — buttons, inputs, menus, and more. Without this, agents can see the screen but",
             sel!(grantAccessibility:),
             target,
             ax,
@@ -180,7 +182,7 @@ fn show_on_main() {
             &cv,
             "Screen Recording",
             "Grant",
-            "Captures screen frames for GPU-accelerated text recognition and visual grounding.",
+            "Lets agents see your screen so they can navigate apps visually. All processing happens on your Mac. Nothing is uploaded or sent to your AI",
             sel!(grantScreenRecording:),
             target,
             sr,
@@ -199,18 +201,20 @@ fn show_on_main() {
             mtm,
         );
         website_btn.setFrame(NSRect::new(
-            NSPoint::new(16.0, 64.0),
-            NSSize::new(130.0, 28.0),
+            NSPoint::new(LX, 138.0),
+            NSSize::new(232.0, BTN_H),
         ));
         cv.addSubview(&website_btn);
 
         let privacy = NSTextField::wrappingLabelWithString(
-            &NSString::from_str("Strictly local. No data is collected or sent to the internet."),
+            &NSString::from_str(
+                "Learn more about how DesktopCtl works, what agents can do with it, and how to get started.",
+            ),
             mtm,
         );
         privacy.setFrame(NSRect::new(
-            NSPoint::new(162.0, 54.0),
-            NSSize::new(322.0, 44.0),
+            NSPoint::new(328.0, 118.0),
+            NSSize::new(560.0, 80.0),
         ));
         privacy.setFont(Some(&NSFont::systemFontOfSize(11.0)));
         cv.addSubview(&privacy);
@@ -219,8 +223,8 @@ fn show_on_main() {
         let close_btn =
             NSButton::buttonWithTitle_target_action(&NSString::from_str("Close"), None, None, mtm);
         close_btn.setFrame(NSRect::new(
-            NSPoint::new(W - 106.0, 12.0),
-            NSSize::new(90.0, 28.0),
+            NSPoint::new(W - 198.0, 34.0),
+            NSSize::new(152.0, BTN_H),
         ));
         let _: () = msg_send![&*close_btn, setTarget: &*window];
         let _: () = msg_send![&*close_btn, setAction: sel!(performClose:)];
@@ -368,8 +372,8 @@ unsafe fn permission_row(
         )
     };
     btn.setFrame(NSRect::new(
-        NSPoint::new(16.0, center_y - 14.0),
-        NSSize::new(190.0, 28.0),
+        NSPoint::new(LX, center_y - (BTN_H / 2.0)),
+        NSSize::new(BTN_W, BTN_H),
     ));
     cv.addSubview(&btn);
 
@@ -380,9 +384,10 @@ unsafe fn permission_row(
     };
     let status = NSTextField::labelWithString(&NSString::from_str(status_text), mtm);
     status.setFrame(NSRect::new(
-        NSPoint::new(RX, center_y + 2.0),
-        NSSize::new(RW, 20.0),
+        NSPoint::new(RX, center_y + 20.0),
+        NSSize::new(RW, 36.0),
     ));
+    status.setFont(Some(&NSFont::boldSystemFontOfSize(17.0)));
     let color = if granted {
         NSColor::systemGreenColor()
     } else {
@@ -393,8 +398,8 @@ unsafe fn permission_row(
 
     let exp = NSTextField::wrappingLabelWithString(&NSString::from_str(explanation), mtm);
     exp.setFrame(NSRect::new(
-        NSPoint::new(RX, center_y - 38.0),
-        NSSize::new(RW, 34.0),
+        NSPoint::new(RX, center_y - 66.0),
+        NSSize::new(RW, 78.0),
     ));
     exp.setFont(Some(&NSFont::systemFontOfSize(11.0)));
     cv.addSubview(&exp);
