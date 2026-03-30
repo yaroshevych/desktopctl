@@ -7,6 +7,7 @@ use desktop_core::{
     error::AppError,
     protocol::{Command, RequestEnvelope, ResponseEnvelope},
 };
+use std::time::Instant;
 
 pub(crate) use parse::parse_command;
 #[cfg(test)]
@@ -40,6 +41,7 @@ fn main() {
 }
 
 fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
+    let run_started = Instant::now();
     let command = parse_command(args)?;
     let passthrough_stored_response = matches!(command, Command::RequestResponse { .. });
     let request = RequestEnvelope::new(request_id.to_string(), command);
@@ -48,14 +50,27 @@ fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
         request.request_id,
         request.command.name()
     ));
+    let send_started = Instant::now();
     let response = send_request_with_autostart(&request)?;
+    let send_elapsed_ms = send_started.elapsed().as_millis();
 
+    let render_started = Instant::now();
     let rendered =
         output::render_response(&request.command, &response, passthrough_stored_response);
     println!(
         "{}",
         serde_json::to_string_pretty(&rendered).unwrap_or_else(|_| "{}".to_string())
     );
+    let render_print_elapsed_ms = render_started.elapsed().as_millis();
+    let total_elapsed_ms = run_started.elapsed().as_millis();
+    trace_log(format!(
+        "run:request_timing request_id={} command={} total_ms={} send_ms={} render_print_ms={}",
+        request.request_id,
+        request.command.name(),
+        total_elapsed_ms,
+        send_elapsed_ms,
+        render_print_elapsed_ms
+    ));
     let code = match response {
         ResponseEnvelope::Success(_) => 0,
         ResponseEnvelope::Error(err) => map_error_code(&err.error.code),
