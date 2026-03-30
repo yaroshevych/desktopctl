@@ -1,5 +1,4 @@
-use crate::transport::{next_request_id, send_request_with_autostart};
-use desktop_core::protocol::{Command, RequestEnvelope, ResponseEnvelope};
+use desktop_core::protocol::{Command, ResponseEnvelope};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn render_response(
@@ -14,7 +13,7 @@ pub(crate) fn render_response(
     let mut prefix_fields: Vec<(String, String)> = Vec::new();
     let mut eligible_hints: Vec<String> = Vec::new();
     if supports_active_window && !has_explicit_active_window_id {
-        eligible_hints.push(active_window_tip_message());
+        eligible_hints.push(active_window_tip_message(response));
     }
     for hint in &json_hints {
         eligible_hints.push((*hint).to_string());
@@ -101,8 +100,8 @@ fn command_has_explicit_active_window_id(command: &Command) -> bool {
     }
 }
 
-fn active_window_tip_message() -> String {
-    let id = resolve_frontmost_window_id().unwrap_or_else(|| "unknown".to_string());
+fn active_window_tip_message(response: &ResponseEnvelope) -> String {
+    let id = resolve_window_id_from_response(response).unwrap_or_else(|| "unknown".to_string());
     format!("use --active-window {id} to avoid acting in the wrong window")
 }
 
@@ -138,23 +137,13 @@ fn command_json_hints(command: &Command) -> Vec<&'static str> {
     }
 }
 
-fn resolve_frontmost_window_id() -> Option<String> {
-    let list_request_id = next_request_id();
-    let request = RequestEnvelope::new(list_request_id, Command::WindowList);
-    let response = send_request_with_autostart(&request).ok()?;
+fn resolve_window_id_from_response(response: &ResponseEnvelope) -> Option<String> {
     let success = match response {
         ResponseEnvelope::Success(success) => success,
         ResponseEnvelope::Error(_) => return None,
     };
     let windows = success.result.get("windows")?.as_array()?;
     for window in windows {
-        if !window
-            .get("frontmost")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            continue;
-        }
         if let Some(id) = window.get("id").and_then(serde_json::Value::as_str) {
             let trimmed = id.trim();
             if !trimmed.is_empty() {
