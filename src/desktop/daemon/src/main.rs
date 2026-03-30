@@ -93,6 +93,8 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
     if permission_requests.screen_recording_requested {
         eprintln!("requested Screen Recording permission for DesktopCtl.app");
     }
+    let missing_permissions =
+        !permissions::accessibility_granted() || !permissions::screen_recording_granted();
 
     daemon::start_background(daemon::DaemonConfig::resident())?;
 
@@ -189,6 +191,9 @@ fn run_macos_app() -> Result<(), desktop_core::error::AppError> {
         .build()
         .map_err(|e| desktop_core::error::AppError::backend_unavailable(e.to_string()))?;
     TRAY.with(|cell| *cell.borrow_mut() = Some(tray));
+    if missing_permissions {
+        permissions_dialog::show();
+    }
 
     ns_app.run();
     Ok(())

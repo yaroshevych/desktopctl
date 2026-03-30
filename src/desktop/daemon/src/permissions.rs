@@ -47,9 +47,6 @@ pub fn request_startup_permissions() -> StartupPermissionRequests {
     }
     if !screen_recording_granted() {
         requests.screen_recording_requested = request_screen_recording_permission_prompt();
-        if !screen_recording_granted() {
-            let _ = open_screen_recording_settings();
-        }
     }
 
     requests
