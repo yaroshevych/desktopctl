@@ -9,7 +9,7 @@ use std::{
 use block2::RcBlock;
 use core_graphics::display::CGDisplay;
 use desktop_core::{error::AppError, protocol::now_millis};
-use image::{ImageFormat, RgbaImage};
+use image::{ImageFormat, RgbaImage, imageops::FilterType};
 use objc2::runtime::AnyClass;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSError, NSURL};
@@ -32,7 +32,20 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
 
     // In-memory-by-default path (no out_path) avoids disk I/O.
     if out_path.is_none() {
-        let image = capture_with_coregraphics(&display)?;
+        let mut image = capture_with_coregraphics(&display)?;
+        let logical_w = bounds.size.width.max(0.0) as u32;
+        let logical_h = bounds.size.height.max(0.0) as u32;
+        if logical_w > 0 && logical_h > 0 && image.width() > logical_w && image.height() > logical_h
+        {
+            trace::log(format!(
+                "capture:screen_png:downscale_to_logical from={}x{} to={}x{}",
+                image.width(),
+                image.height(),
+                logical_w,
+                logical_h
+            ));
+            image = image::imageops::resize(&image, logical_w, logical_h, FilterType::Triangle);
+        }
         trace::log("capture:screen_png:ok path=<memory>");
         return Ok(CapturedImage {
             frame: CapturedFrame {
