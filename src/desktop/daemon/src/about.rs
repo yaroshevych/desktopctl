@@ -1,6 +1,7 @@
-use block2::RcBlock;
+use std::cell::RefCell;
+
 use dispatch2::DispatchQueue;
-use objc2::{class, msg_send, runtime::AnyObject};
+use objc2::{ClassType, class, define_class, msg_send, rc::Retained, runtime::AnyObject, sel};
 use objc2_app_kit::NSWindowStyleMask;
 use objc2_foundation::NSString;
 
@@ -13,15 +14,51 @@ Point your AI agent at the GitHub link below to read the docs and get started.";
 const WEBSITE_URL: &str = "https://desktopctl.com";
 const GITHUB_URL: &str = "https://github.com/yaroshevych/desktopctl";
 
-// NSAlertFirstButtonReturn / Second — added in order: Website (1000), GitHub (1001).
-const ALERT_WEBSITE: isize = 1000;
-const ALERT_GITHUB: isize = 1001;
+define_class!(
+    #[unsafe(super(objc2::runtime::NSObject))]
+    struct AboutTarget;
+
+    impl AboutTarget {
+        #[unsafe(method(openWebsite:))]
+        fn open_website(&self, _: &AnyObject) {
+            open_url(WEBSITE_URL);
+        }
+
+        #[unsafe(method(openGitHub:))]
+        fn open_github(&self, _: &AnyObject) {
+            open_url(GITHUB_URL);
+        }
+    }
+);
+
+struct AboutState {
+    /// Keep alert alive — it owns the window.
+    _alert: Retained<AnyObject>,
+    /// Keep target alive — NSButton holds only a weak ref.
+    _target: Retained<AnyObject>,
+}
+
+thread_local! {
+    static ABOUT: RefCell<Option<AboutState>> = RefCell::new(None);
+}
 
 pub fn show() {
     DispatchQueue::main().exec_async(show_on_main);
 }
 
 fn show_on_main() {
+    // Close any existing About window.
+    ABOUT.with(|cell| {
+        if let Some(ref s) = *cell.borrow() {
+            unsafe {
+                let alert_ptr = Retained::as_ptr(&s._alert);
+                let window: *mut AnyObject = msg_send![alert_ptr, window];
+                let _: () = msg_send![window, close];
+            }
+        }
+        *cell.borrow_mut() = None;
+    });
+
     unsafe {
         let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
 
@@ -31,51 +68,43 @@ fn show_on_main() {
         let info = NSString::from_str(ABOUT_TEXT);
         let _: () = msg_send![alert, setInformativeText: &*info];
 
-        // Two action buttons (right-to-left: Website is default/right, GitHub is left).
         let website_lbl = NSString::from_str("Website");
-        let _: () = msg_send![alert, addButtonWithTitle: &*website_lbl]; // 1000
+        let _: () = msg_send![alert, addButtonWithTitle: &*website_lbl];
 
         let github_lbl = NSString::from_str("GitHub");
-        let _: () = msg_send![alert, addButtonWithTitle: &*github_lbl]; // 1001
+        let _: () = msg_send![alert, addButtonWithTitle: &*github_lbl];
 
-        // Add the standard close button (red ×) to the alert's underlying window.
+        // Force layout so buttons and window are fully initialised.
+        let _: () = msg_send![alert, layout];
+
+        // Add a close button (red ×) to the alert's underlying window.
         let window: *mut AnyObject = msg_send![alert, window];
         let current_mask: NSWindowStyleMask = msg_send![window, styleMask];
         let _: () = msg_send![window, setStyleMask: current_mask | NSWindowStyleMask::Closable];
 
-        // When the user clicks ×, NSWindow posts NSWindowWillCloseNotification.
-        // Handle it by stopping the modal loop (returns NSModalResponseStop = -1000).
-        let nc: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
-        let stop_block = RcBlock::new(|_notif: *mut AnyObject| {
-            let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-            let _: () = msg_send![ns_app, stopModal];
-        });
-        let will_close = NSString::from_str("NSWindowWillCloseNotification");
-        let observer: *mut AnyObject = msg_send![
-            nc,
-            addObserverForName: &*will_close,
-            object: window,
-            queue: std::ptr::null::<AnyObject>(),
-            usingBlock: &*stop_block
-        ];
+        // Wire alert buttons to our target instead of the modal-loop handler.
+        let target_raw: *mut AnyObject = msg_send![AboutTarget::class(), new];
+        let buttons: *mut AnyObject = msg_send![alert, buttons];
+        let website_btn: *mut AnyObject = msg_send![buttons, objectAtIndex: 0usize];
+        let github_btn: *mut AnyObject = msg_send![buttons, objectAtIndex: 1usize];
+        let _: () = msg_send![website_btn, setTarget: target_raw];
+        let _: () = msg_send![website_btn, setAction: sel!(openWebsite:)];
+        let _: () = msg_send![github_btn, setTarget: target_raw];
+        let _: () = msg_send![github_btn, setAction: sel!(openGitHub:)];
 
-        // Bring the app to front so the dialog appears above other windows.
         let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
+        let _: () = msg_send![window, center];
+        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
 
-        let response: isize = msg_send![alert, runModal];
-
-        // Clean up the notification observer now that the modal is done.
-        let _: () = msg_send![nc, removeObserver: observer];
-
-        let url = match response {
-            ALERT_WEBSITE => Some(WEBSITE_URL),
-            ALERT_GITHUB => Some(GITHUB_URL),
-            _ => None, // closed via × button (NSModalResponseStop = -1000)
-        };
-        if let Some(url_str) = url {
-            open_url(url_str);
-        }
+        let alert_retained: Retained<AnyObject> = Retained::from_raw(alert).unwrap();
+        let target_retained: Retained<AnyObject> = Retained::from_raw(target_raw).unwrap();
+        ABOUT.with(|cell| {
+            *cell.borrow_mut() = Some(AboutState {
+                _alert: alert_retained,
+                _target: target_retained,
+            });
+        });
     }
 }
 
