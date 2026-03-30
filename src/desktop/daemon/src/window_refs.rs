@@ -101,6 +101,18 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
     ref_id
 }
 
+pub(crate) fn resolve_native_for_ref(reference: &str) -> Option<(i64, String)> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut store = lock_store();
+    purge_expired(&mut store);
+    let entry = store.by_ref.get_mut(trimmed)?;
+    entry.touched_at = Instant::now();
+    Some((entry.pid, entry.window_id.clone()))
+}
+
 fn normalized_app_prefix(app: &str) -> String {
     let mut out = String::new();
     let mut last_was_sep = false;
@@ -175,5 +187,13 @@ mod tests {
                 .is_some_and(|s| s.chars().all(|c| c.is_ascii_hexdigit()))
         );
         assert!(issued.starts_with("system_settings_"));
+    }
+
+    #[test]
+    fn resolves_native_window_from_ref() {
+        let window = sample_window("System Settings");
+        let issued = issue_for_window(&window);
+        let resolved = resolve_native_for_ref(&issued);
+        assert_eq!(resolved, Some((123, "native-1".to_string())));
     }
 }

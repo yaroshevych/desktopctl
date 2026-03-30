@@ -53,6 +53,15 @@ const OBSERVE_OCR_PAD_PX: f64 = 40.0;
 static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
     OnceLock::new();
 
+type TokenizeHintWindow = (String, String, bool, Option<String>);
+
+#[derive(Debug, Clone)]
+pub(crate) struct TokenizeHintSnapshot {
+    context: Option<String>,
+    state_key: String,
+    current_windows: Vec<TokenizeHintWindow>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RequestContext {
     #[cfg(target_os = "macos")]
@@ -234,6 +243,7 @@ fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppEr
 
 fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     let request: RequestEnvelope = read_framed_json(&mut stream)?;
+    let request_started = Instant::now();
     let request_id = request.request_id.clone();
     let command = request.command.clone();
     let command_name = command.name().to_string();
@@ -290,7 +300,7 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
                 "client:execute_err code={:?} msg={}",
                 err.code, err.message
             ));
-            ResponseEnvelope::from_error(request_id, command_name, err)
+            ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
         }
         Err(payload) => {
             let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
@@ -304,7 +314,7 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             let err = AppError::internal(format!(
                 "daemon panic during command execution: {panic_message}"
             ));
-            ResponseEnvelope::from_error(request_id, command_name, err)
+            ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
         }
     };
     #[cfg(target_os = "macos")]
@@ -323,6 +333,12 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     trace::log("client:write_response_begin");
     write_framed_json(&mut stream, &response)?;
     trace::log("client:write_response_ok");
+    trace::log(format!(
+        "client:request_timing request_id={} command={} total_ms={}",
+        request_id,
+        command_name,
+        request_started.elapsed().as_millis()
+    ));
     Ok(())
 }
 
@@ -747,8 +763,47 @@ pub(super) fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]
 }
 
 fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, AppError> {
-    // Use normalized frontmost snapshot so tiny raw AX/menu windows are replaced
-    // by a meaningful app window candidate when available.
+    // Fast-path: if frontmost app windows provide a viable candidate, return
+    // immediately and avoid slower fallback heuristics.
+    if let Ok(mut frontmost_windows) = window_target::list_frontmost_app_windows() {
+        enrich_window_refs(&mut frontmost_windows);
+        if let Some(selected) = frontmost_windows
+            .iter()
+            .filter(|window| {
+                window.frontmost
+                    && window.visible
+                    && window.bounds.width > 8.0
+                    && window.bounds.height > 8.0
+            })
+            .max_by(|a, b| {
+                let sa = active_window_candidate_score(a, None);
+                let sb = active_window_candidate_score(b, None);
+                sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+        {
+            trace::log("active_window_target:short_circuit_frontmost_app");
+            return Ok(selected);
+        }
+        if let Some(selected) = frontmost_windows
+            .iter()
+            .filter(|window| {
+                window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
+            })
+            .max_by(|a, b| {
+                let sa = active_window_candidate_score(a, None);
+                let sb = active_window_candidate_score(b, None);
+                sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+        {
+            trace::log("active_window_target:short_circuit_visible_frontmost_app");
+            return Ok(selected);
+        }
+    }
+
+    // Use normalized frontmost snapshot only when the quick path above did
+    // not yield a candidate.
     let snapshot = window_target::resolve_frontmost_snapshot();
     let app_hint = snapshot.app.as_deref();
     let target_bounds = snapshot.bounds.as_ref();
@@ -841,6 +896,23 @@ fn assert_active_window_id_matches(
             "active window id must not be empty",
         ));
     }
+    if let Some((expected_pid, expected_window_id)) = window_refs::resolve_native_for_ref(trimmed) {
+        if let Ok(mut current_app_windows) = window_target::list_frontmost_app_windows() {
+            enrich_window_refs(&mut current_app_windows);
+            if let Some(active) = current_app_windows.into_iter().find(|window| {
+                window.visible
+                    && window.bounds.width > 8.0
+                    && window.bounds.height > 8.0
+                    && window.pid == expected_pid
+                    && window.id == expected_window_id
+            }) {
+                trace::log("active_window_id_match:fastpath_hit");
+                return Ok(active);
+            }
+            trace::log("active_window_id_match:fastpath_miss");
+        }
+    }
+
     let active = resolve_active_window_target()?;
     let active_ref = active
         .window_ref
@@ -1041,7 +1113,69 @@ fn append_tokenize_text_dump(value: &mut Value) {
     }
 }
 
-fn append_tokenize_new_window_hint(value: &mut Value, active_window_id: Option<&str>) {
+pub(crate) fn collect_tokenize_new_window_hint_snapshot(
+    active_window_id: &str,
+) -> Option<TokenizeHintSnapshot> {
+    let active_window_id = active_window_id.trim();
+    if active_window_id.is_empty() {
+        return None;
+    }
+    let mut app_windows = window_target::list_frontmost_app_windows().ok()?;
+    enrich_window_refs(&mut app_windows);
+    collect_tokenize_new_window_hint_snapshot_from_windows(active_window_id, app_windows)
+}
+
+pub(crate) fn collect_tokenize_new_window_hint_snapshot_from_windows(
+    active_window_id: &str,
+    app_windows: Vec<platform::windowing::WindowInfo>,
+) -> Option<TokenizeHintSnapshot> {
+    let active_window_id = active_window_id.trim();
+    if active_window_id.is_empty() {
+        return None;
+    }
+    let mut app_windows = app_windows;
+    enrich_window_refs(&mut app_windows);
+    let context = app_windows.iter().find_map(|window| {
+        let app = window.app.trim();
+        if app.is_empty() {
+            None
+        } else {
+            Some(format!("app {app}"))
+        }
+    });
+    let current_windows = app_windows
+        .into_iter()
+        .filter(|window| window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0)
+        .filter_map(|window| {
+            window.window_ref.map(|window_ref| {
+                (
+                    window_ref,
+                    if window.title.trim().is_empty() {
+                        "untitled".to_string()
+                    } else {
+                        window.title
+                    },
+                    window.modal.unwrap_or(false),
+                    window.parent_id,
+                )
+            })
+        })
+        .collect::<Vec<TokenizeHintWindow>>();
+    if current_windows.is_empty() {
+        return None;
+    }
+    Some(TokenizeHintSnapshot {
+        context,
+        state_key: format!("active_window:{active_window_id}"),
+        current_windows,
+    })
+}
+
+fn append_tokenize_new_window_hint(
+    value: &mut Value,
+    active_window_id: Option<&str>,
+    precomputed: Option<TokenizeHintSnapshot>,
+) {
     // This hint is intended for flows pinned to an explicit active window id.
     // Avoid extra window enumeration cost for generic tokenize calls.
     let Some(active_window_id) = active_window_id.map(str::trim).filter(|v| !v.is_empty()) else {
@@ -1054,7 +1188,7 @@ fn append_tokenize_new_window_hint(value: &mut Value, active_window_id: Option<&
         return;
     }
 
-    let mut payload_windows: Vec<(String, String, bool, Option<String>)> = Vec::new();
+    let mut payload_windows: Vec<TokenizeHintWindow> = Vec::new();
     let payload_app = windows.iter().find_map(|window| {
         window
             .as_object()
@@ -1087,49 +1221,14 @@ fn append_tokenize_new_window_hint(value: &mut Value, active_window_id: Option<&
         payload_windows.push((id, title, false, None));
     }
 
-    let mut hint_context: Option<String> = None;
-    let mut state_key: Option<String> = None;
-    let mut current_windows: Vec<(String, String, bool, Option<String>)> = Vec::new();
-
-    if let Ok(mut all_windows) = window_target::list_windows() {
-        enrich_window_refs(&mut all_windows);
-        let anchor_ref = Some(active_window_id.to_string());
-        let anchor = anchor_ref.as_deref().and_then(|id| {
-            all_windows
-                .iter()
-                .find(|window| window.window_ref.as_deref() == Some(id))
-        });
-        let app = anchor
-            .map(|window| window.app.clone())
-            .or_else(|| payload_app.clone());
-
-        if let Some(app) = app {
-            let app_key = app.to_lowercase();
-            hint_context = Some(format!("app {app}"));
-            state_key = Some(match anchor_ref {
-                Some(id) => format!("active_window:{id}"),
-                None => format!("app:{app_key}"),
-            });
-            current_windows = all_windows
-                .into_iter()
-                .filter(|window| window.app.eq_ignore_ascii_case(&app))
-                .filter_map(|window| {
-                    window.window_ref.map(|window_ref| {
-                        (
-                            window_ref,
-                            if window.title.trim().is_empty() {
-                                "untitled".to_string()
-                            } else {
-                                window.title
-                            },
-                            window.modal.unwrap_or(false),
-                            window.parent_id,
-                        )
-                    })
-                })
-                .collect();
-        }
-    }
+    let precomputed =
+        precomputed.or_else(|| collect_tokenize_new_window_hint_snapshot(active_window_id));
+    let mut hint_context: Option<String> =
+        precomputed.as_ref().and_then(|snap| snap.context.clone());
+    let mut state_key: Option<String> = precomputed.as_ref().map(|snap| snap.state_key.clone());
+    let mut current_windows: Vec<TokenizeHintWindow> = precomputed
+        .map(|snap| snap.current_windows)
+        .unwrap_or_default();
 
     if current_windows.is_empty() {
         current_windows = payload_windows;
@@ -1169,7 +1268,7 @@ fn append_tokenize_new_window_hint(value: &mut Value, active_window_id: Option<&
         return;
     }
 
-    let mut new_windows: Vec<(String, String, bool, Option<String>)> = current_windows
+    let mut new_windows: Vec<TokenizeHintWindow> = current_windows
         .into_iter()
         .filter(|(id, _, _, _)| !previous_ids.contains(id))
         .collect();
