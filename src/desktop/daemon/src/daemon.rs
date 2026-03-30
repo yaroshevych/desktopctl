@@ -253,7 +253,7 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     ));
     #[cfg(target_os = "macos")]
     let request_context = RequestContext {
-        frontmost: if command_requires_privacy_signal(&command) {
+        frontmost: if command_requires_frontmost_snapshot(&command) {
             Some(window_target::resolve_frontmost_snapshot())
         } else {
             None
@@ -445,6 +445,16 @@ fn command_requires_privacy_signal(command: &Command) -> bool {
             | Command::KeyEnter { .. }
             | Command::KeyEscape { .. }
     )
+}
+
+#[cfg(target_os = "macos")]
+fn command_requires_frontmost_snapshot(command: &Command) -> bool {
+    if matches!(command, Command::ScreenTokenize { .. }) {
+        // Tokenize resolves the active window in its own execution path.
+        // Avoid expensive pre-execute frontmost snapshot here.
+        return false;
+    }
+    command_requires_privacy_signal(command)
 }
 
 #[cfg(test)]
