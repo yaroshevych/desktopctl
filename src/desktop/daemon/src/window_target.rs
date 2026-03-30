@@ -85,14 +85,6 @@ pub(crate) fn resolve_frontmost_snapshot() -> FrontmostSnapshot {
     FrontmostSnapshot { app, bounds }
 }
 
-pub(crate) fn resolve_frontmost_snapshot_raw() -> FrontmostSnapshot {
-    let context = frontmost_window_context();
-    FrontmostSnapshot {
-        app: context.as_ref().and_then(|ctx| ctx.app.clone()),
-        bounds: context.as_ref().and_then(|ctx| ctx.bounds.clone()),
-    }
-}
-
 fn prefer_larger_bounds(first: Option<Bounds>, second: Option<Bounds>) -> Option<Bounds> {
     match (first, second) {
         (Some(a), Some(b)) => {

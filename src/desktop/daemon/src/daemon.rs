@@ -747,32 +747,67 @@ pub(super) fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]
 }
 
 fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, AppError> {
-    let snapshot_raw = window_target::resolve_frontmost_snapshot_raw();
-    let snapshot = if snapshot_raw.bounds.is_some() {
-        snapshot_raw
-    } else {
-        window_target::resolve_frontmost_snapshot()
-    };
+    // Use normalized frontmost snapshot so tiny raw AX/menu windows are replaced
+    // by a meaningful app window candidate when available.
+    let snapshot = window_target::resolve_frontmost_snapshot();
     let app_hint = snapshot.app.as_deref();
     let target_bounds = snapshot.bounds.as_ref();
 
     let mut windows = window_target::list_windows_basic()?;
     enrich_window_refs(&mut windows);
 
-    let selected = windows
+    let eligible: Vec<&platform::windowing::WindowInfo> = windows
         .iter()
         .filter(|window| window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0)
-        .filter(|window| {
-            app_hint
-                .map(|app| window.app.eq_ignore_ascii_case(app))
-                .unwrap_or(true)
-        })
-        .max_by(|a, b| {
-            let sa = active_window_candidate_score(a, target_bounds);
-            let sb = active_window_candidate_score(b, target_bounds);
-            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .cloned();
+        .collect();
+    let best_scored =
+        |items: Vec<&platform::windowing::WindowInfo>| -> Option<platform::windowing::WindowInfo> {
+            items
+                .into_iter()
+                .max_by(|a, b| {
+                    let sa = active_window_candidate_score(a, target_bounds);
+                    let sb = active_window_candidate_score(b, target_bounds);
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .cloned()
+        };
+    let selected = best_scored(
+        eligible
+            .iter()
+            .copied()
+            .filter(|window| {
+                app_hint
+                    .map(|app| window.app.eq_ignore_ascii_case(app))
+                    .unwrap_or(true)
+            })
+            .collect(),
+    )
+    .or_else(|| {
+        if let Some(target) = target_bounds {
+            let overlap_selected = eligible
+                .iter()
+                .copied()
+                .filter(|window| iou(&window.bounds, target) > 0.01)
+                .max_by(|a, b| {
+                    let sa = iou(&a.bounds, target);
+                    let sb = iou(&b.bounds, target);
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .cloned();
+            if overlap_selected.is_some() {
+                trace::log("active_window_target:app_hint_fallback_to_overlap");
+            }
+            overlap_selected
+        } else {
+            None
+        }
+    })
+    .or_else(|| {
+        if app_hint.is_some() {
+            trace::log("active_window_target:app_hint_fallback_to_any_visible_last_resort");
+        }
+        best_scored(eligible)
+    });
 
     selected.ok_or_else(|| {
         AppError::target_not_found(
@@ -1007,6 +1042,11 @@ fn append_tokenize_text_dump(value: &mut Value) {
 }
 
 fn append_tokenize_new_window_hint(value: &mut Value, active_window_id: Option<&str>) {
+    // This hint is intended for flows pinned to an explicit active window id.
+    // Avoid extra window enumeration cost for generic tokenize calls.
+    let Some(active_window_id) = active_window_id.map(str::trim).filter(|v| !v.is_empty()) else {
+        return;
+    };
     let Some(windows) = value.get("windows").and_then(Value::as_array) else {
         return;
     };
@@ -1053,10 +1093,7 @@ fn append_tokenize_new_window_hint(value: &mut Value, active_window_id: Option<&
 
     if let Ok(mut all_windows) = window_target::list_windows() {
         enrich_window_refs(&mut all_windows);
-        let anchor_ref = active_window_id
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_string());
+        let anchor_ref = Some(active_window_id.to_string());
         let anchor = anchor_ref.as_deref().and_then(|id| {
             all_windows
                 .iter()

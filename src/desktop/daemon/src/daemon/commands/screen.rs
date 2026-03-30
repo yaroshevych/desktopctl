@@ -115,23 +115,23 @@ pub(crate) fn tokenize(
         permissions::ensure_screen_recording_permission()?;
         let backend = new_backend()?;
         backend.check_accessibility_permission()?;
-        let guard = super::super::guards::prepare_active_window(
-            active_window,
-            active_window_id.as_deref(),
-        )?;
-        bound_hint_active_window_id = guard.bound_active_window_id.clone();
+        if active_window_id.is_some() && !active_window {
+            return Err(AppError::invalid_argument(
+                "active window id requires --active-window",
+            ));
+        }
         if active_window {
             if window_query.is_some() {
                 return Err(AppError::invalid_argument(
                     "--active-window cannot be combined with --window-query for screen tokenize",
                 ));
             }
-            let frontmost_window = if let Some(reference) = guard.bound_active_window_id.as_deref()
-            {
+            let frontmost_window = if let Some(reference) = active_window_id.as_deref() {
                 super::super::assert_active_window_id_matches(reference)?
             } else {
                 super::super::resolve_active_window_target()?
             };
+            bound_hint_active_window_id = frontmost_window.window_ref.clone();
             let bounds = frontmost_window.bounds.clone();
             let bounds = super::super::resolve_tokenize_region_bounds(bounds, region.as_ref())?;
             let app = Some(frontmost_window.app.clone());
