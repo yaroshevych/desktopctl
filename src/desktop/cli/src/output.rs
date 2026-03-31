@@ -554,13 +554,13 @@ fn append_tokens_delta_section(
             let before = item.get("before").unwrap_or(item);
             let after = item.get("after").unwrap_or(item);
             lines.push(format!(
-                "- {} -> {}",
+                "{} -> {}",
                 format_token_delta_side(before),
                 format_token_delta_side(after)
             ));
             continue;
         }
-        lines.push(format!("- {}", format_token_delta_side(item)));
+        lines.push(format_token_delta_side(item));
     }
 }
 

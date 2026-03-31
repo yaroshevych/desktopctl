@@ -2465,17 +2465,19 @@ fn observe_after_action(
 
     loop {
         if start.elapsed() >= timeout {
-            let (tokens, _, _) = observe_tokens_for_regions(&last_capture, &changed_regions);
+            let final_regions =
+                final_observe_regions_from_images(&start_capture, &last_capture, observe_scope);
+            let (tokens, _, _) =
+                observe_tokens_for_regions(&last_capture, &final_regions, observe_scope);
             let raw_tokens = tokens;
             let end_state = observe_transition_state(start_state);
-            let regions = normalize_observe_regions(
-                &changed_regions,
-                end_state.active_window_bounds.as_ref(),
-            );
+            let regions =
+                normalize_observe_regions(&final_regions, end_state.active_window_bounds.as_ref());
             let start_tokens = observe_before_tokens_for_regions(
                 pre_click_tokens,
                 &start_capture,
-                &changed_regions,
+                &final_regions,
+                observe_scope,
                 end_state.active_window_bounds.as_ref(),
             );
             let tokens_delta = normalize_observe_tokens_delta(
@@ -2488,10 +2490,10 @@ fn observe_after_action(
                 settle_ms,
                 sample_count,
                 diff_ms_total,
-                changed_regions.len()
+                final_regions.len()
             ));
             return Ok(Some(json!({
-                "changed": changed_any,
+                "changed": !final_regions.is_empty(),
                 "regions": regions,
                 "tokens_delta": tokens_delta,
                 "focus_changed": end_state.focus_changed,
@@ -2540,17 +2542,21 @@ fn observe_after_action(
                 }
             }
             if options.until == ObserveUntil::FirstChange {
-                let (tokens, _, _) = observe_tokens_for_regions(&curr, &changed_regions);
+                let final_regions =
+                    final_observe_regions_from_images(&start_capture, &curr, observe_scope);
+                let (tokens, _, _) =
+                    observe_tokens_for_regions(&curr, &final_regions, observe_scope);
                 let raw_tokens = tokens;
                 let end_state = observe_transition_state(start_state);
                 let regions = normalize_observe_regions(
-                    &changed_regions,
+                    &final_regions,
                     end_state.active_window_bounds.as_ref(),
                 );
                 let start_tokens = observe_before_tokens_for_regions(
                     pre_click_tokens,
                     &start_capture,
-                    &changed_regions,
+                    &final_regions,
+                    observe_scope,
                     end_state.active_window_bounds.as_ref(),
                 );
                 let tokens_delta = normalize_observe_tokens_delta(
@@ -2563,10 +2569,10 @@ fn observe_after_action(
                     settle_ms,
                     sample_count,
                     diff_ms_total,
-                    changed_regions.len()
+                    final_regions.len()
                 ));
                 return Ok(Some(json!({
-                    "changed": true,
+                    "changed": !final_regions.is_empty(),
                     "regions": regions,
                     "tokens_delta": tokens_delta,
                     "focus_changed": end_state.focus_changed,
@@ -2589,17 +2595,21 @@ fn observe_after_action(
                             continue;
                         }
                     }
-                    let (tokens, _, _) = observe_tokens_for_regions(&curr, &changed_regions);
+                    let final_regions =
+                        final_observe_regions_from_images(&start_capture, &curr, observe_scope);
+                    let (tokens, _, _) =
+                        observe_tokens_for_regions(&curr, &final_regions, observe_scope);
                     let raw_tokens = tokens;
                     let end_state = observe_transition_state(start_state);
                     let regions = normalize_observe_regions(
-                        &changed_regions,
+                        &final_regions,
                         end_state.active_window_bounds.as_ref(),
                     );
                     let start_tokens = observe_before_tokens_for_regions(
                         pre_click_tokens,
                         &start_capture,
-                        &changed_regions,
+                        &final_regions,
+                        observe_scope,
                         end_state.active_window_bounds.as_ref(),
                     );
                     let tokens_delta = normalize_observe_tokens_delta(
@@ -2612,10 +2622,10 @@ fn observe_after_action(
                         settle_ms,
                         sample_count,
                         diff_ms_total,
-                        changed_regions.len()
+                        final_regions.len()
                     ));
                     return Ok(Some(json!({
-                        "changed": true,
+                        "changed": !final_regions.is_empty(),
                         "regions": regions,
                         "tokens_delta": tokens_delta,
                         "focus_changed": end_state.focus_changed,
@@ -2670,6 +2680,7 @@ fn observe_after_action(
 fn observe_tokens_for_regions(
     capture: &vision::types::CapturedImage,
     regions: &[desktop_core::protocol::Bounds],
+    observe_scope: Option<&desktop_core::protocol::Bounds>,
 ) -> (Vec<Value>, bool, usize) {
     let observe_started = Instant::now();
     let mut tokens: Vec<Value> = Vec::new();
@@ -2689,6 +2700,7 @@ fn observe_tokens_for_regions(
                 dynamic_pad,
                 capture.frame.width as f64,
                 capture.frame.height as f64,
+                observe_scope,
             );
             if let Some((x0, y0, x1, y1)) = logical_bounds_to_image_rect(
                 &padded,
@@ -2729,6 +2741,11 @@ fn observe_tokens_for_regions(
                         // Keep only OCR boxes that overlap the core changed region.
                         if iou(core_region, &logical_bounds) <= 0.01 {
                             continue;
+                        }
+                        if let Some(scope) = observe_scope {
+                            if iou(scope, &logical_bounds) <= 0.0 {
+                                continue;
+                            }
                         }
                         tokens.push(json!({
                             "id": observe_ocr_token_id(&text.text, &logical_bounds),
@@ -2775,6 +2792,11 @@ fn observe_tokens_for_regions(
     let ax_started = Instant::now();
     let mut ax_count = 0usize;
     for ax in ax_elements {
+        if let Some(scope) = observe_scope {
+            if iou(scope, &ax.bounds) <= 0.0 {
+                continue;
+            }
+        }
         if !regions.is_empty() && !regions.iter().any(|region| iou(region, &ax.bounds) > 0.01) {
             continue;
         }
@@ -2829,13 +2851,14 @@ fn observe_before_tokens_for_regions(
     pre_click_tokens: Option<&[Value]>,
     start_capture: &vision::types::CapturedImage,
     regions: &[desktop_core::protocol::Bounds],
+    observe_scope: Option<&desktop_core::protocol::Bounds>,
     origin: Option<&desktop_core::protocol::Bounds>,
 ) -> Vec<Value> {
     let Some(seed) = pre_click_tokens else {
-        return observe_tokens_for_regions(start_capture, regions).0;
+        return observe_tokens_for_regions(start_capture, regions, observe_scope).0;
     };
     let Some(origin) = origin else {
-        return observe_tokens_for_regions(start_capture, regions).0;
+        return observe_tokens_for_regions(start_capture, regions, observe_scope).0;
     };
     let mut out = Vec::new();
     for token in seed {
@@ -2851,6 +2874,11 @@ fn observe_before_tokens_for_regions(
         if !regions.is_empty() && !regions.iter().any(|region| iou(region, &global) > 0.01) {
             continue;
         }
+        if let Some(scope) = observe_scope {
+            if iou(scope, &global) <= 0.0 {
+                continue;
+            }
+        }
         let mut cloned = token.clone();
         if let Some(obj) = cloned.as_object_mut() {
             obj.insert(
@@ -2861,6 +2889,44 @@ fn observe_before_tokens_for_regions(
         out.push(cloned);
     }
     out
+}
+
+fn final_observe_regions_from_images(
+    start_capture: &vision::types::CapturedImage,
+    end_capture: &vision::types::CapturedImage,
+    observe_scope: Option<&desktop_core::protocol::Bounds>,
+) -> Vec<desktop_core::protocol::Bounds> {
+    let start_gray = vision::diff::thumbnail_from_rgba(
+        &start_capture.image,
+        start_capture.image.width(),
+        start_capture.image.height(),
+    );
+    let end_gray = vision::diff::thumbnail_from_rgba(
+        &end_capture.image,
+        end_capture.image.width(),
+        end_capture.image.height(),
+    );
+    let frame_regions = vision::diff::diff_regions(&start_gray, &end_gray, OBSERVE_DIFF_THRESHOLD);
+    let significant_regions: Vec<_> = frame_regions
+        .into_iter()
+        .filter(|region| {
+            region.width.saturating_mul(region.height).max(1) >= OBSERVE_MIN_THUMB_COMPONENT_AREA
+        })
+        .collect();
+    let mut merged: Vec<desktop_core::protocol::Bounds> = Vec::new();
+    for changed_region in significant_regions {
+        let upscaled = desktop_core::protocol::Bounds {
+            x: changed_region.x as f64,
+            y: changed_region.y as f64,
+            width: changed_region.width as f64,
+            height: changed_region.height as f64,
+        };
+        let padded = pad_bounds(upscaled, OBSERVE_REGION_PAD_PX);
+        if let Some(clipped) = clip_to_scope(&padded, observe_scope) {
+            merge_region_into_list(&mut merged, clipped);
+        }
+    }
+    merged
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2876,16 +2942,28 @@ fn expand_bounds_with_pad_clamped(
     pad: f64,
     frame_width: f64,
     frame_height: f64,
+    scope: Option<&desktop_core::protocol::Bounds>,
 ) -> (desktop_core::protocol::Bounds, AppliedPadding) {
     let core_x1 = core.x.max(0.0);
     let core_y1 = core.y.max(0.0);
     let core_x2 = (core.x + core.width).max(core_x1);
     let core_y2 = (core.y + core.height).max(core_y1);
 
-    let x1 = (core_x1 - pad).max(0.0).min(frame_width);
-    let y1 = (core_y1 - pad).max(0.0).min(frame_height);
-    let x2 = (core_x2 + pad).min(frame_width).max(0.0);
-    let y2 = (core_y2 + pad).min(frame_height).max(0.0);
+    let (limit_x1, limit_y1, limit_x2, limit_y2) = if let Some(scope) = scope {
+        (
+            scope.x.max(0.0).min(frame_width),
+            scope.y.max(0.0).min(frame_height),
+            (scope.x + scope.width).max(0.0).min(frame_width),
+            (scope.y + scope.height).max(0.0).min(frame_height),
+        )
+    } else {
+        (0.0, 0.0, frame_width, frame_height)
+    };
+
+    let x1 = (core_x1 - pad).max(limit_x1).min(limit_x2);
+    let y1 = (core_y1 - pad).max(limit_y1).min(limit_y2);
+    let x2 = (core_x2 + pad).min(limit_x2).max(limit_x1);
+    let y2 = (core_y2 + pad).min(limit_y2).max(limit_y1);
 
     let applied = AppliedPadding {
         left: (core_x1 - x1).max(0.0),
@@ -2998,14 +3076,17 @@ fn merge_region_into_list(
     regions: &mut Vec<desktop_core::protocol::Bounds>,
     incoming: desktop_core::protocol::Bounds,
 ) {
-    for region in regions.iter_mut() {
-        if iou(region, &incoming) > 0.0 {
-            let merged = merge_bounds(Some(&region.clone()), &incoming);
-            *region = merged;
-            return;
+    let mut merged = incoming;
+    let mut idx = 0usize;
+    while idx < regions.len() {
+        if iou(&regions[idx], &merged) > 0.0 {
+            merged = merge_bounds(Some(&regions[idx]), &merged);
+            regions.swap_remove(idx);
+            continue;
         }
+        idx += 1;
     }
-    regions.push(incoming);
+    regions.push(merged);
 }
 
 fn pad_bounds(bounds: desktop_core::protocol::Bounds, pad: f64) -> desktop_core::protocol::Bounds {
@@ -3101,6 +3182,8 @@ fn normalize_observe_tokens_delta(
         }
     }
     remap_observe_ocr_ids_to_tokenize_ids(&mut delta, origin);
+    reconcile_added_removed_pairs(&mut delta);
+    sort_observe_tokens_delta(&mut delta);
     delta
 }
 
@@ -3140,11 +3223,6 @@ fn remap_observe_ocr_ids_to_tokenize_ids(
         return;
     }
     if let Some(items) = delta.get_mut("added").and_then(Value::as_array_mut) {
-        for token in items {
-            remap_single_observe_ocr_id(token, &candidates);
-        }
-    }
-    if let Some(items) = delta.get_mut("removed").and_then(Value::as_array_mut) {
         for token in items {
             remap_single_observe_ocr_id(token, &candidates);
         }
@@ -3226,15 +3304,6 @@ fn remap_single_observe_ocr_id(token: &mut Value, candidates: &[OcrIdCandidate])
             best_idx = Some(idx);
         }
     }
-    if best_idx.is_none() {
-        for (idx, candidate) in candidates.iter().enumerate() {
-            let score = iou(&candidate.bounds, &bounds);
-            if score > best_score {
-                best_score = score;
-                best_idx = Some(idx);
-            }
-        }
-    }
     let Some(idx) = best_idx else {
         return;
     };
@@ -3244,6 +3313,124 @@ fn remap_single_observe_ocr_id(token: &mut Value, candidates: &[OcrIdCandidate])
     if let Some(obj) = token.as_object_mut() {
         obj.insert("id".to_string(), Value::String(candidates[idx].id.clone()));
     }
+}
+
+fn reconcile_added_removed_pairs(delta: &mut Value) {
+    use std::collections::{HashMap, VecDeque};
+
+    let added = delta
+        .get("added")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let removed = delta
+        .get("removed")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut changed = delta
+        .get("changed")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut removed_by_id: HashMap<String, VecDeque<Value>> = HashMap::new();
+    let mut removed_unkeyed: Vec<Value> = Vec::new();
+    for token in removed {
+        if let Some(id) = token
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            removed_by_id
+                .entry(id.to_string())
+                .or_default()
+                .push_back(token);
+        } else {
+            removed_unkeyed.push(token);
+        }
+    }
+
+    let mut added_out: Vec<Value> = Vec::new();
+    for token in added {
+        let Some(id) = token
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            added_out.push(token);
+            continue;
+        };
+
+        let Some(queue) = removed_by_id.get_mut(id) else {
+            added_out.push(token);
+            continue;
+        };
+        let Some(before) = queue.pop_front() else {
+            added_out.push(token);
+            continue;
+        };
+
+        if !observe_token_semantic_equal(&before, &token) {
+            changed.push(json!({
+                "before": before,
+                "after": token
+            }));
+        }
+    }
+
+    let mut removed_out: Vec<Value> = removed_unkeyed;
+    for queue in removed_by_id.into_values() {
+        removed_out.extend(queue);
+    }
+
+    if let Some(obj) = delta.as_object_mut() {
+        obj.insert("added".to_string(), Value::Array(added_out));
+        obj.insert("removed".to_string(), Value::Array(removed_out));
+        obj.insert("changed".to_string(), Value::Array(changed));
+    }
+}
+
+fn sort_observe_tokens_delta(delta: &mut Value) {
+    if let Some(items) = delta.get_mut("added").and_then(Value::as_array_mut) {
+        items.sort_by(token_position_compare);
+    }
+    if let Some(items) = delta.get_mut("removed").and_then(Value::as_array_mut) {
+        items.sort_by(token_position_compare);
+    }
+    if let Some(items) = delta.get_mut("changed").and_then(Value::as_array_mut) {
+        items.sort_by(changed_position_compare);
+    }
+}
+
+fn token_position_compare(a: &Value, b: &Value) -> std::cmp::Ordering {
+    let ka = token_position_key(a);
+    let kb = token_position_key(b);
+    ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+fn changed_position_compare(a: &Value, b: &Value) -> std::cmp::Ordering {
+    let ka = a
+        .get("after")
+        .map(token_position_key)
+        .unwrap_or_else(|| token_position_key(a));
+    let kb = b
+        .get("after")
+        .map(token_position_key)
+        .unwrap_or_else(|| token_position_key(b));
+    ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+fn token_position_key(token: &Value) -> (f64, f64, f64, f64) {
+    let b = token_bbox_bounds(token).unwrap_or(desktop_core::protocol::Bounds {
+        x: f64::MAX,
+        y: f64::MAX,
+        width: 0.0,
+        height: 0.0,
+    });
+    (b.y, b.x, b.height, b.width)
 }
 
 fn token_bbox_bounds(token: &Value) -> Option<desktop_core::protocol::Bounds> {
