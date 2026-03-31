@@ -458,6 +458,9 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     if let Some(obj) = result.as_object() {
         let mut scalar_lines: Vec<String> = Vec::new();
         for (k, v) in obj {
+            if k == "observe" {
+                continue;
+            }
             if let Some(summary) = compact_value_summary(v) {
                 scalar_lines.push(format!("- {}: {}", k, summary));
             }
@@ -469,7 +472,95 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
         }
     }
 
+    append_observe_sections(&mut lines, &result);
     lines.join("\n")
+}
+
+fn append_observe_sections(lines: &mut Vec<String>, result: &serde_json::Value) {
+    let Some(observe) = result.get("observe").and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    lines.push(String::new());
+    lines.push("## Observe".to_string());
+    for key in [
+        "stability",
+        "changed",
+        "elapsed_ms",
+        "settle_ms",
+        "active_window_id",
+        "active_window_changed",
+        "focus_changed",
+        "focused_element_id",
+    ] {
+        if let Some(summary) = observe.get(key).and_then(compact_value_summary) {
+            lines.push(format!("- {key}: {summary}"));
+        }
+    }
+    if let Some(ax) = observe.get("ax").and_then(serde_json::Value::as_object) {
+        let available = ax
+            .get("available")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let count = ax
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        lines.push(format!("- ax: available=`{available}` count=`{count}`"));
+    }
+    let Some(tokens_delta) = observe
+        .get("tokens_delta")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+    append_tokens_delta_section(lines, "Added", tokens_delta.get("added"));
+    append_tokens_delta_section(lines, "Changed", tokens_delta.get("changed"));
+    append_tokens_delta_section(lines, "Removed", tokens_delta.get("removed"));
+}
+
+fn append_tokens_delta_section(
+    lines: &mut Vec<String>,
+    title: &str,
+    tokens: Option<&serde_json::Value>,
+) {
+    let Some(items) = tokens.and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push(format!("## {title}"));
+    for item in items {
+        if title == "Changed" {
+            let before = item.get("before").unwrap_or(item);
+            let after = item.get("after").unwrap_or(item);
+            lines.push(format!(
+                "- {} -> {}",
+                format_token_delta_side(before),
+                format_token_delta_side(after)
+            ));
+            continue;
+        }
+        lines.push(format!("- {}", format_token_delta_side(item)));
+    }
+}
+
+fn format_token_delta_side(token: &serde_json::Value) -> String {
+    let text = token
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("element");
+    let id_suffix = token
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|id| format!(" #{id}"))
+        .unwrap_or_default();
+    format!("{text}{id_suffix}")
 }
 
 fn render_error_markdown_from_value(title: &str, value: &serde_json::Value) -> String {
@@ -640,7 +731,7 @@ fn to_title_case(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{render_markdown_response, render_response};
-    use desktop_core::protocol::{Command, ResponseEnvelope};
+    use desktop_core::protocol::{Command, ObserveOptions, PointerButton, ResponseEnvelope};
     use serde_json::json;
 
     #[test]
@@ -727,7 +818,7 @@ mod tests {
         assert!(markdown.contains("### Left Column"));
         assert!(markdown.contains("### Right Column"));
         assert!(markdown.contains("Search #button_search"));
-        assert!(markdown.contains("Control Centre\\nDesktop & Dock\\nDisplays"));
+        assert!(markdown.contains("Control Centre\\nDesktop & Dock\\nDisplays #text_sidebar"));
         assert!(markdown.contains("Recording #axid_toggle_recording [checked=true]"));
         assert!(!markdown.contains("12"));
         assert!(!markdown.contains("34"));
@@ -735,5 +826,108 @@ mod tests {
         assert!(!markdown.contains("## Windows"));
         assert!(!markdown.lines().any(|line| line == "## Text"));
         assert!(!markdown.contains("```text"));
+    }
+
+    #[test]
+    fn pointer_click_markdown_includes_observe_delta_sections() {
+        let command = Command::PointerClickId {
+            id: "ocr_13".to_string(),
+            button: PointerButton::Left,
+            active_window: false,
+            active_window_id: Some("news_bb9921".to_string()),
+            observe: ObserveOptions::default(),
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "id": "ocr_13",
+                "source": "vision_ocr",
+                "text": "House ballroom project",
+                "x": 765,
+                "y": 387,
+                "observe": {
+                    "stability": "timeout",
+                    "changed": true,
+                    "elapsed_ms": 3487,
+                    "settle_ms": 3487,
+                    "active_window_id": "news_bb9921",
+                    "active_window_changed": false,
+                    "focus_changed": false,
+                    "focused_element_id": "ax_axstatictext",
+                    "ax": { "available": true, "count": 3 },
+                    "tokens_delta": {
+                        "added": [
+                            {
+                                "source": "vision_ocr",
+                                "text": "halt to White House ballroom project",
+                                "confidence": 1.0,
+                                "bbox": [361, 122, 725, 46]
+                            }
+                        ],
+                        "changed": [],
+                        "removed": [
+                            {
+                                "source": "vision_ocr",
+                                "text": "House ballroom project",
+                                "confidence": 1.0,
+                                "bbox": [451, 283, 145, 14]
+                            }
+                        ]
+                    }
+                }
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("## Result"));
+        assert!(markdown.contains("- id: ocr_13"));
+        assert!(markdown.contains("## Observe"));
+        assert!(markdown.contains("- stability: timeout"));
+        assert!(markdown.contains("## Added"));
+        assert!(markdown.contains("halt to White House ballroom project"));
+        assert!(markdown.contains("## Removed"));
+        assert!(markdown.contains("House ballroom project"));
+    }
+
+    #[test]
+    fn pointer_click_markdown_renders_changed_before_after() {
+        let command = Command::PointerClickId {
+            id: "ocr_13".to_string(),
+            button: PointerButton::Left,
+            active_window: false,
+            active_window_id: Some("news_bb9921".to_string()),
+            observe: ObserveOptions::default(),
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "id": "ocr_13",
+                "observe": {
+                    "tokens_delta": {
+                        "added": [],
+                        "removed": [],
+                        "changed": [
+                            {
+                                "before": {
+                                    "source": "vision_ocr",
+                                    "text": "old value",
+                                    "bbox": [10, 20, 30, 40]
+                                },
+                                "after": {
+                                    "source": "vision_ocr",
+                                    "text": "new value",
+                                    "bbox": [11, 21, 30, 40]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }),
+        );
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("## Changed"));
+        assert!(markdown.contains("old value"));
+        assert!(markdown.contains("new value"));
+        assert!(markdown.contains("->"));
     }
 }

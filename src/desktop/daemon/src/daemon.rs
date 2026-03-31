@@ -1,6 +1,8 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet},
     fs,
+    hash::{Hash, Hasher},
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
@@ -2732,6 +2734,7 @@ fn observe_tokens_for_regions(
                             continue;
                         }
                         tokens.push(json!({
+                            "id": observe_ocr_token_id(&text.text, &logical_bounds),
                             "source": "vision_ocr",
                             "text": text.text,
                             "confidence": text.confidence,
@@ -3023,6 +3026,7 @@ fn normalize_observe_tokens_delta(
     for key in ["added", "removed"] {
         if let Some(items) = delta.get_mut(key).and_then(Value::as_array_mut) {
             for token in items {
+                ensure_observe_token_id(token);
                 rewrite_token_bbox_relative(token, origin);
             }
         }
@@ -3030,9 +3034,11 @@ fn normalize_observe_tokens_delta(
     if let Some(items) = delta.get_mut("changed").and_then(Value::as_array_mut) {
         for entry in items {
             if let Some(before) = entry.get_mut("before") {
+                ensure_observe_token_id(before);
                 rewrite_token_bbox_relative(before, origin);
             }
             if let Some(after) = entry.get_mut("after") {
+                ensure_observe_token_id(after);
                 rewrite_token_bbox_relative(after, origin);
             }
         }
@@ -3126,6 +3132,47 @@ fn rewrite_token_bbox_relative(token: &mut Value, origin: Option<&desktop_core::
     }
 }
 
+fn ensure_observe_token_id(token: &mut Value) {
+    if token
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return;
+    }
+    let source = token
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let text = token
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let bbox_key = quantized_bbox_key(token.get("bbox").and_then(Value::as_array));
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    text.hash(&mut hasher);
+    bbox_key.hash(&mut hasher);
+    let prefix = if source == "vision_ocr" {
+        "ocr"
+    } else if source.starts_with("accessibility_ax:") {
+        "ax"
+    } else {
+        "tok"
+    };
+    if let Some(obj) = token.as_object_mut() {
+        obj.insert(
+            "id".to_string(),
+            Value::String(format!(
+                "{prefix}_{:08x}",
+                (hasher.finish() & 0xffff_ffff) as u32
+            )),
+        );
+    }
+}
+
 fn relative_bounds_json(
     bounds: &desktop_core::protocol::Bounds,
     origin: Option<&desktop_core::protocol::Bounds>,
@@ -3157,6 +3204,23 @@ fn relative_bounds(
 
 fn round_nonnegative_i64(value: f64) -> i64 {
     value.round().max(0.0) as i64
+}
+
+fn observe_ocr_token_id(text: &str, bounds: &desktop_core::protocol::Bounds) -> String {
+    let mut hasher = DefaultHasher::new();
+    text.trim().to_ascii_lowercase().hash(&mut hasher);
+    quantized_observe_bbox(bounds).hash(&mut hasher);
+    format!("ocr_{:08x}", (hasher.finish() & 0xffff_ffff) as u32)
+}
+
+fn quantized_observe_bbox(bounds: &desktop_core::protocol::Bounds) -> (i64, i64, i64, i64) {
+    let q = |v: f64| -> i64 { (v / 8.0).round() as i64 };
+    (
+        q(bounds.x.max(0.0)),
+        q(bounds.y.max(0.0)),
+        q(bounds.width.max(0.0)),
+        q(bounds.height.max(0.0)),
+    )
 }
 
 fn observe_token_key(token: &Value) -> String {
