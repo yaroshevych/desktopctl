@@ -14,33 +14,33 @@ pub(crate) use parse::parse_command;
 pub(crate) use transport::send_request_with_hooks;
 use transport::{map_error_code, next_request_id, send_request_with_autostart, trace_log};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputMode {
+    Json,
+    Markdown,
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let (output_mode, args) = match split_output_mode(&raw_args) {
+        Ok(v) => v,
+        Err(err) => {
+            let request_id = next_request_id();
+            print_error(&request_id, &err, OutputMode::Markdown);
+            std::process::exit(map_error_code(&err.code));
+        }
+    };
     let request_id = next_request_id();
-    match run(&args, &request_id) {
+    match run(&args, &request_id, output_mode) {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            let payload = serde_json::json!({
-                "ok": false,
-                "request_id": request_id,
-                "error": {
-                    "code": err.code,
-                    "message": err.message,
-                    "retryable": err.retryable,
-                    "command": err.command,
-                    "debug_ref": err.debug_ref,
-                }
-            });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
-            );
+            print_error(&request_id, &err, output_mode);
             std::process::exit(map_error_code(&err.code));
         }
     }
 }
 
-fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
+fn run(args: &[String], request_id: &str, output_mode: OutputMode) -> Result<i32, AppError> {
     let run_started = Instant::now();
     let command = parse_command(args)?;
     let passthrough_stored_response = matches!(command, Command::RequestResponse { .. });
@@ -55,12 +55,26 @@ fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
     let send_elapsed_ms = send_started.elapsed().as_millis();
 
     let render_started = Instant::now();
-    let rendered =
-        output::render_response(&request.command, &response, passthrough_stored_response);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&rendered).unwrap_or_else(|_| "{}".to_string())
-    );
+    match output_mode {
+        OutputMode::Json => {
+            let rendered =
+                output::render_response(&request.command, &response, passthrough_stored_response);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rendered).unwrap_or_else(|_| "{}".to_string())
+            );
+        }
+        OutputMode::Markdown => {
+            println!(
+                "{}",
+                output::render_markdown_response(
+                    &request.command,
+                    &response,
+                    passthrough_stored_response
+                )
+            );
+        }
+    }
     let render_print_elapsed_ms = render_started.elapsed().as_millis();
     let total_elapsed_ms = run_started.elapsed().as_millis();
     trace_log(format!(
@@ -76,6 +90,47 @@ fn run(args: &[String], request_id: &str) -> Result<i32, AppError> {
         ResponseEnvelope::Error(err) => map_error_code(&err.error.code),
     };
     Ok(code)
+}
+
+fn split_output_mode(args: &[String]) -> Result<(OutputMode, Vec<String>), AppError> {
+    let mut mode = OutputMode::Markdown;
+    let mut filtered: Vec<String> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--json" => mode = OutputMode::Json,
+            "--markdown" => mode = OutputMode::Markdown,
+            _ => filtered.push(arg.clone()),
+        }
+    }
+    if filtered.is_empty() {
+        return Err(AppError::invalid_argument(usage::usage()));
+    }
+    Ok((mode, filtered))
+}
+
+fn print_error(request_id: &str, err: &AppError, output_mode: OutputMode) {
+    match output_mode {
+        OutputMode::Json => {
+            let payload = serde_json::json!({
+                "ok": false,
+                "request_id": request_id,
+                "error": {
+                    "code": err.code,
+                    "message": err.message,
+                    "retryable": err.retryable,
+                    "command": err.command,
+                    "debug_ref": err.debug_ref,
+                }
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+            );
+        }
+        OutputMode::Markdown => {
+            println!("{}", output::render_markdown_error(request_id, err));
+        }
+    }
 }
 
 #[cfg(test)]

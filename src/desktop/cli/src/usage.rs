@@ -1,5 +1,7 @@
 pub(crate) fn usage() -> &'static str {
     "usage:
+  desktopctl [--markdown|--json] <command...>
+    note: default output is --markdown; use --json for machine-readable envelope output
   desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
   desktopctl app hide <application>
   desktopctl app show <application>
