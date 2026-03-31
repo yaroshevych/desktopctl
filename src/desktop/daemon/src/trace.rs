@@ -7,6 +7,21 @@ use std::{
 const DEFAULT_TRACE_PATH: &str = "/tmp/desktopctld.trace.log";
 
 pub fn log(message: impl AsRef<str>) {
+    let trace_enabled = std::env::var("DESKTOPCTL_TRACE")
+        .ok()
+        .map(|v| {
+            let lowered = v.trim().to_ascii_lowercase();
+            lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on"
+        })
+        .unwrap_or(false);
+    let has_custom_path = std::env::var("DESKTOPCTL_TRACE_PATH")
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if !trace_enabled && !has_custom_path {
+        return;
+    }
+
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
