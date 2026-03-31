@@ -149,9 +149,8 @@ fn command_json_hints(command: &Command) -> Vec<&'static str> {
             "prefer `screen tokenize` for automation flows; use screenshot as last resort for visual artifacts/debug",
         ],
         Command::ScreenTokenize { .. } => {
-            const TOKENIZE_HINTS: [&str; 2] = [
+            const TOKENIZE_HINTS: [&str; 1] = [
                 "tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`",
-                "compact output with | jq -r '.result.text_dump'",
             ];
             let idx = (SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -21,7 +21,6 @@ pub(crate) fn usage() -> &'static str {
     note: --active-window cannot be combined with --window-query or --screenshot
     note: --region is relative to the selected window/screenshot target
     hint: tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`
-    hint: compact output with | jq -r '.result.text_dump'
   desktopctl screen find --text <text> [--all]
   desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]
   desktopctl clipboard read

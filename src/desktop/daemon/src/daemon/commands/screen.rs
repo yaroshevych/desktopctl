@@ -562,8 +562,6 @@ pub(crate) fn tokenize(
     stage_done!("json_encode");
     super::super::remap_tokenize_window_id_field(&mut value);
     stage_done!("window_id_remap");
-    super::super::append_tokenize_text_dump(&mut value);
-    stage_done!("text_dump");
     let precomputed_hint = hint_snapshot_prefetch_rx.and_then(|rx| rx.recv().ok().flatten());
     super::super::append_tokenize_new_window_hint(
         &mut value,

@@ -1105,43 +1105,6 @@ fn remap_tokenize_window_id_field(value: &mut Value) {
     }
 }
 
-fn append_tokenize_text_dump(value: &mut Value) {
-    let Some(windows) = value.get("windows").and_then(Value::as_array) else {
-        return;
-    };
-    let mut chunks: Vec<String> = Vec::new();
-    for window in windows {
-        let Some(window_obj) = window.as_object() else {
-            continue;
-        };
-        let title = window_obj
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("window");
-        let app = window_obj.get("app").and_then(Value::as_str).unwrap_or("");
-        let Some(elements) = window_obj.get("elements").and_then(Value::as_array) else {
-            continue;
-        };
-        let dump = build_window_text_dump(elements);
-        if dump.trim().is_empty() {
-            continue;
-        }
-        let mut header_lines = vec![format!("window title: {title}")];
-        if !app.trim().is_empty() {
-            header_lines.push(format!("window app: {app}"));
-        }
-        header_lines.push(dump);
-        chunks.push(header_lines.join("\n"));
-    }
-    if chunks.is_empty() {
-        return;
-    }
-    let text_dump = chunks.join("\n\n");
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("text_dump".to_string(), Value::String(text_dump));
-    }
-}
-
 pub(crate) fn collect_tokenize_new_window_hint_snapshot(
     active_window_id: &str,
 ) -> Option<TokenizeHintSnapshot> {
@@ -1331,12 +1294,7 @@ fn append_tokenize_new_window_hint(
     );
 
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("hint".to_string(), Value::String(hint.clone()));
-        let updated_dump = match obj.get("text_dump").and_then(Value::as_str) {
-            Some(existing) if !existing.trim().is_empty() => format!("hint: {hint}\n\n{existing}"),
-            _ => format!("hint: {hint}"),
-        };
-        obj.insert("text_dump".to_string(), Value::String(updated_dump));
+        obj.insert("hint".to_string(), Value::String(hint));
     }
 }
 
