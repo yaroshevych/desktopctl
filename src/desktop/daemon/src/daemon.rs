@@ -1515,13 +1515,13 @@ fn click_text_target(
             target.bounds.width,
             target.bounds.height
         ));
-        let click_point = perform_click(&target.bounds, button)?;
+        perform_click(&target.bounds, button)?;
         return Ok(json!({
             "snapshot_id": payload.snapshot_id,
-            "text": target.text,
-            "bounds": target.bounds,
-            "x": click_point.x,
-            "y": click_point.y
+            "click_target": {
+                "text": target.text,
+                "bounds": target.bounds
+            }
         }));
     }
 
@@ -1589,14 +1589,14 @@ fn click_text_target(
         target.bounds.width,
         target.bounds.height
     ));
-    let click_point = perform_click(&target.bounds, button)?;
+    perform_click(&target.bounds, button)?;
 
     Ok(json!({
         "snapshot_id": capture.snapshot.snapshot_id,
-        "text": target.text,
-        "bounds": target.bounds,
-        "x": click_point.x,
-        "y": click_point.y
+        "click_target": {
+            "text": target.text,
+            "bounds": target.bounds
+        }
     }))
 }
 
@@ -1645,13 +1645,13 @@ fn try_click_text_active_window_ax(
                 target.bounds.width,
                 target.bounds.height
             ));
-            let click_point = perform_click(&target.bounds, button)?;
+            perform_click(&target.bounds, button)?;
             Ok(Some(json!({
                 "snapshot_id": 0,
-                "text": target.text,
-                "bounds": target.bounds,
-                "x": click_point.x,
-                "y": click_point.y
+                "click_target": {
+                    "text": target.text,
+                    "bounds": target.bounds
+                }
             })))
         }
         Err(err) if matches!(err.code, desktop_core::error::ErrorCode::TargetNotFound) => Ok(None),
@@ -1737,14 +1737,14 @@ fn click_element_id_target(
         target.bounds.height,
         compact_for_log(target.text.as_deref().unwrap_or(""))
     ));
-    let click_point = perform_click(&target.bounds, button)?;
+    perform_click(&target.bounds, button)?;
     Ok(json!({
-        "id": target.id.clone(),
-        "text": target.text.clone(),
-        "bounds": target.bounds.clone(),
-        "x": click_point.x,
-        "y": click_point.y,
-        "source": target.source.clone()
+        "click_target": {
+            "id": target.id.clone(),
+            "text": target.text.clone(),
+            "bounds": target.bounds.clone(),
+            "source": target.source.clone()
+        }
     }))
 }
 
@@ -1963,14 +1963,14 @@ fn try_click_ax_element_id_target(
         target.bounds.height,
         compact_for_log(target.text.as_deref().unwrap_or(""))
     ));
-    let click_point = perform_click(&target.bounds, button)?;
+    perform_click(&target.bounds, button)?;
     Ok(Some(json!({
-        "id": target.id.clone(),
-        "text": target.text.clone(),
-        "bounds": target.bounds.clone(),
-        "x": click_point.x,
-        "y": click_point.y,
-        "source": target.source.clone()
+        "click_target": {
+            "id": target.id.clone(),
+            "text": target.text.clone(),
+            "bounds": target.bounds.clone(),
+            "source": target.source.clone()
+        }
     })))
 }
 
@@ -2453,8 +2453,7 @@ fn observe_after_action(
 
     loop {
         if start.elapsed() >= timeout {
-            let (tokens, ax_available, ax_count) =
-                observe_tokens_for_regions(&last_capture, &changed_regions);
+            let (tokens, _, _) = observe_tokens_for_regions(&last_capture, &changed_regions);
             let raw_tokens = tokens;
             let end_state = observe_transition_state(start_state);
             let regions = normalize_observe_regions(
@@ -2466,7 +2465,6 @@ fn observe_after_action(
                 diff_observe_tokens(&start_tokens, &raw_tokens),
                 end_state.active_window_bounds.as_ref(),
             );
-            let observe_text_dump = build_observe_tokens_delta_text_dump(&tokens_delta);
             let settle_ms = start.elapsed().as_millis() as u64;
             trace::log(format!(
                 "observe:settle outcome=timeout settle_ms={} samples={} diff_ms_total={} regions={}",
@@ -2479,15 +2477,10 @@ fn observe_after_action(
                 "changed": changed_any,
                 "regions": regions,
                 "tokens_delta": tokens_delta,
-                "text_dump": observe_text_dump,
                 "focus_changed": end_state.focus_changed,
                 "focused_element_id": end_state.focused_element_id,
                 "active_window_changed": end_state.active_window_changed,
                 "active_window_id": end_state.active_window_id,
-                "ax": {
-                    "available": ax_available,
-                    "count": ax_count
-                },
                 "stability": "timeout",
                 "elapsed_ms": settle_ms,
                 "settle_ms": settle_ms
@@ -2530,8 +2523,7 @@ fn observe_after_action(
                 }
             }
             if options.until == ObserveUntil::FirstChange {
-                let (tokens, ax_available, ax_count) =
-                    observe_tokens_for_regions(&curr, &changed_regions);
+                let (tokens, _, _) = observe_tokens_for_regions(&curr, &changed_regions);
                 let raw_tokens = tokens;
                 let end_state = observe_transition_state(start_state);
                 let regions = normalize_observe_regions(
@@ -2543,7 +2535,6 @@ fn observe_after_action(
                     diff_observe_tokens(&start_tokens, &raw_tokens),
                     end_state.active_window_bounds.as_ref(),
                 );
-                let observe_text_dump = build_observe_tokens_delta_text_dump(&tokens_delta);
                 let settle_ms = start.elapsed().as_millis() as u64;
                 trace::log(format!(
                     "observe:settle outcome=first_change settle_ms={} samples={} diff_ms_total={} regions={}",
@@ -2556,15 +2547,10 @@ fn observe_after_action(
                     "changed": true,
                     "regions": regions,
                     "tokens_delta": tokens_delta,
-                    "text_dump": observe_text_dump,
                     "focus_changed": end_state.focus_changed,
                     "focused_element_id": end_state.focused_element_id,
                     "active_window_changed": end_state.active_window_changed,
                     "active_window_id": end_state.active_window_id,
-                    "ax": {
-                        "available": ax_available,
-                        "count": ax_count
-                    },
                     "stability": "settled",
                     "elapsed_ms": settle_ms,
                     "settle_ms": settle_ms
@@ -2581,8 +2567,7 @@ fn observe_after_action(
                             continue;
                         }
                     }
-                    let (tokens, ax_available, ax_count) =
-                        observe_tokens_for_regions(&curr, &changed_regions);
+                    let (tokens, _, _) = observe_tokens_for_regions(&curr, &changed_regions);
                     let raw_tokens = tokens;
                     let end_state = observe_transition_state(start_state);
                     let regions = normalize_observe_regions(
@@ -2595,7 +2580,6 @@ fn observe_after_action(
                         diff_observe_tokens(&start_tokens, &raw_tokens),
                         end_state.active_window_bounds.as_ref(),
                     );
-                    let observe_text_dump = build_observe_tokens_delta_text_dump(&tokens_delta);
                     let settle_ms = start.elapsed().as_millis() as u64;
                     trace::log(format!(
                         "observe:settle outcome=settled settle_ms={} samples={} diff_ms_total={} regions={}",
@@ -2608,15 +2592,10 @@ fn observe_after_action(
                         "changed": true,
                         "regions": regions,
                         "tokens_delta": tokens_delta,
-                        "text_dump": observe_text_dump,
                         "focus_changed": end_state.focus_changed,
                         "focused_element_id": end_state.focused_element_id,
                         "active_window_changed": end_state.active_window_changed,
                         "active_window_id": end_state.active_window_id,
-                        "ax": {
-                            "available": ax_available,
-                            "count": ax_count
-                        },
                         "stability": "settled",
                         "elapsed_ms": settle_ms,
                         "settle_ms": settle_ms
@@ -2636,7 +2615,6 @@ fn observe_after_action(
                     "removed": [],
                     "changed": []
                 });
-                let observe_text_dump = build_observe_tokens_delta_text_dump(&tokens_delta);
                 trace::log(format!(
                     "observe:settle outcome=no_change settle_ms={} samples={} diff_ms_total={} regions={}",
                     elapsed_ms,
@@ -2648,15 +2626,10 @@ fn observe_after_action(
                     "changed": false,
                     "regions": [],
                     "tokens_delta": tokens_delta,
-                    "text_dump": observe_text_dump,
                     "focus_changed": end_state.focus_changed,
                     "focused_element_id": end_state.focused_element_id,
                     "active_window_changed": end_state.active_window_changed,
                     "active_window_id": end_state.active_window_id,
-                    "ax": {
-                        "available": false,
-                        "count": 0
-                    },
                     "stability": "no_change",
                     "elapsed_ms": elapsed_ms,
                     "settle_ms": elapsed_ms
@@ -3042,59 +3015,6 @@ fn normalize_observe_tokens_delta(
         }
     }
     delta
-}
-
-fn build_observe_tokens_delta_text_dump(tokens_delta: &Value) -> String {
-    let mut sections = Vec::new();
-    sections.push(format_observe_token_dump_section(
-        "added",
-        tokens_delta.get("added").and_then(Value::as_array),
-    ));
-    sections.push(format_observe_token_dump_section(
-        "removed",
-        tokens_delta.get("removed").and_then(Value::as_array),
-    ));
-    let (changed_before, changed_after) = observe_changed_token_sides(tokens_delta);
-    sections.push(format_observe_token_dump_section(
-        "changed_before",
-        Some(&changed_before),
-    ));
-    sections.push(format_observe_token_dump_section(
-        "changed_after",
-        Some(&changed_after),
-    ));
-    sections.join("\n\n")
-}
-
-fn format_observe_token_dump_section(label: &str, items: Option<&Vec<Value>>) -> String {
-    let mut lines = vec![format!("{label}:"), "---".to_string()];
-    if let Some(values) = items {
-        let dump = build_window_text_dump(values);
-        if !dump.trim().is_empty() {
-            lines.push(dump);
-        }
-    }
-    if lines.len() == 2 {
-        lines.push("(none)".to_string());
-    }
-    lines.join("\n")
-}
-
-fn observe_changed_token_sides(tokens_delta: &Value) -> (Vec<Value>, Vec<Value>) {
-    let mut before = Vec::new();
-    let mut after = Vec::new();
-    let Some(changed) = tokens_delta.get("changed").and_then(Value::as_array) else {
-        return (before, after);
-    };
-    for entry in changed {
-        if let Some(item) = entry.get("before") {
-            before.push(item.clone());
-        }
-        if let Some(item) = entry.get("after") {
-            after.push(item.clone());
-        }
-    }
-    (before, after)
 }
 
 fn rewrite_token_bbox_relative(token: &mut Value, origin: Option<&desktop_core::protocol::Bounds>) {

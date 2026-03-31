@@ -458,7 +458,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     if let Some(obj) = result.as_object() {
         let mut scalar_lines: Vec<String> = Vec::new();
         for (k, v) in obj {
-            if k == "observe" {
+            if k == "observe" || k == "click_target" {
                 continue;
             }
             if let Some(summary) = compact_value_summary(v) {
@@ -469,6 +469,35 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             lines.push(String::new());
             lines.push("## Result".to_string());
             lines.extend(scalar_lines);
+        }
+    }
+
+    if let Some(target) = result
+        .get("click_target")
+        .and_then(serde_json::Value::as_object)
+    {
+        lines.push(String::new());
+        lines.push("## Click Target".to_string());
+        if let Some(id) = target
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+        {
+            lines.push(format!("- id: {}", id));
+        }
+        if let Some(source) = target
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+        {
+            lines.push(format!("- source: {}", source));
+        }
+        if let Some(text) = target
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+        {
+            lines.push(format!("- text: {}", text));
         }
     }
 
@@ -495,17 +524,6 @@ fn append_observe_sections(lines: &mut Vec<String>, result: &serde_json::Value) 
         if let Some(summary) = observe.get(key).and_then(compact_value_summary) {
             lines.push(format!("- {key}: {summary}"));
         }
-    }
-    if let Some(ax) = observe.get("ax").and_then(serde_json::Value::as_object) {
-        let available = ax
-            .get("available")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let count = ax
-            .get("count")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        lines.push(format!("- ax: available=`{available}` count=`{count}`"));
     }
     let Some(tokens_delta) = observe
         .get("tokens_delta")
@@ -840,11 +858,13 @@ mod tests {
         let response = ResponseEnvelope::success(
             "r1",
             json!({
-                "id": "ocr_13",
-                "source": "vision_ocr",
-                "text": "House ballroom project",
-                "x": 765,
-                "y": 387,
+                "click_target": {
+                    "id": "ocr_13",
+                    "source": "vision_ocr",
+                    "text": "House ballroom project",
+                    "x": 765,
+                    "y": 387
+                },
                 "observe": {
                     "stability": "timeout",
                     "changed": true,
@@ -854,7 +874,6 @@ mod tests {
                     "active_window_changed": false,
                     "focus_changed": false,
                     "focused_element_id": "ax_axstatictext",
-                    "ax": { "available": true, "count": 3 },
                     "tokens_delta": {
                         "added": [
                             {
@@ -879,7 +898,7 @@ mod tests {
         );
 
         let markdown = render_markdown_response(&command, &response, false);
-        assert!(markdown.contains("## Result"));
+        assert!(markdown.contains("## Click Target"));
         assert!(markdown.contains("- id: ocr_13"));
         assert!(markdown.contains("## Observe"));
         assert!(markdown.contains("- stability: timeout"));
@@ -901,7 +920,7 @@ mod tests {
         let response = ResponseEnvelope::success(
             "r1",
             json!({
-                "id": "ocr_13",
+                "click_target": { "id": "ocr_13" },
                 "observe": {
                     "tokens_delta": {
                         "added": [],
