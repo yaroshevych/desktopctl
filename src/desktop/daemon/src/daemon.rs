@@ -3001,6 +3001,16 @@ fn dump_observe_region_screenshot(
     core_region: &desktop_core::protocol::Bounds,
     padded_region: &desktop_core::protocol::Bounds,
 ) {
+    let save_enabled = std::env::var("DESKTOPCTL_OBSERVE_SAVE_CROPS")
+        .ok()
+        .map(|v| {
+            let lowered = v.trim().to_ascii_lowercase();
+            lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on"
+        })
+        .unwrap_or(false);
+    if !save_enabled {
+        return;
+    }
     let dir = PathBuf::from("/tmp/desktopctl-observe-crops");
     if let Err(err) = fs::create_dir_all(&dir) {
         trace::log(format!("observe:dump mkdir_failed err={err}"));
