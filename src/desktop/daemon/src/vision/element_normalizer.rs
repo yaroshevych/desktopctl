@@ -86,7 +86,8 @@ impl ElementBuilder {
     }
 }
 
-pub fn finalize_elements(elements: &mut [TokenizeElement]) {
+pub fn finalize_elements(elements: &mut Vec<TokenizeElement>) {
+    split_multiline_ocr_elements(elements);
     elements.sort_by(|a, b| {
         a.bbox[1]
             .partial_cmp(&b.bbox[1])
@@ -133,6 +134,49 @@ pub fn finalize_elements(elements: &mut [TokenizeElement]) {
             element.scrollable = Some(true);
         }
     }
+}
+
+fn split_multiline_ocr_elements(elements: &mut Vec<TokenizeElement>) {
+    let mut out: Vec<TokenizeElement> = Vec::with_capacity(elements.len());
+    for element in elements.drain(..) {
+        let Some(raw_text) = element.text.as_deref() else {
+            out.push(element);
+            continue;
+        };
+        if element.source != "vision_ocr" || !raw_text.contains('\n') {
+            out.push(element);
+            continue;
+        }
+        let lines: Vec<String> = raw_text
+            .split('\n')
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        if lines.len() <= 1 {
+            out.push(element);
+            continue;
+        }
+        let line_count = lines.len() as f64;
+        let base_y = element.bbox[1];
+        let total_h = element.bbox[3].max(line_count);
+        let line_h = (total_h / line_count).max(1.0);
+        for (idx, line) in lines.into_iter().enumerate() {
+            let mut split = element.clone();
+            split.id.clear();
+            split.text = Some(line);
+            split.text_truncated = None;
+            split.bbox[1] = base_y + line_h * idx as f64;
+            split.bbox[3] = if idx + 1 == line_count as usize {
+                let used_h = line_h * idx as f64;
+                (total_h - used_h).max(1.0)
+            } else {
+                line_h
+            };
+            out.push(split);
+        }
+    }
+    *elements = out;
 }
 
 fn is_ax_scrollable_role(role: &str) -> bool {
@@ -529,5 +573,26 @@ mod tests {
         )];
         finalize_elements(&mut elements);
         assert_eq!(elements[0].id, "element_1");
+    }
+
+    #[test]
+    fn finalize_elements_splits_multiline_ocr_into_separate_elements() {
+        let mut elements = vec![el(
+            "vision_ocr",
+            "",
+            Some("Control Centre\nDesktop & Dock\nDisplays"),
+            None,
+            10.0,
+        )];
+        elements[0].bbox = [10.0, 100.0, 120.0, 60.0];
+        finalize_elements(&mut elements);
+        assert_eq!(elements.len(), 3);
+        assert_eq!(elements[0].text.as_deref(), Some("Control Centre"));
+        assert_eq!(elements[1].text.as_deref(), Some("Desktop & Dock"));
+        assert_eq!(elements[2].text.as_deref(), Some("Displays"));
+        assert!(elements.iter().all(|el| el.id.starts_with("ocr_")));
+        assert_eq!(elements[0].bbox[1], 100.0);
+        assert_eq!(elements[1].bbox[1], 120.0);
+        assert_eq!(elements[2].bbox[1], 140.0);
     }
 }
