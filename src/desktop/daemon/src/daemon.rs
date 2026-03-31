@@ -48,7 +48,9 @@ const OBSERVE_DIFF_THRESHOLD: u8 = 8;
 const OBSERVE_THUMB_WIDTH: u32 = 96;
 const OBSERVE_THUMB_HEIGHT: u32 = 54;
 const OBSERVE_REGION_PAD_PX: f64 = 14.0;
-const OBSERVE_MIN_THUMB_COMPONENT_AREA: u32 = 2;
+const OBSERVE_MIN_THUMB_COMPONENT_AREA: u32 = 4;
+const OBSERVE_FINAL_REGION_PAD_PX: f64 = 4.0;
+const OBSERVE_FINAL_MIN_COMPONENT_AREA: u32 = 96;
 const OBSERVE_OCR_PAD_PX: f64 = 40.0;
 static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
     OnceLock::new();
@@ -2471,18 +2473,18 @@ fn observe_after_action(
                 observe_tokens_for_regions(&last_capture, &final_regions, observe_scope);
             let raw_tokens = tokens;
             let end_state = observe_transition_state(start_state);
-            let regions =
-                normalize_observe_regions(&final_regions, end_state.active_window_bounds.as_ref());
+            let origin_bounds = end_state.active_window_bounds.as_ref().or(observe_scope);
+            let regions = normalize_observe_regions(&final_regions, origin_bounds);
             let start_tokens = observe_before_tokens_for_regions(
                 pre_click_tokens,
                 &start_capture,
                 &final_regions,
                 observe_scope,
-                end_state.active_window_bounds.as_ref(),
+                origin_bounds,
             );
             let tokens_delta = normalize_observe_tokens_delta(
                 diff_observe_tokens(&start_tokens, &raw_tokens),
-                end_state.active_window_bounds.as_ref(),
+                origin_bounds,
             );
             let settle_ms = start.elapsed().as_millis() as u64;
             trace::log(format!(
@@ -2548,20 +2550,18 @@ fn observe_after_action(
                     observe_tokens_for_regions(&curr, &final_regions, observe_scope);
                 let raw_tokens = tokens;
                 let end_state = observe_transition_state(start_state);
-                let regions = normalize_observe_regions(
-                    &final_regions,
-                    end_state.active_window_bounds.as_ref(),
-                );
+                let origin_bounds = end_state.active_window_bounds.as_ref().or(observe_scope);
+                let regions = normalize_observe_regions(&final_regions, origin_bounds);
                 let start_tokens = observe_before_tokens_for_regions(
                     pre_click_tokens,
                     &start_capture,
                     &final_regions,
                     observe_scope,
-                    end_state.active_window_bounds.as_ref(),
+                    origin_bounds,
                 );
                 let tokens_delta = normalize_observe_tokens_delta(
                     diff_observe_tokens(&start_tokens, &raw_tokens),
-                    end_state.active_window_bounds.as_ref(),
+                    origin_bounds,
                 );
                 let settle_ms = start.elapsed().as_millis() as u64;
                 trace::log(format!(
@@ -2601,20 +2601,18 @@ fn observe_after_action(
                         observe_tokens_for_regions(&curr, &final_regions, observe_scope);
                     let raw_tokens = tokens;
                     let end_state = observe_transition_state(start_state);
-                    let regions = normalize_observe_regions(
-                        &final_regions,
-                        end_state.active_window_bounds.as_ref(),
-                    );
+                    let origin_bounds = end_state.active_window_bounds.as_ref().or(observe_scope);
+                    let regions = normalize_observe_regions(&final_regions, origin_bounds);
                     let start_tokens = observe_before_tokens_for_regions(
                         pre_click_tokens,
                         &start_capture,
                         &final_regions,
                         observe_scope,
-                        end_state.active_window_bounds.as_ref(),
+                        origin_bounds,
                     );
                     let tokens_delta = normalize_observe_tokens_delta(
                         diff_observe_tokens(&start_tokens, &raw_tokens),
-                        end_state.active_window_bounds.as_ref(),
+                        origin_bounds,
                     );
                     let settle_ms = start.elapsed().as_millis() as u64;
                     trace::log(format!(
@@ -2738,8 +2736,9 @@ fn observe_tokens_for_regions(
                             width: text.bounds.width * sx,
                             height: text.bounds.height * sy,
                         };
-                        // Keep only OCR boxes that overlap the core changed region.
-                        if iou(core_region, &logical_bounds) <= 0.01 {
+                        // Keep OCR boxes that intersect the changed region. IoU is too strict
+                        // for small tokens when the region is large.
+                        if !bounds_intersect(core_region, &logical_bounds) {
                             continue;
                         }
                         if let Some(scope) = observe_scope {
@@ -2797,7 +2796,11 @@ fn observe_tokens_for_regions(
                 continue;
             }
         }
-        if !regions.is_empty() && !regions.iter().any(|region| iou(region, &ax.bounds) > 0.01) {
+        if !regions.is_empty()
+            && !regions
+                .iter()
+                .any(|region| bounds_intersect(region, &ax.bounds))
+        {
             continue;
         }
         let id = vision::ax_merge::primary_id_for_ax(&ax)
@@ -2871,7 +2874,11 @@ fn observe_before_tokens_for_regions(
             width: local.width,
             height: local.height,
         };
-        if !regions.is_empty() && !regions.iter().any(|region| iou(region, &global) > 0.01) {
+        if !regions.is_empty()
+            && !regions
+                .iter()
+                .any(|region| bounds_intersect(region, &global))
+        {
             continue;
         }
         if let Some(scope) = observe_scope {
@@ -2910,7 +2917,7 @@ fn final_observe_regions_from_images(
     let significant_regions: Vec<_> = frame_regions
         .into_iter()
         .filter(|region| {
-            region.width.saturating_mul(region.height).max(1) >= OBSERVE_MIN_THUMB_COMPONENT_AREA
+            region.width.saturating_mul(region.height).max(1) >= OBSERVE_FINAL_MIN_COMPONENT_AREA
         })
         .collect();
     let mut merged: Vec<desktop_core::protocol::Bounds> = Vec::new();
@@ -2921,11 +2928,16 @@ fn final_observe_regions_from_images(
             width: changed_region.width as f64,
             height: changed_region.height as f64,
         };
-        let padded = pad_bounds(upscaled, OBSERVE_REGION_PAD_PX);
+        let padded = pad_bounds(upscaled, OBSERVE_FINAL_REGION_PAD_PX);
         if let Some(clipped) = clip_to_scope(&padded, observe_scope) {
-            merge_region_into_list(&mut merged, clipped);
+            merge_region_into_list_with_threshold(&mut merged, clipped, 0.35);
         }
     }
+    merged.sort_by(|a, b| {
+        (a.y, a.x)
+            .partial_cmp(&(b.y, b.x))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     merged
 }
 
@@ -3080,6 +3092,24 @@ fn merge_region_into_list(
     let mut idx = 0usize;
     while idx < regions.len() {
         if iou(&regions[idx], &merged) > 0.0 {
+            merged = merge_bounds(Some(&regions[idx]), &merged);
+            regions.swap_remove(idx);
+            continue;
+        }
+        idx += 1;
+    }
+    regions.push(merged);
+}
+
+fn merge_region_into_list_with_threshold(
+    regions: &mut Vec<desktop_core::protocol::Bounds>,
+    incoming: desktop_core::protocol::Bounds,
+    min_iou: f64,
+) {
+    let mut merged = incoming;
+    let mut idx = 0usize;
+    while idx < regions.len() {
+        if iou(&regions[idx], &merged) >= min_iou {
             merged = merge_bounds(Some(&regions[idx]), &merged);
             regions.swap_remove(idx);
             continue;
@@ -3328,7 +3358,7 @@ fn reconcile_added_removed_pairs(delta: &mut Value) {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut changed = delta
+    let changed = delta
         .get("changed")
         .and_then(Value::as_array)
         .cloned()
@@ -3353,6 +3383,7 @@ fn reconcile_added_removed_pairs(delta: &mut Value) {
     }
 
     let mut added_out: Vec<Value> = Vec::new();
+    let mut removed_retain: Vec<Value> = Vec::new();
     for token in added {
         let Some(id) = token
             .get("id")
@@ -3373,15 +3404,16 @@ fn reconcile_added_removed_pairs(delta: &mut Value) {
             continue;
         };
 
-        if !observe_token_semantic_equal(&before, &token) {
-            changed.push(json!({
-                "before": before,
-                "after": token
-            }));
+        if observe_token_semantic_equal(&before, &token) {
+            continue;
         }
+        // Same ID but different semantic content: preserve both sides so deletions stay visible.
+        removed_retain.push(before);
+        added_out.push(token);
     }
 
     let mut removed_out: Vec<Value> = removed_unkeyed;
+    removed_out.extend(removed_retain);
     for queue in removed_by_id.into_values() {
         removed_out.extend(queue);
     }
@@ -3676,6 +3708,21 @@ fn iou(a: &desktop_core::protocol::Bounds, b: &desktop_core::protocol::Bounds) -
     }
     let union = (a.width * a.height) + (b.width * b.height) - inter;
     if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+fn bounds_intersect(
+    a: &desktop_core::protocol::Bounds,
+    b: &desktop_core::protocol::Bounds,
+) -> bool {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    let ix1 = a.x.max(b.x);
+    let iy1 = a.y.max(b.y);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    (ix2 - ix1) > 0.0 && (iy2 - iy1) > 0.0
 }
 
 fn compact_for_log(value: &str) -> String {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_OBSERVE_TIMEOUT_MS: u64 = 300;
-const DEFAULT_OBSERVE_SETTLE_MS: u64 = 650;
+const DEFAULT_OBSERVE_TIMEOUT_MS: u64 = 3000;
+const DEFAULT_OBSERVE_SETTLE_MS: u64 = 800;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -549,6 +549,10 @@ fn append_tokens_delta_section(
     }
     lines.push(String::new());
     lines.push(format!("## {title}"));
+    if title == "Removed" {
+        append_tokens_delta_columns(lines, items);
+        return;
+    }
     for item in items {
         if title == "Changed" {
             let before = item.get("before").unwrap_or(item);
@@ -561,6 +565,64 @@ fn append_tokens_delta_section(
             continue;
         }
         lines.push(format_token_delta_side(item));
+    }
+}
+
+fn append_tokens_delta_columns(lines: &mut Vec<String>, items: &[serde_json::Value]) {
+    let mut entries: Vec<MarkdownEntry> = items
+        .iter()
+        .filter_map(markdown_entry_from_token_delta)
+        .collect();
+    if entries.is_empty() {
+        for item in items {
+            lines.push(format_token_delta_side(item));
+        }
+        return;
+    }
+    entries.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
+    let mut columns: Vec<Vec<MarkdownEntry>> = Vec::new();
+    let column_split = 140.0_f64;
+    for entry in entries {
+        if !columns.is_empty() {
+            let idx = columns.len() - 1;
+            let last_x = columns[idx].last().map(|e| e.x).unwrap_or(entry.x);
+            if (entry.x - last_x).abs() <= column_split {
+                columns[idx].push(entry);
+                continue;
+            }
+        }
+        columns.push(vec![entry]);
+    }
+    for (idx, column) in columns.into_iter().enumerate() {
+        let mut column = column;
+        column.sort_by(|a, b| a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x)));
+        let title = match idx {
+            0 => "Left Column".to_string(),
+            1 => "Right Column".to_string(),
+            _ => format!("Column {}", idx + 1),
+        };
+        lines.push(format!("### {title}"));
+        let mut last_render_key: Option<String> = None;
+        let mut last_y: f64 = f64::NEG_INFINITY;
+        for entry in column {
+            let dedupe_key = format!(
+                "{}|{}",
+                normalize_single_line(&entry.label).to_ascii_lowercase(),
+                entry.id.as_deref().unwrap_or_default(),
+            );
+            if last_render_key.as_deref() == Some(dedupe_key.as_str())
+                && (entry.y - last_y).abs() < 14.0
+            {
+                continue;
+            }
+            let mut line = entry.label;
+            if let Some(id) = entry.id.as_deref().filter(|v| !v.trim().is_empty()) {
+                line.push_str(&format!(" #{id}"));
+            }
+            lines.push(line);
+            last_render_key = Some(dedupe_key);
+            last_y = entry.y;
+        }
     }
 }
 
@@ -712,6 +774,35 @@ fn markdown_entry_from_element(element: &serde_json::Value) -> Option<MarkdownEn
         scrollable,
         checked,
         visible,
+    })
+}
+
+fn markdown_entry_from_token_delta(token: &serde_json::Value) -> Option<MarkdownEntry> {
+    let text = token
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(normalize_single_line)
+        .filter(|v| !v.trim().is_empty())?;
+    let bbox = token.get("bbox")?.as_array()?;
+    if bbox.len() != 4 {
+        return None;
+    }
+    let x = bbox[0].as_f64().unwrap_or(0.0);
+    let y = bbox[1].as_f64().unwrap_or(0.0);
+    let id = token
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    Some(MarkdownEntry {
+        label: text,
+        id,
+        x,
+        y,
+        scrollable: false,
+        checked: None,
+        visible: true,
     })
 }
 

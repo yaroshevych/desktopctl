@@ -23,7 +23,7 @@ pub(crate) fn click_text(
         &mut result,
         &observe,
         &observe_start,
-        None,
+        guard.observe_scope.as_ref(),
         pre_click_tokens.as_deref(),
     )?;
     Ok(result)
@@ -51,7 +51,7 @@ pub(crate) fn click_id(
         &mut result,
         &observe,
         &observe_start,
-        None,
+        guard.observe_scope.as_ref(),
         pre_click_tokens.as_deref(),
     )?;
     Ok(result)
