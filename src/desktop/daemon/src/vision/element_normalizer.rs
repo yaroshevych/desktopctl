@@ -251,11 +251,39 @@ fn is_invisible_text_mark(ch: char) -> bool {
 }
 
 fn element_id_base(element: &TokenizeElement) -> String {
+    if element.source == "vision_ocr" {
+        return ocr_hashed_id_base(element);
+    }
     let prefix = element_kind_prefix(element);
     if let Some(suffix) = element_stable_text_suffix(element) {
         return truncate_id_to_limit(&format!("{prefix}_{suffix}"), MAX_ELEMENT_ID_CHARS);
     }
     format!("{prefix}_{POSITIONAL_ID_MARKER}")
+}
+
+fn ocr_hashed_id_base(element: &TokenizeElement) -> String {
+    let text = element
+        .text
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let q = |v: f64| -> i64 { (v.max(0.0) / 8.0).round() as i64 };
+    let bx = q(element.bbox[0]);
+    let by = q(element.bbox[1]);
+    let bw = q(element.bbox[2]);
+    let bh = q(element.bbox[3]);
+    let material = format!("{text}|{bx},{by},{bw},{bh}");
+    format!("ocr_{:08x}", stable_hash32(&material))
+}
+
+fn stable_hash32(input: &str) -> u32 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash & 0xffff_ffff) as u32
 }
 
 fn element_kind_prefix(element: &TokenizeElement) -> &'static str {
@@ -480,7 +508,7 @@ mod tests {
             el("sat_control_v1", "", Some("OK"), Some(true), 80.0),
         ];
         finalize_elements(&mut elements);
-        assert_eq!(elements[0].id, "ocr_1");
+        assert!(elements[0].id.starts_with("ocr_"));
         assert_eq!(elements[1].id, "button_7");
         assert_eq!(elements[2].id, "button_add");
         assert_eq!(elements[3].id, "button_ok");

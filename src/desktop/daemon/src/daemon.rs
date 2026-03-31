@@ -1,8 +1,6 @@
 use std::{
-    collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet},
     fs,
-    hash::{Hash, Hasher},
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
@@ -3151,10 +3149,7 @@ fn ensure_observe_token_id(token: &mut Value) {
         .trim()
         .to_ascii_lowercase();
     let bbox_key = quantized_bbox_key(token.get("bbox").and_then(Value::as_array));
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
-    text.hash(&mut hasher);
-    bbox_key.hash(&mut hasher);
+    let material = format!("{source}|{text}|{bbox_key}");
     let prefix = if source == "vision_ocr" {
         "ocr"
     } else if source.starts_with("accessibility_ax:") {
@@ -3165,10 +3160,7 @@ fn ensure_observe_token_id(token: &mut Value) {
     if let Some(obj) = token.as_object_mut() {
         obj.insert(
             "id".to_string(),
-            Value::String(format!(
-                "{prefix}_{:08x}",
-                (hasher.finish() & 0xffff_ffff) as u32
-            )),
+            Value::String(format!("{prefix}_{:08x}", stable_hash32(&material))),
         );
     }
 }
@@ -3207,10 +3199,9 @@ fn round_nonnegative_i64(value: f64) -> i64 {
 }
 
 fn observe_ocr_token_id(text: &str, bounds: &desktop_core::protocol::Bounds) -> String {
-    let mut hasher = DefaultHasher::new();
-    text.trim().to_ascii_lowercase().hash(&mut hasher);
-    quantized_observe_bbox(bounds).hash(&mut hasher);
-    format!("ocr_{:08x}", (hasher.finish() & 0xffff_ffff) as u32)
+    let (x, y, w, h) = quantized_observe_bbox(bounds);
+    let material = format!("{}|{x},{y},{w},{h}", text.trim().to_ascii_lowercase());
+    format!("ocr_{:08x}", stable_hash32(&material))
 }
 
 fn quantized_observe_bbox(bounds: &desktop_core::protocol::Bounds) -> (i64, i64, i64, i64) {
@@ -3221,6 +3212,15 @@ fn quantized_observe_bbox(bounds: &desktop_core::protocol::Bounds) -> (i64, i64,
         q(bounds.width.max(0.0)),
         q(bounds.height.max(0.0)),
     )
+}
+
+fn stable_hash32(input: &str) -> u32 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash & 0xffff_ffff) as u32
 }
 
 fn observe_token_key(token: &Value) -> String {

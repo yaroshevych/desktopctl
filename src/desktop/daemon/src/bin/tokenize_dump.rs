@@ -258,24 +258,52 @@ fn build_elements_json(
     });
     for (idx, entry) in out.iter_mut().enumerate() {
         if let Some(obj) = entry.as_object_mut() {
-            let prefix = obj
+            let source = obj
                 .get("source")
                 .and_then(serde_json::Value::as_str)
-                .map(|source| {
-                    if source == "vision_ocr" {
-                        "ocr"
-                    } else {
-                        "text"
-                    }
-                })
-                .unwrap_or("text");
-            obj.insert(
-                "id".to_string(),
-                serde_json::Value::String(format!("{prefix}_{:04}", idx + 1)),
-            );
+                .unwrap_or("unknown");
+            let id = if source == "vision_ocr" {
+                let text = obj
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                let bbox_key = quantized_bbox_key(obj.get("bbox").and_then(|v| v.as_array()));
+                format!("ocr_{:08x}", stable_hash32(&format!("{text}|{bbox_key}")))
+            } else {
+                format!("text_{:04}", idx + 1)
+            };
+            obj.insert("id".to_string(), serde_json::Value::String(id));
         }
     }
     out
+}
+
+fn quantized_bbox_key(bbox: Option<&Vec<serde_json::Value>>) -> String {
+    let Some(bbox) = bbox else {
+        return "[]".to_string();
+    };
+    if bbox.len() != 4 {
+        return "[]".to_string();
+    }
+    let q = |v: Option<f64>| -> i64 { (v.unwrap_or(0.0).max(0.0) / 8.0).round() as i64 };
+    format!(
+        "{},{},{},{}",
+        q(bbox[0].as_f64()),
+        q(bbox[1].as_f64()),
+        q(bbox[2].as_f64()),
+        q(bbox[3].as_f64())
+    )
+}
+
+fn stable_hash32(input: &str) -> u32 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash & 0xffff_ffff) as u32
 }
 
 fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
