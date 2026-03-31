@@ -218,6 +218,9 @@ fn element_kind_prefix(element: &TokenizeElement) -> &'static str {
     if let Some(role) = element.source.strip_prefix("accessibility_ax:") {
         return ax_role_prefix(role);
     }
+    if element.source == "vision_ocr" {
+        return "ocr";
+    }
     match element.kind.as_str() {
         "glyph" => "glyph",
         "box" => "box",
@@ -433,7 +436,7 @@ mod tests {
             el("sat_control_v1", "", Some("OK"), Some(true), 80.0),
         ];
         finalize_elements(&mut elements);
-        assert_eq!(elements[0].id, "text_1");
+        assert_eq!(elements[0].id, "ocr_1");
         assert_eq!(elements[1].id, "button_7");
         assert_eq!(elements[2].id, "button_add");
         assert_eq!(elements[3].id, "button_ok");

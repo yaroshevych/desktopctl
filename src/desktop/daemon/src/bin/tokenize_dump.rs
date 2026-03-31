@@ -258,9 +258,20 @@ fn build_elements_json(
     });
     for (idx, entry) in out.iter_mut().enumerate() {
         if let Some(obj) = entry.as_object_mut() {
+            let prefix = obj
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .map(|source| {
+                    if source == "vision_ocr" {
+                        "ocr"
+                    } else {
+                        "text"
+                    }
+                })
+                .unwrap_or("text");
             obj.insert(
                 "id".to_string(),
-                serde_json::Value::String(format!("text_{:04}", idx + 1)),
+                serde_json::Value::String(format!("{prefix}_{:04}", idx + 1)),
             );
         }
     }
