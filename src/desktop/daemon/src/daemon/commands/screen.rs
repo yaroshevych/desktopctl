@@ -219,14 +219,14 @@ pub(crate) fn tokenize(
                     >,
                 > = None;
                 let reference_owned = reference.to_string();
-
-                if let Some(prefetched) =
+                let prefetched_match =
                     active_window_prefetched_windows
                         .as_deref()
                         .and_then(|windows| {
                             resolve_active_window_from_app_windows(&reference_owned, windows)
-                        })
-                {
+                        });
+
+                if let Some(prefetched) = prefetched_match.as_ref() {
                     let prefetched_title = prefetched.title.clone();
                     let prefetched_app = Some(prefetched.app.clone());
                     if let Ok(bounds) = super::super::resolve_tokenize_region_bounds(
@@ -267,8 +267,12 @@ pub(crate) fn tokenize(
                     }
                 }
 
-                let strict_window =
-                    super::super::assert_active_window_id_matches(&reference_owned)?;
+                let strict_window = if let Some(prefetched) = prefetched_match {
+                    trace::log("active_window_resolve:strict_prefetched_hit");
+                    prefetched
+                } else {
+                    super::super::assert_active_window_id_matches(&reference_owned)?
+                };
                 let strict_bounds = super::super::resolve_tokenize_region_bounds(
                     strict_window.bounds.clone(),
                     region.as_ref(),
