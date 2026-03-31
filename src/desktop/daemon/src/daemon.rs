@@ -1474,7 +1474,7 @@ fn click_text_target(
     active_window: bool,
     active_window_id: Option<&str>,
     request_context: &RequestContext,
-) -> Result<Value, AppError> {
+) -> Result<(Value, Option<Vec<Value>>), AppError> {
     if active_window_id.is_some() && !active_window {
         return Err(AppError::invalid_argument(
             "active window id requires --active-window",
@@ -1485,7 +1485,7 @@ fn click_text_target(
             assert_active_window_id_matches(reference)?;
         }
         if let Some(result) = try_click_text_active_window_ax(query, button)? {
-            return Ok(result);
+            return Ok((result, None));
         }
         let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
             AppError::target_not_found("frontmost window bounds unavailable for click --text")
@@ -1498,6 +1498,7 @@ fn click_text_target(
             bounds,
         };
         let payload = vision::pipeline::tokenize_window(window_meta)?;
+        let pre_click_tokens = observe_seed_tokens_from_tokenize_payload(&payload);
         let tokenize_texts = tokenize_payload_texts_for_click(&payload);
         if tokenize_texts.is_empty() {
             return Err(AppError::target_not_found(
@@ -1516,13 +1517,16 @@ fn click_text_target(
             target.bounds.height
         ));
         perform_click(&target.bounds, button)?;
-        return Ok(json!({
-            "snapshot_id": payload.snapshot_id,
-            "click_target": {
-                "text": target.text,
-                "bounds": target.bounds
-            }
-        }));
+        return Ok((
+            json!({
+                "snapshot_id": payload.snapshot_id,
+                "click_target": {
+                    "text": target.text,
+                    "bounds": target.bounds
+                }
+            }),
+            Some(pre_click_tokens),
+        ));
     }
 
     permissions::ensure_screen_recording_permission()?;
@@ -1591,13 +1595,16 @@ fn click_text_target(
     ));
     perform_click(&target.bounds, button)?;
 
-    Ok(json!({
-        "snapshot_id": capture.snapshot.snapshot_id,
-        "click_target": {
-            "text": target.text,
-            "bounds": target.bounds
-        }
-    }))
+    Ok((
+        json!({
+            "snapshot_id": capture.snapshot.snapshot_id,
+            "click_target": {
+                "text": target.text,
+                "bounds": target.bounds
+            }
+        }),
+        None,
+    ))
 }
 
 fn try_click_text_active_window_ax(
@@ -1674,7 +1681,7 @@ fn click_element_id_target(
     active_window: bool,
     active_window_id: Option<&str>,
     request_context: &RequestContext,
-) -> Result<Value, AppError> {
+) -> Result<(Value, Option<Vec<Value>>), AppError> {
     if !active_window {
         return Err(AppError::invalid_argument(
             "pointer click --id requires --active-window",
@@ -1690,7 +1697,7 @@ fn click_element_id_target(
     }
     if is_ax_element_id(needle) {
         if let Some(result) = try_click_ax_element_id_target(needle, button)? {
-            return Ok(result);
+            return Ok((result, None));
         }
     }
     let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
@@ -1704,6 +1711,7 @@ fn click_element_id_target(
         bounds,
     };
     let payload = vision::pipeline::tokenize_window(window_meta)?;
+    let pre_click_tokens = observe_seed_tokens_from_tokenize_payload(&payload);
     let candidates = tokenize_payload_elements_for_click(&payload);
     let total_candidates = candidates.len();
     let matches: Vec<TokenizeClickElementCandidate> = candidates
@@ -1738,14 +1746,17 @@ fn click_element_id_target(
         compact_for_log(target.text.as_deref().unwrap_or(""))
     ));
     perform_click(&target.bounds, button)?;
-    Ok(json!({
-        "click_target": {
-            "id": target.id.clone(),
-            "text": target.text.clone(),
-            "bounds": target.bounds.clone(),
-            "source": target.source.clone()
-        }
-    }))
+    Ok((
+        json!({
+            "click_target": {
+                "id": target.id.clone(),
+                "text": target.text.clone(),
+                "bounds": target.bounds.clone(),
+                "source": target.source.clone()
+            }
+        }),
+        Some(pre_click_tokens),
+    ))
 }
 
 fn is_ax_element_id(id: &str) -> bool {
@@ -2432,6 +2443,7 @@ fn observe_after_action(
     options: &ObserveOptions,
     start_state: &ObserveStartState,
     observe_scope: Option<&desktop_core::protocol::Bounds>,
+    pre_click_tokens: Option<&[Value]>,
 ) -> Result<Option<Value>, AppError> {
     if !options.enabled {
         return Ok(None);
@@ -2460,7 +2472,12 @@ fn observe_after_action(
                 &changed_regions,
                 end_state.active_window_bounds.as_ref(),
             );
-            let start_tokens = observe_tokens_for_regions(&start_capture, &changed_regions).0;
+            let start_tokens = observe_before_tokens_for_regions(
+                pre_click_tokens,
+                &start_capture,
+                &changed_regions,
+                end_state.active_window_bounds.as_ref(),
+            );
             let tokens_delta = normalize_observe_tokens_delta(
                 diff_observe_tokens(&start_tokens, &raw_tokens),
                 end_state.active_window_bounds.as_ref(),
@@ -2530,7 +2547,12 @@ fn observe_after_action(
                     &changed_regions,
                     end_state.active_window_bounds.as_ref(),
                 );
-                let start_tokens = observe_tokens_for_regions(&start_capture, &changed_regions).0;
+                let start_tokens = observe_before_tokens_for_regions(
+                    pre_click_tokens,
+                    &start_capture,
+                    &changed_regions,
+                    end_state.active_window_bounds.as_ref(),
+                );
                 let tokens_delta = normalize_observe_tokens_delta(
                     diff_observe_tokens(&start_tokens, &raw_tokens),
                     end_state.active_window_bounds.as_ref(),
@@ -2574,8 +2596,12 @@ fn observe_after_action(
                         &changed_regions,
                         end_state.active_window_bounds.as_ref(),
                     );
-                    let start_tokens =
-                        observe_tokens_for_regions(&start_capture, &changed_regions).0;
+                    let start_tokens = observe_before_tokens_for_regions(
+                        pre_click_tokens,
+                        &start_capture,
+                        &changed_regions,
+                        end_state.active_window_bounds.as_ref(),
+                    );
                     let tokens_delta = normalize_observe_tokens_delta(
                         diff_observe_tokens(&start_tokens, &raw_tokens),
                         end_state.active_window_bounds.as_ref(),
@@ -2775,6 +2801,66 @@ fn observe_tokens_for_regions(
     ));
 
     (tokens, ax_available, ax_count)
+}
+
+fn observe_seed_tokens_from_tokenize_payload(
+    payload: &desktop_core::protocol::TokenizePayload,
+) -> Vec<Value> {
+    let mut tokens = Vec::new();
+    for window in &payload.windows {
+        for element in &window.elements {
+            let text = element.text.as_deref().unwrap_or("").trim();
+            if text.is_empty() {
+                continue;
+            }
+            tokens.push(json!({
+                "id": element.id,
+                "source": element.source,
+                "text": text,
+                "checked": element.checked,
+                "bbox": [element.bbox[0], element.bbox[1], element.bbox[2], element.bbox[3]]
+            }));
+        }
+    }
+    tokens
+}
+
+fn observe_before_tokens_for_regions(
+    pre_click_tokens: Option<&[Value]>,
+    start_capture: &vision::types::CapturedImage,
+    regions: &[desktop_core::protocol::Bounds],
+    origin: Option<&desktop_core::protocol::Bounds>,
+) -> Vec<Value> {
+    let Some(seed) = pre_click_tokens else {
+        return observe_tokens_for_regions(start_capture, regions).0;
+    };
+    let Some(origin) = origin else {
+        return observe_tokens_for_regions(start_capture, regions).0;
+    };
+    let mut out = Vec::new();
+    for token in seed {
+        let Some(local) = token_bbox_bounds(token) else {
+            continue;
+        };
+        let global = desktop_core::protocol::Bounds {
+            x: origin.x + local.x,
+            y: origin.y + local.y,
+            width: local.width,
+            height: local.height,
+        };
+        if !regions.is_empty() && !regions.iter().any(|region| iou(region, &global) > 0.01) {
+            continue;
+        }
+        let mut cloned = token.clone();
+        if let Some(obj) = cloned.as_object_mut() {
+            obj.insert(
+                "bbox".to_string(),
+                json!([global.x, global.y, global.width, global.height]),
+            );
+        }
+        out.push(cloned);
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3014,7 +3100,172 @@ fn normalize_observe_tokens_delta(
             }
         }
     }
+    remap_observe_ocr_ids_to_tokenize_ids(&mut delta, origin);
     delta
+}
+
+#[derive(Debug, Clone)]
+struct OcrIdCandidate {
+    id: String,
+    text_norm: String,
+    bounds: desktop_core::protocol::Bounds,
+}
+
+fn remap_observe_ocr_ids_to_tokenize_ids(
+    delta: &mut Value,
+    origin: Option<&desktop_core::protocol::Bounds>,
+) {
+    let Some(window_bounds) = origin.cloned() else {
+        return;
+    };
+    let app = window_target::frontmost_app_name();
+    let window_meta = vision::pipeline::TokenizeWindowMeta {
+        id: "frontmost:1".to_string(),
+        title: app.clone().unwrap_or_else(|| "active_window".to_string()),
+        app,
+        bounds: window_bounds,
+    };
+    let payload = match vision::pipeline::tokenize_window(window_meta) {
+        Ok(payload) => payload,
+        Err(err) => {
+            trace::log(format!(
+                "observe:id_remap:tokenize_window_warn {}",
+                err.message
+            ));
+            return;
+        }
+    };
+    let candidates = collect_ocr_id_candidates(&payload);
+    if candidates.is_empty() {
+        return;
+    }
+    if let Some(items) = delta.get_mut("added").and_then(Value::as_array_mut) {
+        for token in items {
+            remap_single_observe_ocr_id(token, &candidates);
+        }
+    }
+    if let Some(items) = delta.get_mut("removed").and_then(Value::as_array_mut) {
+        for token in items {
+            remap_single_observe_ocr_id(token, &candidates);
+        }
+    }
+    if let Some(items) = delta.get_mut("changed").and_then(Value::as_array_mut) {
+        for entry in items {
+            if let Some(before) = entry.get_mut("before") {
+                remap_single_observe_ocr_id(before, &candidates);
+            }
+            if let Some(after) = entry.get_mut("after") {
+                remap_single_observe_ocr_id(after, &candidates);
+            }
+        }
+    }
+}
+
+fn collect_ocr_id_candidates(
+    payload: &desktop_core::protocol::TokenizePayload,
+) -> Vec<OcrIdCandidate> {
+    let mut out = Vec::new();
+    for window in &payload.windows {
+        for element in &window.elements {
+            if element.source != "vision_ocr" {
+                continue;
+            }
+            let id = element.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            let text = element.text.as_deref().unwrap_or("").trim();
+            if text.is_empty() {
+                continue;
+            }
+            out.push(OcrIdCandidate {
+                id: id.to_string(),
+                text_norm: normalize_observe_text(text),
+                bounds: desktop_core::protocol::Bounds {
+                    x: element.bbox[0],
+                    y: element.bbox[1],
+                    width: element.bbox[2],
+                    height: element.bbox[3],
+                },
+            });
+        }
+    }
+    out
+}
+
+fn remap_single_observe_ocr_id(token: &mut Value, candidates: &[OcrIdCandidate]) {
+    let source = token
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if source != "vision_ocr" {
+        return;
+    }
+    let text = token
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() {
+        return;
+    }
+    let Some(bounds) = token_bbox_bounds(token) else {
+        return;
+    };
+    let text_norm = normalize_observe_text(text);
+    let mut best_idx: Option<usize> = None;
+    let mut best_score = -1.0_f64;
+    for (idx, candidate) in candidates.iter().enumerate() {
+        if candidate.text_norm != text_norm {
+            continue;
+        }
+        let score = iou(&candidate.bounds, &bounds);
+        if score > best_score {
+            best_score = score;
+            best_idx = Some(idx);
+        }
+    }
+    if best_idx.is_none() {
+        for (idx, candidate) in candidates.iter().enumerate() {
+            let score = iou(&candidate.bounds, &bounds);
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(idx);
+            }
+        }
+    }
+    let Some(idx) = best_idx else {
+        return;
+    };
+    if best_score < 0.10 {
+        return;
+    }
+    if let Some(obj) = token.as_object_mut() {
+        obj.insert("id".to_string(), Value::String(candidates[idx].id.clone()));
+    }
+}
+
+fn token_bbox_bounds(token: &Value) -> Option<desktop_core::protocol::Bounds> {
+    let bbox = token.get("bbox")?.as_array()?;
+    if bbox.len() != 4 {
+        return None;
+    }
+    Some(desktop_core::protocol::Bounds {
+        x: bbox[0].as_f64().unwrap_or(0.0),
+        y: bbox[1].as_f64().unwrap_or(0.0),
+        width: bbox[2].as_f64().unwrap_or(0.0),
+        height: bbox[3].as_f64().unwrap_or(0.0),
+    })
+}
+
+fn normalize_observe_text(input: &str) -> String {
+    input
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn rewrite_token_bbox_relative(token: &mut Value, origin: Option<&desktop_core::protocol::Bounds>) {

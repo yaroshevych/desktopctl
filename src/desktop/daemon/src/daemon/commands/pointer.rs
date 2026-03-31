@@ -12,14 +12,20 @@ pub(crate) fn click_text(
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let observe_start = super::super::guards::capture_observe_start(&observe);
-    let mut result = super::super::click_text_target(
+    let (mut result, pre_click_tokens) = super::super::click_text_target(
         &text,
         button,
         active_window,
         guard.bound_active_window_id.as_deref(),
         request_context,
     )?;
-    super::super::guards::append_observe(&mut result, &observe, &observe_start, None)?;
+    super::super::guards::append_observe(
+        &mut result,
+        &observe,
+        &observe_start,
+        None,
+        pre_click_tokens.as_deref(),
+    )?;
     Ok(result)
 }
 
@@ -34,13 +40,19 @@ pub(crate) fn click_id(
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let observe_start = super::super::guards::capture_observe_start(&observe);
-    let mut result = super::super::click_element_id_target(
+    let (mut result, pre_click_tokens) = super::super::click_element_id_target(
         &id,
         button,
         active_window,
         guard.bound_active_window_id.as_deref(),
         request_context,
     )?;
-    super::super::guards::append_observe(&mut result, &observe, &observe_start, None)?;
+    super::super::guards::append_observe(
+        &mut result,
+        &observe,
+        &observe_start,
+        None,
+        pre_click_tokens.as_deref(),
+    )?;
     Ok(result)
 }

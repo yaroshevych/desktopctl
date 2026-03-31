@@ -127,6 +127,7 @@ pub(crate) fn pointer_click(
         &observe,
         &observe_start,
         guard.observe_scope.as_ref(),
+        None,
     )?;
     Ok(result)
 }
@@ -173,6 +174,7 @@ pub(crate) fn pointer_scroll(
         &observe,
         &observe_start,
         guard.observe_scope.as_ref(),
+        None,
     )?;
     Ok(result)
 }
@@ -227,6 +229,7 @@ pub(crate) fn key_type(
         &observe,
         &observe_start,
         guard.observe_scope.as_ref(),
+        None,
     )?;
     Ok(result)
 }
@@ -249,6 +252,7 @@ pub(crate) fn key_hotkey(
         &observe,
         &observe_start,
         guard.observe_scope.as_ref(),
+        None,
     )?;
     Ok(result)
 }
@@ -270,6 +274,7 @@ pub(crate) fn key_enter(
         &observe,
         &observe_start,
         guard.observe_scope.as_ref(),
+        None,
     )?;
     Ok(result)
 }
@@ -291,6 +296,7 @@ pub(crate) fn key_escape(
         &observe,
         &observe_start,
         guard.observe_scope.as_ref(),
+        None,
     )?;
     Ok(result)
 }

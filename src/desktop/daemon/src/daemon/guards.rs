@@ -39,10 +39,11 @@ pub(crate) fn append_observe(
     observe: &ObserveOptions,
     observe_start: &super::ObserveStartState,
     observe_scope: Option<&desktop_core::protocol::Bounds>,
+    pre_click_tokens: Option<&[Value]>,
 ) -> Result<(), AppError> {
     super::append_observe_payload(
         result,
-        super::observe_after_action(observe, observe_start, observe_scope)?,
+        super::observe_after_action(observe, observe_start, observe_scope, pre_click_tokens)?,
     );
     Ok(())
 }
