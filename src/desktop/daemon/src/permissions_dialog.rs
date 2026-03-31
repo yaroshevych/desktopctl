@@ -1,6 +1,10 @@
 use block2::RcBlock;
 use std::{
     cell::RefCell,
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -19,6 +23,7 @@ use objc2_app_kit::{
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
+use std::os::unix::fs::symlink;
 
 use crate::permissions;
 
@@ -44,7 +49,7 @@ define_class!(
     impl PermissionsTarget {
         #[unsafe(method(installAgentTool:))]
         fn install_agent_tool(&self, _: &AnyObject) {
-            open_url(WEBSITE_URL);
+            let _ = install_cli_symlink();
         }
 
         #[unsafe(method(grantAccessibility:))]
@@ -607,11 +612,90 @@ unsafe fn dialog_row(
 }
 
 fn cli_in_path() -> bool {
-    std::process::Command::new("which")
+    Command::new("which")
         .arg("desktopctl")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn discover_cli_binary() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("DESKTOPCTL_CLI_BIN") {
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+
+    let sibling = exe_dir.join("desktopctl");
+    if sibling.exists() {
+        return Some(sibling);
+    }
+
+    let bundled = exe_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("MacOS/desktopctl"));
+    if let Some(candidate) = bundled {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn install_cli_symlink() -> Result<PathBuf, String> {
+    let source = discover_cli_binary().ok_or_else(|| "desktopctl binary not found".to_string())?;
+
+    let mut candidate_dirs: Vec<PathBuf> = std::env::var("PATH")
+        .ok()
+        .map(|path| {
+            path.split(':')
+                .filter(|segment| !segment.trim().is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidate_dirs.push(PathBuf::from("/usr/local/bin"));
+        candidate_dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        candidate_dirs.push(home.join(".local/bin"));
+        candidate_dirs.push(home.join("bin"));
+    }
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    candidate_dirs.retain(|dir| seen.insert(dir.clone()));
+
+    for dir in candidate_dirs {
+        if fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let link_path = dir.join("desktopctl");
+        if let Ok(meta) = fs::symlink_metadata(&link_path) {
+            if meta.file_type().is_symlink() {
+                if let Ok(existing_target) = fs::read_link(&link_path) {
+                    if existing_target == source {
+                        return Ok(link_path);
+                    }
+                }
+                if fs::remove_file(&link_path).is_err() {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+        if symlink(&source, &link_path).is_ok() {
+            return Ok(link_path);
+        }
+    }
+
+    Err("failed to install desktopctl symlink in writable PATH dir".to_string())
 }
 
 fn open_url(url: &str) {
