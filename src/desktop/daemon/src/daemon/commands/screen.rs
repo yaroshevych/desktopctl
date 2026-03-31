@@ -35,6 +35,17 @@ fn resolve_active_window_from_app_windows(
     None
 }
 
+fn bounds_match_with_tolerance(
+    a: &desktop_core::protocol::Bounds,
+    b: &desktop_core::protocol::Bounds,
+    tolerance_px: f64,
+) -> bool {
+    (a.x - b.x).abs() <= tolerance_px
+        && (a.y - b.y).abs() <= tolerance_px
+        && (a.width - b.width).abs() <= tolerance_px
+        && (a.height - b.height).abs() <= tolerance_px
+}
+
 pub(crate) fn screenshot(
     out_path: Option<String>,
     overlay: bool,
@@ -196,20 +207,171 @@ pub(crate) fn tokenize(
                     "--active-window cannot be combined with --window-query for screen tokenize",
                 ));
             }
-            let frontmost_window = if let Some(reference) = active_window_id.as_deref() {
-                if let Some(prefetched) = active_window_prefetched_windows
-                    .as_deref()
-                    .and_then(|windows| resolve_active_window_from_app_windows(reference, windows))
+            let (frontmost_window, mut payload) = if let Some(reference) = active_window_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                let mut speculative_bounds: Option<desktop_core::protocol::Bounds> = None;
+                let mut speculative_handle: Option<
+                    std::thread::JoinHandle<
+                        Result<desktop_core::protocol::TokenizePayload, AppError>,
+                    >,
+                > = None;
+                let reference_owned = reference.to_string();
+
+                if let Some(prefetched) =
+                    active_window_prefetched_windows
+                        .as_deref()
+                        .and_then(|windows| {
+                            resolve_active_window_from_app_windows(&reference_owned, windows)
+                        })
                 {
-                    trace::log("active_window_id_match:prefetched_windows_hit");
-                    prefetched
-                } else {
-                    super::super::assert_active_window_id_matches(reference)?
+                    let prefetched_title = prefetched.title.clone();
+                    let prefetched_app = Some(prefetched.app.clone());
+                    if let Ok(bounds) = super::super::resolve_tokenize_region_bounds(
+                        prefetched.bounds.clone(),
+                        region.as_ref(),
+                    ) {
+                        trace::log("active_window_id_match:prefetched_windows_hit");
+                        let meta = vision::pipeline::TokenizeWindowMeta {
+                            id: prefetched.id.clone(),
+                            title: prefetched_title,
+                            app: prefetched_app,
+                            bounds: bounds.clone(),
+                        };
+                        speculative_bounds = Some(bounds);
+                        speculative_handle = Some(std::thread::spawn(move || {
+                            vision::pipeline::tokenize_window(meta)
+                        }));
+                        trace::log("active_window_tokenize:speculative_start source=prefetched");
+                    }
+                } else if let Some(frontmost_bounds) = window_target::frontmost_window_bounds() {
+                    if let Ok(bounds) = super::super::resolve_tokenize_region_bounds(
+                        frontmost_bounds,
+                        region.as_ref(),
+                    ) {
+                        let app = window_target::frontmost_app_name();
+                        let title = app.clone().unwrap_or_else(|| "active_window".to_string());
+                        let meta = vision::pipeline::TokenizeWindowMeta {
+                            id: reference_owned.clone(),
+                            title,
+                            app,
+                            bounds: bounds.clone(),
+                        };
+                        speculative_bounds = Some(bounds);
+                        speculative_handle = Some(std::thread::spawn(move || {
+                            vision::pipeline::tokenize_window(meta)
+                        }));
+                        trace::log("active_window_tokenize:speculative_start source=frontmost");
+                    }
                 }
+
+                let strict_window =
+                    super::super::assert_active_window_id_matches(&reference_owned)?;
+                let strict_bounds = super::super::resolve_tokenize_region_bounds(
+                    strict_window.bounds.clone(),
+                    region.as_ref(),
+                )?;
+                stage_done!("active_window_resolve");
+                stage_done!("active_window_region_resolve");
+
+                let strict_app = Some(strict_window.app.clone());
+                let strict_title = strict_window.title.clone();
+                let strict_meta = vision::pipeline::TokenizeWindowMeta {
+                    id: strict_window.id.clone(),
+                    title: strict_title,
+                    app: strict_app,
+                    bounds: strict_bounds.clone(),
+                };
+                let run_strict = || vision::pipeline::tokenize_window(strict_meta.clone());
+
+                let payload = if let (Some(handle), Some(bounds)) =
+                    (speculative_handle, speculative_bounds)
+                {
+                    if bounds_match_with_tolerance(&bounds, &strict_bounds, 2.0) {
+                        match handle.join() {
+                            Ok(Ok(payload)) => {
+                                let post_validate =
+                                    super::super::assert_active_window_id_matches(&reference_owned)
+                                        .ok()
+                                        .and_then(|window| {
+                                            super::super::resolve_tokenize_region_bounds(
+                                                window.bounds.clone(),
+                                                region.as_ref(),
+                                            )
+                                            .ok()
+                                            .map(|resolved_bounds| (window, resolved_bounds))
+                                        });
+                                if let Some((post_window, post_bounds)) = post_validate {
+                                    if bounds_match_with_tolerance(&bounds, &post_bounds, 2.0) {
+                                        trace::log("active_window_tokenize:speculative_keep");
+                                        payload
+                                    } else {
+                                        trace::log(
+                                            "active_window_tokenize:speculative_discard reason=post_validate_mismatch",
+                                        );
+                                        vision::pipeline::tokenize_window(
+                                            vision::pipeline::TokenizeWindowMeta {
+                                                id: post_window.id,
+                                                title: post_window.title,
+                                                app: Some(post_window.app),
+                                                bounds: post_bounds,
+                                            },
+                                        )?
+                                    }
+                                } else {
+                                    trace::log(
+                                        "active_window_tokenize:speculative_discard reason=post_validate_unavailable",
+                                    );
+                                    run_strict()?
+                                }
+                            }
+                            Ok(Err(err)) => {
+                                trace::log(format!(
+                                    "active_window_tokenize:speculative_error fallback={}",
+                                    err
+                                ));
+                                run_strict()?
+                            }
+                            Err(_) => {
+                                trace::log(
+                                    "active_window_tokenize:speculative_panic fallback=strict",
+                                );
+                                run_strict()?
+                            }
+                        }
+                    } else {
+                        trace::log(
+                            "active_window_tokenize:speculative_discard reason=bounds_mismatch",
+                        );
+                        drop(handle);
+                        run_strict()?
+                    }
+                } else {
+                    run_strict()?
+                };
+                (strict_window, payload)
             } else {
-                super::super::resolve_active_window_target()?
+                let resolved = super::super::resolve_active_window_target()?;
+                stage_done!("active_window_resolve");
+                let bounds = super::super::resolve_tokenize_region_bounds(
+                    resolved.bounds.clone(),
+                    region.as_ref(),
+                )?;
+                stage_done!("active_window_region_resolve");
+                let app = Some(resolved.app.clone());
+                let title = resolved.title.clone();
+                let window_query = resolved.id.clone();
+                let payload =
+                    vision::pipeline::tokenize_window(vision::pipeline::TokenizeWindowMeta {
+                        id: window_query,
+                        title,
+                        app,
+                        bounds,
+                    })?;
+                (resolved, payload)
             };
-            stage_done!("active_window_resolve");
             bound_hint_active_window_id = active_window_id
                 .as_deref()
                 .map(str::trim)
@@ -233,21 +395,6 @@ pub(crate) fn tokenize(
                     hint_snapshot_prefetch_rx = Some(reply_rx);
                 }
             }
-            let bounds = frontmost_window.bounds.clone();
-            let bounds = super::super::resolve_tokenize_region_bounds(bounds, region.as_ref())?;
-            stage_done!("active_window_region_resolve");
-            let app = Some(frontmost_window.app.clone());
-            let title = Some(frontmost_window.title.clone())
-                .or_else(|| app.clone())
-                .unwrap_or_else(|| "active_window".to_string());
-            let window_query = frontmost_window.id.clone();
-            let mut payload =
-                vision::pipeline::tokenize_window(vision::pipeline::TokenizeWindowMeta {
-                    id: window_query,
-                    title,
-                    app,
-                    bounds,
-                })?;
             stage_done!("active_window_tokenize");
             if let Some(first) = payload.windows.first_mut() {
                 if first.window_ref.is_none() {
