@@ -798,6 +798,9 @@ fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, App
     // immediately and avoid slower fallback heuristics.
     if let Ok(mut frontmost_windows) = window_target::list_frontmost_app_windows() {
         enrich_window_refs(&mut frontmost_windows);
+        let focused_window_bounds = platform::ax::focused_frontmost_window_bounds()
+            .ok()
+            .flatten();
         if let Some(selected) = frontmost_windows
             .iter()
             .filter(|window| {
@@ -807,8 +810,8 @@ fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, App
                     && window.bounds.height > 8.0
             })
             .max_by(|a, b| {
-                let sa = active_window_candidate_score(a, None);
-                let sb = active_window_candidate_score(b, None);
+                let sa = active_window_candidate_score(a, focused_window_bounds.as_ref());
+                let sb = active_window_candidate_score(b, focused_window_bounds.as_ref());
                 sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
             })
             .cloned()
@@ -822,8 +825,8 @@ fn resolve_active_window_target() -> Result<platform::windowing::WindowInfo, App
                 window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
             })
             .max_by(|a, b| {
-                let sa = active_window_candidate_score(a, None);
-                let sb = active_window_candidate_score(b, None);
+                let sa = active_window_candidate_score(a, focused_window_bounds.as_ref());
+                let sb = active_window_candidate_score(b, focused_window_bounds.as_ref());
                 sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
             })
             .cloned()

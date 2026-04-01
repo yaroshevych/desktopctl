@@ -111,6 +111,23 @@ mod macos {
         }))
     }
 
+    pub(super) fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
+        let system = AXUIElement::system_wide();
+        let focused_app_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(
+            kAXFocusedApplicationAttribute,
+        ));
+        let app_cf = system.attribute(&focused_app_attr).map_err(ax_err)?;
+        if !app_cf.instance_of::<AXUIElement>() {
+            return Ok(None);
+        }
+        let app = unsafe { AXUIElement::wrap_under_get_rule(app_cf.as_CFTypeRef() as _) };
+        let window = match app.focused_window().or_else(|_| app.main_window()) {
+            Ok(window) => window,
+            Err(_) => return Ok(None),
+        };
+        Ok(element_bounds(&window))
+    }
+
     fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
         if let Some(role) = element.role().ok().map(|v| v.to_string()) {
             if is_interactive_role(&role) {
@@ -542,6 +559,11 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
     macos::focused_frontmost_element()
 }
 
+#[cfg(target_os = "macos")]
+pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
+    macos::focused_frontmost_window_bounds()
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
     Ok(Vec::new())
@@ -549,5 +571,10 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     Ok(None)
 }
