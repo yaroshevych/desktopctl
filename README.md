@@ -1,14 +1,16 @@
 # DesktopCtl
 
-Computer Vision and mouse/keyboard control for local AI agents. Bring your own AI, observe UI, and perform complex operations with mouse, keyboard, and GPU-accelerated text recognition.
+Local CLI for AI agents to observe and control your computer via screen, mouse, and keyboard. Bring your own AI — any model, even without vision.
 
-Stay in control with local runtime. Your AI agent should not take screenshots, and upload them to cloud.
+Runs fully local. No screenshots sent to the cloud.
 
 Learn more at https://desktopctl.com
 
+https://github.com/user-attachments/assets/4321b23e-6706-4792-a911-89e13766ebc0
+
 ## Why DesktopCtl
 
-- Local-first runtime, blazing fast with no cloud dependency in the core loop
+- Local-first runtime. No cloud dependency
 - Bring your own AI: works with any desktop AI agent
 - GPU-accelerated text recognition and computer vision
 - Selector-first automation (`--text`, `--token`) with coordinate fallback
