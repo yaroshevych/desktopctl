@@ -624,6 +624,13 @@ fn clap_app() -> ClapCommand {
 fn app_subcommand() -> ClapCommand {
     ClapCommand::new("app")
         .about("Manage application visibility and launch")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl app open \"Calculator\"\n\
+- desktopctl app hide \"Calculator\"\n\
+- desktopctl app show \"Calculator\"\n\
+- desktopctl app isolate \"Finder\"",
+        )
         .subcommand(
             ClapCommand::new("open")
                 .about("Open an application")
@@ -662,6 +669,12 @@ fn app_subcommand() -> ClapCommand {
 fn window_subcommand() -> ClapCommand {
     ClapCommand::new("window")
         .about("Query and control windows")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl window list\n\
+- desktopctl window bounds --title \"Settings\"\n\
+- desktopctl window focus --id 12345",
+        )
         .subcommand(ClapCommand::new("list").about("List visible windows"))
         .subcommand(
             ClapCommand::new("bounds")
@@ -690,6 +703,13 @@ fn window_subcommand() -> ClapCommand {
 fn screen_subcommand() -> ClapCommand {
     ClapCommand::new("screen")
         .about("Capture screen state and OCR/tokenize output")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl screen screenshot --active-window 12345\n\
+- desktopctl screen tokenize --active-window 12345\n\
+- desktopctl screen find --text \"Continue\"\n\
+- desktopctl screen wait --text \"Loading\" --disappear --timeout 5000",
+        )
         .subcommand(
             ClapCommand::new("screenshot")
                 .about("Capture a screenshot")
@@ -738,6 +758,15 @@ fn screen_subcommand() -> ClapCommand {
 fn pointer_subcommand() -> ClapCommand {
     ClapCommand::new("pointer")
         .about("Move, click, drag, and scroll the pointer")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl pointer move 640 420 --active-window 12345\n\
+- desktopctl pointer down 640 420 --button left --active-window 12345\n\
+- desktopctl pointer up 640 420 --button left --active-window 12345\n\
+- desktopctl pointer click --id button_ok --active-window 12345\n\
+- desktopctl pointer scroll 0 -500 --active-window 12345\n\
+- desktopctl pointer drag 200 300 800 300 120 --active-window 12345",
+        )
         .subcommand(
             ClapCommand::new("move")
                 .about("Move pointer to coordinates")
@@ -826,6 +855,11 @@ fn pointer_subcommand() -> ClapCommand {
 fn keyboard_subcommand() -> ClapCommand {
     ClapCommand::new("keyboard")
         .about("Type text and send key presses")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl keyboard type \"hello world\" --active-window 12345\n\
+- desktopctl keyboard press cmd+a --active-window 12345",
+        )
         .subcommand(
             ClapCommand::new("type")
                 .about("Type text into focused input")
@@ -853,6 +887,11 @@ fn keyboard_subcommand() -> ClapCommand {
 fn clipboard_subcommand() -> ClapCommand {
     ClapCommand::new("clipboard")
         .about("Read and write system clipboard")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl clipboard read\n\
+- desktopctl clipboard write \"hello\"",
+        )
         .subcommand(ClapCommand::new("read").about("Read clipboard text"))
         .subcommand(
             ClapCommand::new("write")
@@ -864,6 +903,14 @@ fn clipboard_subcommand() -> ClapCommand {
 fn debug_subcommand() -> ClapCommand {
     ClapCommand::new("debug")
         .about("Daemon diagnostics and developer tools")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl debug permissions\n\
+- desktopctl debug ping\n\
+- desktopctl debug overlay start --duration 5000\n\
+- desktopctl debug overlay stop\n\
+- desktopctl debug snapshot",
+        )
         .subcommand(ClapCommand::new("permissions").about("Check permission status"))
         .subcommand(ClapCommand::new("ping").about("Check daemon connectivity"))
         .subcommand(
@@ -882,6 +929,14 @@ fn debug_subcommand() -> ClapCommand {
 fn request_subcommand() -> ClapCommand {
     ClapCommand::new("request")
         .about("Inspect stored request artifacts")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl request show 019d4a91-7c0a-79b1-8ee4-90a3acbf3ab3\n\
+- desktopctl request list --limit 10\n\
+- desktopctl request screenshot 019d4a91-7c0a-79b1-8ee4-90a3acbf3ab3 --out /tmp/shot.png\n\
+- desktopctl request response 019d4a91-7c0a-79b1-8ee4-90a3acbf3ab3\n\
+- desktopctl request search \"timeout\" --limit 5",
+        )
         .subcommand(
             ClapCommand::new("show")
                 .about("Show metadata for one request")
@@ -915,6 +970,11 @@ fn request_subcommand() -> ClapCommand {
 fn replay_subcommand() -> ClapCommand {
     ClapCommand::new("replay")
         .about("Record and load replay sessions")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl replay record --duration 5000\n\
+- desktopctl replay load /tmp/desktopctl-replay/session-123",
+        )
         .subcommand(
             ClapCommand::new("record")
                 .about("Start or stop replay recording")
