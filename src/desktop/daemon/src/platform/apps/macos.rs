@@ -4,8 +4,16 @@ use desktop_core::error::AppError;
 
 use crate::platform::windowing::WindowInfo;
 
+fn escape_applescript_string(value: &str) -> String {
+    value
+        .replace('\n', "")
+        .replace('\r', "")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 pub fn focus_window(window: &WindowInfo) -> Result<(), AppError> {
-    let escaped_app = window.app.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_app = escape_applescript_string(&window.app);
     let script = format!(
         r#"tell application "System Events"
 set targetPid to {pid}
@@ -49,7 +57,7 @@ tell application "{escaped_app}" to activate"#,
 }
 
 pub fn hide_application(name: &str) -> Result<&'static str, AppError> {
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = escape_applescript_string(name);
     let script = format!(
         r#"tell application "System Events"
 if exists process "{escaped}" then
@@ -83,7 +91,7 @@ end tell"#
 }
 
 pub fn show_application(name: &str) -> Result<(), AppError> {
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = escape_applescript_string(name);
     let script = format!(
         r#"tell application "System Events"
 if exists process "{escaped}" then
@@ -108,7 +116,7 @@ tell application "{escaped}" to activate"#
 }
 
 pub fn isolate_application(name: &str) -> Result<u32, AppError> {
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = escape_applescript_string(name);
     let script = format!(
         r#"tell application "System Events"
 set targetName to "{escaped}"
