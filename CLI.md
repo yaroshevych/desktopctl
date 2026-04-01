@@ -1,6 +1,6 @@
 # DesktopCtl CLI Reference
 
-- Global `--json` CLI flag for machine-readable responses, which include `request_id`
+- Global output flags: `--markdown` (default human-readable output) and `--json` (machine-readable responses that include `request_id`)
 - Daemon keeps a rolling artifact buffer for recent requests, incl. request, response, and screenshot
 
 ## Observe Mode (Action Feedback)
