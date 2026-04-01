@@ -1,11 +1,10 @@
+use std::process::Command as ProcessCommand;
+
 use desktop_core::error::AppError;
 
-use super::windowing::WindowInfo;
+use crate::platform::windowing::WindowInfo;
 
-#[cfg(target_os = "macos")]
 pub fn focus_window(window: &WindowInfo) -> Result<(), AppError> {
-    use std::process::Command as ProcessCommand;
-
     let escaped_app = window.app.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"tell application "System Events"
@@ -49,18 +48,7 @@ tell application "{escaped_app}" to activate"#,
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn focus_window(_window: &WindowInfo) -> Result<(), AppError> {
-    Err(AppError::backend_unavailable(format!(
-        "unsupported platform: {}",
-        std::env::consts::OS
-    )))
-}
-
-#[cfg(target_os = "macos")]
 pub fn hide_application(name: &str) -> Result<&'static str, AppError> {
-    use std::process::Command as ProcessCommand;
-
     let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"tell application "System Events"
@@ -94,18 +82,7 @@ end tell"#
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn hide_application(_name: &str) -> Result<&'static str, AppError> {
-    Err(AppError::backend_unavailable(format!(
-        "unsupported platform: {}",
-        std::env::consts::OS
-    )))
-}
-
-#[cfg(target_os = "macos")]
 pub fn show_application(name: &str) -> Result<(), AppError> {
-    use std::process::Command as ProcessCommand;
-
     let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"tell application "System Events"
@@ -130,18 +107,7 @@ tell application "{escaped}" to activate"#
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn show_application(_name: &str) -> Result<(), AppError> {
-    Err(AppError::backend_unavailable(format!(
-        "unsupported platform: {}",
-        std::env::consts::OS
-    )))
-}
-
-#[cfg(target_os = "macos")]
 pub fn isolate_application(name: &str) -> Result<u32, AppError> {
-    use std::process::Command as ProcessCommand;
-
     let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"tell application "System Events"
@@ -176,12 +142,4 @@ tell application "{escaped}" to activate"#
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(value.parse::<u32>().unwrap_or(0))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn isolate_application(_name: &str) -> Result<u32, AppError> {
-    Err(AppError::backend_unavailable(format!(
-        "unsupported platform: {}",
-        std::env::consts::OS
-    )))
 }

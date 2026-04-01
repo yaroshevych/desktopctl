@@ -3,9 +3,9 @@ use std::{path::PathBuf, sync::mpsc, time::Instant};
 use desktop_core::{automation::new_backend, error::AppError, protocol::Bounds};
 use serde_json::{Value, json};
 
-#[cfg(target_os = "macos")]
-use crate::overlay;
 use crate::{permissions, platform, trace, vision, window_refs, window_target};
+
+mod overlay_bridge;
 
 fn resolve_active_window_from_app_windows(
     reference: &str,
@@ -427,20 +427,7 @@ pub(crate) fn tokenize(
             stage_done!("active_window_attach_window_ref");
             payload
         } else if window_query.is_none() {
-            let overlay_window_bounds = {
-                #[cfg(target_os = "macos")]
-                {
-                    if overlay::is_active() {
-                        overlay::tracked_window_bounds()
-                    } else {
-                        None
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    None
-                }
-            };
+            let overlay_window_bounds = overlay_bridge::tracked_window_bounds();
             stage_done!("frontmost_bounds_probe");
             if let Some(bounds) = overlay_window_bounds {
                 let bounds = super::super::resolve_tokenize_region_bounds(bounds, region.as_ref())?;
@@ -554,9 +541,8 @@ pub(crate) fn tokenize(
         ));
         stage_done!("overlay_write");
     }
-    #[cfg(target_os = "macos")]
     if overlay_token_updates_enabled {
-        if let Err(err) = overlay::update_from_tokenize(&payload) {
+        if let Err(err) = overlay_bridge::update_from_tokenize(&payload) {
             trace::log(format!("execute:screen_tokenize:overlay_update_warn {err}"));
         }
         stage_done!("overlay_update");

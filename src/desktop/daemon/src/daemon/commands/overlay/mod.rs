@@ -1,0 +1,9 @@
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(target_os = "macos"))]
+mod unsupported;
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::{start, stop};
+#[cfg(not(target_os = "macos"))]
+pub(crate) use unsupported::{start, stop};
