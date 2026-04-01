@@ -22,6 +22,20 @@ enum OutputMode {
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.is_empty() {
+        match parse::render_help_if_requested(&["--help".to_string()]) {
+            Ok(Some(help)) => {
+                println!("{help}");
+                std::process::exit(0);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let request_id = next_request_id();
+                print_error(&request_id, &err, OutputMode::Markdown);
+                std::process::exit(map_error_code(&err.code));
+            }
+        }
+    }
     match parse::render_help_if_requested(&raw_args) {
         Ok(Some(help)) => {
             println!("{help}");

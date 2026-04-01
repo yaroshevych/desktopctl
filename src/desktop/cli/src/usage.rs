@@ -7,8 +7,7 @@ pub(crate) fn help_notes() -> &'static str {
 - desktopctl keyboard type \"hello\"\n\
 - desktopctl clipboard read\n\
 - desktopctl debug ping\n\
-- desktopctl request list --limit 5\n\
-- desktopctl replay record --duration 5000\n\
+- desktopctl request response 12345\n\
 \n\
 Notes and hints:\n\
 - tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`\n\
