@@ -24,6 +24,12 @@ impl MacosAutomation {
     }
 }
 
+impl Default for MacosAutomation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Automation for MacosAutomation {
     fn check_accessibility_permission(&self) -> Result<(), AppError> {
         if ax_is_process_trusted() {

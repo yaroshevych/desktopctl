@@ -91,6 +91,14 @@ test-regression:
   just -f {{workspace_dir}}/Justfile test-compile
   just -f {{workspace_dir}}/Justfile check-cli-reference
 
+release-gates:
+  cd {{workspace_dir}} && cargo fmt --all --check
+  just -f {{workspace_dir}}/Justfile test-regression
+
+release-gates-strict:
+  just -f {{workspace_dir}}/Justfile release-gates
+  cd {{workspace_dir}} && cargo clippy --workspace --all-targets -- -D warnings
+
 check-cli-reference:
   "{{workspace_dir}}/scripts/dev/check_cli_reference.sh"
 

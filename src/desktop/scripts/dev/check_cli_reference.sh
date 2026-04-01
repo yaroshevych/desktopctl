@@ -36,11 +36,12 @@ normalize_lines() {
 
 extract_usage_commands() {
   awk '/usage\(\)/,/^}/' "${USAGE_SRC}" \
-    | sed -n 's/^[[:space:]]*desktopctl /desktopctl /p'
+    | sed -n 's/^[[:space:]]*desktopctl /desktopctl /p' \
+    | grep -v '<command...>'
 }
 
 extract_cli_md_commands() {
-  grep '^desktopctl ' "${CLI_MD}" | grep -v 'desktopctl <command...>'
+  grep '^desktopctl ' "${CLI_MD}" | grep -v '<command...>'
 }
 
 extract_usage_commands | normalize_lines > "${tmpdir}/usage.txt"

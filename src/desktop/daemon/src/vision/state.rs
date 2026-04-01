@@ -260,7 +260,7 @@ mod tests {
             },
             confidence: 0.9,
         }]);
-        assert!(state.token(1).is_some());
+        assert!(state.token_map().get(&1).is_some());
 
         state.replace_token_map(vec![desktop_core::protocol::TokenEntry {
             n: 1,
@@ -274,7 +274,7 @@ mod tests {
             confidence: 0.8,
         }]);
 
-        let token = state.token(1).expect("token should exist");
+        let token = state.token_map().get(&1).expect("token should exist");
         assert_eq!(token.text, "New");
     }
 

@@ -48,7 +48,7 @@ pub use stub::StubAutomation;
 pub fn new_backend() -> Result<Box<dyn Automation>, AppError> {
     #[cfg(target_os = "macos")]
     {
-        return Ok(Box::new(MacosAutomation::new()));
+        Ok(Box::new(MacosAutomation::new()))
     }
 
     #[cfg(not(target_os = "macos"))]
