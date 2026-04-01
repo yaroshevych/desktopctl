@@ -461,7 +461,8 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             if k == "observe" || k == "click_target" {
                 continue;
             }
-            if let Some(summary) = compact_value_summary(v) {
+            if let Some(summary) = permission_state_summary(v).or_else(|| compact_value_summary(v))
+            {
                 scalar_lines.push(format!("- {}: {}", k, summary));
             }
         }
@@ -816,6 +817,12 @@ fn compact_value_summary(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn permission_state_summary(value: &serde_json::Value) -> Option<String> {
+    let obj = value.as_object()?;
+    let granted = obj.get("granted")?.as_bool()?;
+    Some(granted.to_string())
+}
+
 fn to_title_case(value: &str) -> String {
     value
         .split_whitespace()
@@ -928,6 +935,23 @@ mod tests {
         assert!(!markdown.contains("## Windows"));
         assert!(!markdown.lines().any(|line| line == "## Text"));
         assert!(!markdown.contains("```text"));
+    }
+
+    #[test]
+    fn permissions_markdown_shows_granted_bools() {
+        let command = Command::PermissionsCheck;
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "accessibility": { "granted": true },
+                "screen_recording": { "granted": false }
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("- accessibility: true"));
+        assert!(markdown.contains("- screen_recording: false"));
+        assert!(!markdown.contains("fields"));
     }
 
     #[test]
