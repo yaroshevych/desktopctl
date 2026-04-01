@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 
 mod commands;
 mod guards;
+mod platform_runtime;
 
 #[cfg(target_os = "macos")]
 use crate::overlay;
@@ -32,17 +33,9 @@ use crate::{
     permissions, platform, recording, request_store, trace, vision, window_refs, window_target,
 };
 
-#[cfg(target_os = "macos")]
-const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 40;
-#[cfg(target_os = "macos")]
-const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
-#[cfg(target_os = "macos")]
-const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
 const MAX_CONCURRENT_CLIENTS: usize = 16;
 const COMMAND_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-#[cfg(target_os = "macos")]
-static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static PRIVACY_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -101,7 +94,6 @@ pub(crate) struct TokenizeHintSnapshot {
 
 #[derive(Debug, Clone, Default)]
 struct RequestContext {
-    #[cfg(target_os = "macos")]
     frontmost: Option<window_target::FrontmostSnapshot>,
 }
 
@@ -138,8 +130,7 @@ impl DaemonConfig {
 }
 
 pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
-    bootstrap_overlay_glow();
+    platform_runtime::bootstrap_overlay_glow();
     let listener = bind_listener()?;
     thread::spawn(move || {
         if let Err(err) = accept_loop(listener, config) {
@@ -150,57 +141,9 @@ pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
 }
 
 pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
-    bootstrap_overlay_glow();
+    platform_runtime::bootstrap_overlay_glow();
     let listener = bind_listener()?;
     accept_loop(listener, config)
-}
-
-#[cfg(target_os = "macos")]
-fn bootstrap_overlay_glow() {
-    trace::log("overlay:bootstrap ready");
-    start_overlay_watch_tracker();
-    if overlay::is_active() {
-        let (mode, bounds) = if let Some(bounds) = window_target::frontmost_window_bounds() {
-            (overlay::WatchMode::WindowMode, Some(bounds))
-        } else {
-            (overlay::WatchMode::DesktopMode, None)
-        };
-        if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
-            trace::log(format!("overlay:bootstrap mode_warn {err}"));
-        }
-        if let Err(err) = overlay::confidence_changed(1.0) {
-            trace::log(format!("overlay:bootstrap confidence_warn {err}"));
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn start_overlay_watch_tracker() {
-    if OVERLAY_WATCH_TRACK_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-    thread::spawn(|| {
-        trace::log("overlay:watch_tracker start");
-        loop {
-            if overlay::is_active() {
-                if !overlay::is_agent_active() && !overlay::is_watch_mode_locked() {
-                    if let Some(bounds) = window_target::frontmost_window_bounds() {
-                        let _ = overlay::watch_mode_changed(
-                            overlay::WatchMode::WindowMode,
-                            Some(bounds),
-                        );
-                    } else {
-                        let _ = overlay::watch_mode_changed(overlay::WatchMode::DesktopMode, None);
-                    }
-                }
-            }
-            thread::sleep(Duration::from_millis(OVERLAY_WATCH_TRACK_INTERVAL_MS));
-        }
-    });
 }
 
 fn bind_listener() -> Result<UnixListener, AppError> {
@@ -307,46 +250,21 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
         "client:request_start request_id={} command={}",
         request_id, command_name
     ));
-    #[cfg(target_os = "macos")]
     let request_context = RequestContext {
-        frontmost: if command_requires_frontmost_snapshot(&command) {
+        frontmost: if platform_runtime::command_requires_frontmost_snapshot(&command) {
             Some(window_target::resolve_frontmost_snapshot())
         } else {
             None
         },
     };
-    #[cfg(not(target_os = "macos"))]
-    let request_context = RequestContext::default();
-    #[cfg(target_os = "macos")]
-    let transient_overlay_started = maybe_start_privacy_overlay(&command, &request_context);
-    #[cfg(target_os = "macos")]
-    let overlay_token_updates_enabled =
-        !transient_overlay_started && !PRIVACY_OVERLAY_ACTIVE.load(Ordering::SeqCst);
-    #[cfg(not(target_os = "macos"))]
-    let overlay_token_updates_enabled = true;
-    #[cfg(target_os = "macos")]
-    if matches!(
-        command,
-        Command::ScreenCapture {
-            active_window: false,
-            ..
-        }
-    ) {
-        let _ = overlay::lock_watch_mode(
-            overlay::WatchMode::DesktopMode,
-            None,
-            Duration::from_millis(OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS),
-        );
-    } else if !matches!(command, Command::ScreenTokenize { .. }) {
-        if let Some(bounds) = request_frontmost_bounds(&request_context) {
-            let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
-        }
-    }
-    #[cfg(target_os = "macos")]
-    let _ = overlay::agent_active_changed(true);
+    let runtime_state = platform_runtime::begin_command(&command, &request_context);
     let response = match acquire_command_execution_slot() {
         Ok(_slot) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_with_context(command, overlay_token_updates_enabled, &request_context)
+            execute_with_context(
+                command,
+                runtime_state.overlay_token_updates_enabled,
+                &request_context,
+            )
         })) {
             Ok(Ok(result)) => {
                 trace::log("client:execute_ok");
@@ -382,12 +300,7 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
         }
     };
-    #[cfg(target_os = "macos")]
-    let _ = overlay::agent_active_changed(false);
-    #[cfg(target_os = "macos")]
-    if transient_overlay_started {
-        schedule_transient_overlay_stop();
-    }
+    platform_runtime::end_command(runtime_state);
     if let Err(err) = recording::record_command(&request, &response) {
         eprintln!("recorder write failed: {err}");
         trace::log(format!("client:record_err {err}"));
@@ -407,138 +320,12 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn maybe_start_privacy_overlay(command: &Command, context: &RequestContext) -> bool {
-    if !command_requires_privacy_signal(command) || overlay::is_active() {
-        return false;
-    }
-    match overlay::start_overlay() {
-        Ok(started) => {
-            if started {
-                PRIVACY_OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
-                if matches!(command, Command::ScreenTokenize { .. }) {
-                    let command_name = command.name().to_string();
-                    let context = context.clone();
-                    thread::spawn(move || {
-                        let (mode, bounds) =
-                            if let Some(bounds) = request_frontmost_bounds(&context) {
-                                (overlay::WatchMode::WindowMode, Some(bounds))
-                            } else {
-                                (overlay::WatchMode::DesktopMode, None)
-                            };
-                        if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
-                            trace::log(format!(
-                                "overlay:privacy_auto_start mode_warn command={} err={err}",
-                                command_name
-                            ));
-                        }
-                    });
-                } else {
-                    let (mode, bounds) = if let Some(bounds) = request_frontmost_bounds(context) {
-                        (overlay::WatchMode::WindowMode, Some(bounds))
-                    } else {
-                        (overlay::WatchMode::DesktopMode, None)
-                    };
-                    if let Err(err) = overlay::watch_mode_changed(mode, bounds) {
-                        trace::log(format!(
-                            "overlay:privacy_auto_start mode_warn command={} err={err}",
-                            command.name()
-                        ));
-                    }
-                }
-            }
-            trace::log(format!(
-                "overlay:privacy_auto_start command={} started={started}",
-                command.name()
-            ));
-            started
-        }
-        Err(err) => {
-            trace::log(format!(
-                "overlay:privacy_auto_start_warn command={} err={err}",
-                command.name()
-            ));
-            false
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn request_frontmost_bounds(context: &RequestContext) -> Option<desktop_core::protocol::Bounds> {
-    context
-        .frontmost
-        .as_ref()
-        .and_then(|snapshot| snapshot.bounds.clone())
-        .or_else(window_target::frontmost_window_bounds)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn request_frontmost_bounds(_context: &RequestContext) -> Option<desktop_core::protocol::Bounds> {
-    window_target::frontmost_window_bounds()
+    platform_runtime::request_frontmost_bounds(context)
 }
 
 fn request_frontmost_app(context: &RequestContext) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    if let Some(app) = context
-        .frontmost
-        .as_ref()
-        .and_then(|snapshot| snapshot.app.clone())
-    {
-        return Some(app);
-    }
-    window_target::frontmost_app_name()
-}
-
-#[cfg(target_os = "macos")]
-fn schedule_transient_overlay_stop() {
-    thread::spawn(|| {
-        thread::sleep(Duration::from_millis(PRIVACY_OVERLAY_STOP_DELAY_MS));
-        if overlay::is_agent_active() || !overlay::is_active() {
-            return;
-        }
-        match overlay::stop_overlay() {
-            Ok(stopped) => {
-                if stopped {
-                    PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
-                }
-                trace::log(format!("overlay:privacy_auto_stop stopped={stopped}"));
-            }
-            Err(err) => trace::log(format!("overlay:privacy_auto_stop_warn {err}")),
-        }
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn command_requires_privacy_signal(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::ScreenCapture { .. }
-            | Command::ScreenTokenize { .. }
-            | Command::ScreenFindText { .. }
-            | Command::WaitText { .. }
-            | Command::PointerMove { .. }
-            | Command::PointerDown { .. }
-            | Command::PointerUp { .. }
-            | Command::PointerClick { .. }
-            | Command::PointerClickText { .. }
-            | Command::PointerClickId { .. }
-            | Command::PointerScroll { .. }
-            | Command::PointerDrag { .. }
-            | Command::UiType { .. }
-            | Command::KeyHotkey { .. }
-            | Command::KeyEnter { .. }
-            | Command::KeyEscape { .. }
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn command_requires_frontmost_snapshot(command: &Command) -> bool {
-    if matches!(command, Command::ScreenTokenize { .. }) {
-        // Tokenize resolves the active window in its own execution path.
-        // Avoid expensive pre-execute frontmost snapshot here.
-        return false;
-    }
-    command_requires_privacy_signal(command)
+    platform_runtime::request_frontmost_app(context)
 }
 
 #[cfg(test)]
