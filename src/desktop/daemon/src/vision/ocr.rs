@@ -28,7 +28,12 @@ pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> 
     trace::log(format!("ocr:start size={}x{}", width, height));
 
     let preprocessed = preprocess_for_ocr(image);
-    let cg_image = build_cgimage_from_rgba(preprocessed)?;
+    let prepared = preprocessed.as_image();
+    let cg_image = build_cgimage_from_rgba_bytes(
+        prepared.as_raw(),
+        prepared.width() as usize,
+        prepared.height() as usize,
+    )?;
 
     let options = NSDictionary::<VNImageOption, AnyObject>::from_slices::<VNImageOption>(&[], &[]);
     let handler = unsafe {
@@ -100,12 +105,43 @@ pub fn recognize_text_from_image(
 
 // ── preprocessing ───────────────────────────────────────────────────────────
 
+enum OcrPreprocessedImage<'a> {
+    Borrowed(&'a RgbaImage),
+    Owned(RgbaImage),
+}
+
+impl OcrPreprocessedImage<'_> {
+    fn as_image(&self) -> &RgbaImage {
+        match self {
+            Self::Borrowed(image) => image,
+            Self::Owned(image) => image,
+        }
+    }
+}
+
 /// Detects dark backgrounds and inverts to light; boosts contrast for OCR.
-fn preprocess_for_ocr(image: &RgbaImage) -> RgbaImage {
+fn preprocess_for_ocr(image: &RgbaImage) -> OcrPreprocessedImage<'_> {
     let is_dark = is_dark_background(image);
+    let (orig_lo, orig_hi) = contrast_percentile_bounds(image);
+    let (stretch_lo, stretch_hi) = if is_dark {
+        // Preprocessing inverts dark UIs before stretch.
+        (255u8.saturating_sub(orig_hi), 255u8.saturating_sub(orig_lo))
+    } else {
+        (orig_lo, orig_hi)
+    };
+    let contrast_range = (stretch_hi as f32 - stretch_lo as f32).max(1.0);
+    let needs_stretch = contrast_range <= 200.0;
+
     let dbg = std::env::var("TOKENIZE_DEBUG").is_ok();
     if dbg {
-        eprintln!("[ocr] preprocess: dark_bg={}", is_dark);
+        eprintln!(
+            "[ocr] preprocess: dark_bg={} needs_stretch={}",
+            is_dark, needs_stretch
+        );
+    }
+
+    if !is_dark && !needs_stretch {
+        return OcrPreprocessedImage::Borrowed(image);
     }
 
     let mut out = image.clone();
@@ -120,9 +156,11 @@ fn preprocess_for_ocr(image: &RgbaImage) -> RgbaImage {
     }
 
     // Contrast stretch: map [lo, hi] percentiles to [0, 255].
-    contrast_stretch(&mut out);
+    if needs_stretch {
+        contrast_stretch_with_bounds(&mut out, stretch_lo, stretch_hi);
+    }
 
-    out
+    OcrPreprocessedImage::Owned(out)
 }
 
 /// Sample pixels to determine if the image has a predominantly dark background.
@@ -153,8 +191,8 @@ fn is_dark_background(image: &RgbaImage) -> bool {
     dark_count > total / 2
 }
 
-/// Stretch contrast: find 1st and 99th percentile luminance, remap to full range.
-fn contrast_stretch(image: &mut RgbaImage) {
+/// Find the 1st and 99th percentile luminance bounds.
+fn contrast_percentile_bounds(image: &RgbaImage) -> (u8, u8) {
     // Build luminance histogram.
     let mut hist = [0u32; 256];
     for pixel in image.pixels() {
@@ -162,7 +200,7 @@ fn contrast_stretch(image: &mut RgbaImage) {
         hist[luma as usize] += 1;
     }
 
-    let total = image.width() as u32 * image.height() as u32;
+    let total = image.width() * image.height();
     let lo_target = total / 100; // 1st percentile
     let hi_target = total - total / 100; // 99th percentile
 
@@ -179,12 +217,12 @@ fn contrast_stretch(image: &mut RgbaImage) {
         }
     }
 
-    let range = (hi as f32 - lo as f32).max(1.0);
-    if range > 200.0 {
-        // Already good contrast, skip.
-        return;
-    }
+    (lo, hi)
+}
 
+/// Stretch contrast using precomputed percentile bounds.
+fn contrast_stretch_with_bounds(image: &mut RgbaImage, lo: u8, hi: u8) {
+    let range = (hi as f32 - lo as f32).max(1.0);
     let scale = 255.0 / range;
     for pixel in image.pixels_mut() {
         for c in 0..3 {
@@ -197,32 +235,30 @@ fn contrast_stretch(image: &mut RgbaImage) {
 
 // ── image bridge ────────────────────────────────────────────────────────────
 
-unsafe extern "C-unwind" fn release_provider_bytes(
-    info: *mut c_void,
-    _data: std::ptr::NonNull<c_void>,
-    _size: usize,
-) {
-    if !info.is_null() {
-        unsafe {
-            drop(Box::<Vec<u8>>::from_raw(info as *mut Vec<u8>));
-        }
-    }
-}
-
-fn build_cgimage_from_rgba(
-    image: RgbaImage,
+fn build_cgimage_from_rgba_bytes(
+    bytes: &[u8],
+    width: usize,
+    height: usize,
 ) -> Result<objc2_core_foundation::CFRetained<CGImage>, AppError> {
-    let width = image.width() as usize;
-    let height = image.height() as usize;
     if width == 0 || height == 0 {
         return Err(AppError::invalid_argument("ocr image must be non-empty"));
     }
-    let bytes = Box::new(image.into_raw());
-    let data_ptr = bytes.as_ptr() as *const c_void;
-    let byte_len = bytes.len();
-    let info_ptr = Box::into_raw(bytes) as *mut c_void;
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| AppError::invalid_argument("ocr image dimensions overflow"))?;
+    if bytes.len() < expected_len {
+        return Err(AppError::invalid_argument(
+            "ocr image buffer is smaller than expected dimensions",
+        ));
+    }
     let provider = unsafe {
-        CGDataProvider::with_data(info_ptr, data_ptr, byte_len, Some(release_provider_bytes))
+        CGDataProvider::with_data(
+            std::ptr::null_mut(),
+            bytes.as_ptr() as *const c_void,
+            expected_len,
+            None,
+        )
     }
     .ok_or_else(|| AppError::backend_unavailable("failed to build CGDataProvider for OCR image"))?;
     let color_space = CGColorSpace::new_device_rgb()
