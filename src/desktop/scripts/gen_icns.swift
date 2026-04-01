@@ -38,8 +38,12 @@ func renderIcon(size: Int) -> NSImage {
     defer { img.unlockFocus() }
 
     // Rounded-rect clip path shared by background and highlight layers.
-    let corner = s * 0.225
-    let path = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: s, height: s),
+    // 5% inset on each side so the icon doesn't bleed to the canvas edge,
+    // matching macOS HIG visual padding expectations.
+    let pad = s * 0.05
+    let iconRect = NSRect(x: pad, y: pad, width: s - 2 * pad, height: s - 2 * pad)
+    let corner = iconRect.width * 0.225
+    let path = NSBezierPath(roundedRect: iconRect,
                             xRadius: corner, yRadius: corner)
 
     // Gradient background: lighter purple at top → darker at bottom.
