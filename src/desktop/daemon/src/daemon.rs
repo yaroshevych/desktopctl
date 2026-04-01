@@ -170,6 +170,17 @@ fn start_overlay_watch_tracker() {
 
 fn bind_listener() -> Result<UnixListener, AppError> {
     let path = socket_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "create socket directory {} failed: {err}",
+                parent.display()
+            ))
+        })?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|err| {
+            AppError::backend_unavailable(format!("set socket directory permissions failed: {err}"))
+        })?;
+    }
     if path.exists() {
         let _ = fs::remove_file(&path);
     }

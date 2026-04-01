@@ -1,4 +1,5 @@
 use std::{
+    env,
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -10,14 +11,30 @@ use crate::{
 };
 
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+const SOCKET_DIR_NAME: &str = "desktopctl";
+const SOCKET_FILE_NAME: &str = "desktopctl.sock";
+
+fn legacy_socket_path() -> PathBuf {
+    PathBuf::from("/tmp/desktopctl.sock")
+}
 
 pub fn socket_path() -> PathBuf {
-    PathBuf::from("/tmp/desktopctl.sock")
+    if let Some(path) = env::var_os("DESKTOPCTL_SOCKET_PATH") {
+        return PathBuf::from(path);
+    }
+    env::temp_dir().join(SOCKET_DIR_NAME).join(SOCKET_FILE_NAME)
 }
 
 pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
     let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|err| {
+    let stream = UnixStream::connect(&path).or_else(|primary_err| {
+        let legacy = legacy_socket_path();
+        if legacy == path {
+            return Err(primary_err);
+        }
+        UnixStream::connect(&legacy).map_err(|_| primary_err)
+    });
+    let mut stream = stream.map_err(|err| {
         AppError::daemon_not_running(format!(
             "failed to connect to {}: {}. is DesktopCtl.app running?",
             path.display(),
@@ -30,7 +47,8 @@ pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppEr
 }
 
 pub fn socket_exists() -> bool {
-    socket_path().exists()
+    let path = socket_path();
+    path.exists() || (path != legacy_socket_path() && legacy_socket_path().exists())
 }
 
 pub fn write_framed_json<W: Write, T: serde::Serialize>(
