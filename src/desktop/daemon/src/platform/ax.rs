@@ -133,7 +133,11 @@ mod macos {
             if is_interactive_role(&role) {
                 if let Some(bounds) = element_bounds(element) {
                     let text = element_label(element, &role);
-                    let ax_identifier = element_identifier(element);
+                    let ax_identifier = if should_collect_identifier(&role) {
+                        element_identifier(element)
+                    } else {
+                        None
+                    };
                     let checked = element_toggle_state(element, &role);
                     out.push(AxElement {
                         role,
@@ -267,43 +271,64 @@ mod macos {
 
     fn element_label(element: &AXUIElement, role: &str) -> Option<String> {
         let mut candidates: Vec<String> = Vec::new();
-        if let Ok(v) = element.title() {
-            candidates.push(v.to_string());
-        }
-        if let Ok(v) = element.description() {
-            candidates.push(v.to_string());
-        }
-        if let Ok(v) = element.label_value() {
-            candidates.push(v.to_string());
-        }
-        if let Ok(v) = element.value_description() {
-            candidates.push(v.to_string());
-        }
-        if let Ok(v) = element.placeholder_value() {
-            candidates.push(v.to_string());
-        }
-        if let Ok(v) = element.help() {
-            candidates.push(v.to_string());
-        }
-        if let Ok(v) = element.attribute(&AXAttribute::value()) {
-            if let Some(value_text) = cf_type_text(&v) {
-                candidates.push(value_text);
+        match role {
+            // Prefer value-like fields first for editable content; this keeps AX calls small.
+            "AXTextField" | "AXTextArea" | "AXWebArea" => {
+                push_value_text(element, &mut candidates);
+                if let Some(selected) = attribute_text_by_name(element, "AXSelectedText") {
+                    candidates.push(selected);
+                }
+                if let Ok(v) = element.placeholder_value() {
+                    candidates.push(v.to_string());
+                }
+                if let Ok(v) = element.title() {
+                    candidates.push(v.to_string());
+                }
+                if let Ok(v) = element.label_value() {
+                    candidates.push(v.to_string());
+                }
+            }
+            // Buttons frequently expose title/value/label only.
+            "AXButton" | "AXPopUpButton" | "AXMenuButton" | "AXRadioButton" | "AXCheckBox"
+            | "AXSwitch" => {
+                if let Ok(v) = element.title() {
+                    candidates.push(v.to_string());
+                }
+                if let Ok(v) = element.label_value() {
+                    candidates.push(v.to_string());
+                }
+                push_value_text(element, &mut candidates);
+                if let Ok(v) = element.description() {
+                    candidates.push(v.to_string());
+                }
+            }
+            // Calculator display commonly appears as AXScrollArea with dynamic value in descendants.
+            "AXScrollArea" => {
+                if let Ok(v) = element.title() {
+                    candidates.push(v.to_string());
+                }
+                if let Ok(v) = element.label_value() {
+                    candidates.push(v.to_string());
+                }
+                push_value_text(element, &mut candidates);
+                let mut scan_budget: usize = 64;
+                collect_descendant_text_candidates(element, 3, &mut scan_budget, &mut candidates);
+            }
+            _ => {
+                if let Ok(v) = element.title() {
+                    candidates.push(v.to_string());
+                }
+                if let Ok(v) = element.label_value() {
+                    candidates.push(v.to_string());
+                }
+                push_value_text(element, &mut candidates);
+                if let Ok(v) = element.description() {
+                    candidates.push(v.to_string());
+                }
             }
         }
-        // Some editors expose selected/visible text through AXSelectedText.
-        if is_text_container_role(role) {
-            if let Some(selected) = attribute_text_by_name(element, "AXSelectedText") {
-                candidates.push(selected);
-            }
-        }
-        // Calculator display commonly appears as AXScrollArea with dynamic value in descendants.
-        if role == "AXScrollArea" {
-            collect_descendant_text_candidates(element, 6, &mut candidates);
-        }
-
-        let primary = best_label_candidate(role, candidates);
-        if primary.is_some() {
-            return primary;
+        if let Some(primary) = best_label_candidate(role, candidates) {
+            return Some(primary);
         }
 
         // Some controls (notably calculator-style buttons) expose their visible
@@ -337,6 +362,14 @@ mod macos {
         None
     }
 
+    fn push_value_text(element: &AXUIElement, out: &mut Vec<String>) {
+        if let Ok(v) = element.attribute(&AXAttribute::value()) {
+            if let Some(value_text) = cf_type_text(&v) {
+                out.push(value_text);
+            }
+        }
+    }
+
     fn element_identifier(element: &AXUIElement) -> Option<String> {
         const IDENTIFIER_ATTRS: [&str; 3] = ["AXIdentifier", "AXDOMIdentifier", "AXUniqueId"];
         for name in IDENTIFIER_ATTRS {
@@ -350,8 +383,19 @@ mod macos {
         None
     }
 
-    fn is_text_container_role(role: &str) -> bool {
-        matches!(role, "AXTextField" | "AXTextArea" | "AXWebArea")
+    fn should_collect_identifier(role: &str) -> bool {
+        matches!(
+            role,
+            "AXButton"
+                | "AXCheckBox"
+                | "AXRadioButton"
+                | "AXPopUpButton"
+                | "AXTextField"
+                | "AXTextArea"
+                | "AXComboBox"
+                | "AXMenuButton"
+                | "AXSwitch"
+        )
     }
 
     fn best_label_candidate(role: &str, candidates: Vec<String>) -> Option<String> {
@@ -402,17 +446,26 @@ mod macos {
         2
     }
 
-    fn collect_descendant_text_candidates(element: &AXUIElement, depth: u8, out: &mut Vec<String>) {
-        if depth == 0 {
+    fn collect_descendant_text_candidates(
+        element: &AXUIElement,
+        depth: u8,
+        scan_budget: &mut usize,
+        out: &mut Vec<String>,
+    ) {
+        if depth == 0 || *scan_budget == 0 {
             return;
         }
         let Ok(children) = element.children() else {
             return;
         };
         for child in children.iter() {
+            if *scan_budget == 0 {
+                break;
+            }
+            *scan_budget = scan_budget.saturating_sub(1);
             push_direct_text_candidates(&child, out);
             if depth > 1 {
-                collect_descendant_text_candidates(&child, depth - 1, out);
+                collect_descendant_text_candidates(&child, depth - 1, scan_budget, out);
             }
         }
     }
