@@ -2,6 +2,7 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
+    sync::Arc,
     thread,
 };
 
@@ -104,7 +105,7 @@ fn capture_and_update_internal(
     let frame = captured.frame;
     let image_path = frame.image_path.clone();
     let image = captured.image;
-    let frame_png = Some(encode_png(&image)?);
+    let frame_png = Some(Arc::<[u8]>::from(encode_png(&image)?));
 
     with_state(move |state| {
         let roi = state
@@ -190,7 +191,7 @@ pub fn latest_snapshot() -> Result<Option<SnapshotPayload>, AppError> {
     with_state(|state| state.latest_snapshot())
 }
 
-pub fn latest_frame_png() -> Result<Option<Vec<u8>>, AppError> {
+pub fn latest_frame_png() -> Result<Option<Arc<[u8]>>, AppError> {
     with_state(|state| state.latest_frame_png())
 }
 
@@ -219,7 +220,7 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let image_path = frame.image_path.clone();
     let focused_app = window_meta.app.clone();
     let thumb_for_record = thumb.clone();
-    let frame_png = Some(encode_png(&image)?);
+    let frame_png = Some(Arc::<[u8]>::from(encode_png(&image)?));
     let capture = with_state(move |state| {
         let roi = state
             .latest_thumbnail()

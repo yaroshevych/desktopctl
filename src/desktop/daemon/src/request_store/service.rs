@@ -191,7 +191,7 @@ fn extract_screenshot_png(response: &ResponseEnvelope) -> Option<Vec<u8>> {
         if candidate == "<memory>" {
             if let Ok(Some(bytes)) = pipeline::latest_frame_png() {
                 if !bytes.is_empty() {
-                    return Some(bytes);
+                    return Some(bytes.to_vec());
                 }
             }
             continue;
@@ -207,7 +207,7 @@ fn extract_screenshot_png(response: &ResponseEnvelope) -> Option<Vec<u8>> {
     }
     if let Ok(Some(bytes)) = pipeline::latest_frame_png() {
         if !bytes.is_empty() {
-            return Some(bytes);
+            return Some(bytes.to_vec());
         }
     }
     None

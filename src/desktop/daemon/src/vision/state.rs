@@ -32,7 +32,7 @@ pub struct VisionState {
     next_event_id: u64,
     latest_snapshot: Option<SnapshotPayload>,
     latest_frame_path: Option<PathBuf>,
-    latest_frame_png: Option<Vec<u8>>,
+    latest_frame_png: Option<Arc<[u8]>>,
     latest_thumbnail: Option<GrayThumbnail>,
     latest_tokenize_cache_key: Option<String>,
     latest_tokenize_fingerprint: Option<u64>,
@@ -72,8 +72,8 @@ impl VisionState {
         self.latest_frame_path.clone()
     }
 
-    pub fn latest_frame_png(&self) -> Option<Vec<u8>> {
-        self.latest_frame_png.clone()
+    pub fn latest_frame_png(&self) -> Option<Arc<[u8]>> {
+        self.latest_frame_png.as_ref().map(Arc::clone)
     }
 
     pub fn cached_tokenize_payload_if_fingerprint(
@@ -118,7 +118,7 @@ impl VisionState {
     pub fn record_capture(
         &mut self,
         capture: CapturedFrame,
-        frame_png: Option<Vec<u8>>,
+        frame_png: Option<Arc<[u8]>>,
         thumbnail: GrayThumbnail,
         focused_app: Option<String>,
         texts: Vec<desktop_core::protocol::SnapshotText>,
