@@ -3,7 +3,10 @@ use std::{path::PathBuf, sync::mpsc, time::Instant};
 use desktop_core::{automation::new_backend, error::AppError, protocol::Bounds};
 use serde_json::{Value, json};
 
-use crate::{permissions, platform, trace, vision, window_refs, window_target};
+use crate::{
+    daemon::{window_refs, window_target},
+    permissions, platform, trace, vision,
+};
 
 mod overlay_bridge;
 

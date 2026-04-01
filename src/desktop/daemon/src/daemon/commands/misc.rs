@@ -4,7 +4,11 @@ use desktop_core::{
 };
 use serde_json::{Value, json};
 
-use crate::{clipboard, permissions, recording, replay, request_store, vision};
+use crate::{
+    clipboard,
+    daemon::{recording, replay},
+    permissions, request_store, vision,
+};
 
 pub(crate) fn clipboard_read() -> Result<Value, AppError> {
     let text = clipboard::read_clipboard()?;

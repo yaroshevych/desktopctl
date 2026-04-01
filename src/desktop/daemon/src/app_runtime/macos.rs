@@ -13,7 +13,8 @@ use desktop_core::{
     protocol::{Command, RequestEnvelope, ResponseEnvelope, now_millis},
 };
 
-use crate::{about, daemon, overlay, permissions, permissions_dialog, trace};
+use super::{about, permissions_dialog};
+use crate::{daemon, overlay, permissions, trace};
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);

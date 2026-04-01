@@ -1,7 +1,7 @@
 use desktop_core::{automation::new_backend, error::AppError};
 use serde_json::{Value, json};
 
-use crate::{platform, window_target};
+use crate::{daemon::window_target, platform};
 
 pub(crate) fn list() -> Result<Value, AppError> {
     let backend = new_backend()?;

@@ -28,9 +28,13 @@ mod guards;
 mod observe_pipeline;
 mod platform_runtime;
 mod query_ops;
+mod recording;
+mod replay;
 mod screen_image;
 mod text_match;
 mod window_context;
+mod window_refs;
+mod window_target;
 
 #[allow(unused_imports)]
 use click_ops::{
@@ -62,9 +66,7 @@ use window_context::{
 
 #[cfg(target_os = "macos")]
 use crate::overlay;
-use crate::{
-    permissions, platform, recording, request_store, trace, vision, window_refs, window_target,
-};
+use crate::{permissions, platform, request_store, trace, vision};
 
 const MAX_CONCURRENT_CLIENTS: usize = 16;
 const COMMAND_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);

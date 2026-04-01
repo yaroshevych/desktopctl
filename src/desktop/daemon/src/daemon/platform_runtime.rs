@@ -9,7 +9,7 @@ use desktop_core::protocol::Command;
 use super::RequestContext;
 #[cfg(target_os = "macos")]
 use crate::overlay;
-use crate::{trace, window_target};
+use crate::{daemon::window_target, trace};
 
 const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 40;
 const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
