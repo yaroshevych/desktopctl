@@ -3,6 +3,7 @@ use std::{
     cell::RefCell,
     collections::HashSet,
     fs,
+    io::Write,
     path::PathBuf,
     process::Command,
     sync::{
@@ -612,11 +613,92 @@ unsafe fn dialog_row(
 }
 
 fn cli_in_path() -> bool {
-    Command::new("which")
+    if Command::new("which")
         .arg("desktopctl")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+    {
+        return true;
+    }
+
+    discover_existing_cli_link().is_some()
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn candidate_cli_dirs() -> Vec<PathBuf> {
+    let mut candidate_dirs: Vec<PathBuf> = std::env::var("PATH")
+        .ok()
+        .map(|path| {
+            path.split(':')
+                .filter(|segment| !segment.trim().is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(home) = home_dir() {
+        candidate_dirs.push(PathBuf::from("/usr/local/bin"));
+        candidate_dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        candidate_dirs.push(home.join(".local/bin"));
+        candidate_dirs.push(home.join("bin"));
+    }
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    candidate_dirs.retain(|dir| seen.insert(dir.clone()));
+    candidate_dirs
+}
+
+fn discover_existing_cli_link() -> Option<PathBuf> {
+    for dir in candidate_cli_dirs() {
+        let link_path = dir.join("desktopctl");
+        if link_path.exists() {
+            return Some(link_path);
+        }
+    }
+    None
+}
+
+fn append_path_export_once(file: &PathBuf, export_line: &str) -> Result<(), String> {
+    let existing = fs::read_to_string(file).unwrap_or_default();
+    if existing.contains(export_line) {
+        return Ok(());
+    }
+
+    let mut handle = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .map_err(|err| format!("open {} failed: {err}", file.display()))?;
+    if !existing.ends_with('\n') && !existing.is_empty() {
+        handle
+            .write_all(b"\n")
+            .map_err(|err| format!("write {} failed: {err}", file.display()))?;
+    }
+    handle
+        .write_all(format!("{export_line}\n").as_bytes())
+        .map_err(|err| format!("write {} failed: {err}", file.display()))?;
+    Ok(())
+}
+
+fn ensure_shell_path_contains(dir: &PathBuf) {
+    let Some(home) = home_dir() else {
+        return;
+    };
+
+    let export_line = if *dir == home.join(".local/bin") {
+        "export PATH=\"$HOME/.local/bin:$PATH\""
+    } else if *dir == home.join("bin") {
+        "export PATH=\"$HOME/bin:$PATH\""
+    } else {
+        return;
+    };
+
+    let _ = append_path_export_once(&home.join(".zprofile"), export_line);
+    let _ = append_path_export_once(&home.join(".zshrc"), export_line);
 }
 
 fn discover_cli_binary() -> Option<PathBuf> {
@@ -651,27 +733,7 @@ fn discover_cli_binary() -> Option<PathBuf> {
 fn install_cli_symlink() -> Result<PathBuf, String> {
     let source = discover_cli_binary().ok_or_else(|| "desktopctl binary not found".to_string())?;
 
-    let mut candidate_dirs: Vec<PathBuf> = std::env::var("PATH")
-        .ok()
-        .map(|path| {
-            path.split(':')
-                .filter(|segment| !segment.trim().is_empty())
-                .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidate_dirs.push(PathBuf::from("/usr/local/bin"));
-        candidate_dirs.push(PathBuf::from("/opt/homebrew/bin"));
-        candidate_dirs.push(home.join(".local/bin"));
-        candidate_dirs.push(home.join("bin"));
-    }
-
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    candidate_dirs.retain(|dir| seen.insert(dir.clone()));
-
-    for dir in candidate_dirs {
+    for dir in candidate_cli_dirs() {
         if fs::create_dir_all(&dir).is_err() {
             continue;
         }
@@ -691,6 +753,7 @@ fn install_cli_symlink() -> Result<PathBuf, String> {
             }
         }
         if symlink(&source, &link_path).is_ok() {
+            ensure_shell_path_contains(&dir);
             return Ok(link_path);
         }
     }
