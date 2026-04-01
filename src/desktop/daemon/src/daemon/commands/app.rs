@@ -5,6 +5,31 @@ use serde_json::{Value, json};
 
 use crate::{platform, trace};
 
+fn try_resolve_frontmost_window_id_for_app(app_name: &str) -> Option<String> {
+    let mut windows = super::super::window_target::list_frontmost_app_windows().ok()?;
+    super::super::enrich_window_refs(&mut windows);
+    let needle = app_name.trim().to_lowercase();
+    windows
+        .iter()
+        .find(|window| {
+            window.visible
+                && window.bounds.width > 8.0
+                && window.bounds.height > 8.0
+                && window.app.to_lowercase().contains(&needle)
+        })
+        .or_else(|| {
+            windows.iter().find(|window| {
+                window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
+            })
+        })
+        .map(|window| {
+            window
+                .window_ref
+                .clone()
+                .unwrap_or_else(|| window.id.clone())
+        })
+}
+
 pub(crate) fn hide(name: String) -> Result<Value, AppError> {
     trace::log(format!("app_hide:start name={name}"));
     let state = platform::apps::hide_application(&name)?;
@@ -66,5 +91,6 @@ pub(crate) fn open(
     if wait {
         super::super::wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
     }
-    Ok(json!({}))
+    let window_id = try_resolve_frontmost_window_id_for_app(&name);
+    Ok(json!({ "window_id": window_id }))
 }
