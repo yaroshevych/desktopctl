@@ -38,6 +38,7 @@ const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 40;
 const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
 #[cfg(target_os = "macos")]
 const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
+const MAX_CONCURRENT_CLIENTS: usize = 16;
 #[cfg(target_os = "macos")]
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
@@ -211,6 +212,14 @@ fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppEr
         match listener.accept() {
             Ok((stream, _addr)) => {
                 last_activity = Instant::now();
+                let active = active_clients.load(Ordering::SeqCst);
+                if active >= MAX_CONCURRENT_CLIENTS {
+                    trace::log(format!(
+                        "accept:client_rejected too_many_active_clients active={} max={}",
+                        active, MAX_CONCURRENT_CLIENTS
+                    ));
+                    continue;
+                }
                 if let Err(err) = stream.set_nonblocking(false) {
                     eprintln!("failed to set client stream blocking mode: {err}");
                     trace::log(format!("accept:set_blocking_failed error={err}"));
