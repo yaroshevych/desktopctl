@@ -15,6 +15,21 @@
 --observe-timeout <ms>    # observe loop hard timeout (default: 300)
 ```
 
+## Fast Deterministic Pattern (Recommended)
+```bash
+# 1) open app and capture window id
+raw="$(desktopctl app open Notes --json)"
+win_id="$(printf '%s' "$raw" | jq -r '.result.window_id // empty')"
+
+# 2) reuse --active-window <id> for all subsequent commands
+desktopctl keyboard press cmd+f --active-window "$win_id" --no-observe
+desktopctl keyboard type "Shopping list" --active-window "$win_id" --no-observe
+desktopctl pointer click --text "All" --active-window "$win_id" --no-observe
+
+# 3) validate final state
+desktopctl screen tokenize --active-window "$win_id"
+```
+
 ## App and Window
 ```bash
 # open an app; optionally wait until it is ready
@@ -120,6 +135,7 @@ desktopctl debug snapshot
 ## Replay
 ```bash
 # start replay recording (default duration: 3000ms)
+# use only if you explicitly need trace capture/replay artifacts
 desktopctl replay record
 
 # start replay recording with explicit duration (max 1800000ms / 30m)

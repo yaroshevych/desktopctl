@@ -45,7 +45,7 @@
           <div class="hero-ctas">
             <a class="btn-primary" href="https://github.com/yaroshevych/desktopctl">View on GitHub</a>
             <a class="btn-ghost" href="https://github.com/yaroshevych/desktopctl/blob/main/CLI.md">Read the spec</a>
-            <code class="brew-snippet">desktopctl pointer click --text "Send"</code>
+            <code class="brew-snippet">desktopctl app open Notes</code>
           </div>
         </div>
       </section>
@@ -74,20 +74,11 @@
               <div class="dot"></div>
               <span class="code-label">zsh — desktopctl</span>
             </div>
-            <pre aria-label="Example desktopctl commands"><span class="cmd-comment"># list all open windows</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">window list</span>
-
-<span class="cmd-comment"># bring a window into focus by title</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">window focus</span> <span class="cmd-flag">--title</span> <span class="cmd-val">"Messages"</span>
-
-<span class="cmd-comment"># extract structured information from focused window</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">screen tokenize</span> <span class="cmd-flag">--json</span>
-
-<span class="cmd-comment"># click a UI element by visible text label</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">pointer click</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Send"</span>
-
-<span class="cmd-comment"># block until expected text appears</span>
-<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">screen wait</span> <span class="cmd-flag">--text</span> <span class="cmd-val">"Sent"</span> <span class="cmd-flag">--timeout</span> <span class="cmd-val">3000</span></pre>
+            <pre aria-label="Example desktopctl commands">
+<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">app open</span> <span class="cmd-val">Notes</span> <span class="cmd-flag">--json</span>
+<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">keyboard press</span> <span class="cmd-val">cmd+f</span> <span class="cmd-flag">--active-window</span>
+<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">keyboard type</span> <span class="cmd-val">"Shopping list"</span>
+<span class="cmd-prefix">$ </span><span class="cmd-main">desktopctl</span> <span class="cmd-sub">screen tokenize</span> <span class="cmd-flag">--active-window</span></pre>
           </div>
         </div>
       </section>

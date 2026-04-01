@@ -50,10 +50,11 @@ just build run
 ```
 
 ```bash
-desktopctl open Calculator --wait
-desktopctl screen tokenize --json
-desktopctl ui click --text "7"
-desktopctl wait --text "7"
+raw="$(desktopctl app open Notes --json)"
+win_id="$(printf '%s' "$raw" | jq -r '.result.window_id // empty')"
+desktopctl keyboard press cmd+f --active-window "$win_id" --no-observe
+desktopctl keyboard type "Shopping list" --active-window "$win_id" --no-observe
+desktopctl screen tokenize --active-window "$win_id"
 ```
 
 ## Status / Roadmap
