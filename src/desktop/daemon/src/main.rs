@@ -1,7 +1,6 @@
 mod app_runtime;
 mod clipboard;
 mod daemon;
-#[cfg(target_os = "macos")]
 mod overlay;
 mod permissions;
 mod platform;
