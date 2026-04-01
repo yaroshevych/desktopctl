@@ -385,19 +385,13 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     }
                     "--active-window" => {
                         active_window = true;
-                        if let Some(value) = args.get(i + 1) {
-                            if !value.starts_with("--") {
-                                if value.trim().is_empty() {
-                                    return Err(AppError::invalid_argument(
-                                        "active window id must not be empty",
-                                    ));
-                                }
-                                active_window_id = Some(value.clone());
-                                i += 2;
-                                continue;
-                            }
-                        }
-                        i += 1;
+                        let (window_id, consumed) = parse_optional_value_after_flag(
+                            args,
+                            i,
+                            "active window id must not be empty",
+                        )?;
+                        active_window_id = window_id;
+                        i += consumed;
                     }
                     "--region" => {
                         let x = parse_u32(args.get(i + 1), "region_x")?;
@@ -476,19 +470,13 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     }
                     "--active-window" => {
                         active_window = true;
-                        if let Some(value) = args.get(i + 1) {
-                            if !value.starts_with("--") {
-                                if value.trim().is_empty() {
-                                    return Err(AppError::invalid_argument(
-                                        "active window id must not be empty",
-                                    ));
-                                }
-                                active_window_id = Some(value.clone());
-                                i += 2;
-                                continue;
-                            }
-                        }
-                        i += 1;
+                        let (window_id, consumed) = parse_optional_value_after_flag(
+                            args,
+                            i,
+                            "active window id must not be empty",
+                        )?;
+                        active_window_id = window_id;
+                        i += consumed;
                     }
                     "--region" => {
                         let x = parse_u32(args.get(i + 1), "region_x")?;
@@ -692,19 +680,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 }
                 if token == "--active-window" {
                     active_window = true;
-                    if let Some(value) = args.get(i + 1) {
-                        if !value.starts_with("--") {
-                            if value.trim().is_empty() {
-                                return Err(AppError::invalid_argument(
-                                    "active window id must not be empty",
-                                ));
-                            }
-                            active_window_id = Some(value.clone());
-                            i += 2;
-                            continue;
-                        }
-                    }
-                    i += 1;
+                    let (window_id, consumed) = parse_optional_value_after_flag(
+                        args,
+                        i,
+                        "active window id must not be empty",
+                    )?;
+                    active_window_id = window_id;
+                    i += consumed;
                     continue;
                 }
                 if token.starts_with("--") {
@@ -741,19 +723,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 match args[i].as_str() {
                     "--active-window" => {
                         active_window = true;
-                        if let Some(value) = args.get(i + 1) {
-                            if !value.starts_with("--") {
-                                if value.trim().is_empty() {
-                                    return Err(AppError::invalid_argument(
-                                        "active window id must not be empty",
-                                    ));
-                                }
-                                active_window_id = Some(value.clone());
-                                i += 2;
-                                continue;
-                            }
-                        }
-                        i += 1;
+                        let (window_id, consumed) = parse_optional_value_after_flag(
+                            args,
+                            i,
+                            "active window id must not be empty",
+                        )?;
+                        active_window_id = window_id;
+                        i += consumed;
                     }
                     "--button" => {
                         button = parse_pointer_button(args.get(i + 1))?;
@@ -785,19 +761,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 match args[i].as_str() {
                     "--active-window" => {
                         active_window = true;
-                        if let Some(value) = args.get(i + 1) {
-                            if !value.starts_with("--") {
-                                if value.trim().is_empty() {
-                                    return Err(AppError::invalid_argument(
-                                        "active window id must not be empty",
-                                    ));
-                                }
-                                active_window_id = Some(value.clone());
-                                i += 2;
-                                continue;
-                            }
-                        }
-                        i += 1;
+                        let (window_id, consumed) = parse_optional_value_after_flag(
+                            args,
+                            i,
+                            "active window id must not be empty",
+                        )?;
+                        active_window_id = window_id;
+                        i += consumed;
                     }
                     "--button" => {
                         button = parse_pointer_button(args.get(i + 1))?;
@@ -834,19 +804,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     match args[i].as_str() {
                         "--active-window" => {
                             active_window = true;
-                            if let Some(value) = args.get(i + 1) {
-                                if !value.starts_with("--") {
-                                    if value.trim().is_empty() {
-                                        return Err(AppError::invalid_argument(
-                                            "active window id must not be empty",
-                                        ));
-                                    }
-                                    active_window_id = Some(value.clone());
-                                    i += 2;
-                                    continue;
-                                }
-                            }
-                            i += 1;
+                            let (window_id, consumed) = parse_optional_value_after_flag(
+                                args,
+                                i,
+                                "active window id must not be empty",
+                            )?;
+                            active_window_id = window_id;
+                            i += consumed;
                         }
                         "--button" => {
                             button = parse_pointer_button(args.get(i + 1))?;
@@ -906,19 +870,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     match args[i].as_str() {
                         "--active-window" => {
                             active_window = true;
-                            if let Some(value) = args.get(i + 1) {
-                                if !value.starts_with("--") {
-                                    if value.trim().is_empty() {
-                                        return Err(AppError::invalid_argument(
-                                            "active window id must not be empty",
-                                        ));
-                                    }
-                                    active_window_id = Some(value.clone());
-                                    i += 2;
-                                    continue;
-                                }
-                            }
-                            i += 1;
+                            let (window_id, consumed) = parse_optional_value_after_flag(
+                                args,
+                                i,
+                                "active window id must not be empty",
+                            )?;
+                            active_window_id = window_id;
+                            i += consumed;
                         }
                         "--button" => {
                             button = parse_pointer_button(args.get(i + 1))?;
@@ -1015,19 +973,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                     }
                     if token == "--active-window" {
                         active_window = true;
-                        if let Some(value) = args.get(i + 1) {
-                            if !value.starts_with("--") {
-                                if value.trim().is_empty() {
-                                    return Err(AppError::invalid_argument(
-                                        "active window id must not be empty",
-                                    ));
-                                }
-                                active_window_id = Some(value.clone());
-                                i += 2;
-                                continue;
-                            }
-                        }
-                        i += 1;
+                        let (window_id, consumed) = parse_optional_value_after_flag(
+                            args,
+                            i,
+                            "active window id must not be empty",
+                        )?;
+                        active_window_id = window_id;
+                        i += consumed;
                         continue;
                     }
                     if token == "--button" {
@@ -1075,19 +1027,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 let token = &args[i];
                 if token == "--active-window" {
                     active_window = true;
-                    if let Some(value) = args.get(i + 1) {
-                        if !value.starts_with("--") {
-                            if value.trim().is_empty() {
-                                return Err(AppError::invalid_argument(
-                                    "active window id must not be empty",
-                                ));
-                            }
-                            active_window_id = Some(value.clone());
-                            i += 2;
-                            continue;
-                        }
-                    }
-                    i += 1;
+                    let (window_id, consumed) = parse_optional_value_after_flag(
+                        args,
+                        i,
+                        "active window id must not be empty",
+                    )?;
+                    active_window_id = window_id;
+                    i += consumed;
                     continue;
                 }
                 if token.starts_with("--") {
@@ -1138,19 +1084,13 @@ fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
                 match args[i].as_str() {
                     "--active-window" => {
                         active_window = true;
-                        if let Some(value) = args.get(i + 1) {
-                            if !value.starts_with("--") {
-                                if value.trim().is_empty() {
-                                    return Err(AppError::invalid_argument(
-                                        "active window id must not be empty",
-                                    ));
-                                }
-                                active_window_id = Some(value.clone());
-                                i += 2;
-                                continue;
-                            }
-                        }
-                        i += 1;
+                        let (window_id, consumed) = parse_optional_value_after_flag(
+                            args,
+                            i,
+                            "active window id must not be empty",
+                        )?;
+                        active_window_id = window_id;
+                        i += consumed;
                     }
                     "--observe" => {
                         observe.enabled = true;
@@ -1297,19 +1237,10 @@ fn parse_observe_and_active_window_options(
             }
             "--active-window" => {
                 active_window = true;
-                if let Some(value) = args.get(i + 1) {
-                    if !value.starts_with("--") {
-                        if value.trim().is_empty() {
-                            return Err(AppError::invalid_argument(
-                                "active window id must not be empty",
-                            ));
-                        }
-                        active_window_id = Some(value.clone());
-                        i += 2;
-                        continue;
-                    }
-                }
-                i += 1;
+                let (window_id, consumed) =
+                    parse_optional_value_after_flag(args, i, "active window id must not be empty")?;
+                active_window_id = window_id;
+                i += consumed;
             }
             flag => {
                 return Err(AppError::invalid_argument(format!(
@@ -1335,6 +1266,22 @@ fn parse_observe_until(value: &str) -> Result<ObserveUntil, AppError> {
             "invalid --observe-until value: {value} (expected stable|change|first-change)"
         ))),
     }
+}
+
+fn parse_optional_value_after_flag(
+    args: &[String],
+    flag_index: usize,
+    empty_value_message: &'static str,
+) -> Result<(Option<String>, usize), AppError> {
+    if let Some(value) = args.get(flag_index + 1)
+        && !value.starts_with("--")
+    {
+        if value.trim().is_empty() {
+            return Err(AppError::invalid_argument(empty_value_message));
+        }
+        return Ok((Some(value.clone()), 2));
+    }
+    Ok((None, 1))
 }
 
 fn parse_u32(value: Option<&String>, field: &str) -> Result<u32, AppError> {
