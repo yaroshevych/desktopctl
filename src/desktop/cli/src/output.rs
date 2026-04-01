@@ -485,13 +485,6 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
         {
             lines.push(format!("- id: {}", id));
         }
-        if let Some(source) = target
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-        {
-            lines.push(format!("- source: {}", source));
-        }
         if let Some(text) = target
             .get("text")
             .and_then(serde_json::Value::as_str)

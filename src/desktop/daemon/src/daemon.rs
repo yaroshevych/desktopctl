@@ -1583,8 +1583,7 @@ fn click_element_id_target(
             "click_target": {
                 "id": target.id.clone(),
                 "text": target.text.clone(),
-                "bounds": target.bounds.clone(),
-                "source": target.source.clone()
+                "bounds": target.bounds.clone()
             }
         }),
         Some(pre_click_tokens),
@@ -1811,8 +1810,7 @@ fn try_click_ax_element_id_target(
         "click_target": {
             "id": target.id.clone(),
             "text": target.text.clone(),
-            "bounds": target.bounds.clone(),
-            "source": target.source.clone()
+            "bounds": target.bounds.clone()
         }
     })))
 }
