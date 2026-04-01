@@ -5,7 +5,7 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -39,10 +39,44 @@ const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
 #[cfg(target_os = "macos")]
 const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
 const MAX_CONCURRENT_CLIENTS: usize = 16;
+const COMMAND_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(target_os = "macos")]
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 static PRIVACY_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+static COMMAND_EXECUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CommandExecutionGuard<'a> {
+    _guard: MutexGuard<'a, ()>,
+}
+
+fn command_execution_lock() -> &'static Mutex<()> {
+    COMMAND_EXECUTION_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn acquire_command_execution_slot() -> Result<CommandExecutionGuard<'static>, AppError> {
+    let lock = command_execution_lock();
+    let queued_at = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(CommandExecutionGuard { _guard: guard }),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(AppError::internal("command execution lock poisoned"));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if queued_at.elapsed() >= COMMAND_QUEUE_TIMEOUT {
+                    return Err(AppError::timeout(format!(
+                        "command queue timeout after {} ms; another command is still running",
+                        COMMAND_QUEUE_TIMEOUT.as_millis()
+                    )));
+                }
+                thread::sleep(COMMAND_QUEUE_POLL_INTERVAL);
+            }
+        }
+    }
+}
 const OBSERVE_SAMPLE_INTERVAL_MS: u64 = 40;
 const OBSERVE_QUIET_FRAMES: u32 = 2;
 const OBSERVE_DIFF_THRESHOLD: u8 = 8;
@@ -310,31 +344,40 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
     }
     #[cfg(target_os = "macos")]
     let _ = overlay::agent_active_changed(true);
-    let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        execute_with_context(command, overlay_token_updates_enabled, &request_context)
-    })) {
-        Ok(Ok(result)) => {
-            trace::log("client:execute_ok");
-            ResponseEnvelope::success(request_id.clone(), result)
-        }
-        Ok(Err(err)) => {
+    let response = match acquire_command_execution_slot() {
+        Ok(_slot) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            execute_with_context(command, overlay_token_updates_enabled, &request_context)
+        })) {
+            Ok(Ok(result)) => {
+                trace::log("client:execute_ok");
+                ResponseEnvelope::success(request_id.clone(), result)
+            }
+            Ok(Err(err)) => {
+                trace::log(format!(
+                    "client:execute_err code={:?} msg={}",
+                    err.code, err.message
+                ));
+                ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+            }
+            Err(payload) => {
+                let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    (*msg).to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                trace::log(format!("client:execute_panic {panic_message}"));
+                let err = AppError::internal(format!(
+                    "daemon panic during command execution: {panic_message}"
+                ));
+                ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+            }
+        },
+        Err(err) => {
             trace::log(format!(
-                "client:execute_err code={:?} msg={}",
-                err.code, err.message
-            ));
-            ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
-        }
-        Err(payload) => {
-            let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
-                (*msg).to_string()
-            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                msg.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            trace::log(format!("client:execute_panic {panic_message}"));
-            let err = AppError::internal(format!(
-                "daemon panic during command execution: {panic_message}"
+                "client:queue_timeout request_id={} command={} msg={}",
+                request_id, command_name, err.message
             ));
             ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
         }

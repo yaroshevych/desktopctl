@@ -2,6 +2,8 @@
 
 - Global output flags: `--markdown` (default human-readable output) and `--json` (machine-readable responses that include `request_id`)
 - Daemon keeps a rolling artifact buffer for recent requests, incl. request, response, and screenshot
+- Daemon executes at most one command at a time globally; concurrent requests wait in a short queue
+- If queue wait exceeds ~5s, request fails with retryable `TIMEOUT` (exit code `3`).
 
 ## Observe Mode (Action Feedback)
 ```bash
