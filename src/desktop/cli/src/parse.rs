@@ -1,508 +1,154 @@
-use crate::usage::usage;
+use clap::{
+    Arg, ArgAction, ArgMatches, Command as ClapCommand, ValueHint, builder::PossibleValuesParser,
+};
 use desktop_core::{
     error::AppError,
-    protocol::{Command, ObserveOptions, ObserveUntil, PointerButton},
+    protocol::{Bounds, Command, ObserveOptions, ObserveUntil, PointerButton},
 };
+
+use crate::usage::help_notes;
+
+const MAX_REPLAY_DURATION_MS: u64 = 30 * 60 * 1000;
+
+pub(crate) fn render_help_if_requested(raw_args: &[String]) -> Result<Option<String>, AppError> {
+    let help_flag_present = raw_args.iter().any(|arg| arg == "-h" || arg == "--help");
+    let help_subcommand_present = raw_args.first().is_some_and(|arg| arg == "help");
+    if !help_flag_present && !help_subcommand_present {
+        return Ok(None);
+    }
+
+    let forwarded_args: Vec<String> = if help_subcommand_present {
+        if raw_args.len() == 1 {
+            vec!["--help".to_string()]
+        } else {
+            let mut args = raw_args[1..].to_vec();
+            args.push("--help".to_string());
+            args
+        }
+    } else {
+        raw_args.to_vec()
+    };
+
+    let mut argv = Vec::with_capacity(forwarded_args.len() + 1);
+    argv.push("desktopctl".to_string());
+    argv.extend(forwarded_args);
+
+    match clap_app().try_get_matches_from(argv) {
+        Ok(_) => {
+            let mut cmd = clap_app();
+            let mut out = Vec::new();
+            cmd.write_long_help(&mut out)
+                .map_err(|err| AppError::internal(format!("failed to render help: {err}")))?;
+            let help = String::from_utf8(out)
+                .map_err(|err| AppError::internal(format!("invalid UTF-8 help output: {err}")))?;
+            Ok(Some(help))
+        }
+        Err(err) => match err.kind() {
+            clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
+                Ok(Some(err.to_string()))
+            }
+            _ => Err(AppError::invalid_argument(err.to_string())),
+        },
+    }
+}
 
 pub(crate) fn parse_command(args: &[String]) -> Result<Command, AppError> {
     if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-
-    match args[0].as_str() {
-        "app" => parse_app(&args[1..]),
-        "window" => parse_window(&args[1..]),
-        "screen" => parse_screen(&args[1..]),
-        "clipboard" => parse_clipboard(&args[1..]),
-        "debug" => parse_debug(&args[1..]),
-        "request" => parse_request(&args[1..]),
-        "replay" => parse_replay(&args[1..]),
-        "pointer" => parse_pointer(&args[1..]),
-        "keyboard" => parse_keyboard(&args[1..]),
-        _ => Err(AppError::invalid_argument(usage())),
-    }
-}
-
-fn parse_app(args: &[String]) -> Result<Command, AppError> {
-    if args.len() < 2 {
         return Err(AppError::invalid_argument(
-            "usage: desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>] | desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
+            "missing command; run `desktopctl --help`",
         ));
     }
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push("desktopctl".to_string());
+    argv.extend(args.iter().cloned());
 
-    let action = args[0].as_str();
-    if action == "open" {
-        return parse_open(&args[1..]);
-    }
+    let matches = clap_app()
+        .try_get_matches_from(argv)
+        .map_err(|err| AppError::invalid_argument(err.to_string()))?;
 
-    let name = args[1..].join(" ").trim().to_string();
-    if name.is_empty() {
-        return Err(AppError::invalid_argument(
-            "missing application name: desktopctl app hide <application>",
-        ));
-    }
+    let (name, sub) = matches
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing command; run `desktopctl --help`"))?;
 
-    match action {
-        "hide" => Ok(Command::AppHide { name }),
-        "show" => Ok(Command::AppShow { name }),
-        "isolate" => Ok(Command::AppIsolate { name }),
-        _ => Err(AppError::invalid_argument(
-            "usage: desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>] | desktopctl app hide <application> | desktopctl app show <application> | desktopctl app isolate <application>",
-        )),
+    match name {
+        "app" => parse_app(sub),
+        "window" => parse_window(sub),
+        "screen" => parse_screen(sub),
+        "clipboard" => parse_clipboard(sub),
+        "debug" => parse_debug(sub),
+        "request" => parse_request(sub),
+        "replay" => parse_replay(sub),
+        "pointer" => parse_pointer(sub),
+        "keyboard" => parse_keyboard(sub),
+        _ => Err(AppError::invalid_argument("unknown command")),
     }
 }
 
-fn parse_window(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(
-            "usage: desktopctl window list | desktopctl window bounds (--title <text> | --id <id>) | desktopctl window focus (--title <text> | --id <id>)",
-        ));
-    }
-
-    match args[0].as_str() {
-        "list" => {
-            if args.len() > 1 {
-                return Err(AppError::invalid_argument("usage: desktopctl window list"));
-            }
-            Ok(Command::WindowList)
-        }
-        "bounds" => {
-            if args.len() < 3 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds (--title <text> | --id <id>)",
-                ));
-            }
-            let selector_flag = args[1].as_str();
-            if selector_flag != "--title" && selector_flag != "--id" {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds (--title <text> | --id <id>)",
-                ));
-            }
-            let query = args[2].clone();
-            if query.trim().is_empty() {
-                return Err(AppError::invalid_argument(format!(
-                    "missing {}: desktopctl window bounds {} <...>",
-                    if selector_flag == "--id" {
-                        "id"
-                    } else {
-                        "title"
-                    },
-                    selector_flag
-                )));
-            }
-            if args.len() > 3 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl window bounds (--title <text> | --id <id>)",
-                ));
-            }
-            Ok(Command::WindowBounds { title: query })
-        }
-        "focus" => {
-            if args.len() != 3 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl window focus (--title <text> | --id <id>)",
-                ));
-            }
-            let selector_flag = args[1].as_str();
-            if selector_flag != "--title" && selector_flag != "--id" {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl window focus (--title <text> | --id <id>)",
-                ));
-            }
-            let query = args[2].clone();
-            if query.trim().is_empty() {
-                return Err(AppError::invalid_argument(format!(
-                    "missing {}: desktopctl window focus {} <...>",
-                    if selector_flag == "--id" {
-                        "id"
-                    } else {
-                        "title"
-                    },
-                    selector_flag
-                )));
-            }
-            Ok(Command::WindowFocus { title: query })
-        }
-        _ => Err(AppError::invalid_argument(
-            "usage: desktopctl window list | desktopctl window bounds (--title <text> | --id <id>) | desktopctl window focus (--title <text> | --id <id>)",
-        )),
+fn parse_app(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing app action"))?;
+    match name {
+        "hide" => Ok(Command::AppHide {
+            name: join_many(sub, "application")?,
+        }),
+        "show" => Ok(Command::AppShow {
+            name: join_many(sub, "application")?,
+        }),
+        "isolate" => Ok(Command::AppIsolate {
+            name: join_many(sub, "application")?,
+        }),
+        "open" => Ok(Command::OpenApp {
+            name: join_many(sub, "application")?,
+            args: sub
+                .get_many::<String>("open_args")
+                .map(|v| v.cloned().collect())
+                .unwrap_or_default(),
+            wait: sub.get_flag("wait"),
+            timeout_ms: sub
+                .get_one::<String>("timeout")
+                .map(|v| parse_u64(v, "timeout_ms"))
+                .transpose()?,
+        }),
+        _ => Err(AppError::invalid_argument("unknown app action")),
     }
 }
 
-fn parse_debug(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-    match args[0].as_str() {
-        "snapshot" if args.len() == 1 => Ok(Command::DebugSnapshot),
-        "ping" if args.len() == 1 => Ok(Command::Ping),
-        "permissions" if args.len() == 1 => Ok(Command::PermissionsCheck),
-        "overlay" => {
-            if args.len() < 2 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl debug overlay start [--duration <ms>] | desktopctl debug overlay stop",
-                ));
-            }
-            match args[1].as_str() {
-                "start" => {
-                    let mut duration_ms: Option<u64> = None;
-                    let mut i = 2;
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--duration" => {
-                                duration_ms = Some(parse_u64(args.get(i + 1), "duration_ms")?);
-                                i += 2;
-                            }
-                            flag => {
-                                return Err(AppError::invalid_argument(format!(
-                                    "unknown flag for debug overlay start: {flag}"
-                                )));
-                            }
-                        }
-                    }
-                    Ok(Command::OverlayStart { duration_ms })
-                }
-                "stop" if args.len() == 2 => Ok(Command::OverlayStop),
-                _ => Err(AppError::invalid_argument(
-                    "usage: desktopctl debug overlay start [--duration <ms>] | desktopctl debug overlay stop",
-                )),
-            }
-        }
-        _ => Err(AppError::invalid_argument(usage())),
+fn parse_window(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing window action"))?;
+    match name {
+        "list" => Ok(Command::WindowList),
+        "bounds" => Ok(Command::WindowBounds {
+            title: window_selector(sub)?,
+        }),
+        "focus" => Ok(Command::WindowFocus {
+            title: window_selector(sub)?,
+        }),
+        _ => Err(AppError::invalid_argument("unknown window action")),
     }
 }
 
-fn parse_replay(args: &[String]) -> Result<Command, AppError> {
-    const MAX_REPLAY_DURATION_MS: u64 = 30 * 60 * 1000;
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-    match args[0].as_str() {
-        "load" => {
-            if args.len() != 2 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl replay load <session_dir>",
-                ));
-            }
-            Ok(Command::ReplayLoad {
-                session_dir: args[1].clone(),
-            })
-        }
-        "record" => {
-            let mut duration_ms = 3_000_u64;
-            let mut stop = false;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--duration" => {
-                        duration_ms = parse_u64(args.get(i + 1), "duration_ms")?;
-                        i += 2;
-                    }
-                    "--stop" => {
-                        stop = true;
-                        i += 1;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for replay record: {flag}"
-                        )));
-                    }
-                }
-            }
-            if stop && args.len() > 2 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl replay record [--duration <ms>] | desktopctl replay record --stop",
-                ));
-            }
-            if !stop && duration_ms > MAX_REPLAY_DURATION_MS {
-                return Err(AppError::invalid_argument(format!(
-                    "duration_ms exceeds max of {MAX_REPLAY_DURATION_MS}"
-                )));
-            }
-            Ok(Command::ReplayRecord { duration_ms, stop })
-        }
-        _ => Err(AppError::invalid_argument(usage())),
-    }
-}
-
-fn parse_request(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-    match args[0].as_str() {
-        "list" => {
-            let mut limit: Option<u64> = None;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--limit" => {
-                        limit = Some(parse_u64(args.get(i + 1), "limit")?);
-                        i += 2;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for request list: {flag}"
-                        )));
-                    }
-                }
-            }
-            Ok(Command::RequestList { limit })
-        }
-        "show" => {
-            let request_id = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument("usage: desktopctl request show <request_id>")
-            })?;
-            Ok(Command::RequestShow { request_id })
-        }
+fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing screen action"))?;
+    match name {
         "screenshot" => {
-            let request_id = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument(
-                    "usage: desktopctl request screenshot <request_id> [--out <path>]",
-                )
-            })?;
-            let mut out_path: Option<String> = None;
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--out" => {
-                        out_path = Some(
-                            args.get(i + 1)
-                                .cloned()
-                                .ok_or_else(|| AppError::invalid_argument("missing out_path"))?,
-                        );
-                        i += 2;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for request screenshot: {flag}"
-                        )));
-                    }
-                }
-            }
-            Ok(Command::RequestScreenshot {
-                request_id,
-                out_path,
-            })
-        }
-        "response" => {
-            let request_id = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument("usage: desktopctl request response <request_id>")
-            })?;
-            Ok(Command::RequestResponse { request_id })
-        }
-        "search" => {
-            let text = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument(
-                    "usage: desktopctl request search <text> [--limit <n>] [--command <screen_tokenize|...>]",
-                )
-            })?;
-            if text.trim().is_empty() {
-                return Err(AppError::invalid_argument(
-                    "request search query must not be empty",
-                ));
-            }
-            let mut limit: Option<u64> = None;
-            let mut command: Option<String> = None;
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--limit" => {
-                        limit = Some(parse_u64(args.get(i + 1), "limit")?);
-                        i += 2;
-                    }
-                    "--command" => {
-                        let value = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument("missing value for --command")
-                        })?;
-                        if value.trim().is_empty() {
-                            return Err(AppError::invalid_argument(
-                                "request search --command value must not be empty",
-                            ));
-                        }
-                        command = Some(value.clone());
-                        i += 2;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for request search: {flag}"
-                        )));
-                    }
-                }
-            }
-            Ok(Command::RequestSearch {
-                text,
-                limit,
-                command,
-            })
-        }
-        _ => Err(AppError::invalid_argument(usage())),
-    }
-}
-
-fn parse_clipboard(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-    match args[0].as_str() {
-        "read" => Ok(Command::ClipboardRead),
-        "write" => {
-            let text = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument("usage: desktopctl clipboard write <text>")
-            })?;
-            Ok(Command::ClipboardWrite { text })
-        }
-        _ => Err(AppError::invalid_argument(usage())),
-    }
-}
-
-fn parse_screen(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-
-    match args[0].as_str() {
-        "screenshot" => {
-            let mut out_path: Option<String> = None;
-            let mut overlay = false;
-            let mut active_window = false;
-            let mut active_window_id: Option<String> = None;
-            let mut region: Option<desktop_core::protocol::Bounds> = None;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--out" => {
-                        let path = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument(
-                                "missing value for --out: desktopctl screen screenshot --out <path>",
-                            )
-                        })?;
-                        out_path = Some(path.clone());
-                        i += 2;
-                    }
-                    "--overlay" => {
-                        overlay = true;
-                        i += 1;
-                    }
-                    "--active-window" => {
-                        active_window = true;
-                        let (window_id, consumed) = parse_optional_value_after_flag(
-                            args,
-                            i,
-                            "active window id must not be empty",
-                        )?;
-                        active_window_id = window_id;
-                        i += consumed;
-                    }
-                    "--region" => {
-                        let x = parse_u32(args.get(i + 1), "region_x")?;
-                        let y = parse_u32(args.get(i + 2), "region_y")?;
-                        let width = parse_u32(args.get(i + 3), "region_width")?;
-                        let height = parse_u32(args.get(i + 4), "region_height")?;
-                        if width == 0 || height == 0 {
-                            return Err(AppError::invalid_argument(
-                                "region width/height must be > 0",
-                            ));
-                        }
-                        region = Some(desktop_core::protocol::Bounds {
-                            x: x as f64,
-                            y: y as f64,
-                            width: width as f64,
-                            height: height as f64,
-                        });
-                        i += 5;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for screen screenshot: {flag}"
-                        )));
-                    }
-                }
-            }
+            let (active_window, active_window_id) = parse_active_window(sub)?;
             Ok(Command::ScreenCapture {
-                out_path,
-                overlay,
+                out_path: sub.get_one::<String>("out").cloned(),
+                overlay: sub.get_flag("overlay"),
                 active_window,
                 active_window_id,
-                region,
+                region: parse_region(sub)?,
             })
         }
         "tokenize" => {
-            let mut overlay_out_path: Option<String> = None;
-            let mut window_query: Option<String> = None;
-            let mut screenshot_path: Option<String> = None;
-            let mut active_window = false;
-            let mut active_window_id: Option<String> = None;
-            let mut region: Option<desktop_core::protocol::Bounds> = None;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--overlay" => {
-                        let path = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument(
-                                "missing value for --overlay: desktopctl screen tokenize [--overlay <path>]",
-                            )
-                        })?;
-                        overlay_out_path = Some(path.clone());
-                        i += 2;
-                    }
-                    "--window-query" => {
-                        let id = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument(
-                                "missing value for --window-query: desktopctl screen tokenize [--overlay <path>] [--window-query <text>] [--screenshot <path>]",
-                            )
-                        })?;
-                        if id.trim().is_empty() {
-                            return Err(AppError::invalid_argument(
-                                "window query must not be empty",
-                            ));
-                        }
-                        window_query = Some(id.clone());
-                        i += 2;
-                    }
-                    "--screenshot" => {
-                        let path = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument(
-                                "missing value for --screenshot: desktopctl screen tokenize [--overlay <path>] [--active-window [<id>]] [--window-query <text>] [--screenshot <path>]",
-                            )
-                        })?;
-                        screenshot_path = Some(path.clone());
-                        i += 2;
-                    }
-                    "--active-window" => {
-                        active_window = true;
-                        let (window_id, consumed) = parse_optional_value_after_flag(
-                            args,
-                            i,
-                            "active window id must not be empty",
-                        )?;
-                        active_window_id = window_id;
-                        i += consumed;
-                    }
-                    "--region" => {
-                        let x = parse_u32(args.get(i + 1), "region_x")?;
-                        let y = parse_u32(args.get(i + 2), "region_y")?;
-                        let width = parse_u32(args.get(i + 3), "region_width")?;
-                        let height = parse_u32(args.get(i + 4), "region_height")?;
-                        if width == 0 || height == 0 {
-                            return Err(AppError::invalid_argument(
-                                "region width/height must be > 0",
-                            ));
-                        }
-                        region = Some(desktop_core::protocol::Bounds {
-                            x: x as f64,
-                            y: y as f64,
-                            width: width as f64,
-                            height: height as f64,
-                        });
-                        i += 5;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for screen tokenize: {flag}"
-                        )));
-                    }
-                }
-            }
+            let (active_window, active_window_id) = parse_active_window(sub)?;
+            let window_query = sub.get_one::<String>("window_query").cloned();
+            let screenshot_path = sub.get_one::<String>("screenshot").cloned();
             if window_query.is_some() && screenshot_path.is_some() {
                 return Err(AppError::invalid_argument(
                     "--window-query cannot be combined with --screenshot for screen tokenize",
@@ -518,743 +164,394 @@ fn parse_screen(args: &[String]) -> Result<Command, AppError> {
                     "--active-window cannot be combined with --screenshot for screen tokenize",
                 ));
             }
-            if active_window_id.is_some() && !active_window {
-                return Err(AppError::invalid_argument(
-                    "active window id requires --active-window",
-                ));
-            }
             Ok(Command::ScreenTokenize {
-                overlay_out_path,
+                overlay_out_path: sub.get_one::<String>("overlay").cloned(),
                 window_query,
                 screenshot_path,
                 active_window,
                 active_window_id,
-                region,
+                region: parse_region(sub)?,
             })
         }
-        "find" => {
-            if args.len() < 3 || args[1] != "--text" {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl screen find --text <text> [--all]",
-                ));
-            }
-            let text = args[2].clone();
-            let mut all = false;
-            let mut i = 3;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--all" => {
-                        all = true;
-                        i += 1;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for screen find: {flag}"
-                        )));
-                    }
-                }
-            }
-            Ok(Command::ScreenFindText { text, all })
-        }
-        "wait" => parse_screen_wait(&args[1..]),
-        _ => Err(AppError::invalid_argument(usage())),
+        "find" => Ok(Command::ScreenFindText {
+            text: sub
+                .get_one::<String>("text")
+                .cloned()
+                .ok_or_else(|| AppError::invalid_argument("missing --text"))?,
+            all: sub.get_flag("all"),
+        }),
+        "wait" => Ok(Command::WaitText {
+            text: sub
+                .get_one::<String>("text")
+                .cloned()
+                .ok_or_else(|| AppError::invalid_argument("missing --text"))?,
+            timeout_ms: sub
+                .get_one::<String>("timeout")
+                .map(|v| parse_u64(v, "timeout_ms"))
+                .transpose()?
+                .unwrap_or(8_000),
+            interval_ms: sub
+                .get_one::<String>("interval")
+                .map(|v| parse_u64(v, "interval_ms"))
+                .transpose()?
+                .unwrap_or(200),
+            disappear: sub.get_flag("disappear"),
+        }),
+        _ => Err(AppError::invalid_argument("unknown screen action")),
     }
 }
 
-fn parse_screen_wait(args: &[String]) -> Result<Command, AppError> {
-    if args.first().map(String::as_str) != Some("--text") {
-        return Err(AppError::invalid_argument(
-            "usage: desktopctl screen wait --text <text> [--timeout <ms>] [--interval <ms>] [--disappear]",
-        ));
+fn parse_clipboard(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing clipboard action"))?;
+    match name {
+        "read" => Ok(Command::ClipboardRead),
+        "write" => Ok(Command::ClipboardWrite {
+            text: sub
+                .get_one::<String>("text")
+                .cloned()
+                .ok_or_else(|| AppError::invalid_argument("missing text"))?,
+        }),
+        _ => Err(AppError::invalid_argument("unknown clipboard action")),
     }
+}
 
-    let text = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| AppError::invalid_argument("usage: desktopctl screen wait --text <text>"))?;
-    let mut timeout_ms = 8_000_u64;
-    let mut interval_ms = 200_u64;
-    let mut disappear = false;
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--timeout" => {
-                timeout_ms = parse_u64(args.get(i + 1), "timeout_ms")?;
-                i += 2;
+fn parse_debug(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing debug action"))?;
+    match name {
+        "permissions" => Ok(Command::PermissionsCheck),
+        "ping" => Ok(Command::Ping),
+        "snapshot" => Ok(Command::DebugSnapshot),
+        "overlay" => {
+            let (overlay_name, overlay_sub) = sub
+                .subcommand()
+                .ok_or_else(|| AppError::invalid_argument("missing debug overlay action"))?;
+            match overlay_name {
+                "start" => Ok(Command::OverlayStart {
+                    duration_ms: overlay_sub
+                        .get_one::<String>("duration")
+                        .map(|v| parse_u64(v, "duration_ms"))
+                        .transpose()?,
+                }),
+                "stop" => Ok(Command::OverlayStop),
+                _ => Err(AppError::invalid_argument("unknown debug overlay action")),
             }
-            "--interval" => {
-                interval_ms = parse_u64(args.get(i + 1), "interval_ms")?;
-                i += 2;
+        }
+        _ => Err(AppError::invalid_argument("unknown debug action")),
+    }
+}
+
+fn parse_request(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing request action"))?;
+    match name {
+        "show" => Ok(Command::RequestShow {
+            request_id: required_string(sub, "request_id")?,
+        }),
+        "list" => Ok(Command::RequestList {
+            limit: sub
+                .get_one::<String>("limit")
+                .map(|v| parse_u64(v, "limit"))
+                .transpose()?,
+        }),
+        "screenshot" => Ok(Command::RequestScreenshot {
+            request_id: required_string(sub, "request_id")?,
+            out_path: sub.get_one::<String>("out").cloned(),
+        }),
+        "response" => Ok(Command::RequestResponse {
+            request_id: required_string(sub, "request_id")?,
+        }),
+        "search" => {
+            let text = required_string(sub, "text")?;
+            if text.trim().is_empty() {
+                return Err(AppError::invalid_argument(
+                    "request search query must not be empty",
+                ));
             }
-            "--disappear" => {
-                disappear = true;
-                i += 1;
-            }
-            flag => {
+            Ok(Command::RequestSearch {
+                text,
+                limit: sub
+                    .get_one::<String>("limit")
+                    .map(|v| parse_u64(v, "limit"))
+                    .transpose()?,
+                command: sub.get_one::<String>("command").cloned(),
+            })
+        }
+        _ => Err(AppError::invalid_argument("unknown request action")),
+    }
+}
+
+fn parse_replay(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing replay action"))?;
+    match name {
+        "record" => {
+            let stop = sub.get_flag("stop");
+            let duration_ms = sub
+                .get_one::<String>("duration")
+                .map(|v| parse_u64(v, "duration_ms"))
+                .transpose()?
+                .unwrap_or(3_000);
+            if !stop && duration_ms > MAX_REPLAY_DURATION_MS {
                 return Err(AppError::invalid_argument(format!(
-                    "unknown flag for screen wait: {flag}"
+                    "duration_ms exceeds max of {MAX_REPLAY_DURATION_MS}"
                 )));
             }
+            Ok(Command::ReplayRecord { duration_ms, stop })
         }
+        "load" => Ok(Command::ReplayLoad {
+            session_dir: required_string(sub, "session_dir")?,
+        }),
+        _ => Err(AppError::invalid_argument("unknown replay action")),
     }
-    Ok(Command::WaitText {
-        text,
-        timeout_ms,
-        interval_ms,
-        disappear,
-    })
 }
 
-fn parse_open(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-    let mut wait = false;
-    let mut timeout_ms: Option<u64> = None;
-    let mut app_name_parts: Vec<String> = Vec::new();
-    let mut trailing: Vec<String> = Vec::new();
-    let mut passthrough = false;
-    let mut i = 0;
-    while i < args.len() {
-        let token = &args[i];
-        if token == "--" {
-            passthrough = true;
-            i += 1;
-            continue;
-        }
-
-        if passthrough {
-            trailing.push(token.clone());
-            i += 1;
-            continue;
-        }
-
-        match token.as_str() {
-            "--wait" => {
-                wait = true;
-                i += 1;
-            }
-            "--timeout" => {
-                timeout_ms = Some(parse_u64(args.get(i + 1), "timeout_ms")?);
-                i += 2;
-            }
-            _ => {
-                app_name_parts.push(token.clone());
-                i += 1;
-            }
-        }
-    }
-
-    if app_name_parts.is_empty() {
-        return Err(AppError::invalid_argument(
-            "missing app name: desktopctl app open <application> [-- <open-args...>]",
-        ));
-    }
-
-    Ok(Command::OpenApp {
-        name: app_name_parts.join(" "),
-        args: trailing,
-        wait,
-        timeout_ms,
-    })
-}
-
-fn parse_pointer(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-
-    match args[0].as_str() {
+fn parse_pointer(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing pointer action"))?;
+    match name {
         "move" => {
-            let mut absolute = false;
-            let mut active_window = false;
-            let mut active_window_id: Option<String> = None;
-            let mut positional: Vec<&String> = Vec::new();
-            let mut i = 1usize;
-            while i < args.len() {
-                let token = &args[i];
-                if token == "--absolute" {
-                    absolute = true;
-                    i += 1;
-                    continue;
-                }
-                if token == "--active-window" {
-                    active_window = true;
-                    let (window_id, consumed) = parse_optional_value_after_flag(
-                        args,
-                        i,
-                        "active window id must not be empty",
-                    )?;
-                    active_window_id = window_id;
-                    i += consumed;
-                    continue;
-                }
-                if token.starts_with("--") {
-                    return Err(AppError::invalid_argument(format!(
-                        "unknown flag for pointer move: {token}"
-                    )));
-                }
-                positional.push(token);
-                i += 1;
-            }
-            if positional.len() != 2 {
-                return Err(AppError::invalid_argument(
-                    "usage: desktopctl pointer move [--absolute] <x> <y> [--active-window [<id>]]",
-                ));
-            }
-            let x = parse_u32(Some(positional[0]), "x")?;
-            let y = parse_u32(Some(positional[1]), "y")?;
+            let (active_window, active_window_id) = parse_active_window(sub)?;
             Ok(Command::PointerMove {
-                x,
-                y,
-                absolute,
+                x: parse_u32(&required_string(sub, "x")?, "x")?,
+                y: parse_u32(&required_string(sub, "y")?, "y")?,
+                absolute: sub.get_flag("absolute"),
                 active_window,
                 active_window_id,
             })
         }
         "down" => {
-            let x = parse_u32(args.get(1), "x")?;
-            let y = parse_u32(args.get(2), "y")?;
-            let mut active_window = false;
-            let mut active_window_id: Option<String> = None;
-            let mut button = PointerButton::Left;
-            let mut i = 3usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--active-window" => {
-                        active_window = true;
-                        let (window_id, consumed) = parse_optional_value_after_flag(
-                            args,
-                            i,
-                            "active window id must not be empty",
-                        )?;
-                        active_window_id = window_id;
-                        i += consumed;
-                    }
-                    "--button" => {
-                        button = parse_pointer_button(args.get(i + 1))?;
-                        i += 2;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for pointer down: {flag}"
-                        )));
-                    }
-                }
-            }
+            let (active_window, active_window_id) = parse_active_window(sub)?;
             Ok(Command::PointerDown {
-                x,
-                y,
-                button,
+                x: parse_u32(&required_string(sub, "x")?, "x")?,
+                y: parse_u32(&required_string(sub, "y")?, "y")?,
+                button: parse_pointer_button(sub.get_one::<String>("button"))?,
                 active_window,
                 active_window_id,
             })
         }
         "up" => {
-            let x = parse_u32(args.get(1), "x")?;
-            let y = parse_u32(args.get(2), "y")?;
-            let mut active_window = false;
-            let mut active_window_id: Option<String> = None;
-            let mut button = PointerButton::Left;
-            let mut i = 3usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--active-window" => {
-                        active_window = true;
-                        let (window_id, consumed) = parse_optional_value_after_flag(
-                            args,
-                            i,
-                            "active window id must not be empty",
-                        )?;
-                        active_window_id = window_id;
-                        i += consumed;
-                    }
-                    "--button" => {
-                        button = parse_pointer_button(args.get(i + 1))?;
-                        i += 2;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for pointer up: {flag}"
-                        )));
-                    }
-                }
-            }
+            let (active_window, active_window_id) = parse_active_window(sub)?;
             Ok(Command::PointerUp {
-                x,
-                y,
-                button,
+                x: parse_u32(&required_string(sub, "x")?, "x")?,
+                y: parse_u32(&required_string(sub, "y")?, "y")?,
+                button: parse_pointer_button(sub.get_one::<String>("button"))?,
                 active_window,
                 active_window_id,
             })
         }
         "click" => {
-            if args.len() >= 2 && args[1] == "--text" {
-                let text = args.get(2).cloned().ok_or_else(|| {
-                    AppError::invalid_argument(
-                        "usage: desktopctl pointer click --text <text> [--active-window [<id>]]",
-                    )
-                })?;
-                let mut active_window = false;
-                let mut active_window_id: Option<String> = None;
-                let mut button = PointerButton::Left;
-                let mut observe = ObserveOptions::default();
-                let mut i = 3usize;
-                while i < args.len() {
-                    match args[i].as_str() {
-                        "--active-window" => {
-                            active_window = true;
-                            let (window_id, consumed) = parse_optional_value_after_flag(
-                                args,
-                                i,
-                                "active window id must not be empty",
-                            )?;
-                            active_window_id = window_id;
-                            i += consumed;
-                        }
-                        "--button" => {
-                            button = parse_pointer_button(args.get(i + 1))?;
-                            i += 2;
-                        }
-                        "--observe" => {
-                            observe.enabled = true;
-                            i += 1;
-                        }
-                        "--no-observe" => {
-                            observe.enabled = false;
-                            i += 1;
-                        }
-                        "--observe-until" => {
-                            let value = args.get(i + 1).ok_or_else(|| {
-                                AppError::invalid_argument(
-                                    "missing value for --observe-until (stable|change|first-change)",
-                                )
-                            })?;
-                            observe.until = parse_observe_until(value)?;
-                            i += 2;
-                        }
-                        "--observe-timeout" => {
-                            observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
-                            i += 2;
-                        }
-                        "--observe-settle-ms" => {
-                            observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
-                            i += 2;
-                        }
-                        flag => {
-                            return Err(AppError::invalid_argument(format!(
-                                "unknown flag for pointer click --text: {flag}",
-                            )));
-                        }
-                    }
-                }
-                Ok(Command::PointerClickText {
-                    text,
+            let (active_window, active_window_id) = parse_active_window(sub)?;
+            let button = parse_pointer_button(sub.get_one::<String>("button"))?;
+            let observe = parse_observe(sub)?;
+            if let Some(text) = sub.get_one::<String>("text") {
+                return Ok(Command::PointerClickText {
+                    text: text.clone(),
                     button,
                     active_window,
                     active_window_id,
                     observe,
-                })
-            } else if args.len() >= 2 && args[1] == "--id" {
-                let id = args.get(2).cloned().ok_or_else(|| {
-                    AppError::invalid_argument(
-                        "usage: desktopctl pointer click --id <element_id> --active-window [<id>]",
-                    )
-                })?;
-                let mut active_window = false;
-                let mut active_window_id: Option<String> = None;
-                let mut button = PointerButton::Left;
-                let mut observe = ObserveOptions::default();
-                let mut i = 3usize;
-                while i < args.len() {
-                    match args[i].as_str() {
-                        "--active-window" => {
-                            active_window = true;
-                            let (window_id, consumed) = parse_optional_value_after_flag(
-                                args,
-                                i,
-                                "active window id must not be empty",
-                            )?;
-                            active_window_id = window_id;
-                            i += consumed;
-                        }
-                        "--button" => {
-                            button = parse_pointer_button(args.get(i + 1))?;
-                            i += 2;
-                        }
-                        "--observe" => {
-                            observe.enabled = true;
-                            i += 1;
-                        }
-                        "--no-observe" => {
-                            observe.enabled = false;
-                            i += 1;
-                        }
-                        "--observe-until" => {
-                            let value = args.get(i + 1).ok_or_else(|| {
-                                AppError::invalid_argument(
-                                    "missing value for --observe-until (stable|change|first-change)",
-                                )
-                            })?;
-                            observe.until = parse_observe_until(value)?;
-                            i += 2;
-                        }
-                        "--observe-timeout" => {
-                            observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
-                            i += 2;
-                        }
-                        "--observe-settle-ms" => {
-                            observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
-                            i += 2;
-                        }
-                        flag => {
-                            return Err(AppError::invalid_argument(format!(
-                                "unknown flag for pointer click --id: {flag}",
-                            )));
-                        }
-                    }
-                }
+                });
+            }
+            if let Some(id) = sub.get_one::<String>("id") {
                 if !active_window {
                     return Err(AppError::invalid_argument(
                         "pointer click --id requires --active-window",
                     ));
                 }
-                Ok(Command::PointerClickId {
-                    id,
+                return Ok(Command::PointerClickId {
+                    id: id.clone(),
                     button,
                     active_window,
                     active_window_id,
                     observe,
-                })
-            } else {
-                let mut absolute = false;
-                let mut button = PointerButton::Left;
-                let mut observe = ObserveOptions::default();
-                let mut active_window = false;
-                let mut active_window_id: Option<String> = None;
-                let mut positional: Vec<&String> = Vec::new();
-                let mut i = 1usize;
-                while i < args.len() {
-                    let token = &args[i];
-                    if token == "--absolute" {
-                        absolute = true;
-                        i += 1;
-                        continue;
-                    }
-                    if token == "--observe" {
-                        observe.enabled = true;
-                        i += 1;
-                        continue;
-                    }
-                    if token == "--no-observe" {
-                        observe.enabled = false;
-                        i += 1;
-                        continue;
-                    }
-                    if token == "--observe-until" {
-                        let value = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument(
-                                "missing value for --observe-until (stable|change|first-change)",
-                            )
-                        })?;
-                        observe.until = parse_observe_until(value)?;
-                        i += 2;
-                        continue;
-                    }
-                    if token == "--observe-timeout" {
-                        observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
-                        i += 2;
-                        continue;
-                    }
-                    if token == "--observe-settle-ms" {
-                        observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
-                        i += 2;
-                        continue;
-                    }
-                    if token == "--active-window" {
-                        active_window = true;
-                        let (window_id, consumed) = parse_optional_value_after_flag(
-                            args,
-                            i,
-                            "active window id must not be empty",
-                        )?;
-                        active_window_id = window_id;
-                        i += consumed;
-                        continue;
-                    }
-                    if token == "--button" {
-                        button = parse_pointer_button(args.get(i + 1))?;
-                        i += 2;
-                        continue;
-                    }
-                    if token.starts_with("--") {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for pointer click: {}",
-                            token
-                        )));
-                    }
-                    positional.push(token);
-                    i += 1;
-                }
-                if positional.len() != 2 {
-                    return Err(AppError::invalid_argument(
-                        "usage: desktopctl pointer click [--absolute] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>] <x> <y>",
-                    ));
-                }
-                let x = parse_u32(Some(positional[0]), "x")?;
-                let y = parse_u32(Some(positional[1]), "y")?;
-                Ok(Command::PointerClick {
-                    x,
-                    y,
-                    absolute,
-                    button,
-                    observe,
-                    active_window,
-                    active_window_id,
-                })
+                });
             }
-        }
-        "drag" => {
-            let x1 = parse_u32(args.get(1), "x1")?;
-            let y1 = parse_u32(args.get(2), "y1")?;
-            let x2 = parse_u32(args.get(3), "x2")?;
-            let y2 = parse_u32(args.get(4), "y2")?;
-            let mut hold_ms = 60;
-            let mut active_window = false;
-            let mut active_window_id: Option<String> = None;
-            let mut i = 5usize;
-            while i < args.len() {
-                let token = &args[i];
-                if token == "--active-window" {
-                    active_window = true;
-                    let (window_id, consumed) = parse_optional_value_after_flag(
-                        args,
-                        i,
-                        "active window id must not be empty",
-                    )?;
-                    active_window_id = window_id;
-                    i += consumed;
-                    continue;
-                }
-                if token.starts_with("--") {
-                    return Err(AppError::invalid_argument(format!(
-                        "unknown flag for pointer drag: {token}"
-                    )));
-                }
-                if hold_ms != 60 {
-                    return Err(AppError::invalid_argument(
-                        "pointer drag accepts at most one hold_ms positional argument",
-                    ));
-                }
-                hold_ms = parse_u64(Some(token), "hold_ms")?;
-                i += 1;
-            }
-            Ok(Command::PointerDrag {
-                x1,
-                y1,
-                x2,
-                y2,
-                hold_ms,
+
+            Ok(Command::PointerClick {
+                x: parse_u32(&required_string(sub, "x")?, "x")?,
+                y: parse_u32(&required_string(sub, "y")?, "y")?,
+                absolute: sub.get_flag("absolute"),
+                button,
+                observe,
                 active_window,
                 active_window_id,
             })
         }
         "scroll" => {
-            let mut id: Option<String> = None;
-            let (dx_idx, dy_idx, mut i) = if args.len() >= 2 && args[1] == "--id" {
-                let element_id = args.get(2).cloned().ok_or_else(|| {
-                    AppError::invalid_argument(
-                        "usage: desktopctl pointer scroll --id <element_id> <dx> <dy> [--active-window [<id>]] [--observe|--no-observe] [--observe-until <stable|change|first-change>] [--observe-timeout <ms>] [--observe-settle-ms <ms>]",
-                    )
-                })?;
-                if element_id.trim().is_empty() {
-                    return Err(AppError::invalid_argument("empty element id selector"));
-                }
-                id = Some(element_id);
-                (3usize, 4usize, 5usize)
-            } else {
-                (1usize, 2usize, 3usize)
-            };
-            let dx = parse_i32(args.get(dx_idx), "dx")?;
-            let dy = parse_i32(args.get(dy_idx), "dy")?;
-            let mut observe = ObserveOptions::default();
-            let mut active_window = false;
-            let mut active_window_id: Option<String> = None;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--active-window" => {
-                        active_window = true;
-                        let (window_id, consumed) = parse_optional_value_after_flag(
-                            args,
-                            i,
-                            "active window id must not be empty",
-                        )?;
-                        active_window_id = window_id;
-                        i += consumed;
-                    }
-                    "--observe" => {
-                        observe.enabled = true;
-                        i += 1;
-                    }
-                    "--no-observe" => {
-                        observe.enabled = false;
-                        i += 1;
-                    }
-                    "--observe-until" => {
-                        let value = args.get(i + 1).ok_or_else(|| {
-                            AppError::invalid_argument(
-                                "missing value for --observe-until (stable|change|first-change)",
-                            )
-                        })?;
-                        observe.until = parse_observe_until(value)?;
-                        i += 2;
-                    }
-                    "--observe-timeout" => {
-                        observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
-                        i += 2;
-                    }
-                    "--observe-settle-ms" => {
-                        observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
-                        i += 2;
-                    }
-                    flag => {
-                        return Err(AppError::invalid_argument(format!(
-                            "unknown flag for pointer scroll: {flag}"
-                        )));
-                    }
-                }
-            }
+            let (active_window, active_window_id) = parse_active_window(sub)?;
             Ok(Command::PointerScroll {
-                id,
-                dx,
-                dy,
-                observe,
+                id: sub.get_one::<String>("id").cloned(),
+                dx: parse_i32(&required_string(sub, "dx")?, "dx")?,
+                dy: parse_i32(&required_string(sub, "dy")?, "dy")?,
+                observe: parse_observe(sub)?,
                 active_window,
                 active_window_id,
             })
         }
-        _ => Err(AppError::invalid_argument(usage())),
+        "drag" => {
+            let (active_window, active_window_id) = parse_active_window(sub)?;
+            Ok(Command::PointerDrag {
+                x1: parse_u32(&required_string(sub, "x1")?, "x1")?,
+                y1: parse_u32(&required_string(sub, "y1")?, "y1")?,
+                x2: parse_u32(&required_string(sub, "x2")?, "x2")?,
+                y2: parse_u32(&required_string(sub, "y2")?, "y2")?,
+                hold_ms: sub
+                    .get_one::<String>("hold_ms")
+                    .map(|v| parse_u64(v, "hold_ms"))
+                    .transpose()?
+                    .unwrap_or(60),
+                active_window,
+                active_window_id,
+            })
+        }
+        _ => Err(AppError::invalid_argument("unknown pointer action")),
     }
 }
 
-fn parse_pointer_button(value: Option<&String>) -> Result<PointerButton, AppError> {
-    let value = value.ok_or_else(|| {
-        AppError::invalid_argument("missing value for --button (expected left|right)")
-    })?;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "left" => Ok(PointerButton::Left),
-        "right" => Ok(PointerButton::Right),
-        other => Err(AppError::invalid_argument(format!(
-            "invalid --button value: {other} (expected left|right)"
-        ))),
-    }
-}
-
-fn parse_keyboard(args: &[String]) -> Result<Command, AppError> {
-    if args.is_empty() {
-        return Err(AppError::invalid_argument(usage()));
-    }
-
-    match args[0].as_str() {
+fn parse_keyboard(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing keyboard action"))?;
+    match name {
         "type" => {
-            let text = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument("missing text: desktopctl keyboard type \"text\"")
-            })?;
-            let (observe, active_window, active_window_id) =
-                parse_observe_and_active_window_options(&args[2..], "keyboard type")?;
+            let (active_window, active_window_id) = parse_active_window(sub)?;
             Ok(Command::UiType {
-                text,
-                observe,
+                text: required_string(sub, "text")?,
+                observe: parse_observe(sub)?,
                 active_window,
                 active_window_id,
             })
         }
         "press" => {
-            let key = args.get(1).cloned().ok_or_else(|| {
-                AppError::invalid_argument("missing key: desktopctl keyboard press enter")
-            })?;
-            let (observe, active_window, active_window_id) =
-                parse_observe_and_active_window_options(&args[2..], "keyboard press")?;
+            let (active_window, active_window_id) = parse_active_window(sub)?;
+            let key = required_string(sub, "key")?;
             if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") {
                 Ok(Command::KeyEnter {
-                    observe,
+                    observe: parse_observe(sub)?,
                     active_window,
                     active_window_id,
                 })
             } else if key.eq_ignore_ascii_case("escape") || key.eq_ignore_ascii_case("esc") {
                 Ok(Command::KeyEscape {
-                    observe,
+                    observe: parse_observe(sub)?,
                     active_window,
                     active_window_id,
                 })
             } else {
                 Ok(Command::KeyHotkey {
                     hotkey: key,
-                    observe,
+                    observe: parse_observe(sub)?,
                     active_window,
                     active_window_id,
                 })
             }
         }
-        _ => Err(AppError::invalid_argument(usage())),
+        _ => Err(AppError::invalid_argument("unknown keyboard action")),
     }
 }
 
-fn parse_observe_and_active_window_options(
-    args: &[String],
-    command_name: &str,
-) -> Result<(ObserveOptions, bool, Option<String>), AppError> {
+fn parse_observe(m: &ArgMatches) -> Result<ObserveOptions, AppError> {
     let mut observe = ObserveOptions::default();
-    let mut active_window = false;
-    let mut active_window_id: Option<String> = None;
-    let mut i = 0usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--observe" => {
-                observe.enabled = true;
-                i += 1;
-            }
-            "--no-observe" => {
-                observe.enabled = false;
-                i += 1;
-            }
-            "--observe-until" => {
-                let value = args.get(i + 1).ok_or_else(|| {
-                    AppError::invalid_argument(
-                        "missing value for --observe-until (stable|change|first-change)",
-                    )
-                })?;
-                observe.until = parse_observe_until(value)?;
-                i += 2;
-            }
-            "--observe-timeout" => {
-                observe.timeout_ms = parse_u64(args.get(i + 1), "observe_timeout_ms")?;
-                i += 2;
-            }
-            "--observe-settle-ms" => {
-                observe.settle_ms = parse_u64(args.get(i + 1), "observe_settle_ms")?;
-                i += 2;
-            }
-            "--active-window" => {
-                active_window = true;
-                let (window_id, consumed) =
-                    parse_optional_value_after_flag(args, i, "active window id must not be empty")?;
-                active_window_id = window_id;
-                i += consumed;
-            }
-            flag => {
-                return Err(AppError::invalid_argument(format!(
-                    "unknown flag for {command_name}: {flag}"
-                )));
-            }
-        }
+    if m.get_flag("observe") {
+        observe.enabled = true;
     }
-    if active_window_id.is_some() && !active_window {
+    if m.get_flag("no_observe") {
+        observe.enabled = false;
+    }
+    if let Some(until) = m.get_one::<String>("observe_until") {
+        observe.until = parse_observe_until(until)?;
+    }
+    if let Some(timeout) = m.get_one::<String>("observe_timeout") {
+        observe.timeout_ms = parse_u64(timeout, "observe_timeout_ms")?;
+    }
+    if let Some(settle) = m.get_one::<String>("observe_settle_ms") {
+        observe.settle_ms = parse_u64(settle, "observe_settle_ms")?;
+    }
+    Ok(observe)
+}
+
+fn parse_active_window(m: &ArgMatches) -> Result<(bool, Option<String>), AppError> {
+    let active_window = m.contains_id("active_window");
+    let active_window_id = m.get_one::<String>("active_window").cloned();
+    if active_window_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(str::is_empty)
+    {
         return Err(AppError::invalid_argument(
-            "active window id requires --active-window",
+            "active window id must not be empty",
         ));
     }
-    Ok((observe, active_window, active_window_id))
+    Ok((active_window, active_window_id))
+}
+
+fn parse_region(m: &ArgMatches) -> Result<Option<Bounds>, AppError> {
+    let Some(values) = m.get_many::<String>("region") else {
+        return Ok(None);
+    };
+    let parsed: Vec<u32> = values
+        .map(|v| parse_u32(v, "region"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if parsed.len() != 4 {
+        return Err(AppError::invalid_argument(
+            "region requires 4 values: <x> <y> <width> <height>",
+        ));
+    }
+    if parsed[2] == 0 || parsed[3] == 0 {
+        return Err(AppError::invalid_argument(
+            "region width/height must be > 0",
+        ));
+    }
+    Ok(Some(Bounds {
+        x: parsed[0] as f64,
+        y: parsed[1] as f64,
+        width: parsed[2] as f64,
+        height: parsed[3] as f64,
+    }))
+}
+
+fn window_selector(m: &ArgMatches) -> Result<String, AppError> {
+    if let Some(id) = m.get_one::<String>("id") {
+        if id.trim().is_empty() {
+            return Err(AppError::invalid_argument("missing id"));
+        }
+        return Ok(id.clone());
+    }
+    if let Some(title) = m.get_one::<String>("title") {
+        if title.trim().is_empty() {
+            return Err(AppError::invalid_argument("missing title"));
+        }
+        return Ok(title.clone());
+    }
+    Err(AppError::invalid_argument(
+        "expected one of --title or --id",
+    ))
+}
+
+fn required_string(m: &ArgMatches, key: &str) -> Result<String, AppError> {
+    m.get_one::<String>(key)
+        .cloned()
+        .ok_or_else(|| AppError::invalid_argument(format!("missing {key}")))
+}
+
+fn join_many(m: &ArgMatches, key: &str) -> Result<String, AppError> {
+    let parts = m
+        .get_many::<String>(key)
+        .ok_or_else(|| AppError::invalid_argument(format!("missing {key}")))?
+        .cloned()
+        .collect::<Vec<_>>();
+    let joined = parts.join(" ").trim().to_string();
+    if joined.is_empty() {
+        return Err(AppError::invalid_argument(format!("missing {key}")));
+    }
+    Ok(joined)
 }
 
 fn parse_observe_until(value: &str) -> Result<ObserveUntil, AppError> {
@@ -1263,41 +560,363 @@ fn parse_observe_until(value: &str) -> Result<ObserveUntil, AppError> {
         "change" => Ok(ObserveUntil::Change),
         "first-change" => Ok(ObserveUntil::FirstChange),
         _ => Err(AppError::invalid_argument(format!(
-            "invalid --observe-until value: {value} (expected stable|change|first-change)"
+            "invalid --observe-until value: {value} (expected stable|change|first-change)",
         ))),
     }
 }
 
-fn parse_optional_value_after_flag(
-    args: &[String],
-    flag_index: usize,
-    empty_value_message: &'static str,
-) -> Result<(Option<String>, usize), AppError> {
-    if let Some(value) = args.get(flag_index + 1)
-        && !value.starts_with("--")
-    {
-        if value.trim().is_empty() {
-            return Err(AppError::invalid_argument(empty_value_message));
-        }
-        return Ok((Some(value.clone()), 2));
+fn parse_pointer_button(value: Option<&String>) -> Result<PointerButton, AppError> {
+    match value.map(|v| v.as_str()).unwrap_or("left") {
+        "left" => Ok(PointerButton::Left),
+        "right" => Ok(PointerButton::Right),
+        other => Err(AppError::invalid_argument(format!(
+            "invalid --button value: {other} (expected left|right)",
+        ))),
     }
-    Ok((None, 1))
 }
 
-fn parse_u32(value: Option<&String>, field: &str) -> Result<u32, AppError> {
-    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
+fn parse_u32(raw: &str, field: &str) -> Result<u32, AppError> {
     raw.parse::<u32>()
         .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
 }
 
-fn parse_u64(value: Option<&String>, field: &str) -> Result<u64, AppError> {
-    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
+fn parse_u64(raw: &str, field: &str) -> Result<u64, AppError> {
     raw.parse::<u64>()
         .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
 }
 
-fn parse_i32(value: Option<&String>, field: &str) -> Result<i32, AppError> {
-    let raw = value.ok_or_else(|| AppError::invalid_argument(format!("missing {field}")))?;
+fn parse_i32(raw: &str, field: &str) -> Result<i32, AppError> {
     raw.parse::<i32>()
         .map_err(|_| AppError::invalid_argument(format!("invalid {field}: {raw}")))
+}
+
+fn clap_app() -> ClapCommand {
+    ClapCommand::new("desktopctl")
+        .about("DesktopCtl command-line interface")
+        .after_long_help(help_notes())
+        .arg_required_else_help(true)
+        .disable_version_flag(true)
+        .arg(
+            Arg::new("markdown")
+                .long("markdown")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Human-readable output"),
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Machine-readable JSON output"),
+        )
+        .subcommand(app_subcommand())
+        .subcommand(window_subcommand())
+        .subcommand(screen_subcommand())
+        .subcommand(pointer_subcommand())
+        .subcommand(keyboard_subcommand())
+        .subcommand(clipboard_subcommand())
+        .subcommand(debug_subcommand())
+        .subcommand(request_subcommand())
+        .subcommand(replay_subcommand())
+}
+
+fn app_subcommand() -> ClapCommand {
+    ClapCommand::new("app")
+        .subcommand(
+            ClapCommand::new("open")
+                .arg(
+                    Arg::new("application")
+                        .required(true)
+                        .num_args(1..)
+                        .value_hint(ValueHint::CommandName),
+                )
+                .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue))
+                .arg(Arg::new("timeout").long("timeout").value_name("ms"))
+                .arg(
+                    Arg::new("open_args")
+                        .last(true)
+                        .allow_hyphen_values(true)
+                        .num_args(0..),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("hide").arg(Arg::new("application").required(true).num_args(1..)),
+        )
+        .subcommand(
+            ClapCommand::new("show").arg(Arg::new("application").required(true).num_args(1..)),
+        )
+        .subcommand(
+            ClapCommand::new("isolate").arg(Arg::new("application").required(true).num_args(1..)),
+        )
+}
+
+fn window_subcommand() -> ClapCommand {
+    ClapCommand::new("window")
+        .subcommand(ClapCommand::new("list"))
+        .subcommand(
+            ClapCommand::new("bounds")
+                .arg(Arg::new("title").long("title").value_name("text"))
+                .arg(Arg::new("id").long("id").value_name("id"))
+                .group(
+                    clap::ArgGroup::new("selector")
+                        .args(["title", "id"])
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("focus")
+                .arg(Arg::new("title").long("title").value_name("text"))
+                .arg(Arg::new("id").long("id").value_name("id"))
+                .group(
+                    clap::ArgGroup::new("selector")
+                        .args(["title", "id"])
+                        .required(true),
+                ),
+        )
+}
+
+fn screen_subcommand() -> ClapCommand {
+    ClapCommand::new("screen")
+        .subcommand(
+            ClapCommand::new("screenshot")
+                .arg(Arg::new("out").long("out").value_name("path"))
+                .arg(
+                    Arg::new("overlay")
+                        .long("overlay")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(active_window_arg())
+                .arg(region_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("tokenize")
+                .arg(Arg::new("overlay").long("overlay").value_name("path"))
+                .arg(
+                    Arg::new("window_query")
+                        .long("window-query")
+                        .value_name("text"),
+                )
+                .arg(Arg::new("screenshot").long("screenshot").value_name("path"))
+                .arg(active_window_arg())
+                .arg(region_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("find")
+                .arg(Arg::new("text").long("text").required(true))
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
+            ClapCommand::new("wait")
+                .arg(Arg::new("text").long("text").required(true))
+                .arg(Arg::new("timeout").long("timeout").value_name("ms"))
+                .arg(Arg::new("interval").long("interval").value_name("ms"))
+                .arg(
+                    Arg::new("disappear")
+                        .long("disappear")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+}
+
+fn pointer_subcommand() -> ClapCommand {
+    ClapCommand::new("pointer")
+        .subcommand(
+            ClapCommand::new("move")
+                .arg(
+                    Arg::new("absolute")
+                        .long("absolute")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(Arg::new("x").required(true))
+                .arg(Arg::new("y").required(true))
+                .arg(active_window_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("down")
+                .arg(Arg::new("x").required(true))
+                .arg(Arg::new("y").required(true))
+                .arg(button_arg())
+                .arg(active_window_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("up")
+                .arg(Arg::new("x").required(true))
+                .arg(Arg::new("y").required(true))
+                .arg(button_arg())
+                .arg(active_window_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("click")
+                .arg(
+                    Arg::new("text")
+                        .long("text")
+                        .value_name("text")
+                        .conflicts_with_all(["id", "x", "y", "absolute"]),
+                )
+                .arg(
+                    Arg::new("id")
+                        .long("id")
+                        .value_name("element_id")
+                        .conflicts_with_all(["text", "x", "y", "absolute"]),
+                )
+                .arg(
+                    Arg::new("absolute")
+                        .long("absolute")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(button_arg())
+                .arg(observe_arg())
+                .arg(no_observe_arg())
+                .arg(observe_until_arg())
+                .arg(observe_timeout_arg())
+                .arg(observe_settle_arg())
+                .arg(active_window_arg())
+                .arg(Arg::new("x").required(false))
+                .arg(Arg::new("y").required(false)),
+        )
+        .subcommand(
+            ClapCommand::new("scroll")
+                .arg(Arg::new("id").long("id").value_name("element_id"))
+                .arg(Arg::new("dx").required(true).allow_hyphen_values(true))
+                .arg(Arg::new("dy").required(true).allow_hyphen_values(true))
+                .arg(observe_arg())
+                .arg(no_observe_arg())
+                .arg(observe_until_arg())
+                .arg(observe_timeout_arg())
+                .arg(observe_settle_arg())
+                .arg(active_window_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("drag")
+                .arg(Arg::new("x1").required(true))
+                .arg(Arg::new("y1").required(true))
+                .arg(Arg::new("x2").required(true))
+                .arg(Arg::new("y2").required(true))
+                .arg(Arg::new("hold_ms").required(false))
+                .arg(active_window_arg()),
+        )
+}
+
+fn keyboard_subcommand() -> ClapCommand {
+    ClapCommand::new("keyboard")
+        .subcommand(
+            ClapCommand::new("type")
+                .arg(Arg::new("text").required(true))
+                .arg(observe_arg())
+                .arg(no_observe_arg())
+                .arg(observe_until_arg())
+                .arg(observe_timeout_arg())
+                .arg(observe_settle_arg())
+                .arg(active_window_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("press")
+                .arg(Arg::new("key").required(true))
+                .arg(observe_arg())
+                .arg(no_observe_arg())
+                .arg(observe_until_arg())
+                .arg(observe_timeout_arg())
+                .arg(observe_settle_arg())
+                .arg(active_window_arg()),
+        )
+}
+
+fn clipboard_subcommand() -> ClapCommand {
+    ClapCommand::new("clipboard")
+        .subcommand(ClapCommand::new("read"))
+        .subcommand(ClapCommand::new("write").arg(Arg::new("text").required(true)))
+}
+
+fn debug_subcommand() -> ClapCommand {
+    ClapCommand::new("debug")
+        .subcommand(ClapCommand::new("permissions"))
+        .subcommand(ClapCommand::new("ping"))
+        .subcommand(
+            ClapCommand::new("overlay")
+                .subcommand(ClapCommand::new("start").arg(Arg::new("duration").long("duration")))
+                .subcommand(ClapCommand::new("stop")),
+        )
+        .subcommand(ClapCommand::new("snapshot"))
+}
+
+fn request_subcommand() -> ClapCommand {
+    ClapCommand::new("request")
+        .subcommand(ClapCommand::new("show").arg(Arg::new("request_id").required(true)))
+        .subcommand(ClapCommand::new("list").arg(Arg::new("limit").long("limit")))
+        .subcommand(
+            ClapCommand::new("screenshot")
+                .arg(Arg::new("request_id").required(true))
+                .arg(Arg::new("out").long("out")),
+        )
+        .subcommand(ClapCommand::new("response").arg(Arg::new("request_id").required(true)))
+        .subcommand(
+            ClapCommand::new("search")
+                .arg(Arg::new("text").required(true))
+                .arg(Arg::new("limit").long("limit"))
+                .arg(Arg::new("command").long("command")),
+        )
+}
+
+fn replay_subcommand() -> ClapCommand {
+    ClapCommand::new("replay")
+        .subcommand(
+            ClapCommand::new("record")
+                .arg(Arg::new("duration").long("duration").conflicts_with("stop"))
+                .arg(Arg::new("stop").long("stop").action(ArgAction::SetTrue)),
+        )
+        .subcommand(ClapCommand::new("load").arg(Arg::new("session_dir").required(true)))
+}
+
+fn active_window_arg() -> Arg {
+    Arg::new("active_window")
+        .long("active-window")
+        .num_args(0..=1)
+        .value_name("id")
+}
+
+fn region_arg() -> Arg {
+    Arg::new("region")
+        .long("region")
+        .num_args(4)
+        .value_names(["x", "y", "width", "height"])
+}
+
+fn button_arg() -> Arg {
+    Arg::new("button")
+        .long("button")
+        .value_parser(PossibleValuesParser::new(["left", "right"]))
+        .default_value("left")
+}
+
+fn observe_arg() -> Arg {
+    Arg::new("observe")
+        .long("observe")
+        .action(ArgAction::SetTrue)
+        .conflicts_with("no_observe")
+}
+
+fn no_observe_arg() -> Arg {
+    Arg::new("no_observe")
+        .long("no-observe")
+        .action(ArgAction::SetTrue)
+        .conflicts_with("observe")
+}
+
+fn observe_until_arg() -> Arg {
+    Arg::new("observe_until")
+        .long("observe-until")
+        .value_parser(PossibleValuesParser::new([
+            "stable",
+            "change",
+            "first-change",
+        ]))
+}
+
+fn observe_timeout_arg() -> Arg {
+    Arg::new("observe_timeout").long("observe-timeout")
+}
+
+fn observe_settle_arg() -> Arg {
+    Arg::new("observe_settle_ms").long("observe-settle-ms")
 }

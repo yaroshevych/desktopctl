@@ -22,6 +22,18 @@ enum OutputMode {
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    match parse::render_help_if_requested(&raw_args) {
+        Ok(Some(help)) => {
+            println!("{help}");
+            std::process::exit(0);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let request_id = next_request_id();
+            print_error(&request_id, &err, OutputMode::Markdown);
+            std::process::exit(map_error_code(&err.code));
+        }
+    }
     let (output_mode, args) = match split_output_mode(&raw_args) {
         Ok(v) => v,
         Err(err) => {
@@ -103,7 +115,9 @@ fn split_output_mode(args: &[String]) -> Result<(OutputMode, Vec<String>), AppEr
         }
     }
     if filtered.is_empty() {
-        return Err(AppError::invalid_argument(usage::usage()));
+        return Err(AppError::invalid_argument(
+            "missing command; run `desktopctl --help`",
+        ));
     }
     Ok((mode, filtered))
 }
