@@ -48,7 +48,7 @@ pub(crate) fn render_markdown_error(request_id: &str, err: &AppError) -> String 
     let mut lines: Vec<String> = vec![
         "# Error".to_string(),
         String::new(),
-        format!("- Request ID: `{request_id}`"),
+        format!("- Request ID: {request_id}"),
         format!("- Code: `{:?}`", err.code),
         format!("- Message: {}", err.message),
         format!("- Retryable: `{}`", err.retryable),
@@ -306,7 +306,7 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         .map(str::to_string);
 
     let mut lines: Vec<String> = vec!["# Screen Tokenize".to_string(), String::new()];
-    lines.push(format!("- Request ID: `{request_id}`"));
+    lines.push(format!("- Request ID: {request_id}"));
     if let Some(app) = top_app {
         lines.push(format!("- App: {}", app));
     }
@@ -438,7 +438,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
     let mut lines = vec![format!("# {}", to_title_case(&title)), String::new()];
-    lines.push(format!("- Request ID: `{request_id}`"));
+    lines.push(format!("- Request ID: {request_id}"));
     if let Some(hint) = value
         .get("hint")
         .and_then(serde_json::Value::as_str)
@@ -655,7 +655,7 @@ fn render_error_markdown_from_value(title: &str, value: &serde_json::Value) -> S
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     format!(
-        "# {}\n\n- Request ID: `{}`\n- Code: `{}`\n- Message: {}\n- Retryable: `{}`",
+        "# {}\n\n- Request ID: {}\n- Code: `{}`\n- Message: {}\n- Retryable: `{}`",
         to_title_case(title),
         request_id,
         code,
