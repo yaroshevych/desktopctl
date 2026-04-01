@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use desktop_core::{
@@ -36,7 +36,7 @@ pub struct VisionState {
     latest_thumbnail: Option<GrayThumbnail>,
     latest_tokenize_cache_key: Option<String>,
     latest_tokenize_fingerprint: Option<u64>,
-    latest_tokenize_payload: Option<TokenizePayload>,
+    latest_tokenize_payload: Option<Arc<TokenizePayload>>,
     events: VecDeque<VisionEvent>,
     frames: VecDeque<PathBuf>,
     token_map: HashMap<u32, TokenEntry>,
@@ -76,25 +76,28 @@ impl VisionState {
         self.latest_frame_png.clone()
     }
 
-    pub fn cached_tokenize_payload(&self, cache_key: &str) -> Option<(u64, TokenizePayload)> {
+    pub fn cached_tokenize_payload_if_fingerprint(
+        &self,
+        cache_key: &str,
+        fingerprint: u64,
+    ) -> Option<Arc<TokenizePayload>> {
         let key_matches = self
             .latest_tokenize_cache_key
             .as_ref()
             .map(|key| key == cache_key)
             .unwrap_or(false);
-        if !key_matches {
+        let fingerprint_matches = self.latest_tokenize_fingerprint == Some(fingerprint);
+        if !key_matches || !fingerprint_matches {
             return None;
         }
-        let fingerprint = self.latest_tokenize_fingerprint?;
-        let payload = self.latest_tokenize_payload.as_ref()?.clone();
-        Some((fingerprint, payload))
+        self.latest_tokenize_payload.as_ref().map(Arc::clone)
     }
 
     pub fn update_tokenize_cache(
         &mut self,
         cache_key: String,
         fingerprint: u64,
-        payload: TokenizePayload,
+        payload: Arc<TokenizePayload>,
     ) {
         self.latest_tokenize_cache_key = Some(cache_key);
         self.latest_tokenize_fingerprint = Some(fingerprint);
@@ -185,6 +188,7 @@ mod tests {
     use super::VisionState;
     use crate::vision::{diff::GrayThumbnail, types::CapturedFrame};
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn snapshot_ids_are_monotonic() {
@@ -284,15 +288,28 @@ mod tests {
         state.update_tokenize_cache(
             "window:dictionary".to_string(),
             42,
-            desktop_core::protocol::TokenizePayload {
+            Arc::new(desktop_core::protocol::TokenizePayload {
                 snapshot_id: 42,
                 timestamp: "ts".to_string(),
                 image: None,
                 windows: Vec::new(),
-            },
+            }),
         );
 
-        assert!(state.cached_tokenize_payload("window:other").is_none());
-        assert!(state.cached_tokenize_payload("window:dictionary").is_some());
+        assert!(
+            state
+                .cached_tokenize_payload_if_fingerprint("window:other", 42)
+                .is_none()
+        );
+        assert!(
+            state
+                .cached_tokenize_payload_if_fingerprint("window:dictionary", 41)
+                .is_none()
+        );
+        assert!(
+            state
+                .cached_tokenize_payload_if_fingerprint("window:dictionary", 42)
+                .is_some()
+        );
     }
 }

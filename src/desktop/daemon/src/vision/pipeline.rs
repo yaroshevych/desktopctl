@@ -202,15 +202,13 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
     let fingerprint = frame_fingerprint(&captured.image);
 
-    if let Some((prev_fingerprint, cached_payload)) =
-        with_state(|state| state.cached_tokenize_payload(&cache_key))?
+    if let Some(cached_payload) =
+        with_state(|state| state.cached_tokenize_payload_if_fingerprint(&cache_key, fingerprint))?
     {
-        if prev_fingerprint == fingerprint {
-            trace::log("pipeline:tokenize:window_fastpath cache_hit fingerprint_equal");
-            return Ok(cached_payload);
-        }
-        trace::log("pipeline:tokenize:window_fastpath cache_miss fingerprint_changed");
+        trace::log("pipeline:tokenize:window_fastpath cache_hit fingerprint_equal");
+        return Ok((*cached_payload).clone());
     }
+    trace::log("pipeline:tokenize:window_fastpath cache_miss");
 
     let ax_meta = window_meta.clone();
     let ax_handle = thread::spawn(move || detect_ax_elements(Some(&ax_meta)));
@@ -259,7 +257,9 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
         Some(window_meta),
         Some(ax_elements),
     )?;
-    with_state(|state| state.update_tokenize_cache(cache_key, fingerprint, payload.clone()))?;
+    with_state(|state| {
+        state.update_tokenize_cache(cache_key, fingerprint, std::sync::Arc::new(payload.clone()))
+    })?;
     Ok(payload)
 }
 
