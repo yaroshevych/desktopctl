@@ -14,7 +14,7 @@ use desktop_core::{
 };
 
 use super::{about, permissions_dialog};
-use crate::{daemon, overlay, permissions, trace};
+use crate::{daemon, overlay, platform::permissions, trace};
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);

@@ -26,7 +26,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::os::unix::fs::symlink;
 
-use crate::permissions;
+use crate::platform::permissions;
 
 const WEBSITE_URL: &str = "https://desktopctl.com";
 const W: f64 = 520.0;

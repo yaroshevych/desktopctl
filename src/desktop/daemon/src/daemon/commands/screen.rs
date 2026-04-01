@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use crate::{
     daemon::{window_refs, window_target},
-    permissions, platform, trace, vision,
+    platform::{self, permissions},
+    trace, vision,
 };
 
 mod overlay_bridge;

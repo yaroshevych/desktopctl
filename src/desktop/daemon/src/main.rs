@@ -2,7 +2,6 @@ mod app_runtime;
 mod clipboard;
 mod daemon;
 mod overlay;
-mod permissions;
 mod platform;
 mod request_store;
 mod trace;

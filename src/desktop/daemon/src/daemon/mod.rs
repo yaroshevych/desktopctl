@@ -66,7 +66,8 @@ use window_context::{
 
 #[cfg(target_os = "macos")]
 use crate::overlay;
-use crate::{permissions, platform, request_store, trace, vision};
+use crate::platform::permissions;
+use crate::{platform, request_store, trace, vision};
 
 const MAX_CONCURRENT_CLIENTS: usize = 16;
 const COMMAND_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);

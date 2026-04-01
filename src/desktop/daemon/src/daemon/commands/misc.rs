@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use crate::{
     clipboard,
     daemon::{recording, replay},
-    permissions, request_store, vision,
+    platform::permissions,
+    request_store, vision,
 };
 
 pub(crate) fn clipboard_read() -> Result<Value, AppError> {
