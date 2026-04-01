@@ -364,6 +364,17 @@ pub(crate) fn tokenize(
                     region.as_ref(),
                 )?;
                 stage_done!("active_window_region_resolve");
+                if let Some(reference) = resolved.window_ref.as_deref() {
+                    let (reply_tx, reply_rx) =
+                        mpsc::channel::<Option<super::super::TokenizeHintSnapshot>>();
+                    let reference = reference.to_string();
+                    std::thread::spawn(move || {
+                        let snapshot =
+                            super::super::collect_tokenize_new_window_hint_snapshot(&reference);
+                        let _ = reply_tx.send(snapshot);
+                    });
+                    hint_snapshot_prefetch_rx = Some(reply_rx);
+                }
                 let app = Some(resolved.app.clone());
                 let title = resolved.title.clone();
                 let window_query = resolved.id.clone();
