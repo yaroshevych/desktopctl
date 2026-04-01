@@ -601,14 +601,14 @@ fn clap_app() -> ClapCommand {
                 .long("markdown")
                 .global(true)
                 .action(ArgAction::SetTrue)
-                .help("Human-readable output"),
+                .help("Agent-optimized output"),
         )
         .arg(
             Arg::new("json")
                 .long("json")
                 .global(true)
                 .action(ArgAction::SetTrue)
-                .help("Machine-readable JSON output"),
+                .help("Full output for complex cases"),
         )
         .subcommand(app_subcommand())
         .subcommand(window_subcommand())
@@ -623,8 +623,10 @@ fn clap_app() -> ClapCommand {
 
 fn app_subcommand() -> ClapCommand {
     ClapCommand::new("app")
+        .about("Manage application visibility and launch")
         .subcommand(
             ClapCommand::new("open")
+                .about("Open an application")
                 .arg(
                     Arg::new("application")
                         .required(true)
@@ -641,21 +643,29 @@ fn app_subcommand() -> ClapCommand {
                 ),
         )
         .subcommand(
-            ClapCommand::new("hide").arg(Arg::new("application").required(true).num_args(1..)),
+            ClapCommand::new("hide")
+                .about("Hide a running application")
+                .arg(Arg::new("application").required(true).num_args(1..)),
         )
         .subcommand(
-            ClapCommand::new("show").arg(Arg::new("application").required(true).num_args(1..)),
+            ClapCommand::new("show")
+                .about("Show and activate an application")
+                .arg(Arg::new("application").required(true).num_args(1..)),
         )
         .subcommand(
-            ClapCommand::new("isolate").arg(Arg::new("application").required(true).num_args(1..)),
+            ClapCommand::new("isolate")
+                .about("Hide other apps and keep only target app visible")
+                .arg(Arg::new("application").required(true).num_args(1..)),
         )
 }
 
 fn window_subcommand() -> ClapCommand {
     ClapCommand::new("window")
-        .subcommand(ClapCommand::new("list"))
+        .about("Query and control windows")
+        .subcommand(ClapCommand::new("list").about("List visible windows"))
         .subcommand(
             ClapCommand::new("bounds")
+                .about("Get bounds for a matching window")
                 .arg(Arg::new("title").long("title").value_name("text"))
                 .arg(Arg::new("id").long("id").value_name("id"))
                 .group(
@@ -666,6 +676,7 @@ fn window_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("focus")
+                .about("Focus a matching window")
                 .arg(Arg::new("title").long("title").value_name("text"))
                 .arg(Arg::new("id").long("id").value_name("id"))
                 .group(
@@ -678,8 +689,10 @@ fn window_subcommand() -> ClapCommand {
 
 fn screen_subcommand() -> ClapCommand {
     ClapCommand::new("screen")
+        .about("Capture screen state and OCR/tokenize output")
         .subcommand(
             ClapCommand::new("screenshot")
+                .about("Capture a screenshot")
                 .arg(Arg::new("out").long("out").value_name("path"))
                 .arg(
                     Arg::new("overlay")
@@ -691,6 +704,7 @@ fn screen_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("tokenize")
+                .about("Extract structured UI/text tokens from screen")
                 .arg(Arg::new("overlay").long("overlay").value_name("path"))
                 .arg(
                     Arg::new("window_query")
@@ -703,11 +717,13 @@ fn screen_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("find")
+                .about("Find OCR text on screen")
                 .arg(Arg::new("text").long("text").required(true))
                 .arg(Arg::new("all").long("all").action(ArgAction::SetTrue)),
         )
         .subcommand(
             ClapCommand::new("wait")
+                .about("Wait for text to appear or disappear")
                 .arg(Arg::new("text").long("text").required(true))
                 .arg(Arg::new("timeout").long("timeout").value_name("ms"))
                 .arg(Arg::new("interval").long("interval").value_name("ms"))
@@ -721,8 +737,10 @@ fn screen_subcommand() -> ClapCommand {
 
 fn pointer_subcommand() -> ClapCommand {
     ClapCommand::new("pointer")
+        .about("Move, click, drag, and scroll the pointer")
         .subcommand(
             ClapCommand::new("move")
+                .about("Move pointer to coordinates")
                 .arg(
                     Arg::new("absolute")
                         .long("absolute")
@@ -734,6 +752,7 @@ fn pointer_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("down")
+                .about("Press pointer button down")
                 .arg(Arg::new("x").required(true))
                 .arg(Arg::new("y").required(true))
                 .arg(button_arg())
@@ -741,6 +760,7 @@ fn pointer_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("up")
+                .about("Release pointer button")
                 .arg(Arg::new("x").required(true))
                 .arg(Arg::new("y").required(true))
                 .arg(button_arg())
@@ -748,6 +768,7 @@ fn pointer_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("click")
+                .about("Click by coordinates, text, or element id")
                 .arg(
                     Arg::new("text")
                         .long("text")
@@ -777,6 +798,9 @@ fn pointer_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("scroll")
+                .about(
+                    "Scroll by deltas (cursor must be in target scroll area) or target element id",
+                )
                 .arg(Arg::new("id").long("id").value_name("element_id"))
                 .arg(Arg::new("dx").required(true).allow_hyphen_values(true))
                 .arg(Arg::new("dy").required(true).allow_hyphen_values(true))
@@ -789,6 +813,7 @@ fn pointer_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("drag")
+                .about("Drag pointer between coordinates")
                 .arg(Arg::new("x1").required(true))
                 .arg(Arg::new("y1").required(true))
                 .arg(Arg::new("x2").required(true))
@@ -800,8 +825,10 @@ fn pointer_subcommand() -> ClapCommand {
 
 fn keyboard_subcommand() -> ClapCommand {
     ClapCommand::new("keyboard")
+        .about("Type text and send key presses")
         .subcommand(
             ClapCommand::new("type")
+                .about("Type text into focused input")
                 .arg(Arg::new("text").required(true))
                 .arg(observe_arg())
                 .arg(no_observe_arg())
@@ -812,6 +839,7 @@ fn keyboard_subcommand() -> ClapCommand {
         )
         .subcommand(
             ClapCommand::new("press")
+                .about("Press a key or hotkey")
                 .arg(Arg::new("key").required(true))
                 .arg(observe_arg())
                 .arg(no_observe_arg())
@@ -824,34 +852,60 @@ fn keyboard_subcommand() -> ClapCommand {
 
 fn clipboard_subcommand() -> ClapCommand {
     ClapCommand::new("clipboard")
-        .subcommand(ClapCommand::new("read"))
-        .subcommand(ClapCommand::new("write").arg(Arg::new("text").required(true)))
+        .about("Read and write system clipboard")
+        .subcommand(ClapCommand::new("read").about("Read clipboard text"))
+        .subcommand(
+            ClapCommand::new("write")
+                .about("Write text to clipboard")
+                .arg(Arg::new("text").required(true)),
+        )
 }
 
 fn debug_subcommand() -> ClapCommand {
     ClapCommand::new("debug")
-        .subcommand(ClapCommand::new("permissions"))
-        .subcommand(ClapCommand::new("ping"))
+        .about("Daemon diagnostics and developer tools")
+        .subcommand(ClapCommand::new("permissions").about("Check permission status"))
+        .subcommand(ClapCommand::new("ping").about("Check daemon connectivity"))
         .subcommand(
             ClapCommand::new("overlay")
-                .subcommand(ClapCommand::new("start").arg(Arg::new("duration").long("duration")))
-                .subcommand(ClapCommand::new("stop")),
+                .about("Control debug overlay")
+                .subcommand(
+                    ClapCommand::new("start")
+                        .about("Start debug overlay")
+                        .arg(Arg::new("duration").long("duration")),
+                )
+                .subcommand(ClapCommand::new("stop").about("Stop debug overlay")),
         )
-        .subcommand(ClapCommand::new("snapshot"))
+        .subcommand(ClapCommand::new("snapshot").about("Write debug snapshot payload"))
 }
 
 fn request_subcommand() -> ClapCommand {
     ClapCommand::new("request")
-        .subcommand(ClapCommand::new("show").arg(Arg::new("request_id").required(true)))
-        .subcommand(ClapCommand::new("list").arg(Arg::new("limit").long("limit")))
+        .about("Inspect stored request artifacts")
+        .subcommand(
+            ClapCommand::new("show")
+                .about("Show metadata for one request")
+                .arg(Arg::new("request_id").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("list")
+                .about("List recent stored requests")
+                .arg(Arg::new("limit").long("limit")),
+        )
         .subcommand(
             ClapCommand::new("screenshot")
+                .about("Export stored screenshot for one request")
                 .arg(Arg::new("request_id").required(true))
                 .arg(Arg::new("out").long("out")),
         )
-        .subcommand(ClapCommand::new("response").arg(Arg::new("request_id").required(true)))
+        .subcommand(
+            ClapCommand::new("response")
+                .about("Show stored response for one request")
+                .arg(Arg::new("request_id").required(true)),
+        )
         .subcommand(
             ClapCommand::new("search")
+                .about("Search stored request responses")
                 .arg(Arg::new("text").required(true))
                 .arg(Arg::new("limit").long("limit"))
                 .arg(Arg::new("command").long("command")),
@@ -860,12 +914,18 @@ fn request_subcommand() -> ClapCommand {
 
 fn replay_subcommand() -> ClapCommand {
     ClapCommand::new("replay")
+        .about("Record and load replay sessions")
         .subcommand(
             ClapCommand::new("record")
+                .about("Start or stop replay recording")
                 .arg(Arg::new("duration").long("duration").conflicts_with("stop"))
                 .arg(Arg::new("stop").long("stop").action(ArgAction::SetTrue)),
         )
-        .subcommand(ClapCommand::new("load").arg(Arg::new("session_dir").required(true)))
+        .subcommand(
+            ClapCommand::new("load")
+                .about("Load replay session from disk")
+                .arg(Arg::new("session_dir").required(true)),
+        )
 }
 
 fn active_window_arg() -> Arg {
