@@ -47,7 +47,11 @@ pub(crate) fn open(
         return Err(AppError::internal(stderr));
     }
 
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = name
+        .replace('\n', "")
+        .replace('\r', "")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     let script = format!(r#"tell application "{escaped}" to activate"#);
     let activate = ProcessCommand::new("osascript")
         .arg("-e")
