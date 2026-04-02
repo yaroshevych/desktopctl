@@ -237,6 +237,33 @@ pre {
   padding: 0;
 }
 
+#demo,
+#demo + section {
+  border-top: none;
+}
+
+#demo + section {
+  padding-top: 2rem;
+}
+
+#demo {
+  padding: 0;
+}
+
+.demo-caption {
+  width: calc(100% - 60px);
+  max-width: 800px;
+  margin: 0 auto 0.75rem;
+  margin-bottom: 20px;
+}
+
+#demo video {
+  display: block;
+  width: calc(100% - 60px);
+  max-width: 800px;
+  margin: 0 auto;
+}
+
 .code-block-wrap {
   background: var(--bg-code);
   border: 1px solid var(--border-hi);
@@ -400,6 +427,13 @@ footer .container {
 
   .step:last-child {
     border-bottom: none;
+  }
+
+  .demo-caption,
+  #demo video {
+    width: 100%;
+    margin-left: 0;
+    margin-right: 0;
   }
 
 }

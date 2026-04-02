@@ -1,6 +1,6 @@
 # DesktopCtl
 
-Local CLI for AI agents to observe and control your computer via screen, mouse, and keyboard. Bring your own AI — any model, even without vision.
+Local CLI for AI agents to observe and control your computer via screen, mouse, and keyboard. Bring your own AI - any model, even without vision.
 
 Runs fully local. No screenshots sent to the cloud.
 

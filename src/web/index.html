@@ -36,11 +36,10 @@
         <div class="container">
           <h1>Desktop Control</h1>
           <p>
-            Computer Vision and mouse/keyboard control for local AI agents. Bring your own AI, observe UI,
-            and perform complex operations with mouse, keyboard, and GPU-accelerated text recognition.
+            Local CLI for AI agents to observe and control your computer via screen, mouse, and keyboard. Bring your own AI - any model, even without vision.
           </p>
           <p>
-            Privacy-first, free & open source, written in Rust.
+            Works with any app — no integrations required. Privacy-first, free&nbsp;and&nbsp;open source, written in Rust.
           </p>
           <div class="hero-ctas">
             <a class="btn-primary" href="https://github.com/yaroshevych/desktopctl">View on GitHub</a>
@@ -50,16 +49,26 @@
         </div>
       </section>
 
+      <section id="demo">
+        <div class="container">
+          <p class="demo-caption">Demo: find a note with shopping list, create reminders for the furniture store trip.</p>
+          <video autoplay muted playsinline controls>
+            <source src="https://github.com/user-attachments/assets/4321b23e-6706-4792-a911-89e13766ebc0" type="video/mp4">
+          </video>
+        </div>
+      </section>
+
       <section>
         <div class="container">
           <h2>
             What is this
           </h2>
           <ul class="what-list">
-            <li>AI agents already work with local files, system applications, and web services.</li>
-            <li>DesktopCtl brings eyes and hands, which control OS and any UI app.</li>
-            <li>GPU-accelerated text recognition and computer vision, on your local machine.</li>
-            <li>Bring your own AI: integrate with any local agent, using standard CLI interface.</li>
+            <li>DesktopCtl works with any desktop app - no APIs required</li>
+            <li>Exposes UI as structured tokens for agents</li>
+            <li>Deterministic CLI primitives for click, type, and wait</li>
+            <li>Local GPU-accelerated text recognition and vision</li>
+            <li>Bring your own AI: any agent which can use CLI interface</li>
           </ul>
         </div>
       </section>
@@ -90,20 +99,20 @@
             <div class="step">
               <div class="step-num">Step 01</div>
               <span class="step-icon" aria-hidden="true">⬛</span>
-              <h3>Fast loop: local vision</h3>
-              <p>GPU-accelerated text recognition and Computer Vision systems capture UI and extract structured content.</p>
+              <h3>Fast local perception loop</h3>
+              <p>GPU-accelerated text recognition and computer vision capture the UI and extract structured content.</p>
             </div>
             <div class="step">
               <div class="step-num">Step 02</div>
               <span class="step-icon" aria-hidden="true">⊞</span>
-              <h3>Slow loop: AI reasoning</h3>
-              <p>Agent reads structured content, runs inference on remote server, and interacts with user.</p>
+              <h3>Slow decision loop</h3>
+              <p>The agent reads structured content, runs the model, and decides what to do next.</p>
             </div>
             <div class="step">
               <div class="step-num">Step 03</div>
               <span class="step-icon" aria-hidden="true">▶</span>
-              <h3>Action loop: UI interaction</h3>
-              <p>DesktopCtl interacts with UI, using mouse and keyboard. Desktop apps perform actions and update UI.</p>
+              <h3>Deterministic execution via CLI</h3>
+              <p>DesktopCtl exposes CLI interface and interacts with the UI using mouse and keyboard.</p>
             </div>
           </div>
         </div>
@@ -115,10 +124,10 @@
             Stay in control
           </h2>
           <ul class="what-list">
-            <li>Computer Vision and text recognition work locally on your machine.</li>
-            <li>By default, DesktopCtl does not share sensitive screenshots with AI agents.</li>
-            <li>Visual effect, when AI agent is accessing screen, mouse, or keyboard.</li>
-            <li>Stay in control with OS-level permissions, granted to DesktopCtl only.</li>
+            <li>Computer vision and text recognition run locally on your machine</li>
+            <li>Screenshots stay local by default — not shared with AI agents</li>
+            <li>Visual indicator when the agent accesses screen, mouse, or keyboard</li>
+            <li>OS-level permissions are granted to DesktopCtl only</li>
           </ul>
         </div>
       </section>
