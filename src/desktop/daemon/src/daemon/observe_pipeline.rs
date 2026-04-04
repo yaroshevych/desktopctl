@@ -428,12 +428,50 @@ fn final_observe_regions_from_images(
         end_capture.image.height(),
     );
     let frame_regions = vision::diff::diff_regions(&start_gray, &end_gray, OBSERVE_DIFF_THRESHOLD);
+    let change_ratio = observe_changed_pixel_ratio(&start_gray, &end_gray, OBSERVE_DIFF_THRESHOLD);
     let significant_regions: Vec<_> = frame_regions
         .into_iter()
         .filter(|region| {
             region.width.saturating_mul(region.height).max(1) >= OBSERVE_FINAL_MIN_COMPONENT_AREA
         })
         .collect();
+    if significant_regions.is_empty() {
+        return Vec::new();
+    }
+
+    if change_ratio >= OBSERVE_HIGH_CHANGE_RATIO {
+        let mut coarse: Vec<desktop_core::protocol::Bounds> = Vec::new();
+        for changed_region in significant_regions {
+            let upscaled = desktop_core::protocol::Bounds {
+                x: changed_region.x as f64,
+                y: changed_region.y as f64,
+                width: changed_region.width as f64,
+                height: changed_region.height as f64,
+            };
+            let padded = pad_bounds(upscaled, OBSERVE_COARSE_REGION_PAD_PX);
+            if let Some(clipped) = clip_to_scope(&padded, observe_scope) {
+                merge_region_into_list_with_gap(
+                    &mut coarse,
+                    clipped,
+                    OBSERVE_COARSE_MERGE_GAP_PX,
+                    0.05,
+                );
+            }
+        }
+        if coarse.is_empty() {
+            if let Some(scope) = observe_scope {
+                return vec![scope.clone()];
+            }
+            return vec![desktop_core::protocol::Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: end_capture.frame.width.max(1) as f64,
+                height: end_capture.frame.height.max(1) as f64,
+            }];
+        }
+        return cap_regions_by_area_then_position(coarse, OBSERVE_COARSE_MAX_REGIONS);
+    }
+
     let mut merged: Vec<desktop_core::protocol::Bounds> = Vec::new();
     for changed_region in significant_regions {
         let upscaled = desktop_core::protocol::Bounds {
@@ -444,15 +482,10 @@ fn final_observe_regions_from_images(
         };
         let padded = pad_bounds(upscaled, OBSERVE_FINAL_REGION_PAD_PX);
         if let Some(clipped) = clip_to_scope(&padded, observe_scope) {
-            merge_region_into_list_with_threshold(&mut merged, clipped, 0.35);
+            merge_region_into_list_with_gap(&mut merged, clipped, OBSERVE_FINAL_MERGE_GAP_PX, 0.10);
         }
     }
-    merged.sort_by(|a, b| {
-        (a.y, a.x)
-            .partial_cmp(&(b.y, b.x))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    merged
+    cap_regions_by_area_then_position(merged, OBSERVE_MAX_FINAL_REGIONS)
 }
 
 fn clip_to_scope(
@@ -496,15 +529,16 @@ fn merge_region_into_list(
     regions.push(merged);
 }
 
-fn merge_region_into_list_with_threshold(
+fn merge_region_into_list_with_gap(
     regions: &mut Vec<desktop_core::protocol::Bounds>,
     incoming: desktop_core::protocol::Bounds,
+    max_gap: f64,
     min_iou: f64,
 ) {
     let mut merged = incoming;
     let mut idx = 0usize;
     while idx < regions.len() {
-        if iou(&regions[idx], &merged) >= min_iou {
+        if should_merge_regions(&regions[idx], &merged, max_gap, min_iou) {
             merged = merge_bounds(Some(&regions[idx]), &merged);
             regions.swap_remove(idx);
             continue;
@@ -512,6 +546,83 @@ fn merge_region_into_list_with_threshold(
         idx += 1;
     }
     regions.push(merged);
+}
+
+fn should_merge_regions(
+    a: &desktop_core::protocol::Bounds,
+    b: &desktop_core::protocol::Bounds,
+    max_gap: f64,
+    min_iou: f64,
+) -> bool {
+    if iou(a, b) >= min_iou {
+        return true;
+    }
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    let dx = if ax2 < b.x {
+        b.x - ax2
+    } else if bx2 < a.x {
+        a.x - bx2
+    } else {
+        0.0
+    };
+    let dy = if ay2 < b.y {
+        b.y - ay2
+    } else if by2 < a.y {
+        a.y - by2
+    } else {
+        0.0
+    };
+    dx <= max_gap && dy <= max_gap
+}
+
+fn cap_regions_by_area_then_position(
+    mut regions: Vec<desktop_core::protocol::Bounds>,
+    max_regions: usize,
+) -> Vec<desktop_core::protocol::Bounds> {
+    if regions.len() <= max_regions {
+        regions.sort_by(|a, b| {
+            (a.y, a.x)
+                .partial_cmp(&(b.y, b.x))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        return regions;
+    }
+    regions.sort_by(|a, b| {
+        let aa = a.width.max(0.0) * a.height.max(0.0);
+        let bb = b.width.max(0.0) * b.height.max(0.0);
+        bb.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    regions.truncate(max_regions);
+    regions.sort_by(|a, b| {
+        (a.y, a.x)
+            .partial_cmp(&(b.y, b.x))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    regions
+}
+
+fn observe_changed_pixel_ratio(
+    prev: &vision::diff::GrayThumbnail,
+    curr: &vision::diff::GrayThumbnail,
+    threshold: u8,
+) -> f64 {
+    if prev.width != curr.width
+        || prev.height != curr.height
+        || prev.pixels.len() != curr.pixels.len()
+        || curr.pixels.is_empty()
+    {
+        return 1.0;
+    }
+    let mut changed = 0usize;
+    for idx in 0..curr.pixels.len() {
+        if prev.pixels[idx].abs_diff(curr.pixels[idx]) > threshold {
+            changed += 1;
+        }
+    }
+    changed as f64 / curr.pixels.len() as f64
 }
 
 fn pad_bounds(bounds: desktop_core::protocol::Bounds, pad: f64) -> desktop_core::protocol::Bounds {
@@ -633,5 +744,64 @@ mod tests {
         }];
         remap_single_observe_ocr_id(&mut token, &candidates);
         assert_eq!(token.get("id").and_then(Value::as_str), Some("ocr_new"));
+    }
+
+    #[test]
+    fn should_merge_regions_when_close_without_overlap() {
+        let a = desktop_core::protocol::Bounds {
+            x: 100.0,
+            y: 100.0,
+            width: 40.0,
+            height: 20.0,
+        };
+        let b = desktop_core::protocol::Bounds {
+            x: 150.0,
+            y: 104.0,
+            width: 40.0,
+            height: 20.0,
+        };
+        assert!(should_merge_regions(&a, &b, 16.0, 0.10));
+    }
+
+    #[test]
+    fn cap_regions_by_area_then_position_limits_count() {
+        let regions = vec![
+            desktop_core::protocol::Bounds {
+                x: 0.0,
+                y: 100.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            desktop_core::protocol::Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 60.0,
+                height: 20.0,
+            },
+            desktop_core::protocol::Bounds {
+                x: 0.0,
+                y: 50.0,
+                width: 30.0,
+                height: 20.0,
+            },
+        ];
+        let capped = cap_regions_by_area_then_position(regions, 2);
+        assert_eq!(capped.len(), 2);
+    }
+
+    #[test]
+    fn observe_changed_pixel_ratio_reports_fraction() {
+        let prev = vision::diff::GrayThumbnail {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 0, 0, 0],
+        };
+        let curr = vision::diff::GrayThumbnail {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 20, 0, 20],
+        };
+        let ratio = observe_changed_pixel_ratio(&prev, &curr, 8);
+        assert!((ratio - 0.5).abs() < f64::EPSILON);
     }
 }

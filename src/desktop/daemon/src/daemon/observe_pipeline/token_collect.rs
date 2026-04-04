@@ -20,7 +20,20 @@ pub(super) fn observe_tokens_for_regions(
     let mut ocr_tokens = 0usize;
     let ocr_started = Instant::now();
     if !regions.is_empty() {
-        for (idx, core_region) in regions.iter().enumerate() {
+        let selected_region_indices =
+            prioritize_observe_regions_for_ocr(regions, OBSERVE_MAX_OCR_REGIONS);
+        if selected_region_indices.len() < regions.len() {
+            trace::log(format!(
+                "observe:ocr region_cap applied selected={} total={} max={}",
+                selected_region_indices.len(),
+                regions.len(),
+                OBSERVE_MAX_OCR_REGIONS
+            ));
+        }
+        for idx in selected_region_indices {
+            let Some(core_region) = regions.get(idx) else {
+                continue;
+            };
             let dynamic_pad = observe_adaptive_ocr_pad(core_region, &ax_elements);
             let (padded, applied_pad) = expand_bounds_with_pad_clamped(
                 core_region,
@@ -155,6 +168,31 @@ pub(super) fn observe_tokens_for_regions(
     ));
 
     (tokens, ax_available, ax_count)
+}
+
+fn prioritize_observe_regions_for_ocr(
+    regions: &[desktop_core::protocol::Bounds],
+    max_regions: usize,
+) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..regions.len()).collect();
+    indices.sort_by(|a, b| {
+        let ra = &regions[*a];
+        let rb = &regions[*b];
+        let aa = ra.width.max(0.0) * ra.height.max(0.0);
+        let ab = rb.width.max(0.0) * rb.height.max(0.0);
+        ab.partial_cmp(&aa)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                (ra.y, ra.x)
+                    .partial_cmp(&(rb.y, rb.x))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    if indices.len() > max_regions {
+        indices.truncate(max_regions);
+    }
+    indices.sort_unstable();
+    indices
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -345,5 +383,16 @@ mod tests {
         ];
         let pad = observe_adaptive_ocr_pad(&core, &elements);
         assert_eq!(pad, 18.0);
+    }
+
+    #[test]
+    fn prioritize_observe_regions_for_ocr_prefers_large_regions() {
+        let regions = vec![
+            bounds(10.0, 10.0, 10.0, 10.0), // area 100
+            bounds(20.0, 20.0, 50.0, 20.0), // area 1000
+            bounds(30.0, 30.0, 40.0, 20.0), // area 800
+        ];
+        let selected = prioritize_observe_regions_for_ocr(&regions, 2);
+        assert_eq!(selected, vec![1, 2]);
     }
 }

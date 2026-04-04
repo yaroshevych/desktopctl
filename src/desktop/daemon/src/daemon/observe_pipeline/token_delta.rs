@@ -85,6 +85,7 @@ pub(super) fn normalize_observe_tokens_delta(
     }
     remap_observe_ocr_ids_to_tokenize_ids(&mut delta, origin);
     reconcile_added_removed_pairs(&mut delta);
+    dedupe_observe_tokens_delta(&mut delta);
     sort_observe_tokens_delta(&mut delta);
     delta
 }
@@ -297,6 +298,97 @@ fn reconcile_added_removed_pairs(delta: &mut Value) {
     }
 }
 
+fn dedupe_observe_tokens_delta(delta: &mut Value) {
+    if let Some(items) = delta.get_mut("added").and_then(Value::as_array_mut) {
+        dedupe_tokens_in_place(items);
+    }
+    if let Some(items) = delta.get_mut("removed").and_then(Value::as_array_mut) {
+        dedupe_tokens_in_place(items);
+    }
+    if let Some(items) = delta.get_mut("changed").and_then(Value::as_array_mut) {
+        dedupe_changed_in_place(items);
+    }
+}
+
+fn dedupe_tokens_in_place(items: &mut Vec<Value>) {
+    use std::collections::HashMap;
+    let mut best_by_key: HashMap<String, Value> = HashMap::new();
+    for token in items.drain(..) {
+        let key = token_dedupe_key(&token);
+        if let Some(existing) = best_by_key.get_mut(&key) {
+            if token_confidence(&token) > token_confidence(existing) {
+                *existing = token;
+            }
+        } else {
+            best_by_key.insert(key, token);
+        }
+    }
+    items.extend(best_by_key.into_values());
+}
+
+fn dedupe_changed_in_place(items: &mut Vec<Value>) {
+    use std::collections::HashMap;
+    let mut best_by_key: HashMap<String, Value> = HashMap::new();
+    for entry in items.drain(..) {
+        let key = changed_dedupe_key(&entry);
+        if let Some(existing) = best_by_key.get_mut(&key) {
+            let existing_score = entry_confidence(existing);
+            let next_score = entry_confidence(&entry);
+            if next_score > existing_score {
+                *existing = entry;
+            }
+        } else {
+            best_by_key.insert(key, entry);
+        }
+    }
+    items.extend(best_by_key.into_values());
+}
+
+fn token_dedupe_key(token: &Value) -> String {
+    let source = token
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .trim()
+        .to_string();
+    let text = token
+        .get("text")
+        .and_then(Value::as_str)
+        .map(normalize_observe_text)
+        .unwrap_or_default();
+    let bbox_key = quantized_bbox_key_with_step(token.get("bbox").and_then(Value::as_array), 16.0);
+    let checked = token
+        .get("checked")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    format!("{source}|{text}|{bbox_key}|{checked}")
+}
+
+fn changed_dedupe_key(entry: &Value) -> String {
+    let before = entry
+        .get("before")
+        .map(token_dedupe_key)
+        .unwrap_or_else(|| "before:missing".to_string());
+    let after = entry
+        .get("after")
+        .map(token_dedupe_key)
+        .unwrap_or_else(|| "after:missing".to_string());
+    format!("{before}=>{after}")
+}
+
+fn token_confidence(token: &Value) -> f64 {
+    token
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
+fn entry_confidence(entry: &Value) -> f64 {
+    let before = entry.get("before").map(token_confidence).unwrap_or(0.0);
+    let after = entry.get("after").map(token_confidence).unwrap_or(0.0);
+    before.max(after)
+}
+
 fn sort_observe_tokens_delta(delta: &mut Value) {
     if let Some(items) = delta.get_mut("added").and_then(Value::as_array_mut) {
         items.sort_by(token_position_compare);
@@ -501,6 +593,10 @@ fn observe_token_key(token: &Value) -> String {
 }
 
 fn quantized_bbox_key(bbox: Option<&Vec<Value>>) -> String {
+    quantized_bbox_key_with_step(bbox, 8.0)
+}
+
+fn quantized_bbox_key_with_step(bbox: Option<&Vec<Value>>, step: f64) -> String {
     let Some(bbox) = bbox else {
         return "[]".to_string();
     };
@@ -509,8 +605,7 @@ fn quantized_bbox_key(bbox: Option<&Vec<Value>>) -> String {
     }
     let q = |v: Option<f64>| -> i64 {
         let n = v.unwrap_or(0.0);
-        // Tolerate small OCR jitter by quantizing to 8px grid.
-        (n / 8.0).round() as i64
+        (n / step).round() as i64
     };
     let x = q(bbox[0].as_f64());
     let y = q(bbox[1].as_f64());
@@ -646,6 +741,37 @@ mod tests {
             delta["removed"].as_array().expect("removed").len(),
             1,
             "changed semantic content should retain remove"
+        );
+    }
+
+    #[test]
+    fn normalize_observe_tokens_delta_dedupes_near_identical_added_tokens() {
+        let mut delta = json!({
+            "added": [
+                {
+                    "id": "a1",
+                    "source": "vision_ocr",
+                    "text": "Shopping list",
+                    "confidence": 0.8,
+                    "bbox": [100.0, 200.0, 80.0, 20.0]
+                },
+                {
+                    "id": "a2",
+                    "source": "vision_ocr",
+                    "text": " shopping   list ",
+                    "confidence": 0.9,
+                    "bbox": [103.0, 204.0, 81.0, 21.0]
+                }
+            ],
+            "removed": [],
+            "changed": []
+        });
+        delta = normalize_observe_tokens_delta(delta, None);
+        let added = delta["added"].as_array().expect("added");
+        assert_eq!(
+            added.len(),
+            1,
+            "expected duplicate OCR additions to be deduped"
         );
     }
 }
