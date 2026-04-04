@@ -6,7 +6,7 @@ use std::{
 
 const DEFAULT_TRACE_PATH: &str = "/tmp/desktopctld.trace.log";
 
-pub fn log(message: impl AsRef<str>) {
+pub fn is_enabled() -> bool {
     let trace_enabled = std::env::var("DESKTOPCTL_TRACE")
         .ok()
         .map(|v| {
@@ -18,7 +18,11 @@ pub fn log(message: impl AsRef<str>) {
         .ok()
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
-    if !trace_enabled && !has_custom_path {
+    trace_enabled || has_custom_path
+}
+
+pub fn log(message: impl AsRef<str>) {
+    if !is_enabled() {
         return;
     }
 

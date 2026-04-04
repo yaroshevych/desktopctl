@@ -20,6 +20,7 @@ use accessibility_sys::{
     kAXValueTypeCGSize,
 };
 use core_foundation::{
+    array::CFArray,
     attributed_string::{CFAttributedString, CFAttributedStringGetString},
     base::{CFType, TCFType},
     boolean::CFBoolean,
@@ -91,6 +92,7 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
         width: 0.0,
         height: 0.0,
     });
+    dump_all_attributes_compact(&focused, &role, Some(&bounds));
     let text = element_label(&focused, &role);
     let ax_identifier = element_identifier(&focused);
     let checked = element_toggle_state(&focused, &role);
@@ -122,8 +124,10 @@ pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
 
 fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
     if let Some(role) = element.role().ok().map(|v| v.to_string()) {
+        let bounds = element_bounds(element);
+        dump_all_attributes_compact(element, &role, bounds.as_ref());
         if is_interactive_role(&role) {
-            if let Some(bounds) = element_bounds(element) {
+            if let Some(bounds) = bounds {
                 let text = element_label(element, &role);
                 let ax_identifier = if should_collect_identifier(&role) {
                     element_identifier(element)
@@ -530,6 +534,118 @@ fn attribute_text_by_name(element: &AXUIElement, name: &'static str) -> Option<S
         .attribute(&attr)
         .ok()
         .and_then(|value| cf_type_text(&value))
+}
+
+fn dump_all_attributes_compact(element: &AXUIElement, role: &str, bounds: Option<&Bounds>) {
+    if !trace::is_enabled() {
+        return;
+    }
+    let names = match element.attribute_names() {
+        Ok(names) => names,
+        Err(err) => {
+            trace::log(format!("ax:attrs role={role} names_err={err}"));
+            return;
+        }
+    };
+    let mut parts = Vec::with_capacity(names.len().max(0) as usize);
+    for name in names.iter() {
+        let key = compact_for_log(&name.to_string(), 64);
+        let attr = AXAttribute::<CFType>::new(&name);
+        let value = match element.attribute(&attr) {
+            Ok(value) => cf_type_compact(&value),
+            Err(err) => format!("<err:{err}>"),
+        };
+        parts.push(format!("{key}={value}"));
+    }
+    parts.sort_unstable();
+    let bounds_text = bounds.map_or_else(
+        || "none".to_string(),
+        |b| {
+            format!(
+                "{:.0},{:.0},{:.0},{:.0}",
+                b.x.max(0.0),
+                b.y.max(0.0),
+                b.width.max(0.0),
+                b.height.max(0.0)
+            )
+        },
+    );
+    trace::log(format!(
+        "ax:attrs role={} bounds={} count={} attrs={}",
+        compact_for_log(role, 64),
+        bounds_text,
+        parts.len(),
+        compact_for_log(&parts.join(" | "), 8000)
+    ));
+}
+
+fn cf_type_compact(value: &CFType) -> String {
+    if let Some(v) = value.downcast::<CFBoolean>() {
+        return format!("bool:{}", bool::from(v));
+    }
+    if let Some(v) = value.downcast::<CFNumber>() {
+        if let Some(n) = v.to_i64() {
+            return format!("num:{n}");
+        }
+        if let Some(n) = v.to_f64() {
+            return format!("num:{n:.3}");
+        }
+        return "num:<unknown>".to_string();
+    }
+    if let Some(text) = cf_type_text_raw(value) {
+        return format!("str:\"{}\"", compact_for_log(&text, 240));
+    }
+    if let Some((x, y)) = decode_point(value) {
+        return format!("point:{x:.1},{y:.1}");
+    }
+    if let Some((w, h)) = decode_size(value) {
+        return format!("size:{w:.1},{h:.1}");
+    }
+    if value.instance_of::<CFArray<CFType>>() {
+        let arr = unsafe { CFArray::<CFType>::wrap_under_get_rule(value.as_CFTypeRef() as _) };
+        let len = arr.len().max(0) as usize;
+        let mut sample: Vec<String> = Vec::new();
+        let limit = len.min(4);
+        for idx in 0..limit {
+            if let Some(entry) = arr.get(idx as isize) {
+                sample.push(compact_for_log(&cf_type_compact(&entry), 64));
+            }
+        }
+        let suffix = if len > limit { ",..." } else { "" };
+        return format!("arr:{}:[{}{}]", len, sample.join(","), suffix);
+    }
+    if value.instance_of::<AXUIElement>() {
+        return "ax_element".to_string();
+    }
+    format!("other:{}", cf_type_kind(value))
+}
+
+fn compact_for_log(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out = String::with_capacity(value.len().min(max_chars));
+    let mut prev_space = false;
+    let mut char_count = 0usize;
+    for ch in value.chars() {
+        let normalized = if ch.is_whitespace() { ' ' } else { ch };
+        if normalized == ' ' {
+            if prev_space {
+                continue;
+            }
+            prev_space = true;
+            out.push(' ');
+        } else {
+            prev_space = false;
+            out.push(normalized);
+        }
+        char_count += 1;
+        if char_count >= max_chars {
+            out.push_str("...");
+            break;
+        }
+    }
+    out.trim().to_string()
 }
 
 fn element_bounds(element: &AXUIElement) -> Option<Bounds> {
