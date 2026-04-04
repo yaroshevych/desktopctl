@@ -469,6 +469,7 @@ fn final_observe_regions_from_images(
                 height: end_capture.frame.height.max(1) as f64,
             }];
         }
+        let coarse = merge_overlapping_regions(coarse);
         return cap_regions_by_area_then_position(coarse, OBSERVE_COARSE_MAX_REGIONS);
     }
 
@@ -485,6 +486,7 @@ fn final_observe_regions_from_images(
             merge_region_into_list_with_gap(&mut merged, clipped, OBSERVE_FINAL_MERGE_GAP_PX, 0.10);
         }
     }
+    let merged = merge_overlapping_regions(merged);
     cap_regions_by_area_then_position(merged, OBSERVE_MAX_FINAL_REGIONS)
 }
 
@@ -602,6 +604,38 @@ fn cap_regions_by_area_then_position(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     regions
+}
+
+fn merge_overlapping_regions(
+    regions: Vec<desktop_core::protocol::Bounds>,
+) -> Vec<desktop_core::protocol::Bounds> {
+    let mut merged: Vec<desktop_core::protocol::Bounds> = Vec::new();
+    for incoming in regions {
+        merge_region_into_list_overlap_only(&mut merged, incoming);
+    }
+    merged.sort_by(|a, b| {
+        (a.y, a.x)
+            .partial_cmp(&(b.y, b.x))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged
+}
+
+fn merge_region_into_list_overlap_only(
+    regions: &mut Vec<desktop_core::protocol::Bounds>,
+    incoming: desktop_core::protocol::Bounds,
+) {
+    let mut merged = incoming;
+    let mut idx = 0usize;
+    while idx < regions.len() {
+        if bounds_intersect(&regions[idx], &merged) {
+            merged = merge_bounds(Some(&regions[idx]), &merged);
+            regions.swap_remove(idx);
+            continue;
+        }
+        idx += 1;
+    }
+    regions.push(merged);
 }
 
 fn observe_changed_pixel_ratio(
@@ -803,5 +837,27 @@ mod tests {
         };
         let ratio = observe_changed_pixel_ratio(&prev, &curr, 8);
         assert!((ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn merge_overlapping_regions_collapses_contained_boxes() {
+        let regions = vec![
+            desktop_core::protocol::Bounds {
+                x: 100.0,
+                y: 100.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            desktop_core::protocol::Bounds {
+                x: 150.0,
+                y: 150.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        ];
+        let merged = merge_overlapping_regions(regions);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].x, 100.0);
+        assert_eq!(merged[0].y, 100.0);
     }
 }
