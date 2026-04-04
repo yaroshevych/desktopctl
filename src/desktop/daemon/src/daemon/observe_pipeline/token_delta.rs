@@ -485,6 +485,12 @@ fn rewrite_token_bbox_relative(token: &mut Value, origin: Option<&desktop_core::
 }
 
 fn ensure_observe_token_id(token: &mut Value) {
+    if let Some(ax_id) = canonical_ax_token_id(token) {
+        if let Some(obj) = token.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(ax_id));
+        }
+        return;
+    }
     if token
         .get("id")
         .and_then(Value::as_str)
@@ -578,6 +584,9 @@ fn stable_hash32(input: &str) -> u32 {
 }
 
 fn observe_token_key(token: &Value) -> String {
+    if let Some(ax_key) = canonical_ax_match_key(token) {
+        return format!("ax:{ax_key}");
+    }
     if let Some(id) = token.get("id").and_then(Value::as_str) {
         if !id.trim().is_empty() {
             return format!("id:{id}");
@@ -590,6 +599,80 @@ fn observe_token_key(token: &Value) -> String {
     let text = token.get("text").and_then(Value::as_str).unwrap_or("");
     let bbox_key = quantized_bbox_key(token.get("bbox").and_then(Value::as_array));
     format!("fallback:{source}:{text}:{bbox_key}")
+}
+
+fn canonical_ax_token_id(token: &Value) -> Option<String> {
+    let key = canonical_ax_match_key(token)?;
+    let source = token
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("accessibility_ax:ax")
+        .trim()
+        .to_ascii_lowercase();
+    let role_prefix = source
+        .split(':')
+        .nth(1)
+        .map(|s| {
+            s.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ax".to_string());
+    let suffix = if token_is_scrollable(token) {
+        "_scrollable"
+    } else {
+        ""
+    };
+    Some(format!(
+        "{}_{}{}",
+        role_prefix,
+        format!("{:08x}", stable_hash32(&key)),
+        suffix
+    ))
+}
+
+fn canonical_ax_match_key(token: &Value) -> Option<String> {
+    let source = token
+        .get("source")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !source.starts_with("accessibility_ax:") {
+        return None;
+    }
+    let bbox_key = quantized_bbox_key_with_step(token.get("bbox").and_then(Value::as_array), 16.0);
+    let scrollable = token_is_scrollable(token);
+    let checked = token
+        .get("checked")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    Some(format!(
+        "{}|{}|scrollable={}|checked={}",
+        source.to_ascii_lowercase(),
+        bbox_key,
+        scrollable,
+        checked
+    ))
+}
+
+fn token_is_scrollable(token: &Value) -> bool {
+    if token
+        .get("scrollable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let source = token
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    source.contains("axscrollbar")
+        || source.contains("axscrollarea")
+        || source.contains("axvalueindicator")
 }
 
 fn quantized_bbox_key(bbox: Option<&Vec<Value>>) -> String {
@@ -772,6 +855,41 @@ mod tests {
             added.len(),
             1,
             "expected duplicate OCR additions to be deduped"
+        );
+    }
+
+    #[test]
+    fn diff_observe_tokens_matches_ax_by_role_and_bbox_not_raw_id() {
+        let before = vec![json!({
+            "id": "element_3",
+            "source": "accessibility_ax:AXScrollBar",
+            "scrollable": true,
+            "text": "Old content",
+            "bbox": [1031, 51, 17, 629]
+        })];
+        let after = vec![json!({
+            "id": "element",
+            "source": "accessibility_ax:AXScrollBar",
+            "scrollable": true,
+            "text": "New content",
+            "bbox": [1031, 51, 17, 629]
+        })];
+        let mut delta = diff_observe_tokens(&before, &after);
+        delta = normalize_observe_tokens_delta(delta, None);
+        assert_eq!(
+            delta["added"].as_array().expect("added").len(),
+            0,
+            "should not emit AX add for same geometric AX element"
+        );
+        assert_eq!(
+            delta["removed"].as_array().expect("removed").len(),
+            0,
+            "should not emit AX remove for same geometric AX element"
+        );
+        assert_eq!(
+            delta["changed"].as_array().expect("changed").len(),
+            1,
+            "should emit AX changed for text mutation"
         );
     }
 }

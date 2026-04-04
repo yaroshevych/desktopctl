@@ -30,8 +30,8 @@ pub fn merge_elements(
 
         let (merged_text, filled_from_ocr) =
             merged_ax_text(&ax.role, &local, elements, ax.text.as_deref());
-        let ax_primary_id =
-            primary_id_for_ax(ax).or_else(|| Some(fallback_id_for_ax(ax, &mut fallback_id_counts)));
+        let ax_primary_id = primary_id_for_ax(ax)
+            .or_else(|| Some(fallback_id_for_ax(ax, &local, &mut fallback_id_counts)));
         if filled_from_ocr {
             metrics.ax_text_filled += 1;
         }
@@ -113,8 +113,20 @@ pub(crate) fn primary_id_for_ax(ax: &AxElement) -> Option<String> {
     None
 }
 
-fn fallback_id_for_ax(ax: &AxElement, counts: &mut HashMap<String, usize>) -> String {
+fn fallback_id_for_ax(
+    ax: &AxElement,
+    bounds: &Bounds,
+    counts: &mut HashMap<String, usize>,
+) -> String {
     let role = normalize_ax_role_name(&ax.role);
+    if matches!(
+        ax.role.as_str(),
+        "AXScrollBar" | "AXScrollArea" | "AXValueIndicator"
+    ) {
+        let (x, y, w, h) = quantized_bbox(bounds, 16.0);
+        let material = format!("{role}|{x},{y},{w},{h}");
+        return format!("{role}_{:08x}", stable_hash32(&material));
+    }
     let text = ax
         .text
         .as_deref()
@@ -145,8 +157,30 @@ fn normalize_ax_role_name(role: &str) -> &str {
         "AXTextField" => "textfield",
         "AXTextArea" => "textarea",
         "AXMenuButton" => "menubutton",
+        "AXScrollBar" => "scrollbar",
+        "AXScrollArea" => "scrollarea",
+        "AXValueIndicator" => "valueindicator",
         _ => "element",
     }
+}
+
+fn quantized_bbox(bounds: &Bounds, step: f64) -> (i64, i64, i64, i64) {
+    let q = |v: f64| -> i64 { (v / step).round() as i64 };
+    (
+        q(bounds.x.max(0.0)),
+        q(bounds.y.max(0.0)),
+        q(bounds.width.max(0.0)),
+        q(bounds.height.max(0.0)),
+    )
+}
+
+fn stable_hash32(input: &str) -> u32 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash & 0xffff_ffff) as u32
 }
 
 fn truncate_component(value: &str, max_len: usize) -> String {

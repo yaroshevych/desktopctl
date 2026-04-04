@@ -543,7 +543,7 @@ fn append_tokens_delta_section(
     }
     lines.push(String::new());
     lines.push(format!("## {title}"));
-    if title == "Removed" {
+    if title == "Removed" || title == "Added" {
         append_tokens_delta_columns(lines, items);
         return;
     }
@@ -563,6 +563,12 @@ fn append_tokens_delta_section(
 }
 
 fn append_tokens_delta_columns(lines: &mut Vec<String>, items: &[serde_json::Value]) {
+    #[derive(Debug, Default)]
+    struct DeltaColumn {
+        anchor_x: f64,
+        entries: Vec<MarkdownEntry>,
+    }
+
     let mut entries: Vec<MarkdownEntry> = items
         .iter()
         .filter_map(markdown_entry_from_token_delta)
@@ -574,21 +580,24 @@ fn append_tokens_delta_columns(lines: &mut Vec<String>, items: &[serde_json::Val
         return;
     }
     entries.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
-    let mut columns: Vec<Vec<MarkdownEntry>> = Vec::new();
+    let mut columns: Vec<DeltaColumn> = Vec::new();
     let column_split = 140.0_f64;
     for entry in entries {
         if !columns.is_empty() {
             let idx = columns.len() - 1;
-            let last_x = columns[idx].last().map(|e| e.x).unwrap_or(entry.x);
-            if (entry.x - last_x).abs() <= column_split {
-                columns[idx].push(entry);
+            let anchor_x = columns[idx].anchor_x;
+            if (entry.x - anchor_x).abs() <= column_split {
+                columns[idx].entries.push(entry);
                 continue;
             }
         }
-        columns.push(vec![entry]);
+        columns.push(DeltaColumn {
+            anchor_x: entry.x,
+            entries: vec![entry],
+        });
     }
     for (idx, column) in columns.into_iter().enumerate() {
-        let mut column = column;
+        let mut column = column.entries;
         column.sort_by(|a, b| a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x)));
         let title = match idx {
             0 => "Left Column".to_string(),
