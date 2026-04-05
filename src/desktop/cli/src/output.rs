@@ -141,7 +141,7 @@ fn active_window_tip_message(response: &ResponseEnvelope) -> String {
 fn command_json_hints(command: &Command) -> Vec<&'static str> {
     match command {
         Command::WindowList => {
-            vec!["window list markdown prints one line per window as <title> #<id>"]
+            vec!["window list markdown prints one section per window titled by window_title"]
         }
         Command::ScreenCapture { .. } => vec![
             "prefer screen tokenize for automation flows; use screenshot as last resort for visual artifacts/debug",
@@ -922,6 +922,12 @@ fn append_windows_section(lines: &mut Vec<String>, windows: &[serde_json::Value]
         let Some(obj) = window.as_object() else {
             continue;
         };
+        let app = obj
+            .get("app")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("unknown");
         let id = obj
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -934,7 +940,14 @@ fn append_windows_section(lines: &mut Vec<String>, windows: &[serde_json::Value]
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .unwrap_or("(untitled)");
-        lines.push(format!("- {title} #{id}"));
+        let size = obj
+            .get("bounds")
+            .and_then(summarize_bounds_size)
+            .unwrap_or_else(|| "unknown".to_string());
+        lines.push(format!("### {title}"));
+        lines.push(format!("window_id: {id}"));
+        lines.push(format!("app: {app}"));
+        lines.push(format!("window_size: {size}"));
     }
 }
 
@@ -987,7 +1000,7 @@ mod tests {
         let rendered = render_response(&command, &response, false);
         assert_eq!(
             rendered["hint"],
-            "window list markdown prints one line per window as <title> #<id>"
+            "window list markdown prints one section per window titled by window_title"
         );
         assert_eq!(rendered["ok"], true);
         assert_eq!(rendered["result"]["windows"], json!([]));
@@ -1162,8 +1175,14 @@ mod tests {
 
         let markdown = render_markdown_response(&command, &response, false);
         assert!(markdown.contains("## Windows"));
-        assert!(markdown.contains("- Notes #notes_95b2a1"));
-        assert!(markdown.contains("- Screen & System Audio Recording #settings_01"));
+        assert!(markdown.contains("### Notes"));
+        assert!(markdown.contains("window_id: notes_95b2a1"));
+        assert!(markdown.contains("app: Notes"));
+        assert!(markdown.contains("window_size: 1048x680"));
+        assert!(markdown.contains("### Screen & System Audio Recording"));
+        assert!(markdown.contains("window_id: settings_01"));
+        assert!(markdown.contains("app: System Settings"));
+        assert!(markdown.contains("window_size: 1100x780"));
         assert!(!markdown.contains("- windows: 2 items"));
     }
 
