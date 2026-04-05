@@ -473,6 +473,7 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
 }
 
 fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> String {
+    let profile = GenericMarkdownProfile::for_command(command);
     let title = command.name().replace('_', " ");
     let ok = value
         .get("ok")
@@ -496,10 +497,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     }
 
     let result = value.get("result").cloned().unwrap_or_default();
-    if matches!(
-        command,
-        Command::OpenApp { .. } | Command::AppShow { .. } | Command::AppIsolate { .. }
-    ) {
+    if profile.promote_window_id {
         if let Some(window_id) = result
             .get("window_id")
             .and_then(serde_json::Value::as_str)
@@ -509,7 +507,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             lines.push(format!("- window_id: {window_id}"));
         }
     }
-    if matches!(command, Command::ClipboardRead) {
+    if profile.promote_clipboard_text {
         if let Some(text) = result
             .get("text")
             .and_then(serde_json::Value::as_str)
@@ -527,41 +525,19 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     }
 
     if let Some(obj) = result.as_object() {
-        let promote_result_to_top = matches!(
-            command,
-            Command::WindowFocus { .. } | Command::WindowBounds { .. }
-        );
         let mut scalar_lines: Vec<String> = Vec::new();
         let mut windows_for_section: Option<Vec<serde_json::Value>> = None;
         for (k, v) in obj {
             if k == "observe" || k == "click_target" {
                 continue;
             }
-            if matches!(command, Command::AppIsolate { .. }) && k == "hidden_apps" {
+            if profile.promote_hidden_apps && k == "hidden_apps" {
                 if let Some(summary) = compact_value_summary(v) {
                     lines.push(format!("- hidden_apps: {summary}"));
                 }
                 continue;
             }
-            if matches!(command, Command::AppIsolate { .. }) && (k == "app" || k == "state") {
-                continue;
-            }
-            if matches!(command, Command::AppHide { .. } | Command::AppShow { .. })
-                && (k == "app" || k == "state")
-            {
-                continue;
-            }
-            if matches!(
-                command,
-                Command::OpenApp { .. } | Command::AppShow { .. } | Command::AppIsolate { .. }
-            ) && k == "window_id"
-            {
-                continue;
-            }
-            if matches!(command, Command::ClipboardRead) && k == "text" {
-                continue;
-            }
-            if matches!(command, Command::WindowFocus { .. }) && k == "focused" {
+            if profile.skip_result_key(k) {
                 continue;
             }
             if k == "windows" {
@@ -585,7 +561,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             }
         }
         if !scalar_lines.is_empty() {
-            if promote_result_to_top {
+            if profile.promote_result_to_top {
                 lines.extend(scalar_lines);
             } else {
                 lines.push(String::new());
@@ -622,6 +598,67 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
 
     append_observe_sections(&mut lines, &result);
     lines.join("\n")
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GenericMarkdownProfile {
+    promote_result_to_top: bool,
+    promote_window_id: bool,
+    promote_clipboard_text: bool,
+    promote_hidden_apps: bool,
+    suppress_app_state: bool,
+    suppress_focused: bool,
+}
+
+impl GenericMarkdownProfile {
+    fn for_command(command: &Command) -> Self {
+        let mut profile = Self::default();
+        match command {
+            Command::WindowFocus { .. } => {
+                profile.promote_result_to_top = true;
+                profile.suppress_focused = true;
+            }
+            Command::WindowBounds { .. } => {
+                profile.promote_result_to_top = true;
+            }
+            Command::OpenApp { .. } => {
+                profile.promote_window_id = true;
+            }
+            Command::AppShow { .. } => {
+                profile.promote_window_id = true;
+                profile.suppress_app_state = true;
+            }
+            Command::AppHide { .. } => {
+                profile.suppress_app_state = true;
+            }
+            Command::AppIsolate { .. } => {
+                profile.promote_window_id = true;
+                profile.promote_hidden_apps = true;
+                profile.suppress_app_state = true;
+            }
+            Command::ClipboardRead => {
+                profile.promote_clipboard_text = true;
+            }
+            _ => {}
+        }
+        profile
+    }
+
+    fn skip_result_key(&self, key: &str) -> bool {
+        if self.suppress_app_state && (key == "app" || key == "state") {
+            return true;
+        }
+        if self.promote_window_id && key == "window_id" {
+            return true;
+        }
+        if self.promote_clipboard_text && key == "text" {
+            return true;
+        }
+        if self.suppress_focused && key == "focused" {
+            return true;
+        }
+        false
+    }
 }
 
 fn append_observe_sections(lines: &mut Vec<String>, result: &serde_json::Value) {
