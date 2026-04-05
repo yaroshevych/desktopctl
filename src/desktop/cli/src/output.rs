@@ -16,7 +16,9 @@ pub(crate) fn render_response(
     let mut prefix_fields: Vec<(String, String)> = Vec::new();
     let mut eligible_hints: Vec<String> = Vec::new();
     if supports_active_window && !has_explicit_active_window_id {
-        eligible_hints.push(active_window_tip_message(response));
+        if let Some(hint) = active_window_tip_message(response) {
+            eligible_hints.push(hint);
+        }
     }
     if matches!(command, Command::OpenApp { .. }) {
         eligible_hints.push(open_app_hint_message(response));
@@ -136,9 +138,11 @@ fn command_has_explicit_active_window_id(command: &Command) -> bool {
     }
 }
 
-fn active_window_tip_message(response: &ResponseEnvelope) -> String {
-    let id = resolve_window_id_from_response(response).unwrap_or_else(|| "unknown".to_string());
-    format!("use --active-window {id} to avoid acting in the wrong window")
+fn active_window_tip_message(response: &ResponseEnvelope) -> Option<String> {
+    let id = resolve_window_id_from_response(response)?;
+    Some(format!(
+        "use --active-window {id} to avoid acting in the wrong window"
+    ))
 }
 
 fn command_json_hints(command: &Command) -> Vec<&'static str> {
@@ -189,6 +193,35 @@ fn resolve_window_id_from_response(response: &ResponseEnvelope) -> Option<String
         ResponseEnvelope::Success(success) => success,
         ResponseEnvelope::Error(_) => return None,
     };
+    if let Some(id) = success
+        .result
+        .get("observe")
+        .and_then(|v| v.get("active_window_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(id.to_string());
+    }
+    if let Some(id) = success
+        .result
+        .get("window_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(id.to_string());
+    }
+    if let Some(id) = success
+        .result
+        .get("window")
+        .and_then(|v| v.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(id.to_string());
+    }
     let windows = success.result.get("windows")?.as_array()?;
     for window in windows {
         if let Some(id) = window.get("id").and_then(serde_json::Value::as_str) {
@@ -1063,6 +1096,50 @@ mod tests {
         );
         assert_eq!(rendered["ok"], true);
         assert_eq!(rendered["result"]["windows"], json!([]));
+    }
+
+    #[test]
+    fn active_window_hint_uses_observe_active_window_id_when_available() {
+        let command = Command::PointerClick {
+            x: 1,
+            y: 1,
+            absolute: false,
+            button: PointerButton::Left,
+            observe: ObserveOptions::default(),
+            active_window: false,
+            active_window_id: None,
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "observe": {
+                    "active_window_id": "notes_123abc"
+                }
+            }),
+        );
+
+        let rendered = render_response(&command, &response, false);
+        assert_eq!(
+            rendered["hint"],
+            "use --active-window notes_123abc to avoid acting in the wrong window"
+        );
+    }
+
+    #[test]
+    fn active_window_hint_omitted_when_window_id_unavailable() {
+        let command = Command::PointerClick {
+            x: 1,
+            y: 1,
+            absolute: false,
+            button: PointerButton::Left,
+            observe: ObserveOptions::default(),
+            active_window: false,
+            active_window_id: None,
+        };
+        let response = ResponseEnvelope::success("r1", json!({}));
+
+        let rendered = render_response(&command, &response, false);
+        assert!(rendered.get("hint").is_none());
     }
 
     #[test]
