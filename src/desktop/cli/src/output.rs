@@ -18,6 +18,9 @@ pub(crate) fn render_response(
     if supports_active_window && !has_explicit_active_window_id {
         eligible_hints.push(active_window_tip_message(response));
     }
+    if matches!(command, Command::OpenApp { .. }) {
+        eligible_hints.push(open_app_hint_message(response));
+    }
     for hint in &json_hints {
         eligible_hints.push((*hint).to_string());
     }
@@ -165,6 +168,20 @@ fn command_json_hints(command: &Command) -> Vec<&'static str> {
         ],
         _ => Vec::new(),
     }
+}
+
+fn open_app_hint_message(response: &ResponseEnvelope) -> String {
+    let window_id = match response {
+        ResponseEnvelope::Success(success) => success
+            .result
+            .get("window_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("unknown"),
+        ResponseEnvelope::Error(_) => "unknown",
+    };
+    format!("use --active-window {window_id} in follow-up commands to target this app window")
 }
 
 fn resolve_window_id_from_response(response: &ResponseEnvelope) -> Option<String> {
@@ -1004,6 +1021,23 @@ mod tests {
         );
         assert_eq!(rendered["ok"], true);
         assert_eq!(rendered["result"]["windows"], json!([]));
+    }
+
+    #[test]
+    fn open_app_renders_window_hint_with_window_id() {
+        let command = Command::OpenApp {
+            name: "Notes".to_string(),
+            args: vec![],
+            wait: false,
+            timeout_ms: None,
+        };
+        let response = ResponseEnvelope::success("r1", json!({ "window_id": "notes_859606" }));
+
+        let rendered = render_response(&command, &response, false);
+        assert_eq!(
+            rendered["hint"],
+            "use --active-window notes_859606 in follow-up commands to target this app window"
+        );
     }
 
     #[test]
