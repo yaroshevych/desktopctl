@@ -463,6 +463,16 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     }
 
     let result = value.get("result").cloned().unwrap_or_default();
+    if matches!(command, Command::OpenApp { .. }) {
+        if let Some(window_id) = result
+            .get("window_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            lines.push(format!("- window_id: {window_id}"));
+        }
+    }
     if let Some(message) = result.get("message").and_then(serde_json::Value::as_str) {
         lines.push(String::new());
         lines.push("## Result".to_string());
@@ -471,10 +481,31 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     }
 
     if let Some(obj) = result.as_object() {
+        let promote_result_to_top = matches!(
+            command,
+            Command::WindowFocus { .. } | Command::WindowBounds { .. }
+        );
         let mut scalar_lines: Vec<String> = Vec::new();
         let mut windows_for_section: Option<Vec<serde_json::Value>> = None;
         for (k, v) in obj {
             if k == "observe" || k == "click_target" {
+                continue;
+            }
+            if matches!(command, Command::AppIsolate { .. }) && k == "hidden_apps" {
+                if let Some(summary) = compact_value_summary(v) {
+                    lines.push(format!("- hidden_apps: {summary}"));
+                }
+                continue;
+            }
+            if matches!(command, Command::AppIsolate { .. }) && (k == "app" || k == "state") {
+                continue;
+            }
+            if matches!(command, Command::AppHide { .. } | Command::AppShow { .. })
+                && (k == "app" || k == "state")
+            {
+                continue;
+            }
+            if matches!(command, Command::OpenApp { .. }) && k == "window_id" {
                 continue;
             }
             if matches!(command, Command::WindowFocus { .. }) && k == "focused" {
@@ -501,9 +532,13 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             }
         }
         if !scalar_lines.is_empty() {
-            lines.push(String::new());
-            lines.push("## Result".to_string());
-            lines.extend(scalar_lines);
+            if promote_result_to_top {
+                lines.extend(scalar_lines);
+            } else {
+                lines.push(String::new());
+                lines.push("## Result".to_string());
+                lines.extend(scalar_lines);
+            }
         }
         if let Some(windows) = windows_for_section {
             append_windows_section(&mut lines, &windows);
@@ -1041,6 +1076,85 @@ mod tests {
     }
 
     #[test]
+    fn open_app_markdown_promotes_window_id_to_top_section() {
+        let command = Command::OpenApp {
+            name: "Notes".to_string(),
+            args: vec![],
+            wait: false,
+            timeout_ms: None,
+        };
+        let response = ResponseEnvelope::success("r1", json!({ "window_id": "notes_859606" }));
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("- request_id: r1"));
+        assert!(markdown.contains("- hint: use --active-window notes_859606"));
+        assert!(markdown.contains("- window_id: notes_859606"));
+        assert!(!markdown.contains("## Result"));
+    }
+
+    #[test]
+    fn app_hide_markdown_omits_app_state_result_block() {
+        let command = Command::AppHide {
+            name: "Notes".to_string(),
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "app": "Notes",
+                "state": "hidden"
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("- request_id: r1"));
+        assert!(!markdown.contains("## Result"));
+        assert!(!markdown.contains("- app: Notes"));
+        assert!(!markdown.contains("- state: hidden"));
+    }
+
+    #[test]
+    fn app_show_markdown_omits_app_state_result_block() {
+        let command = Command::AppShow {
+            name: "Notes".to_string(),
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "app": "Notes",
+                "state": "shown"
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("- request_id: r1"));
+        assert!(!markdown.contains("## Result"));
+        assert!(!markdown.contains("- app: Notes"));
+        assert!(!markdown.contains("- state: shown"));
+    }
+
+    #[test]
+    fn app_isolate_promotes_hidden_apps_and_omits_app_state_result_block() {
+        let command = Command::AppIsolate {
+            name: "Notes".to_string(),
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "app": "Notes",
+                "hidden_apps": 1,
+                "state": "isolated"
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("- request_id: r1"));
+        assert!(markdown.contains("- hidden_apps: 1"));
+        assert!(!markdown.contains("## Result"));
+        assert!(!markdown.contains("- app: Notes"));
+        assert!(!markdown.contains("- state: isolated"));
+    }
+
+    #[test]
     fn tokenize_markdown_omits_positions_and_keeps_ids() {
         let command = Command::ScreenTokenize {
             overlay_out_path: None,
@@ -1148,6 +1262,7 @@ mod tests {
         assert!(markdown.contains("- window_size: 1048x680"));
         assert!(!markdown.contains("`true`"));
         assert!(!markdown.contains("- window.app:"));
+        assert!(!markdown.contains("## Result"));
     }
 
     #[test]
@@ -1178,6 +1293,7 @@ mod tests {
         assert!(markdown.contains("- window_id: notes_8bec33"));
         assert!(markdown.contains("- window_title: Shopping list"));
         assert!(markdown.contains("- window_size: 1048x680"));
+        assert!(!markdown.contains("## Result"));
     }
 
     #[test]
