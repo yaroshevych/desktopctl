@@ -553,7 +553,12 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     if let Some(obj) = result.as_object() {
         let mut scalar_lines: Vec<String> = Vec::new();
         let mut windows_for_section: Option<Vec<serde_json::Value>> = None;
-        for (k, v) in obj {
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        for k in keys {
+            let Some(v) = obj.get(k) else {
+                continue;
+            };
             if k == "observe" || k == "click_target" {
                 continue;
             }
