@@ -4,6 +4,21 @@ use desktop_core::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn is_snake_case_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn push_kv_line(lines: &mut Vec<String>, key: &str, value: impl AsRef<str>) {
+    debug_assert!(
+        is_snake_case_key(key),
+        "markdown key must be snake_case: {key}"
+    );
+    lines.push(format!("- {key}: {}", value.as_ref()));
+}
+
 pub(crate) fn render_response(
     command: &Command,
     response: &ResponseEnvelope,
@@ -50,19 +65,16 @@ pub(crate) fn render_markdown_response(
 }
 
 pub(crate) fn render_markdown_error(request_id: &str, err: &AppError) -> String {
-    let mut lines: Vec<String> = vec![
-        "# Error".to_string(),
-        String::new(),
-        format!("- request_id: {request_id}"),
-        format!("- code: {:?}", err.code),
-        format!("- message: {}", err.message),
-        format!("- retryable: {}", err.retryable),
-    ];
+    let mut lines: Vec<String> = vec!["# Error".to_string(), String::new()];
+    push_kv_line(&mut lines, "request_id", request_id);
+    push_kv_line(&mut lines, "code", format!("{:?}", err.code));
+    push_kv_line(&mut lines, "message", &err.message);
+    push_kv_line(&mut lines, "retryable", err.retryable.to_string());
     if let Some(command) = err.command.as_deref().filter(|v| !v.trim().is_empty()) {
-        lines.push(format!("- command: {command}"));
+        push_kv_line(&mut lines, "command", command);
     }
     if let Some(debug_ref) = err.debug_ref.as_deref().filter(|v| !v.trim().is_empty()) {
-        lines.push(format!("- debug_ref: {debug_ref}"));
+        push_kv_line(&mut lines, "debug_ref", debug_ref);
     }
     lines.join("\n")
 }
@@ -354,21 +366,21 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         .map(str::to_string);
 
     let mut lines: Vec<String> = vec!["# Screen Tokenize".to_string(), String::new()];
-    lines.push(format!("- request_id: {request_id}"));
+    push_kv_line(&mut lines, "request_id", request_id);
     if let Some(app) = top_app {
-        lines.push(format!("- app: {}", app));
+        push_kv_line(&mut lines, "app", app);
     }
     if let Some(size) = top_size {
-        lines.push(format!("- window_size: {}", size));
+        push_kv_line(&mut lines, "window_size", size);
     }
     if let Some(title) = top_window_title {
-        lines.push(format!("- window_title: {}", title));
+        push_kv_line(&mut lines, "window_title", title);
     }
     if let Some(id) = top_window_id {
-        lines.push(format!("- window_id: {}", id));
+        push_kv_line(&mut lines, "window_id", id);
     }
     if let Some(hint_text) = hint.filter(|v| !v.trim().is_empty()) {
-        lines.push(format!("- hint: {}", hint_text));
+        push_kv_line(&mut lines, "hint", hint_text);
     }
     if windows.is_empty() {
         lines.push(String::new());
@@ -391,8 +403,8 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
             lines.push("## Window".to_string());
         } else {
             lines.push(format!("## Window {}", window_idx + 1));
-            lines.push(format!("- window_title: {}", title));
-            lines.push(format!("- window_id: {}", id));
+            push_kv_line(&mut lines, "window_title", title);
+            push_kv_line(&mut lines, "window_id", id);
         }
         let elements = window
             .get("elements")
@@ -487,13 +499,13 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
     let mut lines = vec![format!("# {}", to_title_case(&title)), String::new()];
-    lines.push(format!("- request_id: {request_id}"));
+    push_kv_line(&mut lines, "request_id", request_id);
     if let Some(hint) = value
         .get("hint")
         .and_then(serde_json::Value::as_str)
         .filter(|v| !v.trim().is_empty())
     {
-        lines.push(format!("- hint: {}", hint));
+        push_kv_line(&mut lines, "hint", hint);
     }
 
     let result = value.get("result").cloned().unwrap_or_default();
@@ -504,7 +516,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            lines.push(format!("- window_id: {window_id}"));
+            push_kv_line(&mut lines, "window_id", window_id);
         }
     }
     if profile.promote_clipboard_text {
@@ -514,7 +526,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            lines.push(format!("- text: {text}"));
+            push_kv_line(&mut lines, "text", text);
         }
     }
     if let Some(message) = result.get("message").and_then(serde_json::Value::as_str) {
@@ -533,7 +545,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             }
             if profile.promote_hidden_apps && k == "hidden_apps" {
                 if let Some(summary) = compact_value_summary(v) {
-                    lines.push(format!("- hidden_apps: {summary}"));
+                    push_kv_line(&mut lines, "hidden_apps", summary);
                 }
                 continue;
             }
@@ -552,12 +564,12 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
                 }
             }
             if let Some(bounds_summary) = summarize_bounds_value(v) {
-                scalar_lines.push(format!("- {k}: {bounds_summary}"));
+                push_kv_line(&mut scalar_lines, k, bounds_summary);
                 continue;
             }
             if let Some(summary) = permission_state_summary(v).or_else(|| compact_value_summary(v))
             {
-                scalar_lines.push(format!("- {}: {}", k, summary));
+                push_kv_line(&mut scalar_lines, k, summary);
             }
         }
         if !scalar_lines.is_empty() {
@@ -585,14 +597,14 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             .and_then(serde_json::Value::as_str)
             .filter(|v| !v.trim().is_empty())
         {
-            lines.push(format!("- id: {}", id));
+            push_kv_line(&mut lines, "id", id);
         }
         if let Some(text) = target
             .get("text")
             .and_then(serde_json::Value::as_str)
             .filter(|v| !v.trim().is_empty())
         {
-            lines.push(format!("- text: {}", text));
+            push_kv_line(&mut lines, "text", text);
         }
     }
 
@@ -678,7 +690,7 @@ fn append_observe_sections(lines: &mut Vec<String>, result: &serde_json::Value) 
         "focused_element_id",
     ] {
         if let Some(summary) = observe.get(key).and_then(compact_value_summary) {
-            lines.push(format!("- {key}: {summary}"));
+            push_kv_line(lines, key, summary);
         }
     }
     let Some(tokens_delta) = observe
@@ -826,14 +838,12 @@ fn render_error_markdown_from_value(title: &str, value: &serde_json::Value) -> S
         .get("retryable")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    format!(
-        "# {}\n\n- request_id: {}\n- code: {}\n- message: {}\n- retryable: {}",
-        to_title_case(title),
-        request_id,
-        code,
-        message,
-        retryable
-    )
+    let mut lines = vec![format!("# {}", to_title_case(title)), String::new()];
+    push_kv_line(&mut lines, "request_id", request_id);
+    push_kv_line(&mut lines, "code", code);
+    push_kv_line(&mut lines, "message", message);
+    push_kv_line(&mut lines, "retryable", retryable.to_string());
+    lines.join("\n")
 }
 
 fn element_label(element: &serde_json::Value) -> String {
