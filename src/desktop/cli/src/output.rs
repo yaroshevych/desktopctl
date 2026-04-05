@@ -19,6 +19,23 @@ fn push_kv_line(lines: &mut Vec<String>, key: &str, value: impl AsRef<str>) {
     lines.push(format!("- {key}: {}", value.as_ref()));
 }
 
+fn push_plain_field_line(lines: &mut Vec<String>, key: &str, value: impl AsRef<str>) {
+    debug_assert!(
+        is_snake_case_key(key),
+        "markdown key must be snake_case: {key}"
+    );
+    lines.push(format!("{key}: {}", value.as_ref()));
+}
+
+fn push_section(lines: &mut Vec<String>, title: &str) {
+    lines.push(String::new());
+    lines.push(format!("## {title}"));
+}
+
+fn push_subsection(lines: &mut Vec<String>, title: &str) {
+    lines.push(format!("### {title}"));
+}
+
 pub(crate) fn render_response(
     command: &Command,
     response: &ResponseEnvelope,
@@ -383,8 +400,7 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         push_kv_line(&mut lines, "hint", hint_text);
     }
     if windows.is_empty() {
-        lines.push(String::new());
-        lines.push("## Window (unknown)".to_string());
+        push_section(&mut lines, "Window (unknown)");
         lines.push("None".to_string());
     }
     let single_window = windows.len() == 1;
@@ -398,11 +414,10 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_str)
             .filter(|v| !v.trim().is_empty())
             .unwrap_or("untitled");
-        lines.push(String::new());
         if single_window {
-            lines.push("## Window".to_string());
+            push_section(&mut lines, "Window");
         } else {
-            lines.push(format!("## Window {}", window_idx + 1));
+            push_section(&mut lines, &format!("Window {}", window_idx + 1));
             push_kv_line(&mut lines, "window_title", title);
             push_kv_line(&mut lines, "window_id", id);
         }
@@ -447,9 +462,9 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
                 _ => format!("Column {}", idx + 1),
             };
             if column_scrollable.get(idx).copied().unwrap_or(false) {
-                lines.push(format!("### {} (Scrollable)", title));
+                push_subsection(&mut lines, &format!("{} (Scrollable)", title));
             } else {
-                lines.push(format!("### {}", title));
+                push_subsection(&mut lines, &title);
             }
             let mut last_render_key: Option<String> = None;
             let mut last_y: f64 = f64::NEG_INFINITY;
@@ -530,8 +545,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
         }
     }
     if let Some(message) = result.get("message").and_then(serde_json::Value::as_str) {
-        lines.push(String::new());
-        lines.push("## Result".to_string());
+        push_section(&mut lines, "Result");
         lines.push(message.to_string());
         return lines.join("\n");
     }
@@ -576,8 +590,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             if profile.promote_result_to_top {
                 lines.extend(scalar_lines);
             } else {
-                lines.push(String::new());
-                lines.push("## Result".to_string());
+                push_section(&mut lines, "Result");
                 lines.extend(scalar_lines);
             }
         }
@@ -590,8 +603,7 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
         .get("click_target")
         .and_then(serde_json::Value::as_object)
     {
-        lines.push(String::new());
-        lines.push("## Click Target".to_string());
+        push_section(&mut lines, "Click Target");
         if let Some(id) = target
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -677,8 +689,7 @@ fn append_observe_sections(lines: &mut Vec<String>, result: &serde_json::Value) 
     let Some(observe) = result.get("observe").and_then(serde_json::Value::as_object) else {
         return;
     };
-    lines.push(String::new());
-    lines.push("## Observe".to_string());
+    push_section(lines, "Observe");
     for key in [
         "stability",
         "changed",
@@ -715,8 +726,7 @@ fn append_tokens_delta_section(
     if items.is_empty() {
         return;
     }
-    lines.push(String::new());
-    lines.push(format!("## {title}"));
+    push_section(lines, title);
     if title == "Removed" || title == "Added" {
         append_tokens_delta_columns(lines, items);
         return;
@@ -778,7 +788,7 @@ fn append_tokens_delta_columns(lines: &mut Vec<String>, items: &[serde_json::Val
             1 => "Right Column".to_string(),
             _ => format!("Column {}", idx + 1),
         };
-        lines.push(format!("### {title}"));
+        push_subsection(lines, &title);
         let mut last_render_key: Option<String> = None;
         let mut last_y: f64 = f64::NEG_INFINITY;
         for entry in column {
@@ -1015,7 +1025,7 @@ fn append_window_result_lines(value: &serde_json::Value, lines: &mut Vec<String>
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        lines.push(format!("- window_title: {v}"));
+        push_kv_line(lines, "window_title", v);
         added = true;
     }
     if let Some(v) = window
@@ -1024,7 +1034,7 @@ fn append_window_result_lines(value: &serde_json::Value, lines: &mut Vec<String>
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        lines.push(format!("- window_id: {v}"));
+        push_kv_line(lines, "window_id", v);
         added = true;
     }
     if let Some(v) = window
@@ -1033,7 +1043,7 @@ fn append_window_result_lines(value: &serde_json::Value, lines: &mut Vec<String>
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        lines.push(format!("- window_app: {v}"));
+        push_kv_line(lines, "window_app", v);
         added = true;
     }
     if let Some(size_summary) = window
@@ -1041,7 +1051,7 @@ fn append_window_result_lines(value: &serde_json::Value, lines: &mut Vec<String>
         .and_then(summarize_bounds_size)
         .filter(|v| !v.is_empty())
     {
-        lines.push(format!("- window_size: {size_summary}"));
+        push_kv_line(lines, "window_size", size_summary);
         added = true;
     }
     added
@@ -1064,8 +1074,7 @@ fn summarize_bounds_size(value: &serde_json::Value) -> Option<String> {
 }
 
 fn append_windows_section(lines: &mut Vec<String>, windows: &[serde_json::Value]) {
-    lines.push(String::new());
-    lines.push("## Windows".to_string());
+    push_section(lines, "Windows");
     if windows.is_empty() {
         lines.push("None".to_string());
         return;
@@ -1096,10 +1105,10 @@ fn append_windows_section(lines: &mut Vec<String>, windows: &[serde_json::Value]
             .get("bounds")
             .and_then(summarize_bounds_size)
             .unwrap_or_else(|| "unknown".to_string());
-        lines.push(format!("### {title}"));
-        lines.push(format!("window_id: {id}"));
-        lines.push(format!("app: {app}"));
-        lines.push(format!("window_size: {size}"));
+        push_subsection(lines, title);
+        push_plain_field_line(lines, "window_id", id);
+        push_plain_field_line(lines, "app", app);
+        push_plain_field_line(lines, "window_size", size);
     }
 }
 
