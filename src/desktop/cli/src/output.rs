@@ -48,16 +48,16 @@ pub(crate) fn render_markdown_error(request_id: &str, err: &AppError) -> String 
     let mut lines: Vec<String> = vec![
         "# Error".to_string(),
         String::new(),
-        format!("- Request ID: {request_id}"),
-        format!("- Code: `{:?}`", err.code),
-        format!("- Message: {}", err.message),
-        format!("- Retryable: `{}`", err.retryable),
+        format!("- request_id: {request_id}"),
+        format!("- code: {:?}", err.code),
+        format!("- message: {}", err.message),
+        format!("- retryable: {}", err.retryable),
     ];
     if let Some(command) = err.command.as_deref().filter(|v| !v.trim().is_empty()) {
-        lines.push(format!("- Command: `{command}`"));
+        lines.push(format!("- command: {command}"));
     }
     if let Some(debug_ref) = err.debug_ref.as_deref().filter(|v| !v.trim().is_empty()) {
-        lines.push(format!("- Debug Ref: `{debug_ref}`"));
+        lines.push(format!("- debug_ref: {debug_ref}"));
     }
     lines.join("\n")
 }
@@ -141,16 +141,14 @@ fn active_window_tip_message(response: &ResponseEnvelope) -> String {
 fn command_json_hints(command: &Command) -> Vec<&'static str> {
     match command {
         Command::WindowList => {
-            vec![
-                "compact output with | jq '.result.windows[] | \"\\\\(.id) \\\\(.visible) \\\\(.title)\"'",
-            ]
+            vec!["window list markdown prints one line per window as <title> #<id>"]
         }
         Command::ScreenCapture { .. } => vec![
-            "prefer `screen tokenize` for automation flows; use screenshot as last resort for visual artifacts/debug",
+            "prefer screen tokenize for automation flows; use screenshot as last resort for visual artifacts/debug",
         ],
         Command::ScreenTokenize { .. } => {
             const TOKENIZE_HINTS: [&str; 1] = [
-                "tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`",
+                "tokenize response includes request_id in JSON output; reuse it with desktopctl request response <request_id>",
             ];
             let idx = (SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -163,7 +161,7 @@ fn command_json_hints(command: &Command) -> Vec<&'static str> {
             vec!["before scroll, move pointer into the target scroll area"]
         }
         Command::UiType { .. } => vec![
-            "to replace existing field content, send `desktopctl keyboard press cmd+a` before typing",
+            "to replace existing field content, send desktopctl keyboard press cmd+a before typing",
         ],
         _ => Vec::new(),
     }
@@ -306,21 +304,21 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         .map(str::to_string);
 
     let mut lines: Vec<String> = vec!["# Screen Tokenize".to_string(), String::new()];
-    lines.push(format!("- Request ID: {request_id}"));
+    lines.push(format!("- request_id: {request_id}"));
     if let Some(app) = top_app {
-        lines.push(format!("- App: {}", app));
+        lines.push(format!("- app: {}", app));
     }
     if let Some(size) = top_size {
-        lines.push(format!("- Window Size: {}", size));
+        lines.push(format!("- window_size: {}", size));
     }
     if let Some(title) = top_window_title {
-        lines.push(format!("- Window Title: {}", title));
+        lines.push(format!("- window_title: {}", title));
     }
     if let Some(id) = top_window_id {
-        lines.push(format!("- Window ID: {}", id));
+        lines.push(format!("- window_id: {}", id));
     }
     if let Some(hint_text) = hint.filter(|v| !v.trim().is_empty()) {
-        lines.push(format!("- Hint: {}", hint_text));
+        lines.push(format!("- hint: {}", hint_text));
     }
     if windows.is_empty() {
         lines.push(String::new());
@@ -343,8 +341,8 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
             lines.push("## Window".to_string());
         } else {
             lines.push(format!("## Window {}", window_idx + 1));
-            lines.push(format!("Title: {}", title));
-            lines.push(format!("ID: {}", id));
+            lines.push(format!("- window_title: {}", title));
+            lines.push(format!("- window_id: {}", id));
         }
         let elements = window
             .get("elements")
@@ -438,13 +436,13 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
     let mut lines = vec![format!("# {}", to_title_case(&title)), String::new()];
-    lines.push(format!("- Request ID: {request_id}"));
+    lines.push(format!("- request_id: {request_id}"));
     if let Some(hint) = value
         .get("hint")
         .and_then(serde_json::Value::as_str)
         .filter(|v| !v.trim().is_empty())
     {
-        lines.push(format!("- Hint: {}", hint));
+        lines.push(format!("- hint: {}", hint));
     }
 
     let result = value.get("result").cloned().unwrap_or_default();
@@ -457,8 +455,27 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
 
     if let Some(obj) = result.as_object() {
         let mut scalar_lines: Vec<String> = Vec::new();
+        let mut windows_for_section: Option<Vec<serde_json::Value>> = None;
         for (k, v) in obj {
             if k == "observe" || k == "click_target" {
+                continue;
+            }
+            if matches!(command, Command::WindowFocus { .. }) && k == "focused" {
+                continue;
+            }
+            if k == "windows" {
+                if let Some(items) = v.as_array() {
+                    windows_for_section = Some(items.clone());
+                }
+                continue;
+            }
+            if k == "window" {
+                if append_window_result_lines(v, &mut scalar_lines) {
+                    continue;
+                }
+            }
+            if let Some(bounds_summary) = summarize_bounds_value(v) {
+                scalar_lines.push(format!("- {k}: {bounds_summary}"));
                 continue;
             }
             if let Some(summary) = permission_state_summary(v).or_else(|| compact_value_summary(v))
@@ -470,6 +487,9 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             lines.push(String::new());
             lines.push("## Result".to_string());
             lines.extend(scalar_lines);
+        }
+        if let Some(windows) = windows_for_section {
+            append_windows_section(&mut lines, &windows);
         }
     }
 
@@ -665,7 +685,7 @@ fn render_error_markdown_from_value(title: &str, value: &serde_json::Value) -> S
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     format!(
-        "# {}\n\n- Request ID: {}\n- Code: `{}`\n- Message: {}\n- Retryable: `{}`",
+        "# {}\n\n- request_id: {}\n- code: {}\n- message: {}\n- retryable: {}",
         to_title_case(title),
         request_id,
         code,
@@ -812,8 +832,8 @@ fn markdown_entry_from_token_delta(token: &serde_json::Value) -> Option<Markdown
 fn compact_value_summary(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => None,
-        serde_json::Value::Bool(v) => Some(format!("`{v}`")),
-        serde_json::Value::Number(v) => Some(format!("`{v}`")),
+        serde_json::Value::Bool(v) => Some(v.to_string()),
+        serde_json::Value::Number(v) => Some(v.to_string()),
         serde_json::Value::String(v) => {
             if v.trim().is_empty() {
                 None
@@ -821,8 +841,8 @@ fn compact_value_summary(value: &serde_json::Value) -> Option<String> {
                 Some(v.clone())
             }
         }
-        serde_json::Value::Array(items) => Some(format!("`{} items`", items.len())),
-        serde_json::Value::Object(map) => Some(format!("`{} fields`", map.len())),
+        serde_json::Value::Array(items) => Some(format!("{} items", items.len())),
+        serde_json::Value::Object(map) => Some(format!("{} fields", map.len())),
     }
 }
 
@@ -830,6 +850,92 @@ fn permission_state_summary(value: &serde_json::Value) -> Option<String> {
     let obj = value.as_object()?;
     let granted = obj.get("granted")?.as_bool()?;
     Some(granted.to_string())
+}
+
+fn append_window_result_lines(value: &serde_json::Value, lines: &mut Vec<String>) -> bool {
+    let Some(window) = value.as_object() else {
+        return false;
+    };
+    let mut added = false;
+    if let Some(v) = window
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        lines.push(format!("- window_title: {v}"));
+        added = true;
+    }
+    if let Some(v) = window
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        lines.push(format!("- window_id: {v}"));
+        added = true;
+    }
+    if let Some(v) = window
+        .get("app")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        lines.push(format!("- window_app: {v}"));
+        added = true;
+    }
+    if let Some(size_summary) = window
+        .get("bounds")
+        .and_then(summarize_bounds_size)
+        .filter(|v| !v.is_empty())
+    {
+        lines.push(format!("- window_size: {size_summary}"));
+        added = true;
+    }
+    added
+}
+
+fn summarize_bounds_value(value: &serde_json::Value) -> Option<String> {
+    let bounds = value.as_object()?;
+    let x = bounds.get("x").and_then(serde_json::Value::as_f64)?;
+    let y = bounds.get("y").and_then(serde_json::Value::as_f64)?;
+    let width = bounds.get("width").and_then(serde_json::Value::as_f64)?;
+    let height = bounds.get("height").and_then(serde_json::Value::as_f64)?;
+    Some(format!("{width:.0}x{height:.0} @ {x:.0},{y:.0}"))
+}
+
+fn summarize_bounds_size(value: &serde_json::Value) -> Option<String> {
+    let bounds = value.as_object()?;
+    let width = bounds.get("width").and_then(serde_json::Value::as_f64)?;
+    let height = bounds.get("height").and_then(serde_json::Value::as_f64)?;
+    Some(format!("{width:.0}x{height:.0}"))
+}
+
+fn append_windows_section(lines: &mut Vec<String>, windows: &[serde_json::Value]) {
+    lines.push(String::new());
+    lines.push("## Windows".to_string());
+    if windows.is_empty() {
+        lines.push("None".to_string());
+        return;
+    }
+    for window in windows {
+        let Some(obj) = window.as_object() else {
+            continue;
+        };
+        let id = obj
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("unknown");
+        let title = obj
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("(untitled)");
+        lines.push(format!("- {title} #{id}"));
+    }
 }
 
 fn to_title_case(value: &str) -> String {
@@ -881,7 +987,7 @@ mod tests {
         let rendered = render_response(&command, &response, false);
         assert_eq!(
             rendered["hint"],
-            "compact output with | jq '.result.windows[] | \"\\\\(.id) \\\\(.visible) \\\\(.title)\"'"
+            "window list markdown prints one line per window as <title> #<id>"
         );
         assert_eq!(rendered["ok"], true);
         assert_eq!(rendered["result"]["windows"], json!([]));
@@ -930,8 +1036,8 @@ mod tests {
         );
 
         let markdown = render_markdown_response(&command, &response, false);
-        assert!(markdown.contains("- Window Title: Permissions"));
-        assert!(markdown.contains("- Window ID: system_settings_1aca92"));
+        assert!(markdown.contains("- window_title: Permissions"));
+        assert!(markdown.contains("- window_id: system_settings_1aca92"));
         assert!(markdown.contains("## Window"));
         assert!(markdown.contains("### Left Column"));
         assert!(markdown.contains("### Right Column"));
@@ -961,6 +1067,104 @@ mod tests {
         assert!(markdown.contains("- accessibility: true"));
         assert!(markdown.contains("- screen_recording: false"));
         assert!(!markdown.contains("fields"));
+    }
+
+    #[test]
+    fn window_focus_markdown_summarizes_window_and_plain_bool() {
+        let command = Command::WindowFocus {
+            title: "Notes".to_string(),
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "focused": true,
+                "window": {
+                    "id": "notes_8bec33",
+                    "app": "Notes",
+                    "title": "Shopping list",
+                    "bounds": {
+                        "x": 1430,
+                        "y": 175,
+                        "width": 1048,
+                        "height": 680
+                    },
+                    "frontmost": true,
+                    "visible": true
+                }
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("- window_app: Notes"));
+        assert!(markdown.contains("- window_id: notes_8bec33"));
+        assert!(markdown.contains("- window_title: Shopping list"));
+        assert!(markdown.contains("- window_size: 1048x680"));
+        assert!(!markdown.contains("`true`"));
+        assert!(!markdown.contains("- window.app:"));
+    }
+
+    #[test]
+    fn window_bounds_markdown_summarizes_window_and_bounds() {
+        let command = Command::WindowBounds {
+            title: "Notes".to_string(),
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "window": {
+                    "id": "notes_8bec33",
+                    "app": "Notes",
+                    "title": "Shopping list",
+                    "bounds": {
+                        "x": 1430,
+                        "y": 175,
+                        "width": 1048,
+                        "height": 680
+                    },
+                    "frontmost": true,
+                    "visible": true
+                }
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("- window_id: notes_8bec33"));
+        assert!(markdown.contains("- window_title: Shopping list"));
+        assert!(markdown.contains("- window_size: 1048x680"));
+    }
+
+    #[test]
+    fn window_list_markdown_renders_windows_section() {
+        let command = Command::WindowList;
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "windows": [
+                    {
+                        "id": "notes_95b2a1",
+                        "app": "Notes",
+                        "title": "Notes",
+                        "bounds": { "x": 1430, "y": 175, "width": 1048, "height": 680 },
+                        "frontmost": true,
+                        "visible": true
+                    },
+                    {
+                        "id": "settings_01",
+                        "app": "System Settings",
+                        "title": "Screen & System Audio Recording",
+                        "bounds": { "x": 120, "y": 70, "width": 1100, "height": 780 },
+                        "frontmost": false,
+                        "visible": true
+                    }
+                ]
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("## Windows"));
+        assert!(markdown.contains("- Notes #notes_95b2a1"));
+        assert!(markdown.contains("- Screen & System Audio Recording #settings_01"));
+        assert!(!markdown.contains("- windows: 2 items"));
     }
 
     #[test]
@@ -1016,6 +1220,7 @@ mod tests {
 
         let markdown = render_markdown_response(&command, &response, false);
         assert!(markdown.contains("## Click Target"));
+        assert!(markdown.contains("- request_id: r1"));
         assert!(markdown.contains("- id: ocr_13"));
         assert!(markdown.contains("## Observe"));
         assert!(markdown.contains("- stability: timeout"));
