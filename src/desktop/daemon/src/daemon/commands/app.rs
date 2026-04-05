@@ -41,7 +41,8 @@ pub(crate) fn show(name: String) -> Result<Value, AppError> {
     trace::log(format!("app_show:start name={name}"));
     platform::apps::show_application(&name)?;
     trace::log(format!("app_show:ok name={name}"));
-    Ok(json!({ "app": name, "state": "shown" }))
+    let window_id = try_resolve_frontmost_window_id_for_app(&name);
+    Ok(json!({ "app": name, "state": "shown", "window_id": window_id }))
 }
 
 pub(crate) fn isolate(name: String) -> Result<Value, AppError> {
@@ -49,7 +50,8 @@ pub(crate) fn isolate(name: String) -> Result<Value, AppError> {
     let hidden = platform::apps::isolate_application(&name)?;
     let _ = super::super::wait_for_open_app(&name, 6_000);
     trace::log(format!("app_isolate:ok name={name} hidden={hidden}"));
-    Ok(json!({ "app": name, "state": "isolated", "hidden_apps": hidden }))
+    let window_id = try_resolve_frontmost_window_id_for_app(&name);
+    Ok(json!({ "app": name, "state": "isolated", "hidden_apps": hidden, "window_id": window_id }))
 }
 
 pub(crate) fn open(

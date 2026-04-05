@@ -463,7 +463,10 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
     }
 
     let result = value.get("result").cloned().unwrap_or_default();
-    if matches!(command, Command::OpenApp { .. }) {
+    if matches!(
+        command,
+        Command::OpenApp { .. } | Command::AppShow { .. } | Command::AppIsolate { .. }
+    ) {
         if let Some(window_id) = result
             .get("window_id")
             .and_then(serde_json::Value::as_str)
@@ -505,7 +508,11 @@ fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> Stri
             {
                 continue;
             }
-            if matches!(command, Command::OpenApp { .. }) && k == "window_id" {
+            if matches!(
+                command,
+                Command::OpenApp { .. } | Command::AppShow { .. } | Command::AppIsolate { .. }
+            ) && k == "window_id"
+            {
                 continue;
             }
             if matches!(command, Command::WindowFocus { .. }) && k == "focused" {
@@ -1121,12 +1128,14 @@ mod tests {
             "r1",
             json!({
                 "app": "Notes",
-                "state": "shown"
+                "state": "shown",
+                "window_id": "notes_859606"
             }),
         );
 
         let markdown = render_markdown_response(&command, &response, false);
         assert!(markdown.contains("- request_id: r1"));
+        assert!(markdown.contains("- window_id: notes_859606"));
         assert!(!markdown.contains("## Result"));
         assert!(!markdown.contains("- app: Notes"));
         assert!(!markdown.contains("- state: shown"));
@@ -1142,12 +1151,14 @@ mod tests {
             json!({
                 "app": "Notes",
                 "hidden_apps": 1,
-                "state": "isolated"
+                "state": "isolated",
+                "window_id": "notes_859606"
             }),
         );
 
         let markdown = render_markdown_response(&command, &response, false);
         assert!(markdown.contains("- request_id: r1"));
+        assert!(markdown.contains("- window_id: notes_859606"));
         assert!(markdown.contains("- hidden_apps: 1"));
         assert!(!markdown.contains("## Result"));
         assert!(!markdown.contains("- app: Notes"));
