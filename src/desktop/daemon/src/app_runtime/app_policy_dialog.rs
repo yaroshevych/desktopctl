@@ -63,6 +63,7 @@ struct DialogState {
     text_observer: *mut AnyObject,
     mode_popup: Retained<AnyObject>,
     apps_field: Retained<AnyObject>,
+    full_screen_checkbox: Retained<AnyObject>,
     warning_label: Retained<NSTextField>,
 }
 
@@ -122,6 +123,11 @@ unsafe fn string_value(control: &AnyObject) -> String {
         .into_owned()
 }
 
+unsafe fn bool_state(control: &AnyObject) -> bool {
+    let state: isize = msg_send![control, state];
+    state != 0
+}
+
 unsafe fn apply_policy_controls_state(
     mode: PolicyMode,
     apps: &[String],
@@ -149,6 +155,7 @@ fn persist_policy_from_dialog() {
             let cfg = AppPolicyConfig {
                 policy_mode: mode,
                 apps: apps.clone(),
+                allow_full_screen_capture: bool_state(&state.full_screen_checkbox),
             };
             if let Err(err) = app_policy::save(&cfg) {
                 eprintln!("failed to save app policy config: {err}");
@@ -306,6 +313,24 @@ fn show_on_main() {
             usingBlock: &*text_change_block
         ];
 
+        let full_screen_checkbox: *mut AnyObject = msg_send![class!(NSButton), alloc];
+        let full_screen_checkbox: *mut AnyObject = msg_send![
+            full_screen_checkbox,
+            initWithFrame: NSRect::new(NSPoint::new(20.0, 78.0), NSSize::new(408.0, 18.0))
+        ];
+        let _: () = msg_send![full_screen_checkbox, setButtonType: 3usize];
+        let _: () = msg_send![
+            full_screen_checkbox,
+            setTitle: &*NSString::from_str("Allow full-screen capture")
+        ];
+        let _: () = msg_send![
+            full_screen_checkbox,
+            setState: if cfg.allow_full_screen_capture { 1isize } else { 0isize }
+        ];
+        let _: () = msg_send![full_screen_checkbox, setTarget: target];
+        let _: () = msg_send![full_screen_checkbox, setAction: sel!(appPolicyModeChanged:)];
+        let _: () = msg_send![&*cv, addSubview: full_screen_checkbox];
+
         let helper = NSTextField::wrappingLabelWithString(
             &NSString::from_str("Comma-separated app names. Example: Safari, Slack"),
             mtm,
@@ -321,7 +346,7 @@ fn show_on_main() {
         warning.setFont(Some(&NSFont::systemFontOfSize(12.0)));
         warning.setTextColor(Some(&NSColor::systemOrangeColor()));
         warning.setFrame(NSRect::new(
-            NSPoint::new(20.0, 96.0),
+            NSPoint::new(20.0, 56.0),
             NSSize::new(408.0, 16.0),
         ));
         cv.addSubview(&warning);
@@ -346,6 +371,7 @@ fn show_on_main() {
             text_observer,
             mode_popup: Retained::from_raw(mode_popup).unwrap(),
             apps_field: Retained::from_raw(apps_field).unwrap(),
+            full_screen_checkbox: Retained::from_raw(full_screen_checkbox).unwrap(),
             warning_label: warning,
         };
 

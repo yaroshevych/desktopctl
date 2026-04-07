@@ -390,10 +390,22 @@ fn enforce_frontmost_app_policy(
         return Ok(());
     }
 
+    let cfg = app_policy::current();
+    if app_policy::command_is_full_screen_capture(command) && !cfg.allow_full_screen_capture {
+        return Err(
+            AppError::permission_denied("full-screen capture is disabled by current policy")
+                .with_details(json!({
+                    "policy_mode": cfg.policy_mode,
+                    "apps": cfg.apps,
+                    "allow_full_screen_capture": cfg.allow_full_screen_capture,
+                    "remediation": "open DesktopCtl menu -> App Access Policy and enable Allow full-screen capture"
+                })),
+        );
+    }
+
     let Some(frontmost_app) = request_frontmost_app(context) else {
         return Ok(());
     };
-    let cfg = app_policy::current();
     if app_policy::is_app_allowed(&cfg, &frontmost_app) {
         return Ok(());
     }

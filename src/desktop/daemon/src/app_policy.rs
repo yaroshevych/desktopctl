@@ -23,6 +23,8 @@ pub struct AppPolicyConfig {
     pub policy_mode: PolicyMode,
     #[serde(default)]
     pub apps: Vec<String>,
+    #[serde(default)]
+    pub allow_full_screen_capture: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +193,17 @@ pub fn command_requires_policy(command: &Command) -> bool {
     )
 }
 
+pub fn command_is_full_screen_capture(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::ScreenCapture {
+            active_window: false,
+            region: None,
+            ..
+        }
+    )
+}
+
 fn normalize_apps(apps: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -224,6 +237,7 @@ mod tests {
         let cfg = AppPolicyConfig {
             policy_mode: PolicyMode::AllowOnlySelected,
             apps: vec!["Safari".to_string(), "Slack".to_string()],
+            allow_full_screen_capture: false,
         };
         assert!(is_app_allowed(&cfg, "safari"));
         assert!(!is_app_allowed(&cfg, "Terminal"));
@@ -234,6 +248,7 @@ mod tests {
         let cfg = AppPolicyConfig {
             policy_mode: PolicyMode::AllowAllExcept,
             apps: vec!["Slack".to_string()],
+            allow_full_screen_capture: false,
         };
         assert!(!is_app_allowed(&cfg, "slack"));
         assert!(is_app_allowed(&cfg, "Safari"));
