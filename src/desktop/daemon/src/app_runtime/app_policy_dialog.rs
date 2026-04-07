@@ -42,12 +42,8 @@ define_class!(
         #[unsafe(method(closePolicyDialog:))]
         fn close_policy_dialog(&self, sender: &AnyObject) {
             unsafe {
-                // Commit active text editing before reading field values.
                 let window: *mut AnyObject = msg_send![sender, window];
-                if !window.is_null() {
-                    let _: bool =
-                        msg_send![window, makeFirstResponder: std::ptr::null::<AnyObject>()];
-                }
+                commit_window_editing(window);
             }
             unsafe {
                 let window: *mut AnyObject = msg_send![sender, window];
@@ -187,6 +183,13 @@ fn schedule_debounced_save() {
     });
 }
 
+unsafe fn commit_window_editing(window: *mut AnyObject) {
+    if window.is_null() {
+        return;
+    }
+    let _: bool = unsafe { msg_send![window, makeFirstResponder: std::ptr::null::<AnyObject>()] };
+}
+
 fn show_on_main() {
     if let Some(prev) = DIALOG.with(|cell| cell.borrow_mut().take()) {
         prev.window.close();
@@ -230,7 +233,9 @@ fn show_on_main() {
 
         let nc: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
         let will_close = NSString::from_str("NSWindowWillCloseNotification");
-        let close_block = RcBlock::new(|_notif: *mut AnyObject| {
+        let close_block = RcBlock::new(|notif: *mut AnyObject| {
+            let window: *mut AnyObject = msg_send![notif, object];
+            commit_window_editing(window);
             save_policy_now();
             DIALOG.with(|cell| {
                 let _ = cell.borrow_mut().take();
