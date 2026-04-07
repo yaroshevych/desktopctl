@@ -173,6 +173,7 @@ impl DaemonConfig {
 }
 
 pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
+    let _ = app_policy::reload_current_from_disk();
     platform_runtime::bootstrap_overlay_glow();
     let listener = bind_listener()?;
     thread::spawn(move || {
@@ -184,6 +185,7 @@ pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
 }
 
 pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
+    let _ = app_policy::reload_current_from_disk();
     platform_runtime::bootstrap_overlay_glow();
     let listener = bind_listener()?;
     accept_loop(listener, config)
@@ -391,7 +393,7 @@ fn enforce_frontmost_app_policy(
     let Some(frontmost_app) = request_frontmost_app(context) else {
         return Ok(());
     };
-    let cfg = app_policy::load();
+    let cfg = app_policy::current();
     if app_policy::is_app_allowed(&cfg, &frontmost_app) {
         return Ok(());
     }

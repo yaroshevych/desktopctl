@@ -42,6 +42,7 @@ define_class!(
                 }
             }
             persist_policy_from_dialog();
+            let _ = app_policy::reload_current_from_disk();
             unsafe {
                 let window: *mut AnyObject = msg_send![sender, window];
                 if !window.is_null() {
@@ -160,9 +161,23 @@ fn show_on_main() {
         return;
     };
 
-    let cfg = app_policy::load();
+    let load_outcome = app_policy::load_with_diagnostics();
+    let cfg = load_outcome.config;
 
     unsafe {
+        if let Some(warning) = load_outcome.warning.as_ref() {
+            let alert: *mut AnyObject = msg_send![class!(NSAlert), new];
+            let msg = NSString::from_str("App Access Policy Config Error");
+            let _: () = msg_send![alert, setMessageText: &*msg];
+            let info = NSString::from_str(&format!(
+                "{warning}\n\nDesktopCtl loaded default policy settings."
+            ));
+            let _: () = msg_send![alert, setInformativeText: &*info];
+            let ok = NSString::from_str("OK");
+            let _: () = msg_send![alert, addButtonWithTitle: &*ok];
+            let _: usize = msg_send![alert, runModal];
+        }
+
         let window = NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, H)),
@@ -182,6 +197,7 @@ fn show_on_main() {
         let will_close = NSString::from_str("NSWindowWillCloseNotification");
         let close_block = RcBlock::new(|_notif: *mut AnyObject| {
             persist_policy_from_dialog();
+            let _ = app_policy::reload_current_from_disk();
             DIALOG.with(|cell| {
                 let _ = cell.borrow_mut().take();
             });

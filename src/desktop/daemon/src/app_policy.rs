@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 use desktop_core::protocol::Command;
@@ -24,6 +25,40 @@ pub struct AppPolicyConfig {
     pub apps: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LoadOutcome {
+    pub config: AppPolicyConfig,
+    pub warning: Option<String>,
+}
+
+static CURRENT_POLICY: OnceLock<Mutex<AppPolicyConfig>> = OnceLock::new();
+
+fn current_policy() -> &'static Mutex<AppPolicyConfig> {
+    CURRENT_POLICY.get_or_init(|| Mutex::new(AppPolicyConfig::default()))
+}
+
+pub fn reload_current_from_disk() -> LoadOutcome {
+    let outcome = load_with_diagnostics();
+    if let Ok(mut guard) = current_policy().lock() {
+        *guard = outcome.config.clone();
+    } else {
+        eprintln!("app policy: failed to update in-memory policy (lock poisoned)");
+    }
+    outcome
+}
+
+pub fn current() -> AppPolicyConfig {
+    current_policy()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|_| {
+            eprintln!(
+                "app policy: failed to read in-memory policy (lock poisoned), using defaults"
+            );
+            AppPolicyConfig::default()
+        })
+}
+
 pub fn config_path() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
         let trimmed = PathBuf::from(base);
@@ -36,23 +71,51 @@ pub fn config_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config/desktopctl/config.json"))
 }
 
-pub fn load() -> AppPolicyConfig {
+pub fn load_with_diagnostics() -> LoadOutcome {
     let Some(path) = config_path() else {
-        return AppPolicyConfig::default();
+        let warning = "unable to resolve app policy config path; using defaults".to_string();
+        eprintln!("app policy: {warning}");
+        return LoadOutcome {
+            config: AppPolicyConfig::default(),
+            warning: Some(warning),
+        };
     };
 
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(_) => return AppPolicyConfig::default(),
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                let warning = format!("failed reading {}: {err}; using defaults", path.display());
+                eprintln!("app policy: {warning}");
+                return LoadOutcome {
+                    config: AppPolicyConfig::default(),
+                    warning: Some(warning),
+                };
+            }
+            return LoadOutcome {
+                config: AppPolicyConfig::default(),
+                warning: None,
+            };
+        }
     };
 
     let mut cfg: AppPolicyConfig = match serde_json::from_str(&raw) {
         Ok(cfg) => cfg,
-        Err(_) => return AppPolicyConfig::default(),
+        Err(err) => {
+            let warning = format!("invalid JSON in {}: {err}; using defaults", path.display());
+            eprintln!("app policy: {warning}");
+            return LoadOutcome {
+                config: AppPolicyConfig::default(),
+                warning: Some(warning),
+            };
+        }
     };
 
     cfg.apps = normalize_apps(&cfg.apps);
-    cfg
+    LoadOutcome {
+        config: cfg,
+        warning: None,
+    }
 }
 
 pub fn save(cfg: &AppPolicyConfig) -> Result<(), String> {
