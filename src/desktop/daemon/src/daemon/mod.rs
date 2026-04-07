@@ -67,7 +67,7 @@ use window_context::{
 #[cfg(target_os = "macos")]
 use crate::overlay;
 use crate::platform::permissions;
-use crate::{platform, request_store, trace, vision};
+use crate::{app_policy, platform, request_store, trace, vision};
 
 const MAX_CONCURRENT_CLIENTS: usize = 16;
 const COMMAND_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -300,50 +300,59 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             None
         },
     };
-    let runtime_state = platform_runtime::begin_command(&command, &request_context);
-    let response = match acquire_command_execution_slot() {
-        Ok(_slot) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_with_context(
-                command,
-                runtime_state.overlay_token_updates_enabled,
-                &request_context,
-            )
-        })) {
-            Ok(Ok(result)) => {
-                trace::log("client:execute_ok");
-                ResponseEnvelope::success(request_id.clone(), result)
-            }
-            Ok(Err(err)) => {
+    let response = if let Err(err) = enforce_frontmost_app_policy(&command, &request_context) {
+        trace::log(format!(
+            "client:policy_block request_id={} command={} msg={}",
+            request_id, command_name, err.message
+        ));
+        ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+    } else {
+        let runtime_state = platform_runtime::begin_command(&command, &request_context);
+        let response = match acquire_command_execution_slot() {
+            Ok(_slot) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_with_context(
+                    command,
+                    runtime_state.overlay_token_updates_enabled,
+                    &request_context,
+                )
+            })) {
+                Ok(Ok(result)) => {
+                    trace::log("client:execute_ok");
+                    ResponseEnvelope::success(request_id.clone(), result)
+                }
+                Ok(Err(err)) => {
+                    trace::log(format!(
+                        "client:execute_err code={:?} msg={}",
+                        err.code, err.message
+                    ));
+                    ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+                }
+                Err(payload) => {
+                    let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                        (*msg).to_string()
+                    } else if let Some(msg) = payload.downcast_ref::<String>() {
+                        msg.clone()
+                    } else {
+                        "non-string panic payload".to_string()
+                    };
+                    trace::log(format!("client:execute_panic {panic_message}"));
+                    let err = AppError::internal(format!(
+                        "daemon panic during command execution: {panic_message}"
+                    ));
+                    ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+                }
+            },
+            Err(err) => {
                 trace::log(format!(
-                    "client:execute_err code={:?} msg={}",
-                    err.code, err.message
+                    "client:queue_timeout request_id={} command={} msg={}",
+                    request_id, command_name, err.message
                 ));
                 ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
             }
-            Err(payload) => {
-                let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
-                    (*msg).to_string()
-                } else if let Some(msg) = payload.downcast_ref::<String>() {
-                    msg.clone()
-                } else {
-                    "non-string panic payload".to_string()
-                };
-                trace::log(format!("client:execute_panic {panic_message}"));
-                let err = AppError::internal(format!(
-                    "daemon panic during command execution: {panic_message}"
-                ));
-                ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
-            }
-        },
-        Err(err) => {
-            trace::log(format!(
-                "client:queue_timeout request_id={} command={} msg={}",
-                request_id, command_name, err.message
-            ));
-            ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
-        }
+        };
+        platform_runtime::end_command(runtime_state);
+        response
     };
-    platform_runtime::end_command(runtime_state);
     if let Err(err) = recording::record_command(&request, &response) {
         eprintln!("recorder write failed: {err}");
         trace::log(format!("client:record_err {err}"));
@@ -369,6 +378,33 @@ fn request_frontmost_bounds(context: &RequestContext) -> Option<desktop_core::pr
 
 fn request_frontmost_app(context: &RequestContext) -> Option<String> {
     platform_runtime::request_frontmost_app(context)
+}
+
+fn enforce_frontmost_app_policy(
+    command: &Command,
+    context: &RequestContext,
+) -> Result<(), AppError> {
+    if !app_policy::command_requires_policy(command) {
+        return Ok(());
+    }
+
+    let Some(frontmost_app) = request_frontmost_app(context) else {
+        return Ok(());
+    };
+    let cfg = app_policy::load();
+    if app_policy::is_app_allowed(&cfg, &frontmost_app) {
+        return Ok(());
+    }
+
+    Err(AppError::permission_denied(format!(
+        "frontmost app \"{frontmost_app}\" is blocked by current policy"
+    ))
+    .with_details(json!({
+        "frontmost_app": frontmost_app,
+        "policy_mode": cfg.policy_mode,
+        "apps": cfg.apps,
+        "remediation": "open DesktopCtl menu -> App Access Policy"
+    })))
 }
 
 #[cfg(test)]

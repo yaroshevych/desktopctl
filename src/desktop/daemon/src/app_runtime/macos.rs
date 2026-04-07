@@ -13,7 +13,7 @@ use desktop_core::{
     protocol::{Command, RequestEnvelope, ResponseEnvelope, now_millis},
 };
 
-use super::{about, permissions_dialog};
+use super::{about, app_policy_dialog, permissions_dialog};
 use crate::{daemon, overlay, platform::permissions, trace};
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
@@ -63,6 +63,7 @@ pub(crate) fn run() -> Result<(), AppError> {
     let menu = Menu::new();
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
     let check_permissions = MenuItem::new("Check Permissions", true, None);
+    let app_access_policy = MenuItem::new("App Access Policy", true, None);
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
     menu.append(&toggle_overlay)
@@ -70,6 +71,8 @@ pub(crate) fn run() -> Result<(), AppError> {
     menu.append(&PredefinedMenuItem::separator())
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&check_permissions)
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&app_access_policy)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&about)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
@@ -80,6 +83,7 @@ pub(crate) fn run() -> Result<(), AppError> {
 
     let toggle_overlay_id = toggle_overlay.id().clone();
     let check_permissions_id = check_permissions.id().clone();
+    let app_access_policy_id = app_access_policy.id().clone();
     let about_id = about.id().clone();
     let quit_id = quit.id().clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -89,6 +93,10 @@ pub(crate) fn run() -> Result<(), AppError> {
         }
         if event.id == check_permissions_id {
             permissions_dialog::show();
+            return;
+        }
+        if event.id == app_access_policy_id {
+            app_policy_dialog::show();
             return;
         }
         if event.id == toggle_overlay_id {

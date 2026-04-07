@@ -1,3 +1,4 @@
+mod app_policy;
 mod app_runtime;
 mod clipboard;
 mod daemon;
