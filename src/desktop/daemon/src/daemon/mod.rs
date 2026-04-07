@@ -404,7 +404,20 @@ fn enforce_frontmost_app_policy(
     }
 
     let Some(frontmost_app) = request_frontmost_app(context) else {
-        return Ok(());
+        if matches!(cfg.policy_mode, app_policy::PolicyMode::AllowAll) {
+            return Ok(());
+        }
+        return Err(
+            AppError::permission_denied(
+                "frontmost app could not be resolved under restrictive app policy",
+            )
+            .with_details(json!({
+                "frontmost_app": null,
+                "policy_mode": cfg.policy_mode,
+                "apps": cfg.apps,
+                "remediation": "open DesktopCtl menu -> App Access Policy, switch to Allow all, or focus a resolvable app window"
+            })),
+        );
     };
     if app_policy::is_app_allowed(&cfg, &frontmost_app) {
         return Ok(());

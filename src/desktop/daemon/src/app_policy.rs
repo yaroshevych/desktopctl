@@ -61,6 +61,16 @@ pub fn current() -> AppPolicyConfig {
         })
 }
 
+pub fn set_current(cfg: &AppPolicyConfig) {
+    if let Ok(mut guard) = current_policy().lock() {
+        let mut normalized = cfg.clone();
+        normalized.apps = normalize_apps(&normalized.apps);
+        *guard = normalized;
+    } else {
+        eprintln!("app policy: failed to update in-memory policy (lock poisoned)");
+    }
+}
+
 pub fn config_path() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
         let trimmed = PathBuf::from(base);

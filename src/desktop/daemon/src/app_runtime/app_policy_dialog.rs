@@ -159,6 +159,8 @@ fn persist_policy_from_dialog() {
             };
             if let Err(err) = app_policy::save(&cfg) {
                 eprintln!("failed to save app policy config: {err}");
+            } else {
+                app_policy::set_current(&cfg);
             }
             apply_policy_controls_state(mode, &apps, &state.apps_field, &state.warning_label);
         }
@@ -168,7 +170,6 @@ fn persist_policy_from_dialog() {
 fn save_policy_now() {
     SAVE_DEBOUNCE_SEQ.fetch_add(1, Ordering::SeqCst);
     persist_policy_from_dialog();
-    let _ = app_policy::reload_current_from_disk();
 }
 
 fn save_policy_if_ticket(ticket: u64) {
@@ -176,7 +177,6 @@ fn save_policy_if_ticket(ticket: u64) {
         return;
     }
     persist_policy_from_dialog();
-    let _ = app_policy::reload_current_from_disk();
 }
 
 fn schedule_debounced_save() {
