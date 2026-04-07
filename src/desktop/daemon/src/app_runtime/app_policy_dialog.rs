@@ -8,12 +8,20 @@ use objc2_app_kit::{
     NSBackingStoreType, NSButton, NSColor, NSFont, NSTextField, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-use std::{cell::RefCell, ffi::CStr};
+use std::{
+    cell::RefCell,
+    ffi::CStr,
+    sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::Duration,
+};
 
 use crate::app_policy::{self, AppPolicyConfig, PolicyMode};
 
 const W: f64 = 448.0;
 const H: f64 = 270.0;
+const SAVE_DEBOUNCE_MS: u64 = 500;
+static SAVE_DEBOUNCE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // Button/action target.
 define_class!(
@@ -23,12 +31,12 @@ define_class!(
     impl AppPolicyTarget {
         #[unsafe(method(appPolicyModeChanged:))]
         fn app_policy_mode_changed(&self, _: &AnyObject) {
-            persist_policy_from_dialog();
+            schedule_debounced_save();
         }
 
         #[unsafe(method(appPolicyAppsChanged:))]
         fn app_policy_apps_changed(&self, _: &AnyObject) {
-            persist_policy_from_dialog();
+            schedule_debounced_save();
         }
 
         #[unsafe(method(closePolicyDialog:))]
@@ -41,8 +49,6 @@ define_class!(
                         msg_send![window, makeFirstResponder: std::ptr::null::<AnyObject>()];
                 }
             }
-            persist_policy_from_dialog();
-            let _ = app_policy::reload_current_from_disk();
             unsafe {
                 let window: *mut AnyObject = msg_send![sender, window];
                 if !window.is_null() {
@@ -58,6 +64,7 @@ struct DialogState {
     _target: Retained<AnyObject>,
     nc: *mut AnyObject,
     observer: *mut AnyObject,
+    text_observer: *mut AnyObject,
     mode_popup: *mut AnyObject,
     apps_field: *mut AnyObject,
     warning_label: *mut AnyObject,
@@ -68,6 +75,9 @@ impl Drop for DialogState {
         unsafe {
             if !self.nc.is_null() && !self.observer.is_null() {
                 let _: () = msg_send![self.nc, removeObserver: self.observer];
+            }
+            if !self.nc.is_null() && !self.text_observer.is_null() {
+                let _: () = msg_send![self.nc, removeObserver: self.text_observer];
             }
         }
     }
@@ -152,6 +162,31 @@ fn persist_policy_from_dialog() {
     });
 }
 
+fn save_policy_now() {
+    SAVE_DEBOUNCE_SEQ.fetch_add(1, Ordering::SeqCst);
+    persist_policy_from_dialog();
+    let _ = app_policy::reload_current_from_disk();
+}
+
+fn save_policy_if_ticket(ticket: u64) {
+    if SAVE_DEBOUNCE_SEQ.load(Ordering::SeqCst) != ticket {
+        return;
+    }
+    persist_policy_from_dialog();
+    let _ = app_policy::reload_current_from_disk();
+}
+
+fn schedule_debounced_save() {
+    let ticket = SAVE_DEBOUNCE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(SAVE_DEBOUNCE_MS));
+        if SAVE_DEBOUNCE_SEQ.load(Ordering::SeqCst) != ticket {
+            return;
+        }
+        DispatchQueue::main().exec_async(move || save_policy_if_ticket(ticket));
+    });
+}
+
 fn show_on_main() {
     if let Some(prev) = DIALOG.with(|cell| cell.borrow_mut().take()) {
         prev.window.close();
@@ -196,8 +231,7 @@ fn show_on_main() {
         let nc: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
         let will_close = NSString::from_str("NSWindowWillCloseNotification");
         let close_block = RcBlock::new(|_notif: *mut AnyObject| {
-            persist_policy_from_dialog();
-            let _ = app_policy::reload_current_from_disk();
+            save_policy_now();
             DIALOG.with(|cell| {
                 let _ = cell.borrow_mut().take();
             });
@@ -209,6 +243,10 @@ fn show_on_main() {
             queue: std::ptr::null::<AnyObject>(),
             usingBlock: &*close_block
         ];
+        let text_changed = NSString::from_str("NSControlTextDidChangeNotification");
+        let text_change_block = RcBlock::new(|_notif: *mut AnyObject| {
+            schedule_debounced_save();
+        });
 
         let title = NSTextField::wrappingLabelWithString(
             &NSString::from_str("Choose which frontmost apps DesktopCtl can control."),
@@ -255,6 +293,13 @@ fn show_on_main() {
         let _: () = msg_send![apps_field, setTarget: target];
         let _: () = msg_send![apps_field, setAction: sel!(appPolicyAppsChanged:)];
         let _: () = msg_send![&*cv, addSubview: apps_field];
+        let text_observer: *mut AnyObject = msg_send![
+            nc,
+            addObserverForName: &*text_changed,
+            object: apps_field,
+            queue: std::ptr::null::<AnyObject>(),
+            usingBlock: &*text_change_block
+        ];
 
         let helper = NSTextField::wrappingLabelWithString(
             &NSString::from_str("Comma-separated app names. Example: Safari, Slack"),
@@ -298,6 +343,7 @@ fn show_on_main() {
             _target: Retained::from_raw(target_raw).unwrap(),
             nc,
             observer,
+            text_observer,
             mode_popup,
             apps_field,
             warning_label: &*warning as *const _ as *mut AnyObject,
