@@ -65,9 +65,9 @@ struct DialogState {
     nc: *mut AnyObject,
     observer: *mut AnyObject,
     text_observer: *mut AnyObject,
-    mode_popup: *mut AnyObject,
-    apps_field: *mut AnyObject,
-    warning_label: *mut AnyObject,
+    mode_popup: Retained<AnyObject>,
+    apps_field: Retained<AnyObject>,
+    warning_label: Retained<NSTextField>,
 }
 
 impl Drop for DialogState {
@@ -107,12 +107,12 @@ fn index_to_mode(index: isize) -> PolicyMode {
     }
 }
 
-unsafe fn selected_policy_mode(popup: *mut AnyObject) -> PolicyMode {
+unsafe fn selected_policy_mode(popup: &AnyObject) -> PolicyMode {
     let index: isize = msg_send![popup, indexOfSelectedItem];
     index_to_mode(index)
 }
 
-unsafe fn string_value(control: *mut AnyObject) -> String {
+unsafe fn string_value(control: &AnyObject) -> String {
     let ns_string: *mut AnyObject = msg_send![control, stringValue];
     if ns_string.is_null() {
         return String::new();
@@ -129,8 +129,8 @@ unsafe fn string_value(control: *mut AnyObject) -> String {
 unsafe fn apply_policy_controls_state(
     mode: PolicyMode,
     apps: &[String],
-    apps_field: *mut AnyObject,
-    warning_label: *mut AnyObject,
+    apps_field: &AnyObject,
+    warning_label: &AnyObject,
 ) {
     let _: () = msg_send![apps_field, setEnabled: mode != PolicyMode::AllowAll];
     let warning = if mode != PolicyMode::AllowAll && apps.is_empty() {
@@ -147,8 +147,8 @@ fn persist_policy_from_dialog() {
         let borrowed = cell.borrow();
         let Some(ref state) = *borrowed else { return };
         unsafe {
-            let mode = selected_policy_mode(state.mode_popup);
-            let csv = string_value(state.apps_field);
+            let mode = selected_policy_mode(&state.mode_popup);
+            let csv = string_value(&state.apps_field);
             let apps = app_policy::normalize_apps_csv(&csv);
             let cfg = AppPolicyConfig {
                 policy_mode: mode,
@@ -157,7 +157,7 @@ fn persist_policy_from_dialog() {
             if let Err(err) = app_policy::save(&cfg) {
                 eprintln!("failed to save app policy config: {err}");
             }
-            apply_policy_controls_state(mode, &apps, state.apps_field, state.warning_label);
+            apply_policy_controls_state(mode, &apps, &state.apps_field, &state.warning_label);
         }
     });
 }
@@ -331,12 +331,7 @@ fn show_on_main() {
         let _: () = msg_send![&*close_btn, setAction: sel!(closePolicyDialog:)];
         cv.addSubview(&close_btn);
 
-        apply_policy_controls_state(
-            cfg.policy_mode,
-            &cfg.apps,
-            apps_field,
-            &*warning as *const _ as *mut AnyObject,
-        );
+        apply_policy_controls_state(cfg.policy_mode, &cfg.apps, &*apps_field, &*warning);
 
         let state = DialogState {
             window,
@@ -344,9 +339,9 @@ fn show_on_main() {
             nc,
             observer,
             text_observer,
-            mode_popup,
-            apps_field,
-            warning_label: &*warning as *const _ as *mut AnyObject,
+            mode_popup: Retained::from_raw(mode_popup).unwrap(),
+            apps_field: Retained::from_raw(apps_field).unwrap(),
+            warning_label: warning,
         };
 
         let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
