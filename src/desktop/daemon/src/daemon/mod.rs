@@ -175,7 +175,8 @@ impl DaemonConfig {
 }
 
 pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
-    let _ = app_policy::reload_current_from_disk();
+    let outcome = app_policy::reload_current_from_disk();
+    set_gui_ops_disabled(outcome.config.agent_access_disabled);
     platform_runtime::bootstrap_overlay_glow();
     let listener = bind_listener()?;
     thread::spawn(move || {
@@ -187,7 +188,8 @@ pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
 }
 
 pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
-    let _ = app_policy::reload_current_from_disk();
+    let outcome = app_policy::reload_current_from_disk();
+    set_gui_ops_disabled(outcome.config.agent_access_disabled);
     platform_runtime::bootstrap_overlay_glow();
     let listener = bind_listener()?;
     accept_loop(listener, config)
@@ -204,6 +206,9 @@ pub fn register_gui_ops_state_hook(hook: fn(bool)) {
 pub fn set_gui_ops_disabled(disabled: bool) -> bool {
     let previous = GUI_OPS_DISABLED.swap(disabled, Ordering::SeqCst);
     if previous != disabled {
+        if let Err(err) = app_policy::set_agent_access_disabled(disabled) {
+            eprintln!("app policy: failed to persist agent_access_disabled={disabled}: {err}");
+        }
         if let Some(hook) = GUI_OPS_STATE_HOOK.get() {
             hook(disabled);
         }

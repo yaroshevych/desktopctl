@@ -156,6 +156,7 @@ fn persist_policy_from_dialog() {
                 policy_mode: mode,
                 apps: apps.clone(),
                 allow_full_screen_capture: bool_state(&state.full_screen_checkbox),
+                agent_access_disabled: app_policy::current().agent_access_disabled,
             };
             if let Err(err) = app_policy::save(&cfg) {
                 eprintln!("failed to save app policy config: {err}");

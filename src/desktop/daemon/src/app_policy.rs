@@ -29,6 +29,8 @@ pub struct AppPolicyConfig {
     pub apps: Vec<String>,
     #[serde(default = "default_allow_full_screen_capture")]
     pub allow_full_screen_capture: bool,
+    #[serde(default)]
+    pub agent_access_disabled: bool,
 }
 
 impl Default for AppPolicyConfig {
@@ -37,6 +39,7 @@ impl Default for AppPolicyConfig {
             policy_mode: PolicyMode::AllowAll,
             apps: Vec::new(),
             allow_full_screen_capture: default_allow_full_screen_capture(),
+            agent_access_disabled: false,
         }
     }
 }
@@ -83,6 +86,14 @@ pub fn set_current(cfg: &AppPolicyConfig) {
     } else {
         eprintln!("app policy: failed to update in-memory policy (lock poisoned)");
     }
+}
+
+pub fn set_agent_access_disabled(disabled: bool) -> Result<(), String> {
+    let mut cfg = current();
+    cfg.agent_access_disabled = disabled;
+    save(&cfg)?;
+    set_current(&cfg);
+    Ok(())
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -262,6 +273,7 @@ mod tests {
             policy_mode: PolicyMode::AllowOnlySelected,
             apps: vec!["Safari".to_string(), "Slack".to_string()],
             allow_full_screen_capture: false,
+            agent_access_disabled: false,
         };
         assert!(is_app_allowed(&cfg, "safari"));
         assert!(!is_app_allowed(&cfg, "Terminal"));
@@ -273,6 +285,7 @@ mod tests {
             policy_mode: PolicyMode::AllowAllExcept,
             apps: vec!["Slack".to_string()],
             allow_full_screen_capture: false,
+            agent_access_disabled: false,
         };
         assert!(!is_app_allowed(&cfg, "slack"));
         assert!(is_app_allowed(&cfg, "Safari"));
@@ -290,5 +303,6 @@ mod tests {
             serde_json::from_str(r#"{ "policy_mode": "allow_all", "apps": [] }"#)
                 .expect("config should deserialize");
         assert!(cfg.allow_full_screen_capture);
+        assert!(!cfg.agent_access_disabled);
     }
 }
