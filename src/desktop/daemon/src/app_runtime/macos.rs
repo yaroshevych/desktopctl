@@ -22,9 +22,9 @@ static OVERLAY_LIVE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn cli_gui_toggle_menu_label(disabled: bool) -> &'static str {
     if disabled {
-        "Enable CLI GUI Ops"
+        "Enable Agent Access"
     } else {
-        "Disable CLI GUI Ops"
+        "Disable Agent Access"
     }
 }
 
@@ -42,6 +42,18 @@ static ICON_ACTIVE: OnceLock<tray_icon::Icon> = OnceLock::new();
 #[derive(Clone)]
 struct MenuState {
     toggle_cli_gui_ops: tray_icon::menu::MenuItem,
+}
+
+fn on_gui_ops_state_changed(disabled: bool) {
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        MENU_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                state
+                    .toggle_cli_gui_ops
+                    .set_text(cli_gui_toggle_menu_label(disabled));
+            }
+        });
+    });
 }
 
 pub(crate) fn run() -> Result<(), AppError> {
@@ -80,20 +92,20 @@ pub(crate) fn run() -> Result<(), AppError> {
         true,
         None,
     );
+    let app_access_policy = MenuItem::new("Agent Access Rules", true, None);
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
-    let check_permissions = MenuItem::new("Check Permissions", true, None);
-    let app_access_policy = MenuItem::new("App Access Policy", true, None);
+    let check_permissions = MenuItem::new("Setup Access", true, None);
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
     menu.append(&toggle_cli_gui_ops)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&toggle_overlay)
+    menu.append(&app_access_policy)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&PredefinedMenuItem::separator())
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&check_permissions)
+    menu.append(&toggle_overlay)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&app_access_policy)
+    menu.append(&check_permissions)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&about)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
@@ -113,6 +125,7 @@ pub(crate) fn run() -> Result<(), AppError> {
             toggle_cli_gui_ops: toggle_cli_gui_ops.clone(),
         });
     });
+    daemon::register_gui_ops_state_hook(on_gui_ops_state_changed);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == about_id {
             about::show();
@@ -130,15 +143,6 @@ pub(crate) fn run() -> Result<(), AppError> {
             let disabled = !daemon::gui_ops_disabled();
             daemon::set_gui_ops_disabled(disabled);
             trace::log(format!("menubar:toggle_cli_gui_ops disabled={disabled}"));
-            dispatch2::DispatchQueue::main().exec_async(move || {
-                MENU_STATE.with(|cell| {
-                    if let Some(state) = cell.borrow().as_ref() {
-                        state
-                            .toggle_cli_gui_ops
-                            .set_text(cli_gui_toggle_menu_label(disabled));
-                    }
-                });
-            });
 
             if disabled && overlay::is_active() {
                 if let Err(err) = overlay::stop_overlay() {

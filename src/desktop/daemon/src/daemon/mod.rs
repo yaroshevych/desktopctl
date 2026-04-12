@@ -124,6 +124,7 @@ const OBSERVE_COARSE_MAX_REGIONS: usize = 4;
 const OBSERVE_MAX_FINAL_REGIONS: usize = 8;
 const OBSERVE_MAX_OCR_REGIONS: usize = 24;
 static GUI_OPS_DISABLED: AtomicBool = AtomicBool::new(false);
+static GUI_OPS_STATE_HOOK: OnceLock<fn(bool)> = OnceLock::new();
 static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
     OnceLock::new();
 
@@ -196,8 +197,18 @@ pub fn gui_ops_disabled() -> bool {
     GUI_OPS_DISABLED.load(Ordering::SeqCst)
 }
 
+pub fn register_gui_ops_state_hook(hook: fn(bool)) {
+    let _ = GUI_OPS_STATE_HOOK.set(hook);
+}
+
 pub fn set_gui_ops_disabled(disabled: bool) -> bool {
-    GUI_OPS_DISABLED.swap(disabled, Ordering::SeqCst)
+    let previous = GUI_OPS_DISABLED.swap(disabled, Ordering::SeqCst);
+    if previous != disabled {
+        if let Some(hook) = GUI_OPS_STATE_HOOK.get() {
+            hook(disabled);
+        }
+    }
+    previous
 }
 
 fn bind_listener() -> Result<UnixListener, AppError> {
