@@ -17,14 +17,28 @@ pub enum PolicyMode {
     AllowAllExcept,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+fn default_allow_full_screen_capture() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPolicyConfig {
     #[serde(default)]
     pub policy_mode: PolicyMode,
     #[serde(default)]
     pub apps: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_allow_full_screen_capture")]
     pub allow_full_screen_capture: bool,
+}
+
+impl Default for AppPolicyConfig {
+    fn default() -> Self {
+        Self {
+            policy_mode: PolicyMode::AllowAll,
+            apps: Vec::new(),
+            allow_full_screen_capture: default_allow_full_screen_capture(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -262,5 +276,19 @@ mod tests {
         };
         assert!(!is_app_allowed(&cfg, "slack"));
         assert!(is_app_allowed(&cfg, "Safari"));
+    }
+
+    #[test]
+    fn default_config_enables_full_screen_capture() {
+        let cfg = AppPolicyConfig::default();
+        assert!(cfg.allow_full_screen_capture);
+    }
+
+    #[test]
+    fn deserialize_missing_allow_full_screen_capture_defaults_to_true() {
+        let cfg: AppPolicyConfig =
+            serde_json::from_str(r#"{ "policy_mode": "allow_all", "apps": [] }"#)
+                .expect("config should deserialize");
+        assert!(cfg.allow_full_screen_capture);
     }
 }
