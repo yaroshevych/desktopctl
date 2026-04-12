@@ -132,6 +132,13 @@ desktopctl debug overlay stop
 desktopctl debug snapshot
 ```
 
+## Safety
+```bash
+# disable GUI operations in the running daemon (e.g., app/window/screen/pointer/keyboard)
+# non-GUI commands like `debug ping` continue to work
+desktopctl disable
+```
+
 ## Replay
 ```bash
 # start replay recording (default duration: 3000ms)

@@ -7,6 +7,7 @@ pub(crate) fn help_notes() -> &'static str {
 - desktopctl keyboard type \"hello\"\n\
 - desktopctl clipboard read\n\
 - desktopctl debug ping\n\
+- desktopctl disable\n\
 - desktopctl request response 12345\n\
 \n\
 Notes and hints:\n\

@@ -532,6 +532,12 @@ fn parses_debug_ping() {
 }
 
 #[test]
+fn parses_disable() {
+    let command = parse_command(&["disable"].map(str::to_string)).expect("disable should parse");
+    assert!(matches!(command, Command::DisableGui));
+}
+
+#[test]
 fn parses_request_commands() {
     let list = parse_command(&["request", "list", "--limit", "5"].map(str::to_string))
         .expect("request list should parse");

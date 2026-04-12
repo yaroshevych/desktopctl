@@ -123,6 +123,7 @@ const OBSERVE_COARSE_REGION_PAD_PX: f64 = 20.0;
 const OBSERVE_COARSE_MAX_REGIONS: usize = 4;
 const OBSERVE_MAX_FINAL_REGIONS: usize = 8;
 const OBSERVE_MAX_OCR_REGIONS: usize = 24;
+static GUI_OPS_DISABLED: AtomicBool = AtomicBool::new(false);
 static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
     OnceLock::new();
 
@@ -302,7 +303,13 @@ fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
             None
         },
     };
-    let response = if let Err(err) = enforce_frontmost_app_policy(&command, &request_context) {
+    let response = if let Err(err) = enforce_gui_ops_enabled(&command) {
+        trace::log(format!(
+            "client:gui_disabled_block request_id={} command={} msg={}",
+            request_id, command_name, err.message
+        ));
+        ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+    } else if let Err(err) = enforce_frontmost_app_policy(&command, &request_context) {
         trace::log(format!(
             "client:policy_block request_id={} command={} msg={}",
             request_id, command_name, err.message
@@ -434,6 +441,35 @@ fn enforce_frontmost_app_policy(
     })))
 }
 
+fn enforce_gui_ops_enabled(command: &Command) -> Result<(), AppError> {
+    if !GUI_OPS_DISABLED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if command_is_allowed_when_gui_disabled(command) {
+        return Ok(());
+    }
+
+    Err(AppError::permission_denied(
+        "GUI operations are disabled in daemon (desktopctl disable was previously issued)",
+    ))
+}
+
+fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Ping
+            | Command::DisableGui
+            | Command::PermissionsCheck
+            | Command::RequestShow { .. }
+            | Command::RequestList { .. }
+            | Command::RequestScreenshot { .. }
+            | Command::RequestResponse { .. }
+            | Command::RequestSearch { .. }
+            | Command::ReplayRecord { .. }
+            | Command::ReplayLoad { .. }
+    )
+}
+
 #[cfg(test)]
 fn execute(command: Command) -> Result<Value, AppError> {
     execute_with_context(command, true, &RequestContext::default())
@@ -446,6 +482,14 @@ fn execute_with_context(
 ) -> Result<Value, AppError> {
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
+        Command::DisableGui => {
+            let was_disabled = GUI_OPS_DISABLED.swap(true, Ordering::SeqCst);
+            Ok(json!({
+                "gui_operations_disabled": true,
+                "already_disabled": was_disabled,
+                "scope": "daemon_process",
+            }))
+        }
         Command::AppHide { name } => commands::app::hide(name),
         Command::AppShow { name } => commands::app::show(name),
         Command::AppIsolate { name } => commands::app::isolate(name),
@@ -762,8 +806,42 @@ mod tests {
 
     #[test]
     fn ping_returns_message() {
+        super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
         let result = execute(desktop_core::protocol::Command::Ping).expect("ping");
         assert_eq!(result["message"], "pong");
+    }
+
+    #[test]
+    fn disable_gui_sets_daemon_gate() {
+        super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let result = execute(desktop_core::protocol::Command::DisableGui).expect("disable");
+        assert_eq!(result["gui_operations_disabled"], true);
+        assert_eq!(result["already_disabled"], false);
+        super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn gui_commands_blocked_when_disabled() {
+        super::GUI_OPS_DISABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = super::enforce_gui_ops_enabled(&desktop_core::protocol::Command::ScreenCapture {
+            out_path: None,
+            overlay: false,
+            active_window: false,
+            active_window_id: None,
+            region: None,
+        })
+        .expect_err("screen capture should be blocked");
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
+
+        let ping = super::enforce_gui_ops_enabled(&desktop_core::protocol::Command::Ping);
+        assert!(ping.is_ok(), "ping must remain allowed");
+
+        let clipboard_err =
+            super::enforce_gui_ops_enabled(&desktop_core::protocol::Command::ClipboardRead)
+                .expect_err("clipboard should be blocked");
+        assert_eq!(clipboard_err.code, ErrorCode::PermissionDenied);
+
+        super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[test]

@@ -71,6 +71,7 @@ pub(crate) fn parse_command(args: &[String]) -> Result<Command, AppError> {
         .ok_or_else(|| AppError::invalid_argument("missing command; run `desktopctl --help`"))?;
 
     match name {
+        "disable" => Ok(Command::DisableGui),
         "app" => parse_app(sub),
         "window" => parse_window(sub),
         "screen" => parse_screen(sub),
@@ -611,6 +612,7 @@ fn clap_app() -> ClapCommand {
                 .help("Full output for complex cases"),
         )
         .subcommand(app_subcommand())
+        .subcommand(disable_subcommand())
         .subcommand(window_subcommand())
         .subcommand(screen_subcommand())
         .subcommand(pointer_subcommand())
@@ -619,6 +621,16 @@ fn clap_app() -> ClapCommand {
         .subcommand(debug_subcommand())
         .subcommand(request_subcommand())
         .subcommand(replay_subcommand())
+}
+
+fn disable_subcommand() -> ClapCommand {
+    ClapCommand::new("disable")
+        .about("Disable GUI operations in the CLI interface (can be re-enabled by human in UI)")
+        .after_long_help(
+            "After `desktopctl disable`:\n\
+- allowed: `desktopctl debug ping`, `desktopctl disable`, `desktopctl debug permissions`, `desktopctl request show|list|screenshot|response|search`, `desktopctl replay record|load`\n\
+- blocked: `desktopctl app ...`, `desktopctl window ...`, `desktopctl screen ...`, `desktopctl pointer ...`, `desktopctl keyboard ...`, `desktopctl clipboard ...`, `desktopctl debug overlay ...`, `desktopctl debug snapshot`",
+        )
 }
 
 fn app_subcommand() -> ClapCommand {

@@ -31,6 +31,7 @@ impl RequestEnvelope {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
     Ping,
+    DisableGui,
     AppHide {
         name: String,
     },
@@ -255,6 +256,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Ping => "ping",
+            Command::DisableGui => "disable",
             Command::AppHide { .. } => "app_hide",
             Command::AppShow { .. } => "app_show",
             Command::AppIsolate { .. } => "app_isolate",
