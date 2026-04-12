@@ -491,12 +491,8 @@ fn execute_with_context(
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
         Command::DisableGui => {
-            let was_disabled = set_gui_ops_disabled(true);
-            Ok(json!({
-                "gui_operations_disabled": true,
-                "already_disabled": was_disabled,
-                "scope": "daemon_process",
-            }))
+            set_gui_ops_disabled(true);
+            Ok(json!({}))
         }
         Command::AppHide { name } => commands::app::hide(name),
         Command::AppShow { name } => commands::app::show(name),
@@ -823,8 +819,8 @@ mod tests {
     fn disable_gui_sets_daemon_gate() {
         super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
         let result = execute(desktop_core::protocol::Command::DisableGui).expect("disable");
-        assert_eq!(result["gui_operations_disabled"], true);
-        assert_eq!(result["already_disabled"], false);
+        assert_eq!(result, serde_json::json!({}));
+        assert!(super::GUI_OPS_DISABLED.load(std::sync::atomic::Ordering::SeqCst));
         super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
