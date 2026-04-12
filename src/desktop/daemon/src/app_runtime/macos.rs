@@ -20,15 +20,29 @@ const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
 static OVERLAY_LIVE_SEQ: AtomicU64 = AtomicU64::new(1);
 
+fn cli_gui_toggle_menu_label(disabled: bool) -> &'static str {
+    if disabled {
+        "Enable CLI GUI Ops"
+    } else {
+        "Disable CLI GUI Ops"
+    }
+}
+
 // TrayIcon is !Send+!Sync; keep it in a thread-local so we never need to
 // move it across threads. Icon updates are dispatched to the main thread via
 // exec_async, so TRAY is always accessed from the same thread it was created on.
 thread_local! {
     static TRAY: std::cell::RefCell<Option<tray_icon::TrayIcon>> = std::cell::RefCell::new(None);
+    static MENU_STATE: std::cell::RefCell<Option<MenuState>> = std::cell::RefCell::new(None);
 }
 
 static ICON_IDLE: OnceLock<tray_icon::Icon> = OnceLock::new();
 static ICON_ACTIVE: OnceLock<tray_icon::Icon> = OnceLock::new();
+
+#[derive(Clone)]
+struct MenuState {
+    toggle_cli_gui_ops: tray_icon::menu::MenuItem,
+}
 
 pub(crate) fn run() -> Result<(), AppError> {
     let args: Vec<String> = std::env::args().collect();
@@ -61,11 +75,18 @@ pub(crate) fn run() -> Result<(), AppError> {
     daemon::start_background(daemon::DaemonConfig::resident())?;
 
     let menu = Menu::new();
+    let toggle_cli_gui_ops = MenuItem::new(
+        cli_gui_toggle_menu_label(daemon::gui_ops_disabled()),
+        true,
+        None,
+    );
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
     let check_permissions = MenuItem::new("Check Permissions", true, None);
     let app_access_policy = MenuItem::new("App Access Policy", true, None);
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
+    menu.append(&toggle_cli_gui_ops)
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&toggle_overlay)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&PredefinedMenuItem::separator())
@@ -81,11 +102,17 @@ pub(crate) fn run() -> Result<(), AppError> {
     menu.append(&quit)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
 
+    let toggle_cli_gui_ops_id = toggle_cli_gui_ops.id().clone();
     let toggle_overlay_id = toggle_overlay.id().clone();
     let check_permissions_id = check_permissions.id().clone();
     let app_access_policy_id = app_access_policy.id().clone();
     let about_id = about.id().clone();
     let quit_id = quit.id().clone();
+    MENU_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(MenuState {
+            toggle_cli_gui_ops: toggle_cli_gui_ops.clone(),
+        });
+    });
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == about_id {
             about::show();
@@ -97,6 +124,35 @@ pub(crate) fn run() -> Result<(), AppError> {
         }
         if event.id == app_access_policy_id {
             app_policy_dialog::show();
+            return;
+        }
+        if event.id == toggle_cli_gui_ops_id {
+            let disabled = !daemon::gui_ops_disabled();
+            daemon::set_gui_ops_disabled(disabled);
+            trace::log(format!("menubar:toggle_cli_gui_ops disabled={disabled}"));
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                MENU_STATE.with(|cell| {
+                    if let Some(state) = cell.borrow().as_ref() {
+                        state
+                            .toggle_cli_gui_ops
+                            .set_text(cli_gui_toggle_menu_label(disabled));
+                    }
+                });
+            });
+
+            if disabled && overlay::is_active() {
+                if let Err(err) = overlay::stop_overlay() {
+                    trace::log(format!("menubar:toggle_cli_gui_ops overlay_stop_err {err}"));
+                }
+                stop_overlay_live_loop();
+                dispatch2::DispatchQueue::main().exec_async(move || {
+                    TRAY.with(|cell| {
+                        if let Some(tray) = cell.borrow().as_ref() {
+                            let _ = tray.set_icon_with_as_template(ICON_IDLE.get().cloned(), true);
+                        }
+                    });
+                });
+            }
             return;
         }
         if event.id == toggle_overlay_id {

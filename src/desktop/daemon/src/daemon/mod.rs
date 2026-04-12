@@ -192,6 +192,14 @@ pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
     accept_loop(listener, config)
 }
 
+pub fn gui_ops_disabled() -> bool {
+    GUI_OPS_DISABLED.load(Ordering::SeqCst)
+}
+
+pub fn set_gui_ops_disabled(disabled: bool) -> bool {
+    GUI_OPS_DISABLED.swap(disabled, Ordering::SeqCst)
+}
+
 fn bind_listener() -> Result<UnixListener, AppError> {
     let path = socket_path();
     if let Some(parent) = path.parent() {
@@ -483,7 +491,7 @@ fn execute_with_context(
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
         Command::DisableGui => {
-            let was_disabled = GUI_OPS_DISABLED.swap(true, Ordering::SeqCst);
+            let was_disabled = set_gui_ops_disabled(true);
             Ok(json!({
                 "gui_operations_disabled": true,
                 "already_disabled": was_disabled,
