@@ -239,7 +239,11 @@ fn parse_hotkey(input: &str) -> Result<(Vec<VIRTUAL_KEY>, VIRTUAL_KEY), AppError
             "ctrl" | "control" => VK_CONTROL,
             "shift" => VK_SHIFT,
             "alt" | "option" => VK_MENU,
-            "cmd" | "command" | "win" | "windows" => VK_CONTROL,
+            "cmd" | "command" | "win" | "windows" => {
+                return Err(AppError::invalid_argument(format!(
+                    "unsupported Windows modifier in hotkey '{input}': use ctrl/alt/shift"
+                )));
+            }
             _ => {
                 return Err(AppError::invalid_argument(format!(
                     "invalid hotkey format: {input}"

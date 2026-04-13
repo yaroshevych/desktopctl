@@ -66,21 +66,22 @@ pub fn recognize_text_from_image(
     image_width: u32,
     image_height: u32,
 ) -> Result<Vec<SnapshotText>, AppError> {
-    let image = image::open(path)
-        .map_err(|err| {
-            AppError::invalid_argument(format!("failed to open image {}: {err}", path.display()))
-        })?
-        .to_rgba8();
+    let (file_width, file_height) = image::image_dimensions(path).map_err(|err| {
+        AppError::invalid_argument(format!(
+            "failed to read image dimensions {}: {err}",
+            path.display()
+        ))
+    })?;
 
     parse_tesseract_tsv(
         &run_tesseract_tsv(path)?,
         if image_width == 0 {
-            image.width()
+            file_width
         } else {
             image_width
         },
         if image_height == 0 {
-            image.height()
+            file_height
         } else {
             image_height
         },
