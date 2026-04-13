@@ -60,39 +60,87 @@ pub(crate) fn open(
     wait: bool,
     timeout_ms: Option<u64>,
 ) -> Result<Value, AppError> {
-    let mut cmd = ProcessCommand::new("open");
-    cmd.arg("-a").arg(&name);
-    if !args.is_empty() {
-        cmd.args(&args);
+    #[cfg(target_os = "windows")]
+    {
+        let escaped_name = escape_ps_single_quoted(&name);
+        let escaped_args: Vec<String> = args
+            .iter()
+            .map(|arg| escape_ps_single_quoted(arg))
+            .collect();
+        let script = if escaped_args.is_empty() {
+            format!("Start-Process -FilePath '{escaped_name}'")
+        } else {
+            let args_literal = escaped_args
+                .iter()
+                .map(|arg| format!("'{arg}'"))
+                .collect::<Vec<String>>()
+                .join(", ");
+            format!("Start-Process -FilePath '{escaped_name}' -ArgumentList @({args_literal})")
+        };
+
+        let output = ProcessCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(script)
+            .output()
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("failed to run powershell: {err}"))
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(AppError::internal(stderr));
+        }
+
+        if wait {
+            super::super::wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
+        }
+        let window_id = try_resolve_frontmost_window_id_for_app(&name);
+        return Ok(json!({ "window_id": window_id }));
     }
 
-    let output = cmd
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to invoke open: {err}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::internal(stderr));
-    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut cmd = ProcessCommand::new("open");
+        cmd.arg("-a").arg(&name);
+        if !args.is_empty() {
+            cmd.args(&args);
+        }
 
-    let escaped = name
-        .replace('\n', "")
-        .replace('\r', "")
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let script = format!(r#"tell application "{escaped}" to activate"#);
-    let activate = ProcessCommand::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run osascript: {err}")))?;
-    if !activate.status.success() {
-        let stderr = String::from_utf8_lossy(&activate.stderr).trim().to_string();
-        return Err(AppError::internal(stderr));
-    }
+        let output = cmd.output().map_err(|err| {
+            AppError::backend_unavailable(format!("failed to invoke open: {err}"))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(AppError::internal(stderr));
+        }
 
-    if wait {
-        super::super::wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
+        let escaped = name
+            .replace('\n', "")
+            .replace('\r', "")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let script = format!(r#"tell application "{escaped}" to activate"#);
+        let activate = ProcessCommand::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("failed to run osascript: {err}"))
+            })?;
+        if !activate.status.success() {
+            let stderr = String::from_utf8_lossy(&activate.stderr).trim().to_string();
+            return Err(AppError::internal(stderr));
+        }
+
+        if wait {
+            super::super::wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
+        }
+        let window_id = try_resolve_frontmost_window_id_for_app(&name);
+        Ok(json!({ "window_id": window_id }))
     }
-    let window_id = try_resolve_frontmost_window_id_for_app(&name);
-    Ok(json!({ "window_id": window_id }))
+}
+
+#[cfg(target_os = "windows")]
+fn escape_ps_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
 }

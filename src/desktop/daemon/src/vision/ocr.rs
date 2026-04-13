@@ -6,6 +6,7 @@ use desktop_core::{error::AppError, protocol::SnapshotText};
 use image::RgbaImage;
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> {
     macos_impl::recognize_text(image)
 }
