@@ -40,16 +40,23 @@ pub struct FrontmostWindowContext {
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod unsupported;
+#[cfg(target_os = "windows")]
+mod windows;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
     frontmost_window_context, list_frontmost_app_windows, list_windows, list_windows_basic,
     main_display_bounds,
 };
+#[cfg(target_os = "windows")]
+pub use windows::{
+    frontmost_window_context, list_frontmost_app_windows, list_windows, list_windows_basic,
+    main_display_bounds,
+};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use unsupported::{
     frontmost_window_context, list_frontmost_app_windows, list_windows, list_windows_basic,
     main_display_bounds,

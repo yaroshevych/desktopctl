@@ -1,8 +1,14 @@
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::{
     env,
     io::{Read, Write},
-    os::unix::net::UnixStream,
     path::PathBuf,
+};
+#[cfg(windows)]
+use std::{
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    time::Duration,
 };
 
 use crate::{
@@ -13,11 +19,14 @@ use crate::{
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const SOCKET_DIR_NAME: &str = "desktopctl";
 const SOCKET_FILE_NAME: &str = "desktopctl.sock";
+#[cfg(windows)]
+const DEFAULT_WINDOWS_ADDR: &str = "127.0.0.1:42737";
 
 fn legacy_socket_path() -> PathBuf {
     PathBuf::from("/tmp/desktopctl.sock")
 }
 
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     if let Some(path) = env::var_os("DESKTOPCTL_SOCKET_PATH") {
         return PathBuf::from(path);
@@ -25,30 +34,85 @@ pub fn socket_path() -> PathBuf {
     env::temp_dir().join(SOCKET_DIR_NAME).join(SOCKET_FILE_NAME)
 }
 
-pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
-    let path = socket_path();
-    let stream = UnixStream::connect(&path).or_else(|primary_err| {
-        let legacy = legacy_socket_path();
-        if legacy == path {
-            return Err(primary_err);
-        }
-        UnixStream::connect(&legacy).map_err(|_| primary_err)
-    });
-    let mut stream = stream.map_err(|err| {
-        AppError::daemon_not_running(format!(
-            "failed to connect to {}: {}. is DesktopCtl.app running?",
-            path.display(),
-            err
-        ))
-    })?;
+#[cfg(windows)]
+pub fn socket_addr() -> String {
+    env::var("DESKTOPCTL_SOCKET_ADDR").unwrap_or_else(|_| DEFAULT_WINDOWS_ADDR.to_string())
+}
 
-    write_framed_json(&mut stream, request)?;
-    read_framed_json(&mut stream)
+pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
+    #[cfg(unix)]
+    {
+        let path = socket_path();
+        let stream = UnixStream::connect(&path).or_else(|primary_err| {
+            let legacy = legacy_socket_path();
+            if legacy == path {
+                return Err(primary_err);
+            }
+            UnixStream::connect(&legacy).map_err(|_| primary_err)
+        });
+        let mut stream = stream.map_err(|err| {
+            AppError::daemon_not_running(format!(
+                "failed to connect to {}: {}. is DesktopCtl.app running?",
+                path.display(),
+                err
+            ))
+        })?;
+
+        write_framed_json(&mut stream, request)?;
+        return read_framed_json(&mut stream);
+    }
+
+    #[cfg(windows)]
+    {
+        let addr = socket_addr();
+        let mut stream = TcpStream::connect(&addr).map_err(|err| {
+            AppError::daemon_not_running(format!(
+                "failed to connect to {addr}: {err}. is desktopctld running?"
+            ))
+        })?;
+        write_framed_json(&mut stream, request)?;
+        return read_framed_json(&mut stream);
+    }
+
+    #[allow(unreachable_code)]
+    Err(AppError::backend_unavailable(format!(
+        "unsupported platform: {}",
+        std::env::consts::OS
+    )))
 }
 
 pub fn socket_exists() -> bool {
-    let path = socket_path();
-    path.exists() || (path != legacy_socket_path() && legacy_socket_path().exists())
+    #[cfg(unix)]
+    {
+        let path = socket_path();
+        return path.exists() || (path != legacy_socket_path() && legacy_socket_path().exists());
+    }
+
+    #[cfg(windows)]
+    {
+        let addr = match resolve_socket_addr(&socket_addr()) {
+            Ok(addr) => addr,
+            Err(_) => return false,
+        };
+        return TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok();
+    }
+
+    #[allow(unreachable_code)]
+    false
+}
+
+#[cfg(windows)]
+fn resolve_socket_addr(addr: &str) -> Result<SocketAddr, AppError> {
+    let mut candidates = addr.to_socket_addrs().map_err(|err| {
+        AppError::invalid_argument(format!(
+            "invalid DESKTOPCTL_SOCKET_ADDR value '{addr}': {err}"
+        ))
+    })?;
+    candidates.next().ok_or_else(|| {
+        AppError::invalid_argument(format!(
+            "invalid DESKTOPCTL_SOCKET_ADDR value '{addr}': no socket addresses found"
+        ))
+    })
 }
 
 pub fn write_framed_json<W: Write, T: serde::Serialize>(

@@ -40,9 +40,14 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacosAutomation;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::WindowsAutomation;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod stub;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use stub::StubAutomation;
 
 pub fn new_backend() -> Result<Box<dyn Automation>, AppError> {
@@ -51,7 +56,12 @@ pub fn new_backend() -> Result<Box<dyn Automation>, AppError> {
         Ok(Box::new(MacosAutomation::new()))
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(WindowsAutomation::new()))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Err(AppError::backend_unavailable(format!(
             "unsupported platform: {}",

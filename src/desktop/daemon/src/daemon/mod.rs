@@ -1,8 +1,13 @@
+#[cfg(windows)]
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::{
+    fs::PermissionsExt,
+    net::{UnixListener, UnixStream},
+};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    os::unix::fs::PermissionsExt,
-    os::unix::net::{UnixListener, UnixStream},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -11,10 +16,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use desktop_core::ipc::socket_addr;
+#[cfg(unix)]
+use desktop_core::ipc::socket_path;
 use desktop_core::{
     automation::{Point, new_backend},
     error::AppError,
-    ipc::{read_framed_json, socket_path, write_framed_json},
+    ipc::{read_framed_json, write_framed_json},
     protocol::{
         Command, ObserveOptions, ObserveUntil, PointerButton, RequestEnvelope, ResponseEnvelope,
     },
@@ -127,6 +136,14 @@ static GUI_OPS_DISABLED: AtomicBool = AtomicBool::new(false);
 static GUI_OPS_STATE_HOOK: OnceLock<fn(bool)> = OnceLock::new();
 static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
     OnceLock::new();
+#[cfg(unix)]
+type IpcListener = UnixListener;
+#[cfg(unix)]
+type IpcStream = UnixStream;
+#[cfg(windows)]
+type IpcListener = TcpListener;
+#[cfg(windows)]
+type IpcStream = TcpStream;
 
 type TokenizeHintWindow = (String, String, bool, Option<String>);
 
@@ -216,37 +233,60 @@ pub fn set_gui_ops_disabled(disabled: bool) -> bool {
     previous
 }
 
-fn bind_listener() -> Result<UnixListener, AppError> {
-    let path = socket_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            AppError::backend_unavailable(format!(
-                "create socket directory {} failed: {err}",
-                parent.display()
-            ))
+fn bind_listener() -> Result<IpcListener, AppError> {
+    #[cfg(unix)]
+    {
+        let path = socket_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "create socket directory {} failed: {err}",
+                    parent.display()
+                ))
+            })?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "set socket directory permissions failed: {err}"
+                ))
+            })?;
+        }
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+
+        let listener = UnixListener::bind(&path).map_err(|err| {
+            AppError::backend_unavailable(format!("bind {} failed: {err}", path.display()))
         })?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|err| {
-            AppError::backend_unavailable(format!("set socket directory permissions failed: {err}"))
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+            AppError::backend_unavailable(format!("set socket permissions failed: {err}"))
         })?;
-    }
-    if path.exists() {
-        let _ = fs::remove_file(&path);
+        listener.set_nonblocking(true).map_err(|err| {
+            AppError::backend_unavailable(format!("set nonblocking failed: {err}"))
+        })?;
+        trace::log(format!("listener:bound socket={}", path.display()));
+        return Ok(listener);
     }
 
-    let listener = UnixListener::bind(&path).map_err(|err| {
-        AppError::backend_unavailable(format!("bind {} failed: {err}", path.display()))
-    })?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| {
-        AppError::backend_unavailable(format!("set socket permissions failed: {err}"))
-    })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|err| AppError::backend_unavailable(format!("set nonblocking failed: {err}")))?;
-    trace::log(format!("listener:bound socket={}", path.display()));
-    Ok(listener)
+    #[cfg(windows)]
+    {
+        let addr = socket_addr();
+        let listener = TcpListener::bind(&addr)
+            .map_err(|err| AppError::backend_unavailable(format!("bind {addr} failed: {err}")))?;
+        listener.set_nonblocking(true).map_err(|err| {
+            AppError::backend_unavailable(format!("set nonblocking failed: {err}"))
+        })?;
+        trace::log(format!("listener:bound addr={addr}"));
+        return Ok(listener);
+    }
+
+    #[allow(unreachable_code)]
+    Err(AppError::backend_unavailable(format!(
+        "unsupported platform: {}",
+        std::env::consts::OS
+    )))
 }
 
-fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppError> {
+fn accept_loop(listener: IpcListener, config: DaemonConfig) -> Result<(), AppError> {
     if config.idle_timeout.is_none() {
         listener.set_nonblocking(false).map_err(|err| {
             AppError::backend_unavailable(format!("set listener blocking mode failed: {err}"))
@@ -302,15 +342,18 @@ fn accept_loop(listener: UnixListener, config: DaemonConfig) -> Result<(), AppEr
         }
     }
 
-    let path = socket_path();
-    if path.exists() {
-        let _ = fs::remove_file(path);
+    #[cfg(unix)]
+    {
+        let path = socket_path();
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
     }
     trace::log("listener:closed");
     Ok(())
 }
 
-fn handle_client(mut stream: UnixStream) -> Result<(), AppError> {
+fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
     let request: RequestEnvelope = read_framed_json(&mut stream)?;
     let request_started = Instant::now();
     let request_id = request.request_id.clone();
