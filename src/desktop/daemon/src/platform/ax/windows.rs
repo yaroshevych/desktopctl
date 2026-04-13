@@ -39,6 +39,10 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
     let mut out = Vec::new();
     let mut stack: Vec<(UIElement, usize)> = Vec::new();
 
+    if let Some(focused) = focused_frontmost_element()? {
+        out.push(focused);
+    }
+
     if let Some(children) = walker.get_children(&root) {
         for child in children.into_iter().rev() {
             stack.push((child, 1));
@@ -75,7 +79,7 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
         Ok(element) => element,
         Err(_) => return Ok(None),
     };
-    Ok(to_ax_element(&focused))
+    Ok(to_ax_element(&focused).or_else(|| to_ax_fallback_element(&focused)))
 }
 
 pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
@@ -98,6 +102,10 @@ fn frontmost_hwnd() -> usize {
 }
 
 fn to_ax_element(element: &UIElement) -> Option<AxElement> {
+    if element.is_offscreen().ok() == Some(true) {
+        return None;
+    }
+
     let control_type = element.get_control_type().ok()?;
     let role = role_for_control_type(control_type)?;
     let bounds = element_bounds(element)?;
@@ -114,6 +122,25 @@ fn to_ax_element(element: &UIElement) -> Option<AxElement> {
     })
 }
 
+fn to_ax_fallback_element(element: &UIElement) -> Option<AxElement> {
+    let bounds = element_bounds(element)?;
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return None;
+    }
+    let control_type = element.get_control_type().ok();
+    Some(AxElement {
+        role: control_type
+            .and_then(role_for_control_type)
+            .unwrap_or_else(|| "AXUnknown".to_string()),
+        text: control_type
+            .and_then(|ty| element_text(element, ty))
+            .or_else(|| normalize_text_candidates(vec![element.get_name().unwrap_or_default()])),
+        bounds,
+        ax_identifier: element_identifier(element),
+        checked: control_type.and_then(|ty| element_toggle_state(element, ty)),
+    })
+}
+
 fn role_for_control_type(control_type: ControlType) -> Option<String> {
     let role = match control_type {
         ControlType::Button | ControlType::SplitButton | ControlType::MenuItem => "AXButton",
@@ -125,6 +152,7 @@ fn role_for_control_type(control_type: ControlType) -> Option<String> {
         ControlType::Text => "AXStaticText",
         ControlType::Hyperlink => "AXLink",
         ControlType::TabItem => "AXTabItem",
+        ControlType::ListItem | ControlType::TreeItem => "AXRow",
         ControlType::Slider => "AXSlider",
         ControlType::Spinner => "AXIncrementor",
         ControlType::ScrollBar => "AXScrollBar",
@@ -161,8 +189,14 @@ fn element_text(element: &UIElement, control_type: ControlType) -> Option<String
         candidates.push(name);
     }
 
-    if matches!(control_type, ControlType::Edit | ControlType::Document)
-        && let Ok(value_pattern) = element.get_pattern::<UIValuePattern>()
+    if matches!(
+        control_type,
+        ControlType::Edit
+            | ControlType::Document
+            | ControlType::Button
+            | ControlType::SplitButton
+            | ControlType::ComboBox
+    ) && let Ok(value_pattern) = element.get_pattern::<UIValuePattern>()
         && let Ok(value) = value_pattern.get_value()
     {
         candidates.push(value);
@@ -179,7 +213,7 @@ fn element_identifier(element: &UIElement) -> Option<String> {
     if let Ok(id) = element.get_automation_id() {
         let id = id.trim();
         if !id.is_empty() {
-            return Some(id.to_string());
+            return Some(format!("uia-{id}"));
         }
     }
 
