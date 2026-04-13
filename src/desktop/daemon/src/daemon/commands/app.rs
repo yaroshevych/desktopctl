@@ -62,34 +62,13 @@ pub(crate) fn open(
 ) -> Result<Value, AppError> {
     #[cfg(target_os = "windows")]
     {
-        let escaped_name = escape_ps_single_quoted(&name);
-        let escaped_args: Vec<String> = args
-            .iter()
-            .map(|arg| escape_ps_single_quoted(arg))
-            .collect();
-        let script = if escaped_args.is_empty() {
-            format!("Start-Process -FilePath '{escaped_name}'")
-        } else {
-            let args_literal = escaped_args
-                .iter()
-                .map(|arg| format!("'{arg}'"))
-                .collect::<Vec<String>>()
-                .join(", ");
-            format!("Start-Process -FilePath '{escaped_name}' -ArgumentList @({args_literal})")
-        };
-
-        let output = ProcessCommand::new("powershell")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(script)
-            .output()
-            .map_err(|err| {
-                AppError::backend_unavailable(format!("failed to run powershell: {err}"))
-            })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(AppError::internal(stderr));
+        let mut cmd = ProcessCommand::new(&name);
+        if !args.is_empty() {
+            cmd.args(&args);
         }
+        cmd.spawn().map_err(|err| {
+            AppError::backend_unavailable(format!("failed to launch application '{name}': {err}"))
+        })?;
 
         if wait {
             super::super::wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
@@ -138,9 +117,4 @@ pub(crate) fn open(
         let window_id = try_resolve_frontmost_window_id_for_app(&name);
         Ok(json!({ "window_id": window_id }))
     }
-}
-
-#[cfg(target_os = "windows")]
-fn escape_ps_single_quoted(value: &str) -> String {
-    value.replace('\'', "''")
 }

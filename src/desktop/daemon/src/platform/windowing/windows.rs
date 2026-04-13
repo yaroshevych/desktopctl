@@ -1,116 +1,119 @@
-use std::process::Command;
+use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
 
 use desktop_core::{error::AppError, protocol::Bounds};
-use serde::Deserialize;
-use serde_json::Value;
+use windows_sys::Win32::{
+    Foundation::{HWND, LPARAM, RECT},
+    Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow},
+    System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    },
+    UI::WindowsAndMessaging::{
+        EnumWindows, GW_OWNER, GetForegroundWindow, GetWindow, GetWindowRect, GetWindowTextLengthW,
+        GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    },
+};
 
 use super::{FrontmostWindowContext, WindowInfo};
 
-#[derive(Debug, Deserialize)]
-struct RawWindowInfo {
-    id: String,
-    pid: i64,
-    index: u32,
-    app: String,
+#[derive(Debug)]
+struct RawWindow {
+    hwnd: HWND,
+    pid: u32,
     title: String,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    frontmost: bool,
+    bounds: Bounds,
     visible: bool,
 }
 
 pub fn main_display_bounds() -> Option<Bounds> {
-    let script = r#"
-Add-Type -AssemblyName System.Windows.Forms
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-[pscustomobject]@{
-  x = [double]$bounds.X
-  y = [double]$bounds.Y
-  width = [double]$bounds.Width
-  height = [double]$bounds.Height
-} | ConvertTo-Json -Compress
-"#;
-
-    let out = run_powershell_capture(script).ok()?;
-    let value: Value = serde_json::from_str(out.trim()).ok()?;
-    Some(Bounds {
-        x: value.get("x")?.as_f64()?.max(0.0),
-        y: value.get("y")?.as_f64()?.max(0.0),
-        width: value.get("width")?.as_f64()?.max(0.0),
-        height: value.get("height")?.as_f64()?.max(0.0),
-    })
+    // SAFETY: Calling Win32 monitor APIs with a null HWND requests primary monitor.
+    unsafe {
+        let monitor = MonitorFromWindow(std::ptr::null_mut(), MONITOR_DEFAULTTOPRIMARY);
+        if monitor.is_null() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            rcWork: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            dwFlags: 0,
+        };
+        if GetMonitorInfoW(monitor, &mut info as *mut MONITORINFO) == 0 {
+            return None;
+        }
+        Some(rect_to_bounds(info.rcMonitor))
+    }
 }
 
 pub fn frontmost_window_context() -> Option<FrontmostWindowContext> {
-    let windows = list_windows().ok()?;
-    let frontmost = windows.into_iter().find(|window| window.frontmost)?;
+    // SAFETY: GetForegroundWindow has no preconditions.
+    let frontmost = unsafe { GetForegroundWindow() };
+    if frontmost.is_null() {
+        return None;
+    }
+
+    let window = raw_window(frontmost)?;
     Some(FrontmostWindowContext {
-        app: Some(frontmost.app),
-        bounds: Some(frontmost.bounds),
+        app: process_name(window.pid),
+        bounds: Some(window.bounds),
     })
 }
 
 pub fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
-    let script = r#"
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-
-public struct RECT {
-    public int Left;
-    public int Top;
-    public int Right;
-    public int Bottom;
-}
-
-public static class DesktopCtlWin {
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-}
-"@;
-
-$front = [int64][DesktopCtlWin]::GetForegroundWindow()
-$rows = @()
-$indexByPid = @{}
-
-Get-Process |
-  Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -ne "" } |
-  ForEach-Object {
-    $pidKey = [string]$_.Id
-    if (-not $indexByPid.ContainsKey($pidKey)) {
-      $indexByPid[$pidKey] = 0
+    // SAFETY: callback_data is a valid mutable Vec for the call duration.
+    let mut rows: Vec<RawWindow> = Vec::new();
+    let callback_data = &mut rows as *mut Vec<RawWindow>;
+    // SAFETY: EnumWindows invokes the callback synchronously while callback_data is valid.
+    let ok = unsafe { EnumWindows(Some(enum_windows_proc), callback_data as LPARAM) };
+    if ok == 0 {
+        return Err(AppError::backend_unavailable(
+            "EnumWindows failed on Windows",
+        ));
     }
-    $indexByPid[$pidKey] = [int]$indexByPid[$pidKey] + 1
 
-    $rect = New-Object RECT
-    [DesktopCtlWin]::GetWindowRect([intptr]$_.MainWindowHandle, [ref]$rect) | Out-Null
+    // SAFETY: GetForegroundWindow has no preconditions.
+    let frontmost_hwnd = unsafe { GetForegroundWindow() };
+    let mut per_pid_index: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
 
-    $rows += [pscustomobject]@{
-      id = "hwnd:$($_.MainWindowHandle)"
-      pid = [int64]$_.Id
-      index = [int]$indexByPid[$pidKey]
-      app = $_.ProcessName
-      title = $_.MainWindowTitle
-      x = [double]$rect.Left
-      y = [double]$rect.Top
-      width = [double]($rect.Right - $rect.Left)
-      height = [double]($rect.Bottom - $rect.Top)
-      frontmost = ([int64]$_.MainWindowHandle -eq $front)
-      visible = $true
+    let mut windows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let app = process_name(row.pid).unwrap_or_else(|| format!("pid-{}", row.pid));
+        let index = per_pid_index.entry(row.pid).or_insert(0);
+        *index = index.saturating_add(1);
+
+        windows.push(WindowInfo {
+            id: format!("hwnd:{}", row.hwnd as usize),
+            window_ref: None,
+            parent_id: None,
+            pid: row.pid as i64,
+            index: *index,
+            app,
+            title: row.title,
+            bounds: row.bounds,
+            frontmost: row.hwnd == frontmost_hwnd,
+            visible: row.visible,
+            modal: None,
+        });
     }
-  }
 
-$rows | ConvertTo-Json -Compress
-"#;
+    windows.sort_by(|a, b| {
+        b.frontmost
+            .cmp(&a.frontmost)
+            .then_with(|| a.app.to_lowercase().cmp(&b.app.to_lowercase()))
+            .then_with(|| a.index.cmp(&b.index))
+    });
 
-    let output = run_powershell_capture(script)?;
-    let rows = parse_window_rows(output.trim())?;
-    Ok(rows.into_iter().map(to_window_info).collect())
+    Ok(windows)
 }
 
 pub fn list_windows_basic() -> Result<Vec<WindowInfo>, AppError> {
@@ -118,74 +121,135 @@ pub fn list_windows_basic() -> Result<Vec<WindowInfo>, AppError> {
 }
 
 pub fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
-    let windows = list_windows()?;
-    let frontmost_app = windows
-        .iter()
-        .find(|window| window.frontmost)
-        .map(|window| window.app.to_lowercase());
-
-    match frontmost_app {
-        Some(app) => Ok(windows
-            .into_iter()
-            .filter(|window| window.app.to_lowercase() == app)
-            .collect()),
-        None => Ok(Vec::new()),
-    }
-}
-
-fn to_window_info(raw: RawWindowInfo) -> WindowInfo {
-    WindowInfo {
-        id: raw.id,
-        window_ref: None,
-        parent_id: None,
-        pid: raw.pid,
-        index: raw.index,
-        app: raw.app,
-        title: raw.title,
-        bounds: Bounds {
-            x: raw.x.max(0.0),
-            y: raw.y.max(0.0),
-            width: raw.width.max(0.0),
-            height: raw.height.max(0.0),
-        },
-        frontmost: raw.frontmost,
-        visible: raw.visible,
-        modal: None,
-    }
-}
-
-fn parse_window_rows(raw_json: &str) -> Result<Vec<RawWindowInfo>, AppError> {
-    if raw_json.trim().is_empty() || raw_json.trim() == "null" {
+    // SAFETY: GetForegroundWindow has no preconditions.
+    let frontmost = unsafe { GetForegroundWindow() };
+    if frontmost.is_null() {
         return Ok(Vec::new());
     }
 
-    let value: Value = serde_json::from_str(raw_json)
-        .map_err(|err| AppError::backend_unavailable(format!("invalid window JSON: {err}")))?;
+    let mut front_pid = 0_u32;
+    // SAFETY: frontmost is a window handle from GetForegroundWindow.
+    unsafe { GetWindowThreadProcessId(frontmost, &mut front_pid as *mut u32) };
 
-    if value.is_array() {
-        serde_json::from_value(value)
-            .map_err(|err| AppError::backend_unavailable(format!("invalid window rows: {err}")))
-    } else {
-        let row: RawWindowInfo = serde_json::from_value(value)
-            .map_err(|err| AppError::backend_unavailable(format!("invalid window row: {err}")))?;
-        Ok(vec![row])
+    let windows = list_windows()?;
+    Ok(windows
+        .into_iter()
+        .filter(|window| window.pid as u32 == front_pid)
+        .collect())
+}
+
+unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+    // SAFETY: lparam is provided by list_windows and points to Vec<RawWindow>.
+    let rows = unsafe { &mut *(lparam as *mut Vec<RawWindow>) };
+
+    if let Some(row) = raw_window(hwnd) {
+        rows.push(row);
+    }
+    1
+}
+
+fn raw_window(hwnd: HWND) -> Option<RawWindow> {
+    if hwnd.is_null() {
+        return None;
+    }
+
+    // SAFETY: hwnd is supplied by EnumWindows/GetForegroundWindow.
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 {
+            return None;
+        }
+        if !GetWindow(hwnd, GW_OWNER).is_null() {
+            return None;
+        }
+
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(hwnd, &mut rect as *mut RECT) == 0 {
+            return None;
+        }
+        let bounds = rect_to_bounds(rect);
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return None;
+        }
+
+        let title = window_title(hwnd);
+
+        let mut pid = 0_u32;
+        GetWindowThreadProcessId(hwnd, &mut pid as *mut u32);
+        if pid == 0 {
+            return None;
+        }
+
+        Some(RawWindow {
+            hwnd,
+            pid,
+            title,
+            bounds,
+            visible: true,
+        })
     }
 }
 
-fn run_powershell_capture(script: &str) -> Result<String, AppError> {
-    let output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run powershell: {err}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::backend_unavailable(format!(
-            "powershell command failed: {stderr}"
-        )));
+fn rect_to_bounds(rect: RECT) -> Bounds {
+    let width = (rect.right - rect.left).max(0) as f64;
+    let height = (rect.bottom - rect.top).max(0) as f64;
+    Bounds {
+        x: (rect.left as f64).max(0.0),
+        y: (rect.top as f64).max(0.0),
+        width,
+        height,
     }
+}
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+fn window_title(hwnd: HWND) -> String {
+    // SAFETY: GetWindowTextLengthW/GetWindowTextW are valid for real HWND.
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return String::new();
+        }
+
+        let mut buf = vec![0_u16; len as usize + 1];
+        let copied = GetWindowTextW(hwnd, buf.as_mut_ptr(), len + 1);
+        if copied <= 0 {
+            return String::new();
+        }
+        OsString::from_wide(&buf[..copied as usize])
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
+fn process_name(pid: u32) -> Option<String> {
+    // SAFETY: OpenProcess called with query-only rights for discovered PID.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+
+        let mut buf = vec![0_u16; 32768];
+        let mut size = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            buf.as_mut_ptr(),
+            &mut size as *mut u32,
+        );
+        let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+        if ok == 0 || size == 0 {
+            return None;
+        }
+
+        let full = OsString::from_wide(&buf[..size as usize]);
+        let full = full.to_string_lossy();
+        Path::new(full.as_ref())
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+    }
 }

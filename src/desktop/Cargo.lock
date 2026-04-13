@@ -359,6 +359,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -397,6 +398,7 @@ dependencies = [
  "serde_json",
  "tray-icon",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

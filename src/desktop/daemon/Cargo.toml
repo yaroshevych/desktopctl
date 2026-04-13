@@ -28,3 +28,6 @@ objc2-metal-performance-shaders = { version = "0.3", features = ["MPSCore", "MPS
 objc2-screen-capture-kit = "0.3"
 objc2-vision = { version = "0.3", features = ["VNObservation", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "objc2-core-graphics"] }
 tray-icon = "0.21"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
