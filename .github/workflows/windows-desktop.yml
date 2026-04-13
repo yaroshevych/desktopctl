@@ -1,0 +1,38 @@
+name: Windows Desktop
+
+on:
+  push:
+    paths:
+      - 'src/desktop/**'
+      - '.github/workflows/windows-desktop.yml'
+  pull_request:
+    paths:
+      - 'src/desktop/**'
+      - '.github/workflows/windows-desktop.yml'
+
+jobs:
+  windows-build-smoke:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: src/desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binaries
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Run core tests
+        run: cargo test -p desktop-core --target x86_64-pc-windows-msvc
+
+      - name: Run Windows smoke test
+        run: .\scripts\smoke-windows.ps1
