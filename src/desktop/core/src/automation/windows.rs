@@ -1,8 +1,21 @@
-use std::process::Command;
-
 use crate::error::AppError;
 
 use super::{Automation, Point};
+
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+    MAPVK_VK_TO_VSC, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW,
+    SendInput, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_F3,
+    VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_HOME, VK_LEFT, VK_NEXT,
+    VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
+
+const WHEEL_DELTA: i32 = 120;
+const VK_SHIFT: u16 = 0x10;
+const VK_CONTROL: u16 = 0x11;
+const VK_MENU: u16 = 0x12;
 
 pub struct WindowsAutomation;
 
@@ -24,196 +37,251 @@ impl Automation for WindowsAutomation {
     }
 
     fn press_hotkey(&self, hotkey: &str) -> Result<(), AppError> {
-        let chord = to_sendkeys_chord(hotkey)?;
-        send_keys(&chord)
+        let (modifiers, key) = parse_hotkey(hotkey)?;
+        for modifier in &modifiers {
+            send_vk(*modifier, false)?;
+        }
+        send_vk(key, false)?;
+        send_vk(key, true)?;
+        for modifier in modifiers.iter().rev() {
+            send_vk(*modifier, true)?;
+        }
+        Ok(())
     }
 
     fn press_enter(&self) -> Result<(), AppError> {
-        send_keys("{ENTER}")
+        tap_vk(VK_RETURN)
     }
 
     fn press_escape(&self) -> Result<(), AppError> {
-        send_keys("{ESC}")
+        tap_vk(VK_ESCAPE)
     }
 
     fn type_text(&self, text: &str) -> Result<(), AppError> {
-        send_keys(&escape_sendkeys_text(text))
+        for unit in text.encode_utf16() {
+            send_unicode(unit, false)?;
+            send_unicode(unit, true)?;
+        }
+        Ok(())
     }
 
     fn move_mouse(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("SetCursorPos", point.x, point.y, 0, 0)
+        move_cursor(point)
     }
 
     fn left_down(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("LeftDown", point.x, point.y, 0, 0)
+        move_cursor(point)?;
+        send_mouse_flags(MOUSEEVENTF_LEFTDOWN, 0)
     }
 
     fn left_drag(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("SetCursorPos", point.x, point.y, 0, 0)
+        move_cursor(point)
     }
 
     fn left_up(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("LeftUp", point.x, point.y, 0, 0)
+        move_cursor(point)?;
+        send_mouse_flags(MOUSEEVENTF_LEFTUP, 0)
     }
 
     fn left_click(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("LeftClick", point.x, point.y, 0, 0)
+        move_cursor(point)?;
+        send_mouse_flags(MOUSEEVENTF_LEFTDOWN, 0)?;
+        send_mouse_flags(MOUSEEVENTF_LEFTUP, 0)
     }
 
     fn right_down(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("RightDown", point.x, point.y, 0, 0)
+        move_cursor(point)?;
+        send_mouse_flags(MOUSEEVENTF_RIGHTDOWN, 0)
     }
 
     fn right_up(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("RightUp", point.x, point.y, 0, 0)
+        move_cursor(point)?;
+        send_mouse_flags(MOUSEEVENTF_RIGHTUP, 0)
     }
 
     fn right_click(&self, point: Point) -> Result<(), AppError> {
-        mouse_call("RightClick", point.x, point.y, 0, 0)
+        move_cursor(point)?;
+        send_mouse_flags(MOUSEEVENTF_RIGHTDOWN, 0)?;
+        send_mouse_flags(MOUSEEVENTF_RIGHTUP, 0)
     }
 
     fn scroll_wheel(&self, dx: i32, dy: i32) -> Result<(), AppError> {
-        // Match existing semantics: positive dy means scroll down.
-        let vertical = -dy;
-        mouse_call("Scroll", 0, 0, dx, vertical)
+        // DesktopCtl semantics: positive dy means scroll down.
+        let vertical = -dy.saturating_mul(WHEEL_DELTA);
+        if vertical != 0 {
+            send_mouse_flags(MOUSEEVENTF_WHEEL, vertical)?;
+        }
+        let horizontal = dx.saturating_mul(WHEEL_DELTA);
+        if horizontal != 0 {
+            send_mouse_flags(MOUSEEVENTF_HWHEEL, horizontal)?;
+        }
+        Ok(())
     }
 }
 
-fn run_powershell(script: &str) -> Result<(), AppError> {
-    let output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(script)
-        .output()
-        .map_err(|err| AppError::backend_unavailable(format!("failed to run powershell: {err}")))?;
+fn move_cursor(point: Point) -> Result<(), AppError> {
+    let x = i32::try_from(point.x).map_err(|_| {
+        AppError::invalid_argument(format!("mouse x coordinate is out of range: {}", point.x))
+    })?;
+    let y = i32::try_from(point.y).map_err(|_| {
+        AppError::invalid_argument(format!("mouse y coordinate is out of range: {}", point.y))
+    })?;
 
-    if output.status.success() {
-        return Ok(());
+    // SAFETY: SetCursorPos is a leaf Win32 API; coordinates are validated above.
+    let ok = unsafe { SetCursorPos(x, y) };
+    if ok == 0 {
+        return Err(AppError::backend_unavailable(
+            "SetCursorPos failed on Windows",
+        ));
     }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(AppError::backend_unavailable(format!(
-        "powershell command failed: {stderr}"
-    )))
+    Ok(())
 }
 
-fn send_keys(keys: &str) -> Result<(), AppError> {
-    let escaped = keys.replace('"', "\"\"");
-    let script = format!(
-        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\"{escaped}\")"
-    );
-    run_powershell(&script)
+fn tap_vk(vk: VIRTUAL_KEY) -> Result<(), AppError> {
+    send_vk(vk, false)?;
+    send_vk(vk, true)
 }
 
-fn mouse_call(action: &str, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), AppError> {
-    let script = format!(
-        r#"
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class DesktopCtlMouse {{
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int X, int Y);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-
-    private const uint LEFTDOWN = 0x0002;
-    private const uint LEFTUP = 0x0004;
-    private const uint RIGHTDOWN = 0x0008;
-    private const uint RIGHTUP = 0x0010;
-    private const uint WHEEL = 0x0800;
-    private const uint HWHEEL = 0x01000;
-
-    public static void Run(string action, int x, int y, int dx, int dy) {{
-        if (action == "SetCursorPos") {{
-            SetCursorPos(x, y);
-            return;
-        }}
-
-        SetCursorPos(x, y);
-        switch (action) {{
-            case "LeftDown":
-                mouse_event(LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                break;
-            case "LeftUp":
-                mouse_event(LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                break;
-            case "LeftClick":
-                mouse_event(LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                mouse_event(LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                break;
-            case "RightDown":
-                mouse_event(RIGHTDOWN, 0, 0, 0, UIntPtr.Zero);
-                break;
-            case "RightUp":
-                mouse_event(RIGHTUP, 0, 0, 0, UIntPtr.Zero);
-                break;
-            case "RightClick":
-                mouse_event(RIGHTDOWN, 0, 0, 0, UIntPtr.Zero);
-                mouse_event(RIGHTUP, 0, 0, 0, UIntPtr.Zero);
-                break;
-            case "Scroll":
-                if (dy != 0) mouse_event(WHEEL, 0, 0, unchecked((uint)(dy * 120)), UIntPtr.Zero);
-                if (dx != 0) mouse_event(HWHEEL, 0, 0, unchecked((uint)(dx * 120)), UIntPtr.Zero);
-                break;
-            default:
-                throw new ArgumentException("unsupported mouse action: " + action);
-        }}
-    }}
-}}
-"@;
-[DesktopCtlMouse]::Run("{action}", {x}, {y}, {dx}, {dy})
-"#
-    );
-
-    run_powershell(&script)
+fn send_vk(vk: VIRTUAL_KEY, key_up: bool) -> Result<(), AppError> {
+    // SAFETY: MapVirtualKeyW is pure for this usage.
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+    let mut flags = 0;
+    if key_up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    send_inputs(&[input])
 }
 
-fn to_sendkeys_chord(input: &str) -> Result<String, AppError> {
-    let parts: Vec<String> = input
+fn send_unicode(unit: u16, key_up: bool) -> Result<(), AppError> {
+    let mut flags = KEYEVENTF_UNICODE;
+    if key_up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: 0,
+                wScan: unit,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    send_inputs(&[input])
+}
+
+fn send_mouse_flags(flags: u32, data: i32) -> Result<(), AppError> {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: data as u32,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    send_inputs(&[input])
+}
+
+fn send_inputs(inputs: &[INPUT]) -> Result<(), AppError> {
+    // SAFETY: inputs points to a valid contiguous slice for the duration of the call.
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    if sent != inputs.len() as u32 {
+        return Err(AppError::backend_unavailable(format!(
+            "SendInput sent {} of {} input events",
+            sent,
+            inputs.len()
+        )));
+    }
+    Ok(())
+}
+
+fn parse_hotkey(input: &str) -> Result<(Vec<VIRTUAL_KEY>, VIRTUAL_KEY), AppError> {
+    let parts: Vec<&str> = input
         .split('+')
-        .map(|item| item.trim().to_lowercase())
+        .map(str::trim)
         .filter(|item| !item.is_empty())
         .collect();
-
     if parts.is_empty() {
         return Err(AppError::invalid_argument(format!(
             "invalid hotkey format: {input}"
         )));
     }
 
-    let key = parts
-        .last()
-        .cloned()
-        .ok_or_else(|| AppError::invalid_argument(format!("invalid hotkey format: {input}")))?;
-
-    let mut prefix = String::new();
-    for modifier in &parts[..parts.len() - 1] {
-        match modifier.as_str() {
-            "ctrl" | "control" => prefix.push('^'),
-            "shift" => prefix.push('+'),
-            "alt" | "option" => prefix.push('%'),
-            "cmd" | "command" | "win" | "windows" => prefix.push('^'),
+    let key = parse_key(parts[parts.len() - 1], input)?;
+    let mut modifiers = Vec::new();
+    for item in &parts[..parts.len() - 1] {
+        let modifier = match item.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => VK_CONTROL,
+            "shift" => VK_SHIFT,
+            "alt" | "option" => VK_MENU,
+            "cmd" | "command" | "win" | "windows" => VK_CONTROL,
             _ => {
                 return Err(AppError::invalid_argument(format!(
                     "invalid hotkey format: {input}"
                 )));
             }
-        }
+        };
+        modifiers.push(modifier);
     }
 
-    let key_token = match key.as_str() {
-        "enter" | "return" => "{ENTER}".to_string(),
-        "escape" | "esc" => "{ESC}".to_string(),
-        "tab" => "{TAB}".to_string(),
-        "space" => " ".to_string(),
-        "left" | "leftarrow" | "left_arrow" => "{LEFT}".to_string(),
-        "right" | "rightarrow" | "right_arrow" => "{RIGHT}".to_string(),
-        "up" | "uparrow" | "up_arrow" => "{UP}".to_string(),
-        "down" | "downarrow" | "down_arrow" => "{DOWN}".to_string(),
-        _ if key.len() == 1 => escape_sendkeys_text(&key),
+    Ok((modifiers, key))
+}
+
+fn parse_key(part: &str, input: &str) -> Result<VIRTUAL_KEY, AppError> {
+    let lower = part.to_ascii_lowercase();
+    let key = match lower.as_str() {
+        "space" => VK_SPACE,
+        "tab" => VK_TAB,
+        "enter" | "return" => VK_RETURN,
+        "escape" | "esc" => VK_ESCAPE,
+        "delete" | "backspace" => VK_BACK,
+        "forwarddelete" | "forward_delete" | "del" => VK_DELETE,
+        "left" | "leftarrow" | "left_arrow" => VK_LEFT,
+        "right" | "rightarrow" | "right_arrow" => VK_RIGHT,
+        "down" | "downarrow" | "down_arrow" => VK_DOWN,
+        "up" | "uparrow" | "up_arrow" => VK_UP,
+        "home" => VK_HOME,
+        "end" => VK_END,
+        "pageup" | "page_up" => VK_PRIOR,
+        "pagedown" | "page_down" => VK_NEXT,
+        "f1" => VK_F1,
+        "f2" => VK_F2,
+        "f3" => VK_F3,
+        "f4" => VK_F4,
+        "f5" => VK_F5,
+        "f6" => VK_F6,
+        "f7" => VK_F7,
+        "f8" => VK_F8,
+        "f9" => VK_F9,
+        "f10" => VK_F10,
+        "f11" => VK_F11,
+        "f12" => VK_F12,
+        _ if part.len() == 1 => part.as_bytes()[0].to_ascii_uppercase() as u16,
         _ => {
             return Err(AppError::invalid_argument(format!(
                 "invalid hotkey format: {input}"
@@ -221,23 +289,5 @@ fn to_sendkeys_chord(input: &str) -> Result<String, AppError> {
         }
     };
 
-    Ok(format!("{prefix}{key_token}"))
-}
-
-fn escape_sendkeys_text(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '{' => out.push_str("{{}"),
-            '}' => out.push_str("{}}"),
-            '+' => out.push_str("{+}"),
-            '^' => out.push_str("{^}"),
-            '%' => out.push_str("{%}"),
-            '~' => out.push_str("{~}"),
-            '(' => out.push_str("{(}"),
-            ')' => out.push_str("{)}"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    Ok(key)
 }
