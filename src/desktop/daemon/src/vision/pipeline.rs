@@ -4,6 +4,7 @@ use std::{
     process::Command as ProcessCommand,
     sync::Arc,
     thread,
+    time::Instant,
 };
 
 use desktop_core::{
@@ -44,6 +45,10 @@ pub struct TokenizeWindowMeta {
     pub bounds: Bounds,
 }
 
+const CAPTURE_BUDGET_MS: u128 = 80;
+const OCR_BUDGET_MS: u128 = 120;
+const TOKENIZE_BUDGET_MS: u128 = 250;
+
 pub fn capture_and_update(out_path: Option<PathBuf>) -> Result<CaptureResult, AppError> {
     capture_and_update_internal(out_path, None, None, true)
 }
@@ -69,7 +74,15 @@ fn capture_and_update_internal(
     lookup_focused_app: bool,
 ) -> Result<CaptureResult, AppError> {
     trace::log("pipeline:capture_and_update:start");
+    let capture_started = Instant::now();
     let mut captured = capture_screen_png(out_path)?;
+    let capture_elapsed = capture_started.elapsed().as_millis();
+    if capture_elapsed > CAPTURE_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn capture_and_update capture_ms={} budget_ms={}",
+            capture_elapsed, CAPTURE_BUDGET_MS
+        ));
+    }
     if let Some(bounds) = crop_bounds.as_ref() {
         crop_capture_to_bounds(&mut captured, bounds)?;
         trace::log(format!(
@@ -92,7 +105,15 @@ fn capture_and_update_internal(
     }
     let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
     trace::log("pipeline:capture_and_update:thumb_ok");
+    let ocr_started = Instant::now();
     let texts = recognize_text(&captured.image)?;
+    let ocr_elapsed = ocr_started.elapsed().as_millis();
+    if ocr_elapsed > OCR_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn capture_and_update ocr_ms={} budget_ms={}",
+            ocr_elapsed, OCR_BUDGET_MS
+        ));
+    }
     trace::log(format!(
         "pipeline:capture_and_update:ocr_ok texts={}",
         texts.len()
@@ -197,8 +218,17 @@ pub fn latest_frame_png() -> Result<Option<Arc<[u8]>>, AppError> {
 
 pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayload, AppError> {
     trace::log("pipeline:tokenize:window_mode");
+    let tokenize_started = Instant::now();
     let cache_key = tokenize_cache_key(&window_meta);
+    let capture_started = Instant::now();
     let mut captured = capture_screen_png(None)?;
+    let capture_elapsed = capture_started.elapsed().as_millis();
+    if capture_elapsed > CAPTURE_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn tokenize_window capture_ms={} budget_ms={}",
+            capture_elapsed, CAPTURE_BUDGET_MS
+        ));
+    }
     crop_capture_to_bounds(&mut captured, &window_meta.bounds)?;
     let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
     let fingerprint = frame_fingerprint(&captured.image);
@@ -213,7 +243,15 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
 
     let ax_meta = window_meta.clone();
     let ax_handle = thread::spawn(move || detect_ax_elements(Some(&ax_meta)));
+    let ocr_started = Instant::now();
     let texts = recognize_text(&captured.image)?;
+    let ocr_elapsed = ocr_started.elapsed().as_millis();
+    if ocr_elapsed > OCR_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn tokenize_window ocr_ms={} budget_ms={}",
+            ocr_elapsed, OCR_BUDGET_MS
+        ));
+    }
     let ax_elements = ax_handle.join().unwrap_or_else(|_| Vec::new());
     let frame = captured.frame;
     let image = captured.image;
@@ -261,6 +299,13 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     with_state(|state| {
         state.update_tokenize_cache(cache_key, fingerprint, std::sync::Arc::new(payload.clone()))
     })?;
+    let total_elapsed = tokenize_started.elapsed().as_millis();
+    if total_elapsed > TOKENIZE_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn tokenize_window total_ms={} budget_ms={}",
+            total_elapsed, TOKENIZE_BUDGET_MS
+        ));
+    }
     Ok(payload)
 }
 
@@ -290,6 +335,7 @@ pub fn tokenize_screenshot(
     window_meta: Option<TokenizeWindowMeta>,
     region: Option<&Bounds>,
 ) -> Result<TokenizePayload, AppError> {
+    let tokenize_started = Instant::now();
     let mut rgba = image::open(screenshot_path)
         .map_err(|err| {
             AppError::invalid_argument(format!(
@@ -315,7 +361,15 @@ pub fn tokenize_screenshot(
     }
     let width = rgba.width();
     let height = rgba.height();
+    let ocr_started = Instant::now();
     let texts = recognize_text(&rgba)?;
+    let ocr_elapsed = ocr_started.elapsed().as_millis();
+    if ocr_elapsed > OCR_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn tokenize_screenshot ocr_ms={} budget_ms={}",
+            ocr_elapsed, OCR_BUDGET_MS
+        ));
+    }
     let snapshot = SnapshotPayload {
         snapshot_id: now_millis() as u64,
         timestamp: now_millis().to_string(),
@@ -328,7 +382,16 @@ pub fn tokenize_screenshot(
         focused_app: window_meta.as_ref().and_then(|meta| meta.app.clone()),
         texts,
     };
-    tokenize_from_snapshot(snapshot, &rgba, Some(screenshot_path), window_meta, None)
+    let payload =
+        tokenize_from_snapshot(snapshot, &rgba, Some(screenshot_path), window_meta, None)?;
+    let total_elapsed = tokenize_started.elapsed().as_millis();
+    if total_elapsed > TOKENIZE_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn tokenize_screenshot total_ms={} budget_ms={}",
+            total_elapsed, TOKENIZE_BUDGET_MS
+        ));
+    }
+    Ok(payload)
 }
 
 fn screenshot_region_crop_rect(

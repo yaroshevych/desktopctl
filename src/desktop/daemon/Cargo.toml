@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 desktop-core = { path = "../core" }
 image = { version = "0.25", default-features = false, features = ["png"] }
+interprocess = "2.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
@@ -31,3 +32,6 @@ tray-icon = "0.21"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))'.dependencies]
+leptess = "0.14"

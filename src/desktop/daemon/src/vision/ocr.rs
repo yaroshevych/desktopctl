@@ -2,10 +2,13 @@
 #[path = "ocr/macos.rs"]
 mod macos_impl;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(all(target_os = "windows", target_env = "msvc"), target_os = "windows"))]
 use desktop_core::protocol::Bounds;
 use desktop_core::{error::AppError, protocol::SnapshotText};
 use image::RgbaImage;
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+use leptess::LepTess;
 
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
@@ -23,7 +26,86 @@ pub fn recognize_text_from_image(
     macos_impl::recognize_text_from_image(path, image_width, image_height)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> {
+    let mut encoded = Vec::new();
+    {
+        let encoder = image::codecs::png::PngEncoder::new(&mut encoded);
+        use image::ImageEncoder as _;
+        encoder
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ColorType::Rgba8.into(),
+            )
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("failed to encode OCR input PNG: {err}"))
+            })?;
+    }
+
+    let mut lt = LepTess::new(None, "eng").map_err(|err| {
+        AppError::backend_unavailable(format!(
+            "failed to initialize Tesseract engine: {err}. ensure Tesseract + tessdata (eng) are installed"
+        ))
+    })?;
+    lt.set_image_from_mem(&encoded).map_err(|err| {
+        AppError::backend_unavailable(format!("failed to load OCR image into Tesseract: {err}"))
+    })?;
+
+    let tsv = lt.get_tsv_text(0).map_err(|err| {
+        AppError::backend_unavailable(format!("failed to retrieve OCR TSV output: {err}"))
+    })?;
+
+    parse_tesseract_tsv(&tsv, image.width(), image.height())
+}
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+#[allow(dead_code)]
+pub fn recognize_text_from_image(
+    path: &std::path::Path,
+    image_width: u32,
+    image_height: u32,
+) -> Result<Vec<SnapshotText>, AppError> {
+    let (file_width, file_height) = image::image_dimensions(path).map_err(|err| {
+        AppError::invalid_argument(format!(
+            "failed to read image dimensions {}: {err}",
+            path.display()
+        ))
+    })?;
+
+    let bytes = std::fs::read(path).map_err(|err| {
+        AppError::invalid_argument(format!("failed to read image {}: {err}", path.display()))
+    })?;
+
+    let mut lt = LepTess::new(None, "eng").map_err(|err| {
+        AppError::backend_unavailable(format!(
+            "failed to initialize Tesseract engine: {err}. ensure Tesseract + tessdata (eng) are installed"
+        ))
+    })?;
+    lt.set_image_from_mem(&bytes).map_err(|err| {
+        AppError::backend_unavailable(format!("failed to load OCR image into Tesseract: {err}"))
+    })?;
+    let tsv = lt.get_tsv_text(0).map_err(|err| {
+        AppError::backend_unavailable(format!("failed to retrieve OCR TSV output: {err}"))
+    })?;
+
+    parse_tesseract_tsv(
+        &tsv,
+        if image_width == 0 {
+            file_width
+        } else {
+            image_width
+        },
+        if image_height == 0 {
+            file_height
+        } else {
+            image_height
+        },
+    )
+}
+
+#[cfg(all(target_os = "windows", not(target_env = "msvc")))]
 pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> {
     let tmp_path = temp_input_path("ocr-input", "png");
     image.save(&tmp_path).map_err(|err| {
@@ -59,7 +141,7 @@ pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> 
     )
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(target_env = "msvc")))]
 #[allow(dead_code)]
 pub fn recognize_text_from_image(
     path: &std::path::Path,
@@ -88,7 +170,7 @@ pub fn recognize_text_from_image(
     )
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(target_env = "msvc")))]
 fn run_tesseract_tsv(path: &std::path::Path) -> Result<String, AppError> {
     let output = std::process::Command::new("tesseract")
         .arg(path)
@@ -169,7 +251,7 @@ fn parse_tesseract_tsv(
     Ok(rows)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(target_env = "msvc")))]
 fn temp_input_path(prefix: &str, ext: &str) -> std::path::PathBuf {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

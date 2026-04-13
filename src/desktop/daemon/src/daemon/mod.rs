@@ -1,12 +1,5 @@
-#[cfg(windows)]
-use std::io::Read;
-#[cfg(windows)]
-use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
-use std::os::unix::{
-    fs::PermissionsExt,
-    net::{UnixListener, UnixStream},
-};
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -18,10 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use desktop_core::ipc::pipe_name;
 #[cfg(unix)]
 use desktop_core::ipc::socket_path;
-#[cfg(windows)]
-use desktop_core::ipc::{socket_addr, windows_ipc_token_path};
 use desktop_core::{
     automation::{Point, new_backend},
     error::AppError,
@@ -29,6 +22,13 @@ use desktop_core::{
     protocol::{
         Command, ObserveOptions, ObserveUntil, PointerButton, RequestEnvelope, ResponseEnvelope,
     },
+};
+#[cfg(unix)]
+use interprocess::local_socket::{GenericFilePath, ToFsName};
+#[cfg(windows)]
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
+use interprocess::local_socket::{
+    Listener, ListenerNonblockingMode, ListenerOptions, Stream, prelude::*,
 };
 use serde_json::{Value, json};
 
@@ -138,16 +138,8 @@ static GUI_OPS_DISABLED: AtomicBool = AtomicBool::new(false);
 static GUI_OPS_STATE_HOOK: OnceLock<fn(bool)> = OnceLock::new();
 static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
     OnceLock::new();
-#[cfg(windows)]
-static WINDOWS_IPC_AUTH_TOKEN: OnceLock<String> = OnceLock::new();
-#[cfg(unix)]
-type IpcListener = UnixListener;
-#[cfg(unix)]
-type IpcStream = UnixStream;
-#[cfg(windows)]
-type IpcListener = TcpListener;
-#[cfg(windows)]
-type IpcStream = TcpStream;
+type IpcListener = Listener;
+type IpcStream = Stream;
 
 type TokenizeHintWindow = (String, String, bool, Option<String>);
 
@@ -258,29 +250,52 @@ fn bind_listener() -> Result<IpcListener, AppError> {
             let _ = fs::remove_file(&path);
         }
 
-        let listener = UnixListener::bind(&path).map_err(|err| {
-            AppError::backend_unavailable(format!("bind {} failed: {err}", path.display()))
-        })?;
+        let name = path
+            .as_os_str()
+            .to_fs_name::<GenericFilePath>()
+            .map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "build socket name {} failed: {err}",
+                    path.display()
+                ))
+            })?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("bind {} failed: {err}", path.display()))
+            })?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|err| {
             AppError::backend_unavailable(format!("set socket permissions failed: {err}"))
         })?;
-        listener.set_nonblocking(true).map_err(|err| {
-            AppError::backend_unavailable(format!("set nonblocking failed: {err}"))
-        })?;
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("set nonblocking failed: {err}"))
+            })?;
         trace::log(format!("listener:bound socket={}", path.display()));
         return Ok(listener);
     }
 
     #[cfg(windows)]
     {
-        let _ = ensure_windows_ipc_auth_token()?;
-        let addr = socket_addr();
-        let listener = TcpListener::bind(&addr)
-            .map_err(|err| AppError::backend_unavailable(format!("bind {addr} failed: {err}")))?;
-        listener.set_nonblocking(true).map_err(|err| {
-            AppError::backend_unavailable(format!("set nonblocking failed: {err}"))
-        })?;
-        trace::log(format!("listener:bound addr={addr}"));
+        let name_raw = pipe_name();
+        let name = name_raw
+            .clone()
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|err| AppError::invalid_argument(format!("invalid pipe name: {err}")))?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("bind named pipe '{name_raw}' failed: {err}"))
+            })?;
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("set nonblocking failed: {err}"))
+            })?;
+        trace::log(format!("listener:bound pipe={name_raw}"));
         return Ok(listener);
     }
 
@@ -293,16 +308,18 @@ fn bind_listener() -> Result<IpcListener, AppError> {
 
 fn accept_loop(listener: IpcListener, config: DaemonConfig) -> Result<(), AppError> {
     if config.idle_timeout.is_none() {
-        listener.set_nonblocking(false).map_err(|err| {
-            AppError::backend_unavailable(format!("set listener blocking mode failed: {err}"))
-        })?;
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Neither)
+            .map_err(|err| {
+                AppError::backend_unavailable(format!("set listener blocking mode failed: {err}"))
+            })?;
     }
     let mut last_activity = Instant::now();
     let active_clients = Arc::new(AtomicUsize::new(0));
 
     loop {
         match listener.accept() {
-            Ok((stream, _addr)) => {
+            Ok(stream) => {
                 last_activity = Instant::now();
                 let active = active_clients.load(Ordering::SeqCst);
                 if active >= MAX_CONCURRENT_CLIENTS {
@@ -359,8 +376,6 @@ fn accept_loop(listener: IpcListener, config: DaemonConfig) -> Result<(), AppErr
 }
 
 fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
-    #[cfg(windows)]
-    validate_windows_ipc_auth(&mut stream)?;
     let request: RequestEnvelope = read_framed_json(&mut stream)?;
     let request_started = Instant::now();
     let request_id = request.request_id.clone();
@@ -452,72 +467,6 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
         command_name,
         request_started.elapsed().as_millis()
     ));
-    Ok(())
-}
-
-#[cfg(windows)]
-fn ensure_windows_ipc_auth_token() -> Result<&'static str, AppError> {
-    if let Some(token) = WINDOWS_IPC_AUTH_TOKEN.get() {
-        return Ok(token.as_str());
-    }
-
-    let token = uuid::Uuid::new_v4().to_string();
-    let path = windows_ipc_token_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            AppError::backend_unavailable(format!(
-                "failed to create IPC token directory {}: {err}",
-                parent.display()
-            ))
-        })?;
-    }
-    fs::write(&path, format!("{token}\n")).map_err(|err| {
-        AppError::backend_unavailable(format!(
-            "failed to persist IPC token to {}: {err}",
-            path.display()
-        ))
-    })?;
-
-    let _ = WINDOWS_IPC_AUTH_TOKEN.set(token);
-    WINDOWS_IPC_AUTH_TOKEN
-        .get()
-        .map(|token| token.as_str())
-        .ok_or_else(|| AppError::backend_unavailable("failed to initialize Windows IPC auth token"))
-}
-
-#[cfg(windows)]
-fn validate_windows_ipc_auth(stream: &mut IpcStream) -> Result<(), AppError> {
-    let expected = ensure_windows_ipc_auth_token()?;
-    let mut buf = Vec::with_capacity(64);
-    loop {
-        if buf.len() >= 4096 {
-            return Err(AppError::permission_denied(
-                "IPC authentication header exceeds maximum length",
-            ));
-        }
-        let mut byte = [0_u8; 1];
-        stream.read_exact(&mut byte).map_err(|err| {
-            AppError::permission_denied(format!("failed to read IPC authentication header: {err}"))
-        })?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        if byte[0] != b'\r' {
-            buf.push(byte[0]);
-        }
-    }
-
-    let line = String::from_utf8(buf)
-        .map_err(|_| AppError::permission_denied("IPC authentication header is not valid UTF-8"))?;
-    let token = line
-        .strip_prefix("AUTH ")
-        .map(str::trim)
-        .ok_or_else(|| AppError::permission_denied("missing IPC authentication header"))?;
-    if token != expected {
-        return Err(AppError::permission_denied(
-            "invalid IPC authentication token",
-        ));
-    }
     Ok(())
 }
 

@@ -1,15 +1,15 @@
 #[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::{
     env,
     io::{Read, Write},
-    path::PathBuf,
 };
+
+#[cfg(unix)]
+use interprocess::local_socket::{GenericFilePath, ToFsName};
 #[cfg(windows)]
-use std::{
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
-    time::Duration,
-};
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
+use interprocess::local_socket::{Stream, prelude::*};
 
 use crate::{
     error::AppError,
@@ -22,9 +22,7 @@ const SOCKET_DIR_NAME: &str = "desktopctl";
 #[cfg(unix)]
 const SOCKET_FILE_NAME: &str = "desktopctl.sock";
 #[cfg(windows)]
-const DEFAULT_WINDOWS_ADDR: &str = "127.0.0.1:42737";
-#[cfg(windows)]
-const WINDOWS_TOKEN_FILE_NAME: &str = "desktopctl-ipc-token";
+const DEFAULT_WINDOWS_PIPE_NAME: &str = "desktopctl";
 
 #[cfg(unix)]
 fn legacy_socket_path() -> PathBuf {
@@ -40,43 +38,35 @@ pub fn socket_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-pub fn socket_addr() -> String {
-    env::var("DESKTOPCTL_SOCKET_ADDR").unwrap_or_else(|_| DEFAULT_WINDOWS_ADDR.to_string())
-}
-
-#[cfg(windows)]
-pub fn windows_ipc_token_path() -> PathBuf {
-    if let Some(path) = env::var_os("DESKTOPCTL_IPC_TOKEN_PATH") {
-        return PathBuf::from(path);
-    }
-    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data)
-            .join("DesktopCtl")
-            .join(WINDOWS_TOKEN_FILE_NAME);
-    }
-    env::temp_dir()
-        .join("desktopctl")
-        .join(WINDOWS_TOKEN_FILE_NAME)
+pub fn pipe_name() -> String {
+    env::var("DESKTOPCTL_PIPE_NAME").unwrap_or_else(|_| DEFAULT_WINDOWS_PIPE_NAME.to_string())
 }
 
 pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
     #[cfg(unix)]
     {
         let path = socket_path();
-        let stream = UnixStream::connect(&path).or_else(|primary_err| {
-            let legacy = legacy_socket_path();
-            if legacy == path {
-                return Err(primary_err);
-            }
-            UnixStream::connect(&legacy).map_err(|_| primary_err)
-        });
-        let mut stream = stream.map_err(|err| {
-            AppError::daemon_not_running(format!(
-                "failed to connect to {}: {}. is DesktopCtl.app running?",
-                path.display(),
-                err
-            ))
-        })?;
+        let connect = || -> std::io::Result<Stream> {
+            let name = path.as_os_str().to_fs_name::<GenericFilePath>()?;
+            Stream::connect(name)
+        };
+
+        let mut stream = connect()
+            .or_else(|primary_err| {
+                let legacy = legacy_socket_path();
+                if legacy == path {
+                    return Err(primary_err);
+                }
+                let legacy_name = legacy.as_os_str().to_fs_name::<GenericFilePath>()?;
+                Stream::connect(legacy_name).map_err(|_| primary_err)
+            })
+            .map_err(|err| {
+                AppError::daemon_not_running(format!(
+                    "failed to connect to {}: {}. is DesktopCtl.app running?",
+                    path.display(),
+                    err
+                ))
+            })?;
 
         write_framed_json(&mut stream, request)?;
         return read_framed_json(&mut stream);
@@ -84,14 +74,22 @@ pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppEr
 
     #[cfg(windows)]
     {
-        let addr = socket_addr();
-        let mut stream = TcpStream::connect(&addr).map_err(|err| {
+        let name_raw = pipe_name();
+        let name = name_raw
+            .clone()
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|err| {
+                AppError::invalid_argument(format!(
+                    "invalid DESKTOPCTL_PIPE_NAME '{name_raw}': {err}"
+                ))
+            })?;
+
+        let mut stream = Stream::connect(name).map_err(|err| {
             AppError::daemon_not_running(format!(
-                "failed to connect to {addr}: {err}. is desktopctld running?"
+                "failed to connect to named pipe '{name_raw}': {err}. is desktopctld running?"
             ))
         })?;
-        let token = load_windows_ipc_token()?;
-        write_windows_auth_line(&mut stream, &token)?;
+
         write_framed_json(&mut stream, request)?;
         return read_framed_json(&mut stream);
     }
@@ -112,60 +110,16 @@ pub fn socket_exists() -> bool {
 
     #[cfg(windows)]
     {
-        let addr = match resolve_socket_addr(&socket_addr()) {
-            Ok(addr) => addr,
+        let name_raw = pipe_name();
+        let name = match name_raw.to_ns_name::<GenericNamespaced>() {
+            Ok(name) => name,
             Err(_) => return false,
         };
-        return TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok();
+        return Stream::connect(name).is_ok();
     }
 
     #[allow(unreachable_code)]
     false
-}
-
-#[cfg(windows)]
-fn resolve_socket_addr(addr: &str) -> Result<SocketAddr, AppError> {
-    let mut candidates = addr.to_socket_addrs().map_err(|err| {
-        AppError::invalid_argument(format!(
-            "invalid DESKTOPCTL_SOCKET_ADDR value '{addr}': {err}"
-        ))
-    })?;
-    candidates.next().ok_or_else(|| {
-        AppError::invalid_argument(format!(
-            "invalid DESKTOPCTL_SOCKET_ADDR value '{addr}': no socket addresses found"
-        ))
-    })
-}
-
-#[cfg(windows)]
-fn load_windows_ipc_token() -> Result<String, AppError> {
-    let path = windows_ipc_token_path();
-    let raw = std::fs::read_to_string(&path).map_err(|err| {
-        AppError::daemon_not_running(format!(
-            "failed to read DesktopCtl IPC token at {}: {err}. is desktopctld running?",
-            path.display()
-        ))
-    })?;
-    let token = raw.trim().to_string();
-    if token.is_empty() {
-        return Err(AppError::daemon_not_running(format!(
-            "DesktopCtl IPC token file is empty at {}. restart desktopctld",
-            path.display()
-        )));
-    }
-    Ok(token)
-}
-
-#[cfg(windows)]
-fn write_windows_auth_line(stream: &mut TcpStream, token: &str) -> Result<(), AppError> {
-    stream
-        .write_all(format!("AUTH {token}\n").as_bytes())
-        .map_err(|err| {
-            AppError::backend_unavailable(format!("failed to write IPC auth prelude: {err}"))
-        })?;
-    stream.flush().map_err(|err| {
-        AppError::backend_unavailable(format!("failed to flush IPC auth prelude: {err}"))
-    })
 }
 
 pub fn write_framed_json<W: Write, T: serde::Serialize>(
