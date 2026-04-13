@@ -182,6 +182,14 @@ fn discover_daemon_binary_path() -> Option<PathBuf> {
 
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?;
+    #[cfg(windows)]
+    {
+        let sibling_exe = exe_dir.join("desktopctld.exe");
+        if sibling_exe.exists() {
+            return Some(sibling_exe);
+        }
+    }
+
     let sibling = exe_dir.join("desktopctld");
     if sibling.exists() {
         return Some(sibling);

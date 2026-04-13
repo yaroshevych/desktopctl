@@ -8,7 +8,7 @@ try {
   $daemon = Start-Process -FilePath ".\target\x86_64-pc-windows-msvc\release\desktopctld.exe" -ArgumentList "--on-demand" -PassThru
   Start-Sleep -Milliseconds 700
 
-  $pingOutput = & ".\target\x86_64-pc-windows-msvc\release\desktopctl.exe" ping
+  $pingOutput = & ".\target\x86_64-pc-windows-msvc\release\desktopctl.exe" debug ping
   if ($LASTEXITCODE -ne 0) {
     throw "desktopctl ping failed"
   }
