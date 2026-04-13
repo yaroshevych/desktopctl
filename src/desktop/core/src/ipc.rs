@@ -17,11 +17,16 @@ use crate::{
 };
 
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+#[cfg(unix)]
 const SOCKET_DIR_NAME: &str = "desktopctl";
+#[cfg(unix)]
 const SOCKET_FILE_NAME: &str = "desktopctl.sock";
 #[cfg(windows)]
 const DEFAULT_WINDOWS_ADDR: &str = "127.0.0.1:42737";
+#[cfg(windows)]
+const WINDOWS_TOKEN_FILE_NAME: &str = "desktopctl-ipc-token";
 
+#[cfg(unix)]
 fn legacy_socket_path() -> PathBuf {
     PathBuf::from("/tmp/desktopctl.sock")
 }
@@ -37,6 +42,21 @@ pub fn socket_path() -> PathBuf {
 #[cfg(windows)]
 pub fn socket_addr() -> String {
     env::var("DESKTOPCTL_SOCKET_ADDR").unwrap_or_else(|_| DEFAULT_WINDOWS_ADDR.to_string())
+}
+
+#[cfg(windows)]
+pub fn windows_ipc_token_path() -> PathBuf {
+    if let Some(path) = env::var_os("DESKTOPCTL_IPC_TOKEN_PATH") {
+        return PathBuf::from(path);
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("DesktopCtl")
+            .join(WINDOWS_TOKEN_FILE_NAME);
+    }
+    env::temp_dir()
+        .join("desktopctl")
+        .join(WINDOWS_TOKEN_FILE_NAME)
 }
 
 pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
@@ -70,6 +90,8 @@ pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppEr
                 "failed to connect to {addr}: {err}. is desktopctld running?"
             ))
         })?;
+        let token = load_windows_ipc_token()?;
+        write_windows_auth_line(&mut stream, &token)?;
         write_framed_json(&mut stream, request)?;
         return read_framed_json(&mut stream);
     }
@@ -112,6 +134,37 @@ fn resolve_socket_addr(addr: &str) -> Result<SocketAddr, AppError> {
         AppError::invalid_argument(format!(
             "invalid DESKTOPCTL_SOCKET_ADDR value '{addr}': no socket addresses found"
         ))
+    })
+}
+
+#[cfg(windows)]
+fn load_windows_ipc_token() -> Result<String, AppError> {
+    let path = windows_ipc_token_path();
+    let raw = std::fs::read_to_string(&path).map_err(|err| {
+        AppError::daemon_not_running(format!(
+            "failed to read DesktopCtl IPC token at {}: {err}. is desktopctld running?",
+            path.display()
+        ))
+    })?;
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        return Err(AppError::daemon_not_running(format!(
+            "DesktopCtl IPC token file is empty at {}. restart desktopctld",
+            path.display()
+        )));
+    }
+    Ok(token)
+}
+
+#[cfg(windows)]
+fn write_windows_auth_line(stream: &mut TcpStream, token: &str) -> Result<(), AppError> {
+    stream
+        .write_all(format!("AUTH {token}\n").as_bytes())
+        .map_err(|err| {
+            AppError::backend_unavailable(format!("failed to write IPC auth prelude: {err}"))
+        })?;
+    stream.flush().map_err(|err| {
+        AppError::backend_unavailable(format!("failed to flush IPC auth prelude: {err}"))
     })
 }
 

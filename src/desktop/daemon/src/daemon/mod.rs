@@ -1,4 +1,6 @@
 #[cfg(windows)]
+use std::io::Read;
+#[cfg(windows)]
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::{
@@ -16,10 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(windows)]
-use desktop_core::ipc::socket_addr;
 #[cfg(unix)]
 use desktop_core::ipc::socket_path;
+#[cfg(windows)]
+use desktop_core::ipc::{socket_addr, windows_ipc_token_path};
 use desktop_core::{
     automation::{Point, new_backend},
     error::AppError,
@@ -136,6 +138,8 @@ static GUI_OPS_DISABLED: AtomicBool = AtomicBool::new(false);
 static GUI_OPS_STATE_HOOK: OnceLock<fn(bool)> = OnceLock::new();
 static TOKENIZE_WINDOW_HINT_STATE: OnceLock<Mutex<HashMap<String, HashSet<String>>>> =
     OnceLock::new();
+#[cfg(windows)]
+static WINDOWS_IPC_AUTH_TOKEN: OnceLock<String> = OnceLock::new();
 #[cfg(unix)]
 type IpcListener = UnixListener;
 #[cfg(unix)]
@@ -269,6 +273,7 @@ fn bind_listener() -> Result<IpcListener, AppError> {
 
     #[cfg(windows)]
     {
+        let _ = ensure_windows_ipc_auth_token()?;
         let addr = socket_addr();
         let listener = TcpListener::bind(&addr)
             .map_err(|err| AppError::backend_unavailable(format!("bind {addr} failed: {err}")))?;
@@ -354,6 +359,8 @@ fn accept_loop(listener: IpcListener, config: DaemonConfig) -> Result<(), AppErr
 }
 
 fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
+    #[cfg(windows)]
+    validate_windows_ipc_auth(&mut stream)?;
     let request: RequestEnvelope = read_framed_json(&mut stream)?;
     let request_started = Instant::now();
     let request_id = request.request_id.clone();
@@ -445,6 +452,72 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
         command_name,
         request_started.elapsed().as_millis()
     ));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_windows_ipc_auth_token() -> Result<&'static str, AppError> {
+    if let Some(token) = WINDOWS_IPC_AUTH_TOKEN.get() {
+        return Ok(token.as_str());
+    }
+
+    let token = uuid::Uuid::new_v4().to_string();
+    let path = windows_ipc_token_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to create IPC token directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    fs::write(&path, format!("{token}\n")).map_err(|err| {
+        AppError::backend_unavailable(format!(
+            "failed to persist IPC token to {}: {err}",
+            path.display()
+        ))
+    })?;
+
+    let _ = WINDOWS_IPC_AUTH_TOKEN.set(token);
+    WINDOWS_IPC_AUTH_TOKEN
+        .get()
+        .map(|token| token.as_str())
+        .ok_or_else(|| AppError::backend_unavailable("failed to initialize Windows IPC auth token"))
+}
+
+#[cfg(windows)]
+fn validate_windows_ipc_auth(stream: &mut IpcStream) -> Result<(), AppError> {
+    let expected = ensure_windows_ipc_auth_token()?;
+    let mut buf = Vec::with_capacity(64);
+    loop {
+        if buf.len() >= 4096 {
+            return Err(AppError::permission_denied(
+                "IPC authentication header exceeds maximum length",
+            ));
+        }
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).map_err(|err| {
+            AppError::permission_denied(format!("failed to read IPC authentication header: {err}"))
+        })?;
+        if byte[0] == b'\n' {
+            break;
+        }
+        if byte[0] != b'\r' {
+            buf.push(byte[0]);
+        }
+    }
+
+    let line = String::from_utf8(buf)
+        .map_err(|_| AppError::permission_denied("IPC authentication header is not valid UTF-8"))?;
+    let token = line
+        .strip_prefix("AUTH ")
+        .map(str::trim)
+        .ok_or_else(|| AppError::permission_denied("missing IPC authentication header"))?;
+    if token != expected {
+        return Err(AppError::permission_denied(
+            "invalid IPC authentication token",
+        ));
+    }
     Ok(())
 }
 
