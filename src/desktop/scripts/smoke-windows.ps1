@@ -6,7 +6,18 @@ Push-Location $root
 $daemon = $null
 try {
   $daemon = Start-Process -FilePath ".\target\x86_64-pc-windows-msvc\release\desktopctld.exe" -ArgumentList "--on-demand" -PassThru
-  Start-Sleep -Milliseconds 700
+  $ready = $false
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    Start-Sleep -Milliseconds 250
+    $probe = & ".\target\x86_64-pc-windows-msvc\release\desktopctl.exe" debug ping 2>&1
+    if ($LASTEXITCODE -eq 0 -and ($probe -match 'pong')) {
+      $ready = $true
+      break
+    }
+  }
+  if (-not $ready) {
+    throw "desktopctld did not become ready in time"
+  }
 
   $pingOutput = & ".\target\x86_64-pc-windows-msvc\release\desktopctl.exe" debug ping
   if ($LASTEXITCODE -ne 0) {
@@ -24,6 +35,11 @@ try {
 
   if (-not ($tokenizeOutput -match '#axid_')) {
     throw "tokenize output did not include AX/UIA ids (#axid_). output: $tokenizeOutput"
+  }
+
+  $permissionsOutput = & ".\target\x86_64-pc-windows-msvc\release\desktopctl.exe" debug permissions
+  if ($LASTEXITCODE -ne 0) {
+    throw "desktopctl debug permissions failed"
   }
 
   Write-Host "Windows smoke test passed."
