@@ -575,11 +575,36 @@ pub(crate) fn tokenize(
         .map(|(label, ms)| format!("{label}_ms={ms}"))
         .collect::<Vec<_>>()
         .join(" ");
+    let total_ms = total_started.elapsed().as_millis();
     trace::log(format!(
         "execute:screen_tokenize:timing total_ms={} {}",
-        total_started.elapsed().as_millis(),
-        timing_breakdown
+        total_ms, timing_breakdown
     ));
+    if std::env::var("DESKTOPCTL_INCLUDE_DEBUG_TIMINGS")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    {
+        let mut stage_ms = serde_json::Map::new();
+        for (label, ms) in &stage_timings {
+            stage_ms.insert((*label).to_string(), serde_json::json!(ms));
+        }
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "_debug".to_string(),
+                serde_json::json!({
+                    "perf_ms": {
+                        "total": total_ms,
+                        "stages": stage_ms
+                    }
+                }),
+            );
+        }
+    }
     Ok(value)
 }
 

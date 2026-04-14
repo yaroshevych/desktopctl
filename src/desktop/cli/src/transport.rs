@@ -133,9 +133,19 @@ fn launch_daemon() -> Result<(), AppError> {
     }
 
     trace_log("launch:no_binary_or_app");
-    Err(AppError::daemon_not_running(
-        "unable to auto-start daemon; run `just build` and retry",
-    ))
+    #[cfg(windows)]
+    {
+        return Err(AppError::daemon_not_running(
+            "unable to auto-start daemon; run desktopctld.exe (or set DESKTOPCTL_DAEMON_BIN) and retry",
+        ));
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err(AppError::daemon_not_running(
+            "unable to auto-start daemon; run `just build` and retry",
+        ))
+    }
 }
 
 fn discover_daemon_app_path() -> Option<PathBuf> {
