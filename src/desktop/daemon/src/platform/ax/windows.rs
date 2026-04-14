@@ -2,6 +2,7 @@ use desktop_core::{
     error::AppError,
     protocol::{Bounds, ToggleState},
 };
+use std::collections::HashSet;
 use uiautomation::{
     UIAutomation, UIElement,
     patterns::{UITogglePattern, UIValuePattern},
@@ -37,10 +38,11 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
         .map_err(|err| backend_error("failed to create UIA control walker", err))?;
 
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     let mut stack: Vec<(UIElement, usize)> = Vec::new();
 
     if let Some(focused) = focused_frontmost_element()? {
-        out.push(focused);
+        push_unique(&mut out, &mut seen, focused);
     }
 
     if let Some(children) = walker.get_children(&root) {
@@ -55,7 +57,7 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
         }
 
         if let Some(ax) = to_ax_element(&element) {
-            out.push(ax);
+            push_unique(&mut out, &mut seen, ax);
         }
 
         if depth >= MAX_UIA_DEPTH {
@@ -107,7 +109,7 @@ fn to_ax_element(element: &UIElement) -> Option<AxElement> {
     }
 
     let control_type = element.get_control_type().ok()?;
-    let role = role_for_control_type(control_type)?;
+    let role = map_role_for_control_type(control_type)?;
     let bounds = element_bounds(element)?;
     if bounds.width <= 0.0 || bounds.height <= 0.0 {
         return None;
@@ -115,10 +117,10 @@ fn to_ax_element(element: &UIElement) -> Option<AxElement> {
 
     Some(AxElement {
         role,
-        text: element_text(element, control_type),
+        text: map_text_for_element(element, control_type),
         bounds,
-        ax_identifier: element_identifier(element),
-        checked: element_toggle_state(element, control_type),
+        ax_identifier: map_identifier_for_element(element),
+        checked: map_toggle_state_for_element(element, control_type),
     })
 }
 
@@ -130,18 +132,18 @@ fn to_ax_fallback_element(element: &UIElement) -> Option<AxElement> {
     let control_type = element.get_control_type().ok();
     Some(AxElement {
         role: control_type
-            .and_then(role_for_control_type)
+            .and_then(map_role_for_control_type)
             .unwrap_or_else(|| "AXUnknown".to_string()),
         text: control_type
-            .and_then(|ty| element_text(element, ty))
+            .and_then(|ty| map_text_for_element(element, ty))
             .or_else(|| normalize_text_candidates(vec![element.get_name().unwrap_or_default()])),
         bounds,
-        ax_identifier: element_identifier(element),
-        checked: control_type.and_then(|ty| element_toggle_state(element, ty)),
+        ax_identifier: map_identifier_for_element(element),
+        checked: control_type.and_then(|ty| map_toggle_state_for_element(element, ty)),
     })
 }
 
-fn role_for_control_type(control_type: ControlType) -> Option<String> {
+fn map_role_for_control_type(control_type: ControlType) -> Option<String> {
     let role = match control_type {
         ControlType::Button | ControlType::SplitButton | ControlType::MenuItem => "AXButton",
         ControlType::CheckBox => "AXCheckBox",
@@ -156,6 +158,8 @@ fn role_for_control_type(control_type: ControlType) -> Option<String> {
         ControlType::Slider => "AXSlider",
         ControlType::Spinner => "AXIncrementor",
         ControlType::ScrollBar => "AXScrollBar",
+        ControlType::Tab => "AXTabGroup",
+        ControlType::Window | ControlType::Pane | ControlType::Group => "AXGroup",
         _ => return None,
     };
     Some(role.to_string())
@@ -182,7 +186,7 @@ fn element_bounds(element: &UIElement) -> Option<Bounds> {
     })
 }
 
-fn element_text(element: &UIElement, control_type: ControlType) -> Option<String> {
+fn map_text_for_element(element: &UIElement, control_type: ControlType) -> Option<String> {
     let mut candidates = Vec::with_capacity(4);
 
     if let Ok(name) = element.get_name() {
@@ -209,7 +213,7 @@ fn element_text(element: &UIElement, control_type: ControlType) -> Option<String
     normalize_text_candidates(candidates)
 }
 
-fn element_identifier(element: &UIElement) -> Option<String> {
+fn map_identifier_for_element(element: &UIElement) -> Option<String> {
     if let Ok(id) = element.get_automation_id() {
         let id = id.trim();
         if !id.is_empty() {
@@ -233,7 +237,10 @@ fn element_identifier(element: &UIElement) -> Option<String> {
     None
 }
 
-fn element_toggle_state(element: &UIElement, control_type: ControlType) -> Option<ToggleState> {
+fn map_toggle_state_for_element(
+    element: &UIElement,
+    control_type: ControlType,
+) -> Option<ToggleState> {
     if !matches!(
         control_type,
         ControlType::CheckBox | ControlType::RadioButton
@@ -250,6 +257,36 @@ fn element_toggle_state(element: &UIElement, control_type: ControlType) -> Optio
     })
 }
 
+fn push_unique(out: &mut Vec<AxElement>, seen: &mut HashSet<String>, element: AxElement) {
+    let key = dedupe_key(&element);
+    if seen.insert(key) {
+        out.push(element);
+    }
+}
+
+fn dedupe_key(element: &AxElement) -> String {
+    let id = element
+        .ax_identifier
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("<none>");
+    let text = element
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("<none>");
+    let role = element.role.trim();
+    format!(
+        "{id}|{role}|{text}|{:.0},{:.0},{:.0},{:.0}",
+        element.bounds.x.round(),
+        element.bounds.y.round(),
+        element.bounds.width.round(),
+        element.bounds.height.round()
+    )
+}
+
 fn normalize_text_candidates(values: Vec<String>) -> Option<String> {
     for value in values {
         let compact = value.replace('\r', " ").replace('\n', " ");
@@ -263,4 +300,78 @@ fn normalize_text_candidates(values: Vec<String>) -> Option<String> {
 
 fn backend_error(context: &str, err: uiautomation::Error) -> AppError {
     AppError::backend_unavailable(format!("{context}: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(bounds: Bounds) -> AxElement {
+        AxElement {
+            role: "AXButton".to_string(),
+            text: Some("Save".to_string()),
+            bounds,
+            ax_identifier: Some("uia-save-button".to_string()),
+            checked: None,
+        }
+    }
+
+    #[test]
+    fn map_role_for_control_type_includes_common_windows_controls() {
+        assert_eq!(
+            map_role_for_control_type(ControlType::Button).as_deref(),
+            Some("AXButton")
+        );
+        assert_eq!(
+            map_role_for_control_type(ControlType::Edit).as_deref(),
+            Some("AXTextField")
+        );
+        assert_eq!(
+            map_role_for_control_type(ControlType::Tab).as_deref(),
+            Some("AXTabGroup")
+        );
+        assert_eq!(
+            map_role_for_control_type(ControlType::Pane).as_deref(),
+            Some("AXGroup")
+        );
+    }
+
+    #[test]
+    fn normalize_text_candidates_trims_and_collapses_whitespace() {
+        let normalized =
+            normalize_text_candidates(vec!["   ".to_string(), "Line 1\r\n  Line 2".to_string()]);
+        assert_eq!(normalized.as_deref(), Some("Line 1 Line 2"));
+    }
+
+    #[test]
+    fn dedupe_key_matches_same_element_after_rounding() {
+        let a = sample(Bounds {
+            x: 100.49,
+            y: 200.49,
+            width: 80.49,
+            height: 30.49,
+        });
+        let b = sample(Bounds {
+            x: 100.51,
+            y: 200.51,
+            width: 80.51,
+            height: 30.51,
+        });
+        assert_eq!(dedupe_key(&a), dedupe_key(&b));
+    }
+
+    #[test]
+    fn push_unique_skips_duplicates() {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let element = sample(Bounds {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        });
+        push_unique(&mut out, &mut seen, element.clone());
+        push_unique(&mut out, &mut seen, element);
+        assert_eq!(out.len(), 1);
+    }
 }
