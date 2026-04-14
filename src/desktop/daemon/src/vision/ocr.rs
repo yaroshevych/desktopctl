@@ -115,14 +115,14 @@ pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> 
         ))
     })?;
 
-    let output = std::process::Command::new("tesseract")
+    let output = tesseract_command()
         .arg(&tmp_path)
         .arg("stdout")
         .arg("tsv")
         .output()
         .map_err(|err| {
             AppError::backend_unavailable(format!(
-                "failed to run tesseract binary: {err}. install Tesseract or provide it on PATH"
+                "failed to run tesseract binary: {err}. install Tesseract, set DESKTOPCTL_TESSERACT_BIN, or provide it on PATH"
             ))
         })?;
     let _ = std::fs::remove_file(&tmp_path);
@@ -172,14 +172,14 @@ pub fn recognize_text_from_image(
 
 #[cfg(all(target_os = "windows", not(target_env = "msvc")))]
 fn run_tesseract_tsv(path: &std::path::Path) -> Result<String, AppError> {
-    let output = std::process::Command::new("tesseract")
+    let output = tesseract_command()
         .arg(path)
         .arg("stdout")
         .arg("tsv")
         .output()
         .map_err(|err| {
             AppError::backend_unavailable(format!(
-                "failed to run tesseract binary: {err}. install Tesseract or provide it on PATH"
+                "failed to run tesseract binary: {err}. install Tesseract, set DESKTOPCTL_TESSERACT_BIN, or provide it on PATH"
             ))
         })?;
 
@@ -191,6 +191,23 @@ fn run_tesseract_tsv(path: &std::path::Path) -> Result<String, AppError> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(all(target_os = "windows", not(target_env = "msvc")))]
+fn tesseract_command() -> std::process::Command {
+    if let Some(path) = std::env::var("DESKTOPCTL_TESSERACT_BIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return std::process::Command::new(path);
+    }
+    if let Some(path) = std::env::var("TESSERACT_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return std::process::Command::new(path);
+    }
+    std::process::Command::new("tesseract")
 }
 
 #[cfg(target_os = "windows")]
