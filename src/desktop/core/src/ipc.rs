@@ -1,4 +1,6 @@
-#[cfg(unix)]
+#[cfg(windows)]
+use std::fs;
+#[cfg(any(unix, windows))]
 use std::path::PathBuf;
 use std::{
     env,
@@ -23,6 +25,12 @@ const SOCKET_DIR_NAME: &str = "desktopctl";
 const SOCKET_FILE_NAME: &str = "desktopctl.sock";
 #[cfg(windows)]
 const DEFAULT_WINDOWS_PIPE_NAME: &str = "desktopctl";
+#[cfg(windows)]
+const WINDOWS_AUTH_DIR_NAME: &str = "desktopctl";
+#[cfg(windows)]
+const WINDOWS_AUTH_FILE_NAME: &str = "ipc-token";
+#[cfg(windows)]
+const AUTH_PREFIX: &str = "AUTH ";
 
 #[cfg(unix)]
 fn legacy_socket_path() -> PathBuf {
@@ -39,7 +47,17 @@ pub fn socket_path() -> PathBuf {
 
 #[cfg(windows)]
 pub fn pipe_name() -> String {
-    env::var("DESKTOPCTL_PIPE_NAME").unwrap_or_else(|_| DEFAULT_WINDOWS_PIPE_NAME.to_string())
+    if let Ok(name) = env::var("DESKTOPCTL_PIPE_NAME") {
+        if !name.trim().is_empty() {
+            return name;
+        }
+    }
+    let user = env::var("USERNAME")
+        .ok()
+        .map(|name| sanitize_pipe_component(&name))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "user".to_string());
+    format!("{DEFAULT_WINDOWS_PIPE_NAME}-{user}")
 }
 
 pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
@@ -90,6 +108,7 @@ pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppEr
             ))
         })?;
 
+        send_windows_client_auth(&mut stream)?;
         write_framed_json(&mut stream, request)?;
         return read_framed_json(&mut stream);
     }
@@ -208,4 +227,139 @@ mod tests {
         let err = read_framed_json::<_, ResponseEnvelope>(&mut cursor).expect_err("bad json");
         assert!(err.message.contains("invalid JSON"));
     }
+}
+
+#[cfg(windows)]
+fn sanitize_pipe_component(input: &str) -> String {
+    let mut out = String::new();
+    let mut prev_sep = false;
+    for ch in input.trim().chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_sep = false;
+        } else if !prev_sep {
+            out.push('-');
+            prev_sep = true;
+        }
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+#[cfg(windows)]
+fn windows_auth_token_path() -> PathBuf {
+    if let Ok(path) = env::var("DESKTOPCTL_IPC_TOKEN_PATH") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .map(|base| base.join("AppData").join("Local"))
+        })
+        .unwrap_or_else(env::temp_dir);
+    local_app_data
+        .join(WINDOWS_AUTH_DIR_NAME)
+        .join(WINDOWS_AUTH_FILE_NAME)
+}
+
+#[cfg(windows)]
+fn load_or_create_windows_auth_token() -> Result<String, AppError> {
+    let path = windows_auth_token_path();
+    if let Ok(existing) = fs::read_to_string(&path) {
+        let token = existing.trim().to_string();
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to create auth token directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(token.as_bytes()).map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "failed to write auth token file {}: {err}",
+                    path.display()
+                ))
+            })?;
+            Ok(token)
+        }
+        Err(_) => {
+            let existing = fs::read_to_string(&path).map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "failed to read auth token file {}: {err}",
+                    path.display()
+                ))
+            })?;
+            let token = existing.trim().to_string();
+            if token.is_empty() {
+                return Err(AppError::backend_unavailable(format!(
+                    "auth token file {} is empty",
+                    path.display()
+                )));
+            }
+            Ok(token)
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn send_windows_client_auth<W: Write>(writer: &mut W) -> Result<(), AppError> {
+    let token = load_or_create_windows_auth_token()?;
+    let line = format!("{AUTH_PREFIX}{token}\n");
+    writer.write_all(line.as_bytes()).map_err(|err| {
+        AppError::backend_unavailable(format!("failed to write auth prelude: {err}"))
+    })?;
+    writer.flush().map_err(|err| {
+        AppError::backend_unavailable(format!("failed to flush auth prelude: {err}"))
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn expect_windows_client_auth<R: Read>(reader: &mut R) -> Result<(), AppError> {
+    let expected = load_or_create_windows_auth_token()?;
+    let mut line = Vec::with_capacity(96);
+    let mut byte = [0_u8; 1];
+    while line.len() < 1024 {
+        reader.read_exact(&mut byte).map_err(|err| {
+            AppError::permission_denied(format!("failed to read auth prelude: {err}"))
+        })?;
+        if byte[0] == b'\n' {
+            break;
+        }
+        if byte[0] != b'\r' {
+            line.push(byte[0]);
+        }
+    }
+    if line.is_empty() {
+        return Err(AppError::permission_denied("missing auth prelude"));
+    }
+    let line_text = String::from_utf8(line)
+        .map_err(|_| AppError::permission_denied("invalid auth prelude encoding"))?;
+    let provided = line_text
+        .strip_prefix(AUTH_PREFIX)
+        .ok_or_else(|| AppError::permission_denied("invalid auth prelude prefix"))?;
+    if provided.trim() != expected {
+        return Err(AppError::permission_denied("invalid IPC auth token"));
+    }
+    Ok(())
 }

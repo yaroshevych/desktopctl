@@ -376,6 +376,8 @@ fn accept_loop(listener: IpcListener, config: DaemonConfig) -> Result<(), AppErr
 }
 
 fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
+    #[cfg(windows)]
+    desktop_core::ipc::expect_windows_client_auth(&mut stream)?;
     let request: RequestEnvelope = read_framed_json(&mut stream)?;
     let request_started = Instant::now();
     let request_id = request.request_id.clone();
