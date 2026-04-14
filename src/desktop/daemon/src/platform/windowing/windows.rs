@@ -3,14 +3,16 @@ use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
 use desktop_core::{error::AppError, protocol::Bounds};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, RECT},
+    Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow},
     System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
     },
     UI::WindowsAndMessaging::{
-        EnumWindows, GW_OWNER, GetForegroundWindow, GetWindow, GetWindowRect, GetWindowTextLengthW,
-        GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+        EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
+        GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible, WS_EX_TOOLWINDOW,
     },
 };
 
@@ -161,6 +163,20 @@ fn raw_window(hwnd: HWND) -> Option<RawWindow> {
         if !GetWindow(hwnd, GW_OWNER).is_null() {
             return None;
         }
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        if ex_style & WS_EX_TOOLWINDOW != 0 {
+            return None;
+        }
+        let mut cloaked = 0_u32;
+        let cloaked_status = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            &mut cloaked as *mut u32 as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        );
+        if cloaked_status == 0 && cloaked != 0 {
+            return None;
+        }
 
         let mut rect = RECT {
             left: 0,
@@ -198,8 +214,8 @@ fn rect_to_bounds(rect: RECT) -> Bounds {
     let width = (rect.right - rect.left).max(0) as f64;
     let height = (rect.bottom - rect.top).max(0) as f64;
     Bounds {
-        x: (rect.left as f64).max(0.0),
-        y: (rect.top as f64).max(0.0),
+        x: rect.left as f64,
+        y: rect.top as f64,
         width,
         height,
     }

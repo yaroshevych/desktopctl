@@ -2,20 +2,31 @@ use crate::error::AppError;
 
 use super::{Automation, Point};
 
+use windows_sys::Win32::Foundation::{CloseHandle, HWND};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    MAPVK_VK_TO_VSC, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW,
-    SendInput, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_F3,
-    VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_HOME, VK_LEFT, VK_NEXT,
-    VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+    MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW, SendInput, VIRTUAL_KEY,
+    VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6,
+    VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_HOME, VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR,
+    VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP, VkKeyScanW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+};
 
 const WHEEL_DELTA: i32 = 120;
 const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
-const VK_MENU: u16 = 0x12;
+const VK_ALT: u16 = 0x12;
 
 pub struct WindowsAutomation;
 
@@ -33,6 +44,11 @@ impl Default for WindowsAutomation {
 
 impl Automation for WindowsAutomation {
     fn check_accessibility_permission(&self) -> Result<(), AppError> {
+        if is_uipi_blocked().unwrap_or(false) {
+            return Err(AppError::permission_denied(
+                "input/UI automation is blocked because target app is elevated (run desktopctld elevated or target app non-elevated)",
+            ));
+        }
         Ok(())
     }
 
@@ -66,41 +82,41 @@ impl Automation for WindowsAutomation {
     }
 
     fn move_mouse(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)
+        send_mouse_move_absolute(point)
     }
 
     fn left_down(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)?;
+        send_mouse_move_absolute(point)?;
         send_mouse_flags(MOUSEEVENTF_LEFTDOWN, 0)
     }
 
     fn left_drag(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)
+        send_mouse_move_absolute(point)
     }
 
     fn left_up(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)?;
+        send_mouse_move_absolute(point)?;
         send_mouse_flags(MOUSEEVENTF_LEFTUP, 0)
     }
 
     fn left_click(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)?;
+        send_mouse_move_absolute(point)?;
         send_mouse_flags(MOUSEEVENTF_LEFTDOWN, 0)?;
         send_mouse_flags(MOUSEEVENTF_LEFTUP, 0)
     }
 
     fn right_down(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)?;
+        send_mouse_move_absolute(point)?;
         send_mouse_flags(MOUSEEVENTF_RIGHTDOWN, 0)
     }
 
     fn right_up(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)?;
+        send_mouse_move_absolute(point)?;
         send_mouse_flags(MOUSEEVENTF_RIGHTUP, 0)
     }
 
     fn right_click(&self, point: Point) -> Result<(), AppError> {
-        move_cursor(point)?;
+        send_mouse_move_absolute(point)?;
         send_mouse_flags(MOUSEEVENTF_RIGHTDOWN, 0)?;
         send_mouse_flags(MOUSEEVENTF_RIGHTUP, 0)
     }
@@ -119,7 +135,25 @@ impl Automation for WindowsAutomation {
     }
 }
 
-fn move_cursor(point: Point) -> Result<(), AppError> {
+fn send_mouse_move_absolute(point: Point) -> Result<(), AppError> {
+    let (abs_x, abs_y) = absolute_mouse_coords(point)?;
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: abs_x,
+                dy: abs_y,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    send_inputs(&[input])
+}
+
+fn absolute_mouse_coords(point: Point) -> Result<(i32, i32), AppError> {
     let x = i32::try_from(point.x).map_err(|_| {
         AppError::invalid_argument(format!("mouse x coordinate is out of range: {}", point.x))
     })?;
@@ -127,14 +161,21 @@ fn move_cursor(point: Point) -> Result<(), AppError> {
         AppError::invalid_argument(format!("mouse y coordinate is out of range: {}", point.y))
     })?;
 
-    // SAFETY: SetCursorPos is a leaf Win32 API; coordinates are validated above.
-    let ok = unsafe { SetCursorPos(x, y) };
-    if ok == 0 {
-        return Err(AppError::backend_unavailable(
-            "SetCursorPos failed on Windows",
-        ));
+    // SAFETY: GetSystemMetrics reads process-global display metrics.
+    unsafe {
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if vw <= 1 || vh <= 1 {
+            return Err(AppError::backend_unavailable(
+                "virtual desktop metrics unavailable",
+            ));
+        }
+        let nx = ((x - vx) as f64 * 65535.0 / (vw - 1) as f64).round() as i32;
+        let ny = ((y - vy) as f64 * 65535.0 / (vh - 1) as f64).round() as i32;
+        Ok((nx.clamp(0, 65535), ny.clamp(0, 65535)))
     }
-    Ok(())
 }
 
 fn tap_vk(vk: VIRTUAL_KEY) -> Result<(), AppError> {
@@ -232,18 +273,14 @@ fn parse_hotkey(input: &str) -> Result<(Vec<VIRTUAL_KEY>, VIRTUAL_KEY), AppError
         )));
     }
 
-    let key = parse_key(parts[parts.len() - 1], input)?;
+    let (key, mut implied_modifiers) = parse_key(parts[parts.len() - 1], input)?;
     let mut modifiers = Vec::new();
     for item in &parts[..parts.len() - 1] {
         let modifier = match item.to_ascii_lowercase().as_str() {
             "ctrl" | "control" => VK_CONTROL,
             "shift" => VK_SHIFT,
-            "alt" | "option" => VK_MENU,
-            "cmd" | "command" | "win" | "windows" => {
-                return Err(AppError::invalid_argument(format!(
-                    "unsupported Windows modifier in hotkey '{input}': use ctrl/alt/shift"
-                )));
-            }
+            "alt" | "option" => VK_ALT,
+            "cmd" | "command" | "win" | "windows" => VK_LWIN,
             _ => {
                 return Err(AppError::invalid_argument(format!(
                     "invalid hotkey format: {input}"
@@ -252,11 +289,16 @@ fn parse_hotkey(input: &str) -> Result<(Vec<VIRTUAL_KEY>, VIRTUAL_KEY), AppError
         };
         modifiers.push(modifier);
     }
+    for modifier in implied_modifiers.drain(..) {
+        if !modifiers.contains(&modifier) {
+            modifiers.push(modifier);
+        }
+    }
 
     Ok((modifiers, key))
 }
 
-fn parse_key(part: &str, input: &str) -> Result<VIRTUAL_KEY, AppError> {
+fn parse_key(part: &str, input: &str) -> Result<(VIRTUAL_KEY, Vec<VIRTUAL_KEY>), AppError> {
     let lower = part.to_ascii_lowercase();
     let key = match lower.as_str() {
         "space" => VK_SPACE,
@@ -285,7 +327,29 @@ fn parse_key(part: &str, input: &str) -> Result<VIRTUAL_KEY, AppError> {
         "f10" => VK_F10,
         "f11" => VK_F11,
         "f12" => VK_F12,
-        _ if part.len() == 1 => part.as_bytes()[0].to_ascii_uppercase() as u16,
+        _ if part.chars().count() == 1 => {
+            let ch = part.chars().next().expect("single char");
+            // SAFETY: VkKeyScanW is pure for a Unicode scalar value.
+            let packed = unsafe { VkKeyScanW(ch as u16) };
+            if packed == -1 {
+                return Err(AppError::invalid_argument(format!(
+                    "unsupported hotkey character in '{input}': {part}"
+                )));
+            }
+            let vk = (packed as u16) & 0x00ff;
+            let shift_state = ((packed as u16) >> 8) & 0x00ff;
+            let mut modifiers = Vec::new();
+            if shift_state & 0x01 != 0 {
+                modifiers.push(VK_SHIFT);
+            }
+            if shift_state & 0x02 != 0 {
+                modifiers.push(VK_CONTROL);
+            }
+            if shift_state & 0x04 != 0 {
+                modifiers.push(VK_ALT);
+            }
+            return Ok((vk, modifiers));
+        }
         _ => {
             return Err(AppError::invalid_argument(format!(
                 "invalid hotkey format: {input}"
@@ -293,5 +357,67 @@ fn parse_key(part: &str, input: &str) -> Result<VIRTUAL_KEY, AppError> {
         }
     };
 
-    Ok(key)
+    Ok((key, Vec::new()))
+}
+
+fn is_uipi_blocked() -> Result<bool, AppError> {
+    let self_elevated = current_process_elevated()?;
+    // SAFETY: GetForegroundWindow and GetWindowThreadProcessId are leaf Win32 APIs.
+    let foreground: HWND = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return Ok(false);
+    }
+    let mut pid = 0_u32;
+    // SAFETY: foreground is a handle from GetForegroundWindow.
+    unsafe { GetWindowThreadProcessId(foreground, &mut pid as *mut u32) };
+    if pid == 0 {
+        return Ok(false);
+    }
+    let target_elevated = process_elevated(pid)?;
+    Ok(target_elevated && !self_elevated)
+}
+
+fn current_process_elevated() -> Result<bool, AppError> {
+    // SAFETY: GetCurrentProcess returns a pseudo-handle valid for OpenProcessToken.
+    let process = unsafe { GetCurrentProcess() };
+    token_elevated(process)
+}
+
+fn process_elevated(pid: u32) -> Result<bool, AppError> {
+    // SAFETY: OpenProcess called with query-only rights for discovered PID.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Ok(false);
+    }
+    let elevated = token_elevated(process);
+    // SAFETY: process is a valid handle returned by OpenProcess.
+    unsafe { CloseHandle(process) };
+    elevated
+}
+
+fn token_elevated(process: windows_sys::Win32::Foundation::HANDLE) -> Result<bool, AppError> {
+    let mut token: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    // SAFETY: token out ptr is valid; process handle comes from Win32 APIs.
+    let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token as *mut _) };
+    if ok == 0 || token.is_null() {
+        return Ok(false);
+    }
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut returned = 0_u32;
+    // SAFETY: token is valid; elevation buffer matches requested class.
+    let info_ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut _,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned as *mut u32,
+        )
+    };
+    // SAFETY: token came from OpenProcessToken.
+    unsafe { CloseHandle(token) };
+    if info_ok == 0 {
+        return Ok(false);
+    }
+    Ok(elevation.TokenIsElevated != 0)
 }
