@@ -213,17 +213,12 @@ fn capture_with_gdi() -> Result<GdiCapture, AppError> {
         ));
     }
 
-    let mut rgba = vec![0_u8; byte_len];
-    for chunk in 0..(byte_len / 4) {
-        let src = chunk * 4;
-        let dst = src;
-        rgba[dst] = bgra[src + 2];
-        rgba[dst + 1] = bgra[src + 1];
-        rgba[dst + 2] = bgra[src];
-        rgba[dst + 3] = bgra[src + 3];
+    // Convert BGRA -> RGBA in-place by swapping B and R channels.
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
     }
 
-    let image = RgbaImage::from_vec(width as u32, height as u32, rgba).ok_or_else(|| {
+    let image = RgbaImage::from_vec(width as u32, height as u32, bgra).ok_or_else(|| {
         AppError::backend_unavailable("failed to build RGBA capture image from GDI buffer")
     })?;
 

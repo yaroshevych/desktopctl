@@ -3,6 +3,7 @@ use desktop_core::{
     protocol::{Bounds, ToggleState},
 };
 use std::collections::HashSet;
+use std::{cell::RefCell, thread_local};
 use uiautomation::{
     UIAutomation, UIElement,
     patterns::{UITogglePattern, UIValuePattern},
@@ -22,20 +23,25 @@ pub struct AxElement {
 const MAX_UIA_DEPTH: usize = 8;
 const MAX_UIA_NODES: usize = 512;
 
+thread_local! {
+    static UIA_CONTEXT: RefCell<Option<UIAutomation>> = const { RefCell::new(None) };
+}
+
 pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
     let hwnd = frontmost_hwnd();
     if hwnd == 0 {
         return Ok(Vec::new());
     }
 
-    let automation = UIAutomation::new()
-        .map_err(|err| backend_error("failed to initialize UIAutomation", err))?;
-    let root = automation
-        .element_from_handle(UiaHandle::from(hwnd as isize))
-        .map_err(|err| backend_error("failed to resolve frontmost window UIA element", err))?;
-    let walker = automation
-        .get_control_view_walker()
-        .map_err(|err| backend_error("failed to create UIA control walker", err))?;
+    let (root, walker) = with_uia_context(|automation| {
+        let root = automation
+            .element_from_handle(UiaHandle::from(hwnd as isize))
+            .map_err(|err| backend_error("failed to resolve frontmost window UIA element", err))?;
+        let walker = automation
+            .get_control_view_walker()
+            .map_err(|err| backend_error("failed to create UIA control walker", err))?;
+        Ok((root, walker))
+    })?;
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -75,13 +81,13 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
 }
 
 pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
-    let automation = UIAutomation::new()
-        .map_err(|err| backend_error("failed to initialize UIAutomation", err))?;
-    let focused = match automation.get_focused_element() {
-        Ok(element) => element,
-        Err(_) => return Ok(None),
-    };
-    Ok(to_ax_element(&focused).or_else(|| to_ax_fallback_element(&focused)))
+    with_uia_context(|automation| {
+        let focused = match automation.get_focused_element() {
+            Ok(element) => element,
+            Err(_) => return Ok(None),
+        };
+        Ok(to_ax_element(&focused).or_else(|| to_ax_fallback_element(&focused)))
+    })
 }
 
 pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
@@ -89,13 +95,13 @@ pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     if hwnd == 0 {
         return Ok(None);
     }
-    let automation = UIAutomation::new()
-        .map_err(|err| backend_error("failed to initialize UIAutomation", err))?;
-    let window = match automation.element_from_handle(UiaHandle::from(hwnd as isize)) {
-        Ok(element) => element,
-        Err(_) => return Ok(None),
-    };
-    Ok(element_bounds(&window))
+    with_uia_context(|automation| {
+        let window = match automation.element_from_handle(UiaHandle::from(hwnd as isize)) {
+            Ok(element) => element,
+            Err(_) => return Ok(None),
+        };
+        Ok(element_bounds(&window))
+    })
 }
 
 fn frontmost_hwnd() -> usize {
@@ -300,6 +306,23 @@ fn normalize_text_candidates(values: Vec<String>) -> Option<String> {
 
 fn backend_error(context: &str, err: uiautomation::Error) -> AppError {
     AppError::backend_unavailable(format!("{context}: {err}"))
+}
+
+fn with_uia_context<T>(
+    f: impl FnOnce(&UIAutomation) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    UIA_CONTEXT.with(|slot| {
+        if slot.borrow().is_none() {
+            let automation = UIAutomation::new()
+                .map_err(|err| backend_error("failed to initialize UIAutomation", err))?;
+            *slot.borrow_mut() = Some(automation);
+        }
+        let borrow = slot.borrow();
+        let automation = borrow
+            .as_ref()
+            .ok_or_else(|| AppError::backend_unavailable("UIAutomation context unavailable"))?;
+        f(automation)
+    })
 }
 
 #[cfg(test)]
