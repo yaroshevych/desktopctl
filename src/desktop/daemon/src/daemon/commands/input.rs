@@ -202,7 +202,17 @@ pub(crate) fn pointer_drag(
     backend.move_mouse(start)?;
     backend.left_down(start)?;
     backend.sleep_ms(hold_ms.max(30));
-    backend.left_drag(end)?;
+    let dx = i64::from(x2) - i64::from(x1);
+    let dy = i64::from(y2) - i64::from(y1);
+    let max_axis = dx.unsigned_abs().max(dy.unsigned_abs());
+    let steps = ((max_axis / 40).max(1)).min(24) as u32;
+    for step in 1..=steps {
+        let x = i64::from(x1) + (dx * i64::from(step)) / i64::from(steps);
+        let y = i64::from(y1) + (dy * i64::from(step)) / i64::from(steps);
+        let px = x.clamp(0, u32::MAX as i64) as u32;
+        let py = y.clamp(0, u32::MAX as i64) as u32;
+        backend.left_drag(Point::new(px, py))?;
+    }
     backend.left_up(end)?;
     trace::log(format!(
         "pointer_drag:ok from=({}, {}) to=({}, {}) hold_ms={}",
