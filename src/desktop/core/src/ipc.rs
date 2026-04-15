@@ -52,6 +52,9 @@ pub fn pipe_name() -> String {
             return name;
         }
     }
+    if let Some(sid) = current_user_sid_component() {
+        return format!("{DEFAULT_WINDOWS_PIPE_NAME}-sid-{sid}");
+    }
     let user = env::var("USERNAME")
         .ok()
         .map(|name| sanitize_pipe_component(&name))
@@ -247,6 +250,94 @@ fn sanitize_pipe_component(input: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+#[cfg(windows)]
+fn current_user_sid_component() -> Option<String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE, LocalFree},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    // SAFETY: GetCurrentProcess returns a valid pseudo-handle for OpenProcessToken.
+    let process: HANDLE = unsafe { GetCurrentProcess() };
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: token out pointer is valid.
+    let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token as *mut HANDLE) };
+    if ok == 0 || token.is_null() {
+        return None;
+    }
+
+    let mut needed = 0_u32;
+    // SAFETY: probe call requesting required size.
+    unsafe {
+        let _ = GetTokenInformation(
+            token,
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &mut needed as *mut u32,
+        );
+    }
+    if needed == 0 {
+        // SAFETY: token came from OpenProcessToken.
+        unsafe { CloseHandle(token) };
+        return None;
+    }
+
+    let mut buffer = vec![0_u8; needed as usize];
+    // SAFETY: buffer points to writable memory sized by the prior probe.
+    let info_ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr() as *mut _,
+            needed,
+            &mut needed as *mut u32,
+        )
+    };
+    if info_ok == 0 {
+        // SAFETY: token came from OpenProcessToken.
+        unsafe { CloseHandle(token) };
+        return None;
+    }
+
+    // SAFETY: TOKEN_USER is the buffer layout for TokenUser.
+    let token_user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    let mut sid_wide: *mut u16 = std::ptr::null_mut();
+    // SAFETY: SID pointer is owned by token_user from GetTokenInformation.
+    let sid_ok =
+        unsafe { ConvertSidToStringSidW(token_user.User.Sid, &mut sid_wide as *mut *mut u16) };
+
+    // SAFETY: token came from OpenProcessToken.
+    unsafe { CloseHandle(token) };
+    if sid_ok == 0 || sid_wide.is_null() {
+        return None;
+    }
+
+    let mut len = 0_usize;
+    // SAFETY: sid_wide is NUL-terminated UTF-16 per ConvertSidToStringSidW contract.
+    unsafe {
+        while *sid_wide.add(len) != 0 {
+            len += 1;
+        }
+    }
+    // SAFETY: sid_wide points to `len` UTF-16 code units.
+    let sid = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(sid_wide, len)) };
+    // SAFETY: memory owned by LocalAlloc, must be freed with LocalFree.
+    unsafe {
+        let _ = LocalFree(sid_wide as *mut core::ffi::c_void);
+    }
+    let normalized = sanitize_pipe_component(&sid);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 }
 
 #[cfg(windows)]
