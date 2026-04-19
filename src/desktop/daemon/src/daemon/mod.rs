@@ -501,6 +501,10 @@ fn enforce_frontmost_app_policy(
         );
     }
 
+    if let Some(target_app) = app_policy::command_target_app_name(command) {
+        return enforce_app_name_policy(&cfg, target_app, "target app", "target_app");
+    }
+
     let Some(frontmost_app) = request_frontmost_app(context) else {
         if matches!(cfg.policy_mode, app_policy::PolicyMode::AllowAll) {
             return Ok(());
@@ -517,15 +521,24 @@ fn enforce_frontmost_app_policy(
             })),
         );
     };
-    if app_policy::is_app_allowed(&cfg, &frontmost_app) {
+    enforce_app_name_policy(&cfg, &frontmost_app, "frontmost app", "frontmost_app")
+}
+
+fn enforce_app_name_policy(
+    cfg: &app_policy::AppPolicyConfig,
+    app_name: &str,
+    app_label: &'static str,
+    details_key: &'static str,
+) -> Result<(), AppError> {
+    if app_policy::is_app_allowed(cfg, app_name) {
         return Ok(());
     }
 
     Err(AppError::permission_denied(format!(
-        "frontmost app \"{frontmost_app}\" is blocked by current policy"
+        "{app_label} \"{app_name}\" is blocked by current policy"
     ))
     .with_details(json!({
-        "frontmost_app": frontmost_app,
+        details_key: app_name,
         "policy_mode": cfg.policy_mode,
         "apps": cfg.apps,
         "remediation": "open DesktopCtl menu -> App Access Policy"
@@ -929,6 +942,20 @@ mod tests {
         assert_eq!(clipboard_err.code, ErrorCode::PermissionDenied);
 
         super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn app_name_policy_blocks_open_target_when_listed_in_deny_mode() {
+        let cfg = crate::app_policy::AppPolicyConfig {
+            policy_mode: crate::app_policy::PolicyMode::AllowAllExcept,
+            apps: vec!["Notes".to_string()],
+            allow_full_screen_capture: true,
+            agent_access_disabled: false,
+        };
+        let err = super::enforce_app_name_policy(&cfg, "Notes", "target app", "target_app")
+            .expect_err("target app should be blocked");
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
+        assert!(err.message.contains("target app \"Notes\" is blocked"));
     }
 
     #[test]

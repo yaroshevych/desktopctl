@@ -210,6 +210,7 @@ pub fn command_requires_policy(command: &Command) -> bool {
     matches!(
         command,
         Command::ScreenCapture { .. }
+            | Command::OpenApp { .. }
             | Command::ScreenTokenize { .. }
             | Command::ScreenFindText { .. }
             | Command::WaitText { .. }
@@ -226,6 +227,13 @@ pub fn command_requires_policy(command: &Command) -> bool {
             | Command::KeyEnter { .. }
             | Command::KeyEscape { .. }
     )
+}
+
+pub fn command_target_app_name(command: &Command) -> Option<&str> {
+    match command {
+        Command::OpenApp { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 pub fn command_is_full_screen_capture(command: &Command) -> bool {
@@ -304,5 +312,17 @@ mod tests {
                 .expect("config should deserialize");
         assert!(cfg.allow_full_screen_capture);
         assert!(!cfg.agent_access_disabled);
+    }
+
+    #[test]
+    fn open_app_requires_policy_and_exposes_target_name() {
+        let command = Command::OpenApp {
+            name: "Notes".to_string(),
+            args: Vec::new(),
+            wait: false,
+            timeout_ms: None,
+        };
+        assert!(command_requires_policy(&command));
+        assert_eq!(command_target_app_name(&command), Some("Notes"));
     }
 }

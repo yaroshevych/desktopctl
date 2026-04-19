@@ -641,7 +641,10 @@ fn app_subcommand() -> ClapCommand {
 - desktopctl app open \"Calculator\"\n\
 - desktopctl app hide \"Calculator\"\n\
 - desktopctl app show \"Calculator\"\n\
-- desktopctl app isolate \"Finder\"",
+- desktopctl app isolate \"Finder\"\n\
+\n\
+Policy:\n\
+- app access policy applies to `app open`; opening a blocked app is denied by target app name",
         )
         .subcommand(
             ClapCommand::new("open")
