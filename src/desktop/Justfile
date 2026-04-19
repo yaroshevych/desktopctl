@@ -99,6 +99,18 @@ release-gates-strict:
   just -f {{workspace_dir}}/Justfile release-gates
   cd {{workspace_dir}} && cargo clippy --workspace --all-targets -- -D warnings
 
+release tag target="main" repo="yaroshevych/desktopctl" demo_asset="":
+  if [[ -z "{{tag}}" ]]; then echo "usage: just release <tag> [target] [repo] [demo_asset]"; exit 2; fi
+  if ! command -v gh >/dev/null 2>&1; then echo "gh CLI is required. Install with: brew install gh"; exit 1; fi
+  just -f {{workspace_dir}}/Justfile build
+  cd {{dist_dir}} && ditto -c -k --sequesterRsrc --keepParent DesktopCtl.app "/tmp/DesktopCtl-{{tag}}-macos.zip"
+  assets=("/tmp/DesktopCtl-{{tag}}-macos.zip"); if [[ -n "{{demo_asset}}" ]]; then assets+=("{{demo_asset}}"); fi; gh release create "{{tag}}" "${assets[@]}" --repo "{{repo}}" --target "{{target}}" --title "{{tag}}" --generate-notes
+  echo "Release created:"
+  echo "  tag: {{tag}}"
+  echo "  repo: {{repo}}"
+  echo "  target: {{target}}"
+  echo "  asset: /tmp/DesktopCtl-{{tag}}-macos.zip"
+
 check-cli-reference:
   "{{workspace_dir}}/scripts/dev/check_cli_reference.sh"
 
