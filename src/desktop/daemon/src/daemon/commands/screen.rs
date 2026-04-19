@@ -22,6 +22,10 @@ fn resolve_active_window_from_app_windows(
     let visible_match = |window: &&platform::windowing::WindowInfo| {
         window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
     };
+    let is_desktopctl_window = |window: &&platform::windowing::WindowInfo| {
+        let app_lc = window.app.trim().to_ascii_lowercase();
+        app_lc.contains("desktopctl")
+    };
     if let Some((expected_pid, expected_window_id)) = window_refs::resolve_native_for_ref(reference)
     {
         if let Some(found) = app_windows
@@ -30,6 +34,7 @@ fn resolve_active_window_from_app_windows(
                 visible_match(window)
                     && window.pid == expected_pid
                     && window.id == expected_window_id
+                    && !is_desktopctl_window(window)
             })
             .cloned()
         {

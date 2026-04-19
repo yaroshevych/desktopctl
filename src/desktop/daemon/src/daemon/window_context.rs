@@ -1,5 +1,18 @@
 use super::*;
 
+fn is_desktopctl_window_app(app: &str) -> bool {
+    let app_lc = app.trim().to_ascii_lowercase();
+    app_lc.contains("desktopctl")
+}
+
+fn is_restricted_window(window: &platform::windowing::WindowInfo) -> bool {
+    is_desktopctl_window_app(&window.app)
+}
+
+fn restricted_window_error() -> AppError {
+    AppError::target_not_found("DesktopCtl windows cannot be targeted; focus another app window")
+}
+
 pub(super) fn enrich_window_refs(windows: &mut [platform::windowing::WindowInfo]) {
     for window in windows.iter_mut() {
         if window.window_ref.is_none() {
@@ -24,6 +37,16 @@ pub(super) fn resolve_active_window_target() -> Result<platform::windowing::Wind
     // immediately and avoid slower fallback heuristics.
     if let Ok(mut frontmost_windows) = window_target::list_frontmost_app_windows() {
         enrich_window_refs(&mut frontmost_windows);
+        if frontmost_windows.iter().any(|window| {
+            window.frontmost
+                && window.visible
+                && window.bounds.width > 8.0
+                && window.bounds.height > 8.0
+                && is_restricted_window(window)
+        }) {
+            trace::log("active_window_target:blocked_desktopctl_window");
+            return Err(restricted_window_error());
+        }
         let focused_window_bounds = platform::ax::focused_frontmost_window_bounds()
             .ok()
             .flatten();
@@ -34,6 +57,7 @@ pub(super) fn resolve_active_window_target() -> Result<platform::windowing::Wind
                     && window.visible
                     && window.bounds.width > 8.0
                     && window.bounds.height > 8.0
+                    && !is_restricted_window(window)
             })
             .max_by(|a, b| {
                 let sa = active_window_candidate_score(a, focused_window_bounds.as_ref());
@@ -48,7 +72,10 @@ pub(super) fn resolve_active_window_target() -> Result<platform::windowing::Wind
         if let Some(selected) = frontmost_windows
             .iter()
             .filter(|window| {
-                window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
+                window.visible
+                    && window.bounds.width > 8.0
+                    && window.bounds.height > 8.0
+                    && !is_restricted_window(window)
             })
             .max_by(|a, b| {
                 let sa = active_window_candidate_score(a, focused_window_bounds.as_ref());
@@ -73,7 +100,12 @@ pub(super) fn resolve_active_window_target() -> Result<platform::windowing::Wind
 
     let eligible: Vec<&platform::windowing::WindowInfo> = windows
         .iter()
-        .filter(|window| window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0)
+        .filter(|window| {
+            window.visible
+                && window.bounds.width > 8.0
+                && window.bounds.height > 8.0
+                && !is_restricted_window(window)
+        })
         .collect();
     let best_scored =
         |items: Vec<&platform::windowing::WindowInfo>| -> Option<platform::windowing::WindowInfo> {
@@ -166,6 +198,9 @@ pub(super) fn assert_active_window_id_matches(
                     && window.pid == expected_pid
                     && window.id == expected_window_id
             }) {
+                if is_restricted_window(&active) {
+                    return Err(restricted_window_error());
+                }
                 trace::log("active_window_id_match:fastpath_hit");
                 return Ok(active);
             }
@@ -528,5 +563,22 @@ pub(super) fn append_tokenize_new_window_hint(
 
     if let Some(obj) = value.as_object_mut() {
         obj.insert("hint".to_string(), Value::String(hint));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_desktopctl_window_app;
+
+    #[test]
+    fn desktopctl_app_windows_are_blocked() {
+        assert!(is_desktopctl_window_app("DesktopCtl"));
+        assert!(is_desktopctl_window_app("desktopctl helper"));
+    }
+
+    #[test]
+    fn non_desktopctl_app_windows_are_allowed() {
+        assert!(!is_desktopctl_window_app("Safari"));
+        assert!(!is_desktopctl_window_app("Notes"));
     }
 }
