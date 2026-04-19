@@ -1,6 +1,6 @@
 pub(crate) fn help_notes() -> &'static str {
     "Examples:\n\
-- desktopctl app open \"Calculator\"\n\
+- desktopctl app open \"Calculator\" --wait\n\
 - desktopctl window focus --title \"Settings\"\n\
 - desktopctl screen tokenize --active-window 12345\n\
 - desktopctl pointer click --id button_ok --active-window 12345\n\

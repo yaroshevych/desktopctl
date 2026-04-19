@@ -638,7 +638,7 @@ fn app_subcommand() -> ClapCommand {
         .about("Manage application visibility and launch")
         .after_long_help(
             "Examples:\n\
-- desktopctl app open \"Calculator\"\n\
+- desktopctl app open \"Calculator\" --wait\n\
 - desktopctl app hide \"Calculator\"\n\
 - desktopctl app show \"Calculator\"\n\
 - desktopctl app isolate \"Finder\"\n\
