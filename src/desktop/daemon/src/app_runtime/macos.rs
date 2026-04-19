@@ -92,7 +92,7 @@ pub(crate) fn run() -> Result<(), AppError> {
         true,
         None,
     );
-    let app_access_policy = MenuItem::new("Agent Access Rules", true, None);
+    let app_access_policy = MenuItem::new("Agent Permissions", true, None);
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
     let check_permissions = MenuItem::new("Setup Access", true, None);
     let about = MenuItem::new("About", true, None);

@@ -232,7 +232,7 @@ fn show_on_main() {
             false,
         );
         window.setReleasedWhenClosed(false);
-        window.setTitle(&NSString::from_str("App Access Policy"));
+        window.setTitle(&NSString::from_str("Agent Permissions"));
 
         let cv = window.contentView().expect("window has no content view");
 
