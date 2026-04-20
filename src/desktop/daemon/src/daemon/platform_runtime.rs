@@ -15,6 +15,8 @@ const OVERLAY_WATCH_TRACK_INTERVAL_MS: u64 = 40;
 const OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS: u64 = 2_000;
 const PRIVACY_OVERLAY_STOP_DELAY_MS: u64 = 2_200;
 static OVERLAY_WATCH_TRACK_RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static JOURNAL_PRIVACY_GLOW_SHOWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CommandRuntimeState {
@@ -157,14 +159,40 @@ pub(super) fn end_command(_state: CommandRuntimeState) {}
 
 #[cfg(target_os = "macos")]
 fn maybe_start_privacy_overlay(command: &Command, context: &RequestContext) -> bool {
-    if !command_requires_privacy_signal(command) || overlay::is_active() {
+    let is_journal_tokenize = matches!(command, Command::ScreenTokenize { journal: true, .. });
+    let should_show_journal_glow = if is_journal_tokenize {
+        JOURNAL_PRIVACY_GLOW_SHOWN
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    } else {
+        false
+    };
+    if is_journal_tokenize && !should_show_journal_glow {
+        return false;
+    }
+    if !command_requires_privacy_signal(command) {
+        return false;
+    }
+    if overlay::is_active() {
+        if is_journal_tokenize {
+            let _ = overlay::watch_mode_changed(overlay::WatchMode::DesktopMode, None);
+        }
         return false;
     }
     match overlay::start_overlay() {
         Ok(started) => {
             if started {
                 super::PRIVACY_OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
-                if matches!(command, Command::ScreenTokenize { .. }) {
+                if is_journal_tokenize {
+                    if let Err(err) =
+                        overlay::watch_mode_changed(overlay::WatchMode::DesktopMode, None)
+                    {
+                        trace::log(format!(
+                            "overlay:privacy_auto_start mode_warn command={} err={err}",
+                            command.name()
+                        ));
+                    }
+                } else if matches!(command, Command::ScreenTokenize { .. }) {
                     let command_name = command.name().to_string();
                     let context = context.clone();
                     thread::spawn(move || {
