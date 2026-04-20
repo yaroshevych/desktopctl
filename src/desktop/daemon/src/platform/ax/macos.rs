@@ -124,24 +124,43 @@ pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
 
 fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
     if let Some(role) = element.role().ok().map(|v| v.to_string()) {
-        let bounds = element_bounds(element);
-        dump_all_attributes_compact(element, &role, bounds.as_ref());
-        if is_interactive_role(&role) {
+        let interactive = is_interactive_role(&role);
+        let text_bearing = !interactive && is_text_bearing_role(&role);
+        if interactive || text_bearing {
+            let bounds = element_bounds(element);
+            dump_all_attributes_compact(element, &role, bounds.as_ref());
             if let Some(bounds) = bounds {
-                let text = element_label(element, &role);
-                let ax_identifier = if should_collect_identifier(&role) {
-                    element_identifier(element)
+                if interactive {
+                    let text = element_label(element, &role);
+                    let ax_identifier = if should_collect_identifier(&role) {
+                        element_identifier(element)
+                    } else {
+                        None
+                    };
+                    let checked = element_toggle_state(element, &role);
+                    out.push(AxElement {
+                        role,
+                        text,
+                        bounds,
+                        ax_identifier,
+                        checked,
+                    });
                 } else {
-                    None
-                };
-                let checked = element_toggle_state(element, &role);
-                out.push(AxElement {
-                    role,
-                    text,
-                    bounds,
-                    ax_identifier,
-                    checked,
-                });
+                    let text = text_bearing_label(element, &role);
+                    if text
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|t| !t.is_empty())
+                    {
+                        out.push(AxElement {
+                            role,
+                            text,
+                            bounds,
+                            ax_identifier: None,
+                            checked: None,
+                        });
+                    }
+                }
             }
         }
     }
@@ -173,6 +192,40 @@ fn is_interactive_role(role: &str) -> bool {
             | "AXSplitter"
             | "AXSwitch"
     )
+}
+
+fn is_text_bearing_role(role: &str) -> bool {
+    matches!(
+        role,
+        "AXStaticText" | "AXText" | "AXLink" | "AXHeading" | "AXImage"
+    )
+}
+
+fn text_bearing_label(element: &AXUIElement, role: &str) -> Option<String> {
+    match role {
+        "AXStaticText" | "AXText" => element
+            .attribute(&AXAttribute::value())
+            .ok()
+            .and_then(|v| cf_type_text(&v))
+            .or_else(|| element.title().ok().map(|v| v.to_string())),
+        "AXLink" | "AXHeading" => element
+            .title()
+            .ok()
+            .map(|v| v.to_string())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                element
+                    .attribute(&AXAttribute::value())
+                    .ok()
+                    .and_then(|v| cf_type_text(&v))
+            }),
+        "AXImage" => element
+            .description()
+            .ok()
+            .map(|v| v.to_string())
+            .filter(|s| !s.trim().is_empty()),
+        _ => None,
+    }
 }
 
 fn element_toggle_state(element: &AXUIElement, role: &str) -> Option<ToggleState> {
