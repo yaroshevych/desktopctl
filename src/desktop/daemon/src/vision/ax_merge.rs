@@ -69,6 +69,11 @@ pub fn merge_elements(
         }
 
         if let Some(idx) = replace_idx {
+            if ax.role == "AXImage" && !elements[idx].source.starts_with("accessibility_ax:") {
+                // Keep OCR/native entries for image controls; AX image descriptions are often
+                // internal asset names and degrade label quality in apps like Things.
+                continue;
+            }
             let existing_text = elements[idx].text.clone();
             elements[idx] = ElementBuilder::new()
                 .id(ax_primary_id.clone())
@@ -81,6 +86,11 @@ pub fn merge_elements(
                 .source(format!("accessibility_ax:{}", ax.role))
                 .build();
             metrics.ax_replaced += 1;
+            continue;
+        }
+
+        if ax.role == "AXImage" && merged_text.is_none() {
+            // Skip unlabeled AXImage entries; they add noise without improving actionability.
             continue;
         }
 
@@ -288,6 +298,9 @@ fn normalize_ax_primary_text(role: &str, text: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
+    if role == "AXImage" && is_uninformative_ax_image_text(trimmed) {
+        return None;
+    }
     if is_uninformative_ax_text(role, trimmed) {
         return None;
     }
@@ -302,6 +315,15 @@ fn is_uninformative_ax_text(role: &str, text: &str) -> bool {
         text.to_ascii_lowercase().as_str(),
         "input" | "output" | "calculator"
     )
+}
+
+fn is_uninformative_ax_image_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("template")
+        || lower.starts_with("symbol source ")
+        || lower.starts_with("windowbutton")
+        || lower.starts_with("mainwindow")
+        || lower.starts_with("toolbar ")
 }
 
 fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
@@ -495,6 +517,45 @@ mod tests {
         let only = &elements[0];
         assert_eq!(only.source, "accessibility_ax:AXScrollArea");
         assert_eq!(only.text.as_deref(), Some("7777878"));
+    }
+
+    #[test]
+    fn merge_elements_keeps_ocr_when_aximage_has_template_description() {
+        let mut elements = vec![make_element(
+            "vision_ocr",
+            Some("Buy milk"),
+            [100.0, 200.0, 120.0, 20.0],
+        )];
+        let ax_elements = vec![AxElement {
+            role: "AXImage".to_string(),
+            text: Some("Task NewForToday Template".to_string()),
+            bounds: Bounds {
+                x: 98.0,
+                y: 198.0,
+                width: 130.0,
+                height: 24.0,
+            },
+            ax_identifier: None,
+            checked: None,
+        }];
+        let coord_map = CoordMap::new(
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 400.0,
+            },
+            400,
+            400,
+        );
+
+        let metrics = merge_elements(&mut elements, &ax_elements, &coord_map);
+        assert_eq!(metrics.ax_seen, 1);
+        assert_eq!(metrics.ax_replaced, 0);
+        assert_eq!(metrics.ax_added, 0);
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].source, "vision_ocr");
+        assert_eq!(elements[0].text.as_deref(), Some("Buy milk"));
     }
 
     #[test]
