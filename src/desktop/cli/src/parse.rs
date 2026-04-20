@@ -12,8 +12,9 @@ const MAX_REPLAY_DURATION_MS: u64 = 30 * 60 * 1000;
 
 pub(crate) fn render_help_if_requested(raw_args: &[String]) -> Result<Option<String>, AppError> {
     let help_flag_present = raw_args.iter().any(|arg| arg == "-h" || arg == "--help");
+    let version_flag_present = raw_args.iter().any(|arg| arg == "-V" || arg == "--version");
     let help_subcommand_present = raw_args.first().is_some_and(|arg| arg == "help");
-    if !help_flag_present && !help_subcommand_present {
+    if !help_flag_present && !version_flag_present && !help_subcommand_present {
         return Ok(None);
     }
 
@@ -597,10 +598,10 @@ fn parse_i32(raw: &str, field: &str) -> Result<i32, AppError> {
 
 fn clap_app() -> ClapCommand {
     ClapCommand::new("desktopctl")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("DesktopCtl command-line interface")
         .after_long_help(help_notes())
         .arg_required_else_help(true)
-        .disable_version_flag(true)
         .arg(
             Arg::new("markdown")
                 .long("markdown")

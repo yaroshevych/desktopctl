@@ -1,4 +1,4 @@
-use super::{parse_command, send_request_with_hooks};
+use super::{parse::render_help_if_requested, parse_command, send_request_with_hooks};
 use desktop_core::{
     error::{AppError, ErrorCode},
     protocol::{Command, PointerButton, RequestEnvelope, ResponseEnvelope},
@@ -58,6 +58,14 @@ fn auto_start_not_invoked_for_invalid_argument() {
 
     assert_eq!(launched.load(Ordering::SeqCst), 0);
     assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
+#[test]
+fn renders_version_for_top_level_version_flag() {
+    let rendered = render_help_if_requested(&["--version".to_string()])
+        .expect("version rendering should succeed")
+        .expect("version output should be present");
+    assert!(rendered.starts_with("desktopctl "));
 }
 
 #[test]
