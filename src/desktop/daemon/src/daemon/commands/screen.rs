@@ -154,6 +154,9 @@ pub(crate) fn tokenize(
     let mut hint_snapshot_prefetch_rx: Option<
         mpsc::Receiver<Option<super::super::TokenizeHintSnapshot>>,
     > = None;
+    let mut all_windows_prefetch_handle: Option<
+        std::thread::JoinHandle<Result<Vec<platform::windowing::WindowInfo>, AppError>>,
+    > = None;
     let mut active_window_prefetched_windows: Option<Vec<platform::windowing::WindowInfo>> = None;
     let payload = if let Some(path_raw) = screenshot_path {
         if window_query.is_some() {
@@ -193,6 +196,13 @@ pub(crate) fn tokenize(
             return Err(AppError::invalid_argument(
                 "active window id requires --active-window",
             ));
+        }
+        if list_all_windows {
+            all_windows_prefetch_handle = Some(std::thread::spawn(move || {
+                let mut windows = window_target::list_windows()?;
+                super::super::enrich_window_refs(&mut windows);
+                Ok(windows)
+            }));
         }
         if active_window {
             if let Some(reference) = active_window_id
@@ -589,8 +599,18 @@ pub(crate) fn tokenize(
         stage_timings.push(("new_window_hint", stage_started.elapsed().as_millis()));
     }
     if list_all_windows && !screenshot_mode {
-        let mut windows = window_target::list_windows()?;
-        super::super::enrich_window_refs(&mut windows);
+        let windows = if let Some(handle) = all_windows_prefetch_handle.take() {
+            match handle.join() {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(AppError::internal("all_windows prefetch worker panicked"));
+                }
+            }
+        } else {
+            let mut windows = window_target::list_windows()?;
+            super::super::enrich_window_refs(&mut windows);
+            windows
+        };
         if let Some(obj) = value.as_object_mut() {
             obj.insert(
                 "all_windows".to_string(),
