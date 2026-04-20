@@ -60,8 +60,24 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
         .focused_window()
         .or_else(|_| app.main_window())
         .map_err(ax_err)?;
+
     let mut elements = Vec::new();
-    collect_elements_recursive(&window, &mut elements);
+    let Some(batch) = fetch_batch(&window) else {
+        return Ok(elements);
+    };
+    let role = batch
+        .get(IDX_ROLE)
+        .and_then(|v| v.as_ref())
+        .and_then(cf_to_string);
+    let viewport = batch_bounds(&batch);
+    if let Some(role) = role.as_ref() {
+        emit_element_from_batch(&window, role, &batch, viewport.as_ref(), &mut elements);
+    }
+    if let Some(children_value) = batch.get(IDX_CHILDREN).and_then(|v| v.as_ref()) {
+        for child in cf_to_children(children_value) {
+            collect_elements_recursive(&child, viewport.as_ref(), &mut elements);
+        }
+    }
     Ok(elements)
 }
 
@@ -215,7 +231,11 @@ fn cf_to_children(value: &CFType) -> Vec<AXUIElement> {
     out
 }
 
-fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
+fn collect_elements_recursive(
+    element: &AXUIElement,
+    viewport: Option<&Bounds>,
+    out: &mut Vec<AxElement>,
+) {
     let Some(batch) = fetch_batch(element) else {
         return;
     };
@@ -228,56 +248,80 @@ fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
         return;
     };
 
-    let interactive = is_interactive_role(&role);
-    let text_bearing = !interactive && is_text_bearing_role(&role);
-
-    if interactive || text_bearing {
-        let bounds = batch_bounds(&batch);
-        if trace::is_enabled() {
-            dump_all_attributes_compact(element, &role, bounds.as_ref());
-        }
-        if let Some(bounds) = bounds {
-            if interactive {
-                let text = batch_interactive_label(&batch, &role)
-                    .or_else(|| element_label(element, &role));
-                let ax_identifier = if should_collect_identifier(&role) {
-                    batch_text_at(&batch, IDX_IDENTIFIER).or_else(|| element_identifier(element))
-                } else {
-                    None
-                };
-                let checked = element_toggle_state_from_batch(&batch, &role)
-                    .or_else(|| element_toggle_state(element, &role));
-                out.push(AxElement {
-                    role,
-                    text,
-                    bounds,
-                    ax_identifier,
-                    checked,
-                });
-            } else {
-                let text = batch_text_bearing_label(&batch, &role);
-                if text
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|t| !t.is_empty())
-                {
-                    out.push(AxElement {
-                        role,
-                        text,
-                        bounds,
-                        ax_identifier: None,
-                        checked: None,
-                    });
-                }
-            }
+    let bounds = batch_bounds(&batch);
+    if let (Some(b), Some(vp)) = (bounds.as_ref(), viewport) {
+        if !bounds_intersect(b, vp) {
+            return;
         }
     }
+
+    emit_element_from_batch(element, &role, &batch, bounds.as_ref(), out);
 
     if let Some(children_value) = batch.get(IDX_CHILDREN).and_then(|v| v.as_ref()) {
         for child in cf_to_children(children_value) {
-            collect_elements_recursive(&child, out);
+            collect_elements_recursive(&child, viewport, out);
         }
     }
+}
+
+fn emit_element_from_batch(
+    element: &AXUIElement,
+    role: &str,
+    batch: &[Option<CFType>],
+    bounds: Option<&Bounds>,
+    out: &mut Vec<AxElement>,
+) {
+    let interactive = is_interactive_role(role);
+    let text_bearing = !interactive && is_text_bearing_role(role);
+    if !interactive && !text_bearing {
+        return;
+    }
+    if trace::is_enabled() {
+        dump_all_attributes_compact(element, role, bounds);
+    }
+    let Some(bounds) = bounds else {
+        return;
+    };
+    if interactive {
+        let text = batch_interactive_label(batch, role).or_else(|| element_label(element, role));
+        let ax_identifier = if should_collect_identifier(role) {
+            batch_text_at(batch, IDX_IDENTIFIER).or_else(|| element_identifier(element))
+        } else {
+            None
+        };
+        let checked = element_toggle_state_from_batch(batch, role)
+            .or_else(|| element_toggle_state(element, role));
+        out.push(AxElement {
+            role: role.to_string(),
+            text,
+            bounds: bounds.clone(),
+            ax_identifier,
+            checked,
+        });
+    } else {
+        let text = batch_text_bearing_label(batch, role);
+        if text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|t| !t.is_empty())
+        {
+            out.push(AxElement {
+                role: role.to_string(),
+                text,
+                bounds: bounds.clone(),
+                ax_identifier: None,
+                checked: None,
+            });
+        }
+    }
+}
+
+fn bounds_intersect(a: &Bounds, b: &Bounds) -> bool {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    a.x < bx2 && b.x < ax2 && a.y < by2 && b.y < ay2
 }
 
 fn batch_bounds(batch: &[Option<CFType>]) -> Option<Bounds> {
