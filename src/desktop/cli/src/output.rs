@@ -521,7 +521,12 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
 
         for (idx, column) in columns.into_iter().enumerate() {
             let mut column = column;
-            column.sort_by(|a, b| a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x)));
+            column.sort_by(|a, b| {
+                a.y.total_cmp(&b.y)
+                    .then_with(|| a.x.total_cmp(&b.x))
+                    // Prefer non-OCR ids when duplicate labels overlap.
+                    .then_with(|| is_ocr_id(a.id.as_deref()).cmp(&is_ocr_id(b.id.as_deref())))
+            });
             let title = match idx {
                 0 => "Left Column".to_string(),
                 1 => "Right Column".to_string(),
@@ -532,24 +537,40 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
             } else {
                 push_subsection(&mut lines, &title);
             }
-            let mut last_render_key: Option<String> = None;
-            let mut last_y: f64 = f64::NEG_INFINITY;
+            let mut last_render_entry: Option<MarkdownEntry> = None;
+            let mut last_line_index: Option<usize> = None;
             for entry in column {
                 if !entry.visible {
                     continue;
                 }
-                let dedupe_key = format!(
-                    "{}|{}|{}",
-                    normalize_single_line(&entry.label).to_ascii_lowercase(),
-                    entry.id.as_deref().unwrap_or_default(),
-                    entry.checked.as_deref().unwrap_or_default()
-                );
-                if last_render_key.as_deref() == Some(dedupe_key.as_str())
-                    && (entry.y - last_y).abs() < 14.0
+                if last_render_entry
+                    .as_ref()
+                    .is_some_and(|prev| entries_dedupe_match(prev, &entry))
                 {
+                    if last_render_entry
+                        .as_ref()
+                        .is_some_and(|prev| is_ocr_id(prev.id.as_deref()))
+                        && !is_ocr_id(entry.id.as_deref())
+                    {
+                        let mut replacement = entry.label.clone();
+                        if let Some(id) = entry.id.as_deref().filter(|v| !v.trim().is_empty()) {
+                            replacement.push_str(&format!(" #{id}"));
+                        }
+                        if let Some(checked) =
+                            entry.checked.as_deref().filter(|v| !v.trim().is_empty())
+                        {
+                            replacement.push_str(&format!(" [checked={checked}]"));
+                        }
+                        if let Some(idx) = last_line_index {
+                            if let Some(line) = lines.get_mut(idx) {
+                                *line = replacement;
+                            }
+                            last_render_entry = Some(entry.clone());
+                        }
+                    }
                     continue;
                 }
-                let mut line = entry.label;
+                let mut line = entry.label.clone();
                 if let Some(id) = entry.id.as_deref().filter(|v| !v.trim().is_empty()) {
                     line.push_str(&format!(" #{id}"));
                 }
@@ -557,8 +578,8 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
                     line.push_str(&format!(" [checked={checked}]"));
                 }
                 lines.push(line);
-                last_render_key = Some(dedupe_key);
-                last_y = entry.y;
+                last_render_entry = Some(entry);
+                last_line_index = Some(lines.len().saturating_sub(1));
             }
         }
     }
@@ -863,26 +884,20 @@ fn append_tokens_delta_columns(lines: &mut Vec<String>, items: &[serde_json::Val
             _ => format!("Column {}", idx + 1),
         };
         push_subsection(lines, &title);
-        let mut last_render_key: Option<String> = None;
-        let mut last_y: f64 = f64::NEG_INFINITY;
+        let mut last_render_entry: Option<MarkdownEntry> = None;
         for entry in column {
-            let dedupe_key = format!(
-                "{}|{}",
-                normalize_single_line(&entry.label).to_ascii_lowercase(),
-                entry.id.as_deref().unwrap_or_default(),
-            );
-            if last_render_key.as_deref() == Some(dedupe_key.as_str())
-                && (entry.y - last_y).abs() < 14.0
+            if last_render_entry
+                .as_ref()
+                .is_some_and(|prev| entries_dedupe_match(prev, &entry))
             {
                 continue;
             }
-            let mut line = entry.label;
+            let mut line = entry.label.clone();
             if let Some(id) = entry.id.as_deref().filter(|v| !v.trim().is_empty()) {
                 line.push_str(&format!(" #{id}"));
             }
             lines.push(line);
-            last_render_key = Some(dedupe_key);
-            last_y = entry.y;
+            last_render_entry = Some(entry);
         }
     }
 }
@@ -977,6 +992,8 @@ struct MarkdownEntry {
     id: Option<String>,
     x: f64,
     y: f64,
+    width: f64,
+    height: f64,
     scrollable: bool,
     checked: Option<String>,
     visible: bool,
@@ -993,6 +1010,8 @@ fn markdown_entry_from_element(element: &serde_json::Value) -> Option<MarkdownEn
     }
     let x = bbox[0].as_f64().unwrap_or(0.0);
     let y = bbox[1].as_f64().unwrap_or(0.0);
+    let width = bbox[2].as_f64().unwrap_or(0.0);
+    let height = bbox[3].as_f64().unwrap_or(0.0);
     let role = element_role(element);
     let id = element
         .get("id")
@@ -1030,6 +1049,8 @@ fn markdown_entry_from_element(element: &serde_json::Value) -> Option<MarkdownEn
         id,
         x,
         y,
+        width,
+        height,
         scrollable,
         checked,
         visible,
@@ -1048,6 +1069,8 @@ fn markdown_entry_from_token_delta(token: &serde_json::Value) -> Option<Markdown
     }
     let x = bbox[0].as_f64().unwrap_or(0.0);
     let y = bbox[1].as_f64().unwrap_or(0.0);
+    let width = bbox[2].as_f64().unwrap_or(0.0);
+    let height = bbox[3].as_f64().unwrap_or(0.0);
     let id = token
         .get("id")
         .and_then(serde_json::Value::as_str)
@@ -1059,6 +1082,8 @@ fn markdown_entry_from_token_delta(token: &serde_json::Value) -> Option<Markdown
         id,
         x,
         y,
+        width,
+        height,
         scrollable: false,
         checked: None,
         visible: true,
@@ -1080,6 +1105,41 @@ fn compact_value_summary(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Array(items) => Some(format!("{} items", items.len())),
         serde_json::Value::Object(map) => Some(format!("{} fields", map.len())),
     }
+}
+
+fn is_ocr_id(id: Option<&str>) -> bool {
+    id.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .is_some_and(|v| v.starts_with("ocr_"))
+}
+
+fn entries_dedupe_match(a: &MarkdownEntry, b: &MarkdownEntry) -> bool {
+    if normalize_single_line(&a.label).to_ascii_lowercase()
+        != normalize_single_line(&b.label).to_ascii_lowercase()
+    {
+        return false;
+    }
+    if a.checked.as_deref().unwrap_or_default() != b.checked.as_deref().unwrap_or_default() {
+        return false;
+    }
+    bounds_overlap_enough(a, b)
+}
+
+fn bounds_overlap_enough(a: &MarkdownEntry, b: &MarkdownEntry) -> bool {
+    let ax2 = a.x + a.width.max(0.0);
+    let ay2 = a.y + a.height.max(0.0);
+    let bx2 = b.x + b.width.max(0.0);
+    let by2 = b.y + b.height.max(0.0);
+    let ix = (ax2.min(bx2) - a.x.max(b.x)).max(0.0);
+    let iy = (ay2.min(by2) - a.y.max(b.y)).max(0.0);
+    if ix <= 0.0 || iy <= 0.0 {
+        return false;
+    }
+    let intersection = ix * iy;
+    let area_a = (a.width.max(0.0) * a.height.max(0.0)).max(1.0);
+    let area_b = (b.width.max(0.0) * b.height.max(0.0)).max(1.0);
+    let overlap_vs_smaller = intersection / area_a.min(area_b);
+    overlap_vs_smaller >= 0.5
 }
 
 fn permission_state_summary(value: &serde_json::Value) -> Option<String> {
@@ -1493,6 +1553,40 @@ mod tests {
         assert!(!markdown.contains("## Windows"));
         assert!(!markdown.lines().any(|line| line == "## Text"));
         assert!(!markdown.contains("```text"));
+    }
+
+    #[test]
+    fn tokenize_markdown_merges_overlapping_element_and_ocr_entries() {
+        let command = Command::ScreenTokenize {
+            overlay_out_path: None,
+            window_query: None,
+            screenshot_path: None,
+            journal: false,
+            list_all_windows: false,
+            active_window: false,
+            active_window_id: None,
+            region: None,
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "windows": [{
+                    "id": "settings_01",
+                    "title": "Settings",
+                    "app": "System Settings",
+                    "elements": [
+                        { "id": "ocr_wifi", "role": "text", "text": "Wi-Fi", "bbox": [10, 10, 80, 16] },
+                        { "id": "element_wifi", "role": "button", "text": "Wi-Fi", "bbox": [11, 12, 82, 18] },
+                        { "id": "element_bluetooth", "role": "button", "text": "Bluetooth", "bbox": [10, 40, 100, 16] }
+                    ]
+                }]
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("Wi-Fi #element_wifi"));
+        assert!(!markdown.contains("Wi-Fi #ocr_wifi"));
+        assert!(markdown.contains("Bluetooth #element_bluetooth"));
     }
 
     #[test]
