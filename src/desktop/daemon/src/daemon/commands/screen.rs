@@ -132,6 +132,7 @@ pub(crate) fn tokenize(
     overlay_out_path: Option<String>,
     window_query: Option<String>,
     screenshot_path: Option<String>,
+    journal: bool,
     active_window: bool,
     active_window_id: Option<String>,
     region: Option<Bounds>,
@@ -566,15 +567,21 @@ pub(crate) fn tokenize(
     let mut value = serde_json::to_value(payload)
         .map_err(|err| AppError::internal(format!("failed to encode token payload: {err}")))?;
     stage_done!("json_encode");
-    super::super::remap_tokenize_window_id_field(&mut value);
-    stage_done!("window_id_remap");
-    let precomputed_hint = hint_snapshot_prefetch_rx.and_then(|rx| rx.recv().ok().flatten());
-    super::super::append_tokenize_new_window_hint(
-        &mut value,
-        bound_hint_active_window_id.as_deref(),
-        precomputed_hint,
-    );
-    stage_timings.push(("new_window_hint", stage_started.elapsed().as_millis()));
+    if journal {
+        apply_journal_redaction(&mut value);
+        stage_done!("journal_redact");
+    }
+    if !journal {
+        super::super::remap_tokenize_window_id_field(&mut value);
+        stage_done!("window_id_remap");
+        let precomputed_hint = hint_snapshot_prefetch_rx.and_then(|rx| rx.recv().ok().flatten());
+        super::super::append_tokenize_new_window_hint(
+            &mut value,
+            bound_hint_active_window_id.as_deref(),
+            precomputed_hint,
+        );
+        stage_timings.push(("new_window_hint", stage_started.elapsed().as_millis()));
+    }
     let timing_breakdown = stage_timings
         .iter()
         .map(|(label, ms)| format!("{label}_ms={ms}"))
@@ -611,6 +618,35 @@ pub(crate) fn tokenize(
         }
     }
     Ok(value)
+}
+
+fn apply_journal_redaction(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.remove("window_id");
+    obj.remove("hint");
+    if let Some(windows) = obj
+        .get_mut("windows")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for window in windows {
+            let Some(window_obj) = window.as_object_mut() else {
+                continue;
+            };
+            window_obj.remove("id");
+            if let Some(elements) = window_obj
+                .get_mut("elements")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for element in elements {
+                    if let Some(element_obj) = element.as_object_mut() {
+                        element_obj.remove("id");
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn find_text(text: String, all: bool) -> Result<Value, AppError> {

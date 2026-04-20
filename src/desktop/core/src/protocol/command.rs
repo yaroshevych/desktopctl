@@ -202,6 +202,8 @@ pub enum Command {
         #[serde(default)]
         screenshot_path: Option<String>,
         #[serde(default)]
+        journal: bool,
+        #[serde(default)]
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,

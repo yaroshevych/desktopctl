@@ -41,18 +41,23 @@ pub(crate) fn render_response(
     response: &ResponseEnvelope,
     passthrough_stored_response: bool,
 ) -> serde_json::Value {
+    let is_journal_tokenize = is_journal_tokenize(command);
     let supports_active_window = command_supports_active_window(command);
     let has_explicit_active_window_id = command_has_explicit_active_window_id(command);
-    let json_hints = command_json_hints(command);
+    let json_hints = if is_journal_tokenize {
+        Vec::new()
+    } else {
+        command_json_hints(command)
+    };
 
     let mut prefix_fields: Vec<(String, String)> = Vec::new();
     let mut eligible_hints: Vec<String> = Vec::new();
-    if supports_active_window && !has_explicit_active_window_id {
+    if !is_journal_tokenize && supports_active_window && !has_explicit_active_window_id {
         if let Some(hint) = active_window_tip_message(response) {
             eligible_hints.push(hint);
         }
     }
-    if matches!(command, Command::OpenApp { .. }) {
+    if !is_journal_tokenize && matches!(command, Command::OpenApp { .. }) {
         eligible_hints.push(open_app_hint_message(response));
     }
     for hint in &json_hints {
@@ -66,7 +71,12 @@ pub(crate) fn render_response(
     if let Some(hint) = pick_random_hint(&eligible_hints) {
         prefix_fields.push(("hint".to_string(), hint));
     }
-    render_response_with_prefix_fields(response, &prefix_fields, passthrough_stored_response)
+    let mut rendered =
+        render_response_with_prefix_fields(response, &prefix_fields, passthrough_stored_response);
+    if is_journal_tokenize {
+        apply_journal_render_redaction(&mut rendered);
+    }
+    rendered
 }
 
 pub(crate) fn render_markdown_response(
@@ -114,6 +124,10 @@ fn command_supports_active_window(command: &Command) -> bool {
             | Command::ScreenCapture { .. }
             | Command::ScreenTokenize { .. }
     )
+}
+
+fn is_journal_tokenize(command: &Command) -> bool {
+    matches!(command, Command::ScreenTokenize { journal: true, .. })
 }
 
 fn command_has_explicit_active_window_id(command: &Command) -> bool {
@@ -164,6 +178,42 @@ fn command_has_explicit_active_window_id(command: &Command) -> bool {
             .map(|id| !id.trim().is_empty())
             .unwrap_or(false),
         _ => false,
+    }
+}
+
+fn apply_journal_render_redaction(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.remove("request_id");
+    obj.remove("hint");
+    if let Some(result) = obj
+        .get_mut("result")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        result.remove("window_id");
+        result.remove("hint");
+        if let Some(windows) = result
+            .get_mut("windows")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for window in windows {
+                let Some(window_obj) = window.as_object_mut() else {
+                    continue;
+                };
+                window_obj.remove("id");
+                if let Some(elements) = window_obj
+                    .get_mut("elements")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for element in elements {
+                        if let Some(element_obj) = element.as_object_mut() {
+                            element_obj.remove("id");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1333,6 +1383,7 @@ mod tests {
             overlay_out_path: None,
             window_query: None,
             screenshot_path: None,
+            journal: false,
             active_window: false,
             active_window_id: None,
             region: None,
@@ -1384,6 +1435,55 @@ mod tests {
         assert!(!markdown.contains("## Windows"));
         assert!(!markdown.lines().any(|line| line == "## Text"));
         assert!(!markdown.contains("```text"));
+    }
+
+    #[test]
+    fn journal_tokenize_redacts_ids_and_request_metadata() {
+        let command = Command::ScreenTokenize {
+            overlay_out_path: None,
+            window_query: None,
+            screenshot_path: None,
+            journal: true,
+            active_window: false,
+            active_window_id: None,
+            region: None,
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "window_id": "settings_01",
+                "hint": "sample hint",
+                "windows": [{
+                    "id": "settings_01",
+                    "title": "Permissions",
+                    "app": "System Settings",
+                    "elements": [{
+                        "id": "axid_toggle_recording",
+                        "role": "checkbox",
+                        "text": "Recording"
+                    }]
+                }]
+            }),
+        );
+
+        let rendered = render_response(&command, &response, false);
+        assert!(rendered.get("request_id").is_none());
+        assert!(rendered.get("hint").is_none());
+        let result = rendered.get("result").expect("result");
+        assert!(result.get("window_id").is_none());
+        assert!(result.get("hint").is_none());
+        let windows = result
+            .get("windows")
+            .and_then(serde_json::Value::as_array)
+            .expect("windows array");
+        let first = windows.first().expect("first window");
+        assert!(first.get("id").is_none());
+        let first_element = first
+            .get("elements")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|v| v.first())
+            .expect("first element");
+        assert!(first_element.get("id").is_none());
     }
 
     #[test]

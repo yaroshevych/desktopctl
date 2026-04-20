@@ -150,6 +150,7 @@ fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
             let (active_window, active_window_id) = parse_active_window(sub)?;
             let window_query = sub.get_one::<String>("window_query").cloned();
             let screenshot_path = sub.get_one::<String>("screenshot").cloned();
+            let journal = sub.get_flag("journal");
             if window_query.is_some() && screenshot_path.is_some() {
                 return Err(AppError::invalid_argument(
                     "--window-query cannot be combined with --screenshot for screen tokenize",
@@ -169,6 +170,7 @@ fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
                 overlay_out_path: sub.get_one::<String>("overlay").cloned(),
                 window_query,
                 screenshot_path,
+                journal,
                 active_window,
                 active_window_id,
                 region: parse_region(sub)?,
@@ -741,6 +743,14 @@ fn screen_subcommand() -> ClapCommand {
             ClapCommand::new("tokenize")
                 .about("Extract structured UI/text tokens from screen")
                 .arg(Arg::new("overlay").long("overlay").value_name("path"))
+                .arg(
+                    Arg::new("journal")
+                        .long("journal")
+                        .action(ArgAction::SetTrue)
+                        .help(
+                            "Emit redacted/stable tokenize output (omits volatile ids and request/window hint metadata)",
+                        ),
+                )
                 .arg(
                     Arg::new("window_query")
                         .long("window-query")
