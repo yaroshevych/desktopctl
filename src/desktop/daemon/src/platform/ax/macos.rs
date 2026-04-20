@@ -15,18 +15,21 @@ pub struct AxElement {
 use crate::trace;
 use accessibility::{AXAttribute, AXUIElement, AXUIElementAttributes};
 use accessibility_sys::{
-    AXValueGetType, AXValueGetValue, AXValueRef, kAXFocusedApplicationAttribute,
-    kAXFocusedUIElementAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXValueTypeCGPoint,
-    kAXValueTypeCGSize,
+    AXUIElementCopyMultipleAttributeValues, AXValueGetType, AXValueGetValue, AXValueRef,
+    kAXChildrenAttribute, kAXDescriptionAttribute, kAXErrorSuccess, kAXFocusedApplicationAttribute,
+    kAXFocusedUIElementAttribute, kAXIdentifierAttribute, kAXLabelValueAttribute,
+    kAXPositionAttribute, kAXRoleAttribute, kAXSizeAttribute, kAXTitleAttribute, kAXValueAttribute,
+    kAXValueTypeAXError, kAXValueTypeCGPoint, kAXValueTypeCGSize,
 };
 use core_foundation::{
-    array::CFArray,
+    array::{CFArray, CFArrayRef},
     attributed_string::{CFAttributedString, CFAttributedStringGetString},
-    base::{CFType, TCFType},
+    base::{CFGetTypeID, CFType, TCFType},
     boolean::CFBoolean,
     number::CFNumber,
     string::CFString,
 };
+use std::cell::OnceCell;
 use std::ffi::c_void;
 
 #[repr(C)]
@@ -122,54 +125,256 @@ pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     Ok(element_bounds(&window))
 }
 
+const BATCH_ATTRS: &[&str] = &[
+    kAXRoleAttribute,
+    kAXChildrenAttribute,
+    kAXPositionAttribute,
+    kAXSizeAttribute,
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXLabelValueAttribute,
+    kAXIdentifierAttribute,
+];
+const IDX_ROLE: usize = 0;
+const IDX_CHILDREN: usize = 1;
+const IDX_POSITION: usize = 2;
+const IDX_SIZE: usize = 3;
+const IDX_TITLE: usize = 4;
+const IDX_VALUE: usize = 5;
+const IDX_DESCRIPTION: usize = 6;
+const IDX_LABEL_VALUE: usize = 7;
+const IDX_IDENTIFIER: usize = 8;
+
+thread_local! {
+    static BATCH_ATTRS_CF: OnceCell<CFArray<CFString>> = const { OnceCell::new() };
+}
+
+fn batch_attrs_array() -> CFArrayRef {
+    BATCH_ATTRS_CF.with(|cell| {
+        let arr = cell.get_or_init(|| {
+            let strings: Vec<CFString> = BATCH_ATTRS
+                .iter()
+                .map(|s| CFString::from_static_string(s))
+                .collect();
+            CFArray::from_CFTypes(&strings)
+        });
+        arr.as_concrete_TypeRef()
+    })
+}
+
+fn fetch_batch(element: &AXUIElement) -> Option<Vec<Option<CFType>>> {
+    let attrs = batch_attrs_array();
+    let mut out: CFArrayRef = std::ptr::null();
+    let err = unsafe {
+        AXUIElementCopyMultipleAttributeValues(element.as_concrete_TypeRef(), attrs, 0, &mut out)
+    };
+    if err != kAXErrorSuccess || out.is_null() {
+        return None;
+    }
+    let arr = unsafe { CFArray::<CFType>::wrap_under_create_rule(out) };
+    let len = arr.len();
+    let mut values = Vec::with_capacity(len.max(0) as usize);
+    for i in 0..len {
+        let item = arr.get(i).map(|item| (*item).clone());
+        values.push(item.filter(|v| !is_ax_error_value(v)));
+    }
+    Some(values)
+}
+
+fn is_ax_error_value(value: &CFType) -> bool {
+    let type_id = value.as_CFTypeRef();
+    if type_id.is_null() {
+        return false;
+    }
+    if unsafe { CFGetTypeID(type_id) } != unsafe { accessibility_sys::AXValueGetTypeID() } {
+        return false;
+    }
+    let av = type_id as AXValueRef;
+    unsafe { AXValueGetType(av) == kAXValueTypeAXError }
+}
+
+fn cf_to_string(value: &CFType) -> Option<String> {
+    cf_type_text(value)
+}
+
+fn cf_to_children(value: &CFType) -> Vec<AXUIElement> {
+    if !value.instance_of::<CFArray<CFType>>() {
+        return Vec::new();
+    }
+    let arr = unsafe { CFArray::<CFType>::wrap_under_get_rule(value.as_CFTypeRef() as CFArrayRef) };
+    let mut out = Vec::with_capacity(arr.len().max(0) as usize);
+    for i in 0..arr.len() {
+        if let Some(item) = arr.get(i) {
+            if item.instance_of::<AXUIElement>() {
+                let child = unsafe { AXUIElement::wrap_under_get_rule(item.as_CFTypeRef() as _) };
+                out.push(child);
+            }
+        }
+    }
+    out
+}
+
 fn collect_elements_recursive(element: &AXUIElement, out: &mut Vec<AxElement>) {
-    if let Some(role) = element.role().ok().map(|v| v.to_string()) {
-        let interactive = is_interactive_role(&role);
-        let text_bearing = !interactive && is_text_bearing_role(&role);
-        if interactive || text_bearing {
-            let bounds = element_bounds(element);
+    let Some(batch) = fetch_batch(element) else {
+        return;
+    };
+
+    let role = batch
+        .get(IDX_ROLE)
+        .and_then(|v| v.as_ref())
+        .and_then(cf_to_string);
+    let Some(role) = role else {
+        return;
+    };
+
+    let interactive = is_interactive_role(&role);
+    let text_bearing = !interactive && is_text_bearing_role(&role);
+
+    if interactive || text_bearing {
+        let bounds = batch_bounds(&batch);
+        if trace::is_enabled() {
             dump_all_attributes_compact(element, &role, bounds.as_ref());
-            if let Some(bounds) = bounds {
-                if interactive {
-                    let text = element_label(element, &role);
-                    let ax_identifier = if should_collect_identifier(&role) {
-                        element_identifier(element)
-                    } else {
-                        None
-                    };
-                    let checked = element_toggle_state(element, &role);
+        }
+        if let Some(bounds) = bounds {
+            if interactive {
+                let text = batch_interactive_label(&batch, &role)
+                    .or_else(|| element_label(element, &role));
+                let ax_identifier = if should_collect_identifier(&role) {
+                    batch_text_at(&batch, IDX_IDENTIFIER).or_else(|| element_identifier(element))
+                } else {
+                    None
+                };
+                let checked = element_toggle_state_from_batch(&batch, &role)
+                    .or_else(|| element_toggle_state(element, &role));
+                out.push(AxElement {
+                    role,
+                    text,
+                    bounds,
+                    ax_identifier,
+                    checked,
+                });
+            } else {
+                let text = batch_text_bearing_label(&batch, &role);
+                if text
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|t| !t.is_empty())
+                {
                     out.push(AxElement {
                         role,
                         text,
                         bounds,
-                        ax_identifier,
-                        checked,
+                        ax_identifier: None,
+                        checked: None,
                     });
-                } else {
-                    let text = text_bearing_label(element, &role);
-                    if text
-                        .as_deref()
-                        .map(str::trim)
-                        .is_some_and(|t| !t.is_empty())
-                    {
-                        out.push(AxElement {
-                            role,
-                            text,
-                            bounds,
-                            ax_identifier: None,
-                            checked: None,
-                        });
-                    }
                 }
             }
         }
     }
 
-    if let Ok(children) = element.children() {
-        for child in children.iter() {
+    if let Some(children_value) = batch.get(IDX_CHILDREN).and_then(|v| v.as_ref()) {
+        for child in cf_to_children(children_value) {
             collect_elements_recursive(&child, out);
         }
     }
+}
+
+fn batch_bounds(batch: &[Option<CFType>]) -> Option<Bounds> {
+    let pos = batch.get(IDX_POSITION).and_then(|v| v.as_ref())?;
+    let size = batch.get(IDX_SIZE).and_then(|v| v.as_ref())?;
+    let (x, y) = decode_point(pos)?;
+    let (w, h) = decode_size(size)?;
+    if w <= 1.0 || h <= 1.0 {
+        return None;
+    }
+    Some(Bounds {
+        x: x.max(0.0),
+        y: y.max(0.0),
+        width: w.max(0.0),
+        height: h.max(0.0),
+    })
+}
+
+fn batch_text_at(batch: &[Option<CFType>], idx: usize) -> Option<String> {
+    let value = batch.get(idx).and_then(|v| v.as_ref())?;
+    cf_to_string(value).and_then(|s| {
+        let trimmed = s.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
+fn batch_text_bearing_label(batch: &[Option<CFType>], role: &str) -> Option<String> {
+    match role {
+        "AXStaticText" | "AXText" => {
+            batch_text_at(batch, IDX_VALUE).or_else(|| batch_text_at(batch, IDX_TITLE))
+        }
+        "AXLink" | "AXHeading" => {
+            batch_text_at(batch, IDX_TITLE).or_else(|| batch_text_at(batch, IDX_VALUE))
+        }
+        "AXImage" => batch_text_at(batch, IDX_DESCRIPTION),
+        _ => None,
+    }
+}
+
+fn batch_interactive_label(batch: &[Option<CFType>], role: &str) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let push = |candidates: &mut Vec<String>, val: Option<String>| {
+        if let Some(v) = val {
+            candidates.push(v);
+        }
+    };
+    match role {
+        "AXTextField" | "AXTextArea" | "AXWebArea" => {
+            push(&mut candidates, batch_text_at(batch, IDX_VALUE));
+            push(&mut candidates, batch_text_at(batch, IDX_TITLE));
+            push(&mut candidates, batch_text_at(batch, IDX_LABEL_VALUE));
+        }
+        "AXButton" | "AXPopUpButton" | "AXMenuButton" | "AXRadioButton" | "AXCheckBox"
+        | "AXSwitch" => {
+            push(&mut candidates, batch_text_at(batch, IDX_TITLE));
+            push(&mut candidates, batch_text_at(batch, IDX_LABEL_VALUE));
+            push(&mut candidates, batch_text_at(batch, IDX_VALUE));
+            push(&mut candidates, batch_text_at(batch, IDX_DESCRIPTION));
+        }
+        _ => {
+            push(&mut candidates, batch_text_at(batch, IDX_TITLE));
+            push(&mut candidates, batch_text_at(batch, IDX_LABEL_VALUE));
+            push(&mut candidates, batch_text_at(batch, IDX_VALUE));
+            push(&mut candidates, batch_text_at(batch, IDX_DESCRIPTION));
+        }
+    }
+    best_label_candidate(role, candidates)
+}
+
+fn element_toggle_state_from_batch(batch: &[Option<CFType>], role: &str) -> Option<ToggleState> {
+    if !matches!(role, "AXCheckBox" | "AXRadioButton" | "AXSwitch") {
+        return None;
+    }
+    let value = batch.get(IDX_VALUE).and_then(|v| v.as_ref())?;
+    if let Some(b) = value.downcast::<CFBoolean>() {
+        return Some(if bool::from(b) {
+            ToggleState::True
+        } else {
+            ToggleState::False
+        });
+    }
+    if let Some(n) = value.downcast::<CFNumber>() {
+        let raw = n
+            .to_i64()
+            .or_else(|| n.to_f64().map(|v| v.round() as i64))?;
+        return Some(if raw <= 0 {
+            ToggleState::False
+        } else if raw == 1 {
+            ToggleState::True
+        } else {
+            ToggleState::Mixed
+        });
+    }
+    if let Some(text) = cf_type_text_raw(value) {
+        return parse_toggle_text_state(&text);
+    }
+    Some(ToggleState::Unknown)
 }
 
 fn is_interactive_role(role: &str) -> bool {
@@ -199,33 +404,6 @@ fn is_text_bearing_role(role: &str) -> bool {
         role,
         "AXStaticText" | "AXText" | "AXLink" | "AXHeading" | "AXImage"
     )
-}
-
-fn text_bearing_label(element: &AXUIElement, role: &str) -> Option<String> {
-    match role {
-        "AXStaticText" | "AXText" => element
-            .attribute(&AXAttribute::value())
-            .ok()
-            .and_then(|v| cf_type_text(&v))
-            .or_else(|| element.title().ok().map(|v| v.to_string())),
-        "AXLink" | "AXHeading" => element
-            .title()
-            .ok()
-            .map(|v| v.to_string())
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                element
-                    .attribute(&AXAttribute::value())
-                    .ok()
-                    .and_then(|v| cf_type_text(&v))
-            }),
-        "AXImage" => element
-            .description()
-            .ok()
-            .map(|v| v.to_string())
-            .filter(|s| !s.trim().is_empty()),
-        _ => None,
-    }
 }
 
 fn element_toggle_state(element: &AXUIElement, role: &str) -> Option<ToggleState> {
