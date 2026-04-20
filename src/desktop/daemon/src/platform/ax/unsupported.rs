@@ -23,3 +23,7 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
 pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     Ok(None)
 }
+
+pub fn frontmost_app_pid() -> Option<i64> {
+    None
+}

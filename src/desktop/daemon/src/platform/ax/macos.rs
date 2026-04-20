@@ -124,6 +124,25 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
     }))
 }
 
+pub fn frontmost_app_pid() -> Option<i64> {
+    use accessibility_sys::{AXUIElementGetPid, pid_t};
+    let system = AXUIElement::system_wide();
+    let focused_app_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(
+        kAXFocusedApplicationAttribute,
+    ));
+    let app_cf = system.attribute(&focused_app_attr).ok()?;
+    if !app_cf.instance_of::<AXUIElement>() {
+        return None;
+    }
+    let app = unsafe { AXUIElement::wrap_under_get_rule(app_cf.as_CFTypeRef() as _) };
+    let mut pid: pid_t = 0;
+    let err = unsafe { AXUIElementGetPid(app.as_concrete_TypeRef(), &mut pid) };
+    if err != kAXErrorSuccess || pid <= 0 {
+        return None;
+    }
+    Some(pid as i64)
+}
+
 pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     let system = AXUIElement::system_wide();
     let focused_app_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(

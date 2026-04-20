@@ -104,6 +104,17 @@ pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     })
 }
 
+pub fn frontmost_app_pid() -> Option<i64> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    let hwnd = frontmost_hwnd();
+    if hwnd == 0 {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd as _, &mut pid as *mut u32) };
+    if pid == 0 { None } else { Some(pid as i64) }
+}
+
 fn frontmost_hwnd() -> usize {
     // SAFETY: GetForegroundWindow has no preconditions.
     unsafe { GetForegroundWindow() as usize }
