@@ -151,6 +151,7 @@ fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
             let window_query = sub.get_one::<String>("window_query").cloned();
             let screenshot_path = sub.get_one::<String>("screenshot").cloned();
             let journal = sub.get_flag("journal");
+            let list_all_windows = sub.get_flag("list_windows");
             if window_query.is_some() && screenshot_path.is_some() {
                 return Err(AppError::invalid_argument(
                     "--window-query cannot be combined with --screenshot for screen tokenize",
@@ -171,6 +172,7 @@ fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
                 window_query,
                 screenshot_path,
                 journal,
+                list_all_windows,
                 active_window,
                 active_window_id,
                 region: parse_region(sub)?,
@@ -750,6 +752,12 @@ fn screen_subcommand() -> ClapCommand {
                         .help(
                             "Emit redacted/stable tokenize output (omits volatile ids and request/window hint metadata)",
                         ),
+                )
+                .arg(
+                    Arg::new("list_windows")
+                        .long("list-windows")
+                        .action(ArgAction::SetTrue)
+                        .help("Include a list of all visible windows in markdown output"),
                 )
                 .arg(
                     Arg::new("window_query")

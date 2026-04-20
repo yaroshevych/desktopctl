@@ -214,6 +214,16 @@ fn apply_journal_render_redaction(value: &mut serde_json::Value) {
                 }
             }
         }
+        if let Some(windows) = result
+            .get_mut("all_windows")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for window in windows {
+                if let Some(window_obj) = window.as_object_mut() {
+                    window_obj.remove("id");
+                }
+            }
+        }
     }
 }
 
@@ -398,9 +408,15 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
     let hint = value.get("hint").and_then(serde_json::Value::as_str);
-    let windows = value
-        .get("result")
+    let result = value.get("result");
+    let windows = result
         .and_then(|v| v.get("windows"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let has_all_windows = result.and_then(|v| v.get("all_windows")).is_some();
+    let all_windows = result
+        .and_then(|v| v.get("all_windows"))
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
@@ -545,6 +561,9 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
                 last_y = entry.y;
             }
         }
+    }
+    if has_all_windows {
+        append_windows_section_with_title(&mut lines, "All Windows", &all_windows);
     }
     lines.join("\n")
 }
@@ -1129,7 +1148,15 @@ fn summarize_bounds_size(value: &serde_json::Value) -> Option<String> {
 }
 
 fn append_windows_section(lines: &mut Vec<String>, windows: &[serde_json::Value]) {
-    push_section(lines, "Windows");
+    append_windows_section_with_title(lines, "Windows", windows);
+}
+
+fn append_windows_section_with_title(
+    lines: &mut Vec<String>,
+    title: &str,
+    windows: &[serde_json::Value],
+) {
+    push_section(lines, title);
     if windows.is_empty() {
         lines.push("None".to_string());
         return;
@@ -1384,6 +1411,7 @@ mod tests {
             window_query: None,
             screenshot_path: None,
             journal: false,
+            list_all_windows: false,
             active_window: false,
             active_window_id: None,
             region: None,
@@ -1444,6 +1472,7 @@ mod tests {
             window_query: None,
             screenshot_path: None,
             journal: true,
+            list_all_windows: false,
             active_window: false,
             active_window_id: None,
             region: None,
@@ -1462,6 +1491,11 @@ mod tests {
                         "role": "checkbox",
                         "text": "Recording"
                     }]
+                }],
+                "all_windows": [{
+                    "id": "settings_01",
+                    "title": "Permissions",
+                    "app": "System Settings"
                 }]
             }),
         );
@@ -1484,6 +1518,58 @@ mod tests {
             .and_then(|v| v.first())
             .expect("first element");
         assert!(first_element.get("id").is_none());
+        let all_windows = result
+            .get("all_windows")
+            .and_then(serde_json::Value::as_array)
+            .expect("all_windows array");
+        let listed = all_windows.first().expect("first listed window");
+        assert!(listed.get("id").is_none());
+    }
+
+    #[test]
+    fn tokenize_markdown_includes_all_windows_section_when_present() {
+        let command = Command::ScreenTokenize {
+            overlay_out_path: None,
+            window_query: None,
+            screenshot_path: None,
+            journal: false,
+            list_all_windows: true,
+            active_window: false,
+            active_window_id: None,
+            region: None,
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "windows": [{
+                    "id": "notes_01",
+                    "title": "Notes",
+                    "app": "Notes",
+                    "elements": []
+                }],
+                "all_windows": [
+                    {
+                        "id": "notes_01",
+                        "title": "Notes",
+                        "app": "Notes",
+                        "bounds": {"x": 10, "y": 20, "width": 1200, "height": 800}
+                    },
+                    {
+                        "id": "term_02",
+                        "title": "Terminal",
+                        "app": "Terminal",
+                        "bounds": {"x": 30, "y": 40, "width": 900, "height": 700}
+                    }
+                ]
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("## All Windows"));
+        assert!(markdown.contains("### Notes"));
+        assert!(markdown.contains("### Terminal"));
+        assert!(markdown.contains("window_id: notes_01"));
+        assert!(markdown.contains("window_id: term_02"));
     }
 
     #[test]

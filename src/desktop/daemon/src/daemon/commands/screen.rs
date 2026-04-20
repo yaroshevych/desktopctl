@@ -133,6 +133,7 @@ pub(crate) fn tokenize(
     window_query: Option<String>,
     screenshot_path: Option<String>,
     journal: bool,
+    list_all_windows: bool,
     active_window: bool,
     active_window_id: Option<String>,
     region: Option<Bounds>,
@@ -163,6 +164,11 @@ pub(crate) fn tokenize(
         if active_window {
             return Err(AppError::invalid_argument(
                 "--active-window cannot be combined with --screenshot for screen tokenize",
+            ));
+        }
+        if list_all_windows {
+            return Err(AppError::invalid_argument(
+                "--list-windows cannot be combined with --screenshot for screen tokenize",
             ));
         }
         let screenshot = PathBuf::from(path_raw);
@@ -582,6 +588,20 @@ pub(crate) fn tokenize(
         );
         stage_timings.push(("new_window_hint", stage_started.elapsed().as_millis()));
     }
+    if list_all_windows && !screenshot_mode {
+        let mut windows = window_target::list_windows()?;
+        super::super::enrich_window_refs(&mut windows);
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "all_windows".to_string(),
+                Value::Array(windows.iter().map(|w| w.as_json()).collect::<Vec<Value>>()),
+            );
+        }
+        if journal {
+            apply_journal_all_windows_redaction(&mut value);
+        }
+        stage_timings.push(("all_windows_list", stage_started.elapsed().as_millis()));
+    }
     let timing_breakdown = stage_timings
         .iter()
         .map(|(label, ms)| format!("{label}_ms={ms}"))
@@ -644,6 +664,22 @@ fn apply_journal_redaction(value: &mut Value) {
                         element_obj.remove("id");
                     }
                 }
+            }
+        }
+    }
+}
+
+fn apply_journal_all_windows_redaction(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(windows) = obj
+        .get_mut("all_windows")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for window in windows {
+            if let Some(window_obj) = window.as_object_mut() {
+                window_obj.remove("id");
             }
         }
     }

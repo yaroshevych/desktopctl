@@ -332,6 +332,7 @@ fn parses_screen_tokenize_with_overlay() {
             window_query,
             screenshot_path,
             journal,
+            list_all_windows,
             active_window,
             active_window_id,
             region,
@@ -340,6 +341,7 @@ fn parses_screen_tokenize_with_overlay() {
             assert!(window_query.is_none());
             assert!(screenshot_path.is_none());
             assert!(!journal);
+            assert!(!list_all_windows);
             assert!(!active_window);
             assert!(active_window_id.is_none());
             assert!(region.is_none());
@@ -363,6 +365,7 @@ fn parses_screen_tokenize_with_window() {
             window_query,
             screenshot_path,
             journal,
+            list_all_windows,
             active_window,
             active_window_id,
             region,
@@ -371,6 +374,7 @@ fn parses_screen_tokenize_with_window() {
             assert_eq!(window_query.as_deref(), Some("777:3"));
             assert!(screenshot_path.is_none());
             assert!(!journal);
+            assert!(!list_all_windows);
             assert!(!active_window);
             assert!(active_window_id.is_none());
             assert!(region.is_none());
@@ -395,6 +399,7 @@ fn parses_screen_tokenize_with_active_window_id() {
             window_query,
             screenshot_path,
             journal,
+            list_all_windows,
             region,
             overlay_out_path,
         } => {
@@ -406,6 +411,7 @@ fn parses_screen_tokenize_with_active_window_id() {
             assert!(window_query.is_none());
             assert!(screenshot_path.is_none());
             assert!(!journal);
+            assert!(!list_all_windows);
             assert!(region.is_none());
             assert!(overlay_out_path.is_none());
         }
@@ -427,6 +433,7 @@ fn parses_screen_tokenize_with_active_window() {
             window_query,
             screenshot_path,
             journal,
+            list_all_windows,
             active_window,
             active_window_id,
             region,
@@ -435,6 +442,7 @@ fn parses_screen_tokenize_with_active_window() {
             assert!(window_query.is_none());
             assert!(screenshot_path.is_none());
             assert!(!journal);
+            assert!(!list_all_windows);
             assert!(active_window);
             assert!(active_window_id.is_none());
             assert!(region.is_none());
@@ -479,6 +487,24 @@ fn parses_screen_tokenize_with_journal() {
     match command {
         Command::ScreenTokenize { journal, .. } => {
             assert!(journal);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_screen_tokenize_with_list_windows() {
+    let args = vec![
+        "screen".to_string(),
+        "tokenize".to_string(),
+        "--list-windows".to_string(),
+    ];
+    let command = parse_command(&args).expect("screen tokenize --list-windows should parse");
+    match command {
+        Command::ScreenTokenize {
+            list_all_windows, ..
+        } => {
+            assert!(list_all_windows);
         }
         other => panic!("unexpected command: {other:?}"),
     }

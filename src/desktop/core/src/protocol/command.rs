@@ -204,6 +204,8 @@ pub enum Command {
         #[serde(default)]
         journal: bool,
         #[serde(default)]
+        list_all_windows: bool,
+        #[serde(default)]
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,
