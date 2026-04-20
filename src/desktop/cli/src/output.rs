@@ -563,7 +563,7 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         }
     }
     if has_all_windows {
-        append_windows_section_with_title(&mut lines, "All Windows", &all_windows);
+        append_compact_windows_section_with_title(&mut lines, "All Windows", &all_windows);
     }
     lines.join("\n")
 }
@@ -1194,6 +1194,36 @@ fn append_windows_section_with_title(
     }
 }
 
+fn append_compact_windows_section_with_title(
+    lines: &mut Vec<String>,
+    title: &str,
+    windows: &[serde_json::Value],
+) {
+    push_section(lines, title);
+    if windows.is_empty() {
+        lines.push("None".to_string());
+        return;
+    }
+    for window in windows {
+        let Some(obj) = window.as_object() else {
+            continue;
+        };
+        let app = obj
+            .get("app")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("unknown");
+        let title = obj
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("(untitled)");
+        lines.push(format!("- {app}: {title}"));
+    }
+}
+
 fn to_title_case(value: &str) -> String {
     value
         .split_whitespace()
@@ -1566,10 +1596,8 @@ mod tests {
 
         let markdown = render_markdown_response(&command, &response, false);
         assert!(markdown.contains("## All Windows"));
-        assert!(markdown.contains("### Notes"));
-        assert!(markdown.contains("### Terminal"));
-        assert!(markdown.contains("window_id: notes_01"));
-        assert!(markdown.contains("window_id: term_02"));
+        assert!(markdown.contains("- Notes: Notes"));
+        assert!(markdown.contains("- Terminal: Terminal"));
     }
 
     #[test]
