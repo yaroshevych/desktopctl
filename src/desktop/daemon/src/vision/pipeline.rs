@@ -93,21 +93,18 @@ pub fn capture_and_update_window(
             captured.frame.width, captured.frame.height
         ));
     }
-    let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
     let texts = recognize_text(&captured.image)?;
     let frame = captured.frame;
     let image_path = frame.image_path.clone();
     let image = captured.image;
     let frame_png = Some(Arc::<[u8]>::from(encode_png(&image)?));
     with_state(move |state| {
-        let roi = state
-            .latest_thumbnail()
-            .and_then(|prev| diff_region(prev, &thumb, 8))
-            .map(|region| {
-                upscale_region(region, frame.width, frame.height, thumb.width, thumb.height)
-            });
-        let update =
-            state.record_capture(frame, frame_png, thumb, focused_app_override, texts, roi);
+        let update = state.record_capture_without_diff_baseline(
+            frame,
+            frame_png,
+            focused_app_override,
+            texts,
+        );
         let event_ids = state.event_ids(update.snapshot.snapshot_id);
         CaptureResult {
             snapshot: update.snapshot,
@@ -392,6 +389,7 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let image = captured.image;
     let image_path = frame.image_path.clone();
     let focused_app = window_meta.app.clone();
+    let update_diff_baseline = window_meta.native_window_id.is_none();
     let thumb_for_record = thumb.clone();
     let frame_png = Some(Arc::<[u8]>::from(encode_png(&image)?));
     let capture = with_state(move |state| {
@@ -408,8 +406,11 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
                 )
             });
 
-        let update =
-            state.record_capture(frame, frame_png, thumb_for_record, focused_app, texts, roi);
+        let update = if update_diff_baseline {
+            state.record_capture(frame, frame_png, thumb_for_record, focused_app, texts, roi)
+        } else {
+            state.record_capture_without_diff_baseline(frame, frame_png, focused_app, texts)
+        };
         trace::log(format!(
             "pipeline:tokenize:window_recorded snapshot_id={} event_id={}",
             update.snapshot.snapshot_id, update.event_id

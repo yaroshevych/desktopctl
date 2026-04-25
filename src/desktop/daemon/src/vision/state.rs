@@ -124,6 +124,27 @@ impl VisionState {
         texts: Vec<desktop_core::protocol::SnapshotText>,
         _roi: Option<Bounds>,
     ) -> CaptureUpdate {
+        self.record_capture_internal(capture, frame_png, Some(thumbnail), focused_app, texts)
+    }
+
+    pub fn record_capture_without_diff_baseline(
+        &mut self,
+        capture: CapturedFrame,
+        frame_png: Option<Arc<[u8]>>,
+        focused_app: Option<String>,
+        texts: Vec<desktop_core::protocol::SnapshotText>,
+    ) -> CaptureUpdate {
+        self.record_capture_internal(capture, frame_png, None, focused_app, texts)
+    }
+
+    fn record_capture_internal(
+        &mut self,
+        capture: CapturedFrame,
+        frame_png: Option<Arc<[u8]>>,
+        thumbnail: Option<GrayThumbnail>,
+        focused_app: Option<String>,
+        texts: Vec<desktop_core::protocol::SnapshotText>,
+    ) -> CaptureUpdate {
         let snapshot_id = self.next_snapshot_id;
         self.next_snapshot_id += 1;
         let event_id = self.next_event_id;
@@ -145,7 +166,9 @@ impl VisionState {
         self.latest_snapshot = Some(snapshot.clone());
         self.latest_frame_path = capture.image_path.clone();
         self.latest_frame_png = frame_png;
-        self.latest_thumbnail = Some(thumbnail);
+        if let Some(thumbnail) = thumbnail {
+            self.latest_thumbnail = Some(thumbnail);
+        }
         if let Some(path) = capture.image_path {
             self.frames.push_back(path);
         }
@@ -248,6 +271,50 @@ mod tests {
         );
         let second = state.record_capture(base_capture, None, thumb, None, Vec::new(), None);
         assert!(first.event_id < second.event_id);
+    }
+
+    #[test]
+    fn scoped_capture_does_not_replace_diff_thumbnail() {
+        let mut state = VisionState::new();
+        let display_thumb = GrayThumbnail {
+            width: 2,
+            height: 2,
+            pixels: vec![1; 4],
+        };
+        let display_capture = CapturedFrame {
+            snapshot_id: 1,
+            timestamp: "display".to_string(),
+            display_id: 1,
+            width: 100,
+            height: 100,
+            scale: 1.0,
+            image_path: Some(PathBuf::from("/tmp/display.png")),
+        };
+        let window_capture = CapturedFrame {
+            snapshot_id: 2,
+            timestamp: "window".to_string(),
+            display_id: 2,
+            width: 50,
+            height: 50,
+            scale: 2.0,
+            image_path: Some(PathBuf::from("/tmp/window.png")),
+        };
+
+        state.record_capture(
+            display_capture,
+            None,
+            display_thumb.clone(),
+            None,
+            Vec::new(),
+            None,
+        );
+        state.record_capture_without_diff_baseline(window_capture, None, None, Vec::new());
+
+        assert_eq!(
+            state.latest_thumbnail().unwrap().pixels,
+            display_thumb.pixels
+        );
+        assert_eq!(state.latest_snapshot().unwrap().display.id, 2);
     }
 
     #[test]
