@@ -13,6 +13,7 @@ use super::{diff::GrayThumbnail, types::CapturedFrame};
 
 const MAX_EVENTS: usize = 512;
 const MAX_FRAMES: usize = 64;
+const TOKENIZE_CACHE_CAPACITY: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct VisionEvent {
@@ -34,9 +35,7 @@ pub struct VisionState {
     latest_frame_path: Option<PathBuf>,
     latest_frame_png: Option<Arc<[u8]>>,
     latest_thumbnail: Option<GrayThumbnail>,
-    latest_tokenize_cache_key: Option<String>,
-    latest_tokenize_fingerprint: Option<u64>,
-    latest_tokenize_payload: Option<Arc<TokenizePayload>>,
+    tokenize_cache: VecDeque<(String, u64, Arc<TokenizePayload>)>,
     events: VecDeque<VisionEvent>,
     frames: VecDeque<PathBuf>,
     token_map: HashMap<u32, TokenEntry>,
@@ -51,9 +50,7 @@ impl VisionState {
             latest_frame_path: None,
             latest_frame_png: None,
             latest_thumbnail: None,
-            latest_tokenize_cache_key: None,
-            latest_tokenize_fingerprint: None,
-            latest_tokenize_payload: None,
+            tokenize_cache: VecDeque::new(),
             events: VecDeque::new(),
             frames: VecDeque::new(),
             token_map: HashMap::new(),
@@ -81,16 +78,12 @@ impl VisionState {
         cache_key: &str,
         fingerprint: u64,
     ) -> Option<Arc<TokenizePayload>> {
-        let key_matches = self
-            .latest_tokenize_cache_key
-            .as_ref()
-            .map(|key| key == cache_key)
-            .unwrap_or(false);
-        let fingerprint_matches = self.latest_tokenize_fingerprint == Some(fingerprint);
-        if !key_matches || !fingerprint_matches {
-            return None;
-        }
-        self.latest_tokenize_payload.as_ref().map(Arc::clone)
+        self.tokenize_cache
+            .iter()
+            .find(|(key, cached_fingerprint, _)| {
+                key == cache_key && *cached_fingerprint == fingerprint
+            })
+            .map(|(_, _, payload)| Arc::clone(payload))
     }
 
     pub fn update_tokenize_cache(
@@ -99,9 +92,20 @@ impl VisionState {
         fingerprint: u64,
         payload: Arc<TokenizePayload>,
     ) {
-        self.latest_tokenize_cache_key = Some(cache_key);
-        self.latest_tokenize_fingerprint = Some(fingerprint);
-        self.latest_tokenize_payload = Some(payload);
+        if let Some((_, cached_fingerprint, cached_payload)) = self
+            .tokenize_cache
+            .iter_mut()
+            .find(|(key, _, _)| *key == cache_key)
+        {
+            *cached_fingerprint = fingerprint;
+            *cached_payload = payload;
+            return;
+        }
+        self.tokenize_cache
+            .push_back((cache_key, fingerprint, payload));
+        while self.tokenize_cache.len() > TOKENIZE_CACHE_CAPACITY {
+            self.tokenize_cache.pop_front();
+        }
     }
 
     pub fn token_map(&self) -> &HashMap<u32, TokenEntry> {
@@ -212,6 +216,15 @@ mod tests {
     use crate::vision::{diff::GrayThumbnail, types::CapturedFrame};
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    fn test_tokenize_payload(snapshot_id: u64) -> Arc<desktop_core::protocol::TokenizePayload> {
+        Arc::new(desktop_core::protocol::TokenizePayload {
+            snapshot_id,
+            timestamp: format!("ts-{snapshot_id}"),
+            image: None,
+            windows: Vec::new(),
+        })
+    }
 
     #[test]
     fn snapshot_ids_are_monotonic() {
@@ -355,12 +368,7 @@ mod tests {
         state.update_tokenize_cache(
             "window:dictionary".to_string(),
             42,
-            Arc::new(desktop_core::protocol::TokenizePayload {
-                snapshot_id: 42,
-                timestamp: "ts".to_string(),
-                image: None,
-                windows: Vec::new(),
-            }),
+            test_tokenize_payload(42),
         );
 
         assert!(
@@ -376,6 +384,69 @@ mod tests {
         assert!(
             state
                 .cached_tokenize_payload_if_fingerprint("window:dictionary", 42)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn tokenize_cache_hits_two_distinct_keys() {
+        let mut state = VisionState::new();
+        state.update_tokenize_cache("window:notes".to_string(), 10, test_tokenize_payload(10));
+        state.update_tokenize_cache("window:safari".to_string(), 20, test_tokenize_payload(20));
+
+        let notes = state
+            .cached_tokenize_payload_if_fingerprint("window:notes", 10)
+            .expect("notes cache hit");
+        let safari = state
+            .cached_tokenize_payload_if_fingerprint("window:safari", 20)
+            .expect("safari cache hit");
+
+        assert_eq!(notes.snapshot_id, 10);
+        assert_eq!(safari.snapshot_id, 20);
+    }
+
+    #[test]
+    fn tokenize_cache_evicts_oldest_when_capacity_exceeded() {
+        let mut state = VisionState::new();
+        for idx in 1..=5 {
+            state.update_tokenize_cache(format!("window:{idx}"), idx, test_tokenize_payload(idx));
+        }
+
+        assert!(
+            state
+                .cached_tokenize_payload_if_fingerprint("window:1", 1)
+                .is_none()
+        );
+        for idx in 2..=5 {
+            assert!(
+                state
+                    .cached_tokenize_payload_if_fingerprint(&format!("window:{idx}"), idx)
+                    .is_some(),
+                "window:{idx} should remain cached"
+            );
+        }
+    }
+
+    #[test]
+    fn tokenize_cache_updates_existing_key_in_place() {
+        let mut state = VisionState::new();
+        state.update_tokenize_cache("window:notes".to_string(), 10, test_tokenize_payload(10));
+        state.update_tokenize_cache("window:safari".to_string(), 20, test_tokenize_payload(20));
+        state.update_tokenize_cache("window:notes".to_string(), 11, test_tokenize_payload(11));
+
+        assert_eq!(state.tokenize_cache.len(), 2);
+        assert!(
+            state
+                .cached_tokenize_payload_if_fingerprint("window:notes", 10)
+                .is_none()
+        );
+        let updated = state
+            .cached_tokenize_payload_if_fingerprint("window:notes", 11)
+            .expect("updated notes cache hit");
+        assert_eq!(updated.snapshot_id, 11);
+        assert!(
+            state
+                .cached_tokenize_payload_if_fingerprint("window:safari", 20)
                 .is_some()
         );
     }
