@@ -15,7 +15,10 @@ use core_graphics::{
         kCGWindowListOptionIncludingWindow,
     },
 };
-use desktop_core::{error::AppError, protocol::now_millis};
+use desktop_core::{
+    error::AppError,
+    protocol::{Bounds, now_millis},
+};
 use image::{ImageFormat, RgbaImage, imageops::FilterType};
 use objc2::runtime::AnyClass;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -138,6 +141,7 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
 pub(crate) fn capture_window_png(
     out_path: Option<PathBuf>,
     window_id: u32,
+    logical_bounds: Option<&Bounds>,
 ) -> Result<CapturedImage, AppError> {
     trace::log(format!("capture:window_png:start window_id={window_id}"));
     let cg_image = create_image(
@@ -164,16 +168,18 @@ pub(crate) fn capture_window_png(
     } else {
         None
     };
+    let scale = infer_window_capture_scale(image.width(), image.height(), logical_bounds);
 
     trace::log(format!(
-        "capture:window_png:ok window_id={} path={} size={}x{}",
+        "capture:window_png:ok window_id={} path={} size={}x{} scale={:.3}",
         window_id,
         image_path
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "<memory>".to_string()),
         image.width(),
-        image.height()
+        image.height(),
+        scale
     ));
 
     Ok(CapturedImage {
@@ -183,11 +189,37 @@ pub(crate) fn capture_window_png(
             display_id: window_id,
             width: image.width(),
             height: image.height(),
-            scale: 1.0,
+            scale,
             image_path,
         },
         image,
     })
+}
+
+fn infer_window_capture_scale(
+    image_width: u32,
+    image_height: u32,
+    logical_bounds: Option<&Bounds>,
+) -> f64 {
+    let Some(bounds) = logical_bounds else {
+        return 1.0;
+    };
+    let width_scale = if bounds.width > 0.0 {
+        Some(image_width as f64 / bounds.width)
+    } else {
+        None
+    };
+    let height_scale = if bounds.height > 0.0 {
+        Some(image_height as f64 / bounds.height)
+    } else {
+        None
+    };
+    match (width_scale, height_scale) {
+        (Some(w), Some(h)) if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 => (w + h) * 0.5,
+        (Some(w), _) if w.is_finite() && w > 0.0 => w,
+        (_, Some(h)) if h.is_finite() && h > 0.0 => h,
+        _ => 1.0,
+    }
 }
 
 pub(crate) fn default_capture_path() -> PathBuf {
@@ -337,7 +369,9 @@ fn save_capture_png(image: &RgbaImage, target_path: &PathBuf) -> Result<(), AppE
 
 #[cfg(test)]
 mod tests {
-    use super::default_capture_path;
+    use desktop_core::protocol::Bounds;
+
+    use super::{default_capture_path, infer_window_capture_scale};
 
     #[test]
     fn default_capture_path_points_to_tmp_png() {
@@ -345,5 +379,17 @@ mod tests {
         let path_s = path.display().to_string();
         assert!(path_s.starts_with("/tmp/desktopctl-captures/capture-"));
         assert!(path_s.ends_with(".png"));
+    }
+
+    #[test]
+    fn infer_window_capture_scale_uses_logical_window_bounds() {
+        let bounds = Bounds {
+            x: 100.0,
+            y: 80.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let scale = infer_window_capture_scale(1600, 1200, Some(&bounds));
+        assert_eq!(scale, 2.0);
     }
 }

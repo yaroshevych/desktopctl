@@ -78,7 +78,7 @@ pub fn capture_and_update_window(
 ) -> Result<CaptureResult, AppError> {
     trace::log("pipeline:capture_and_update_window:start");
     let capture_started = Instant::now();
-    let mut captured = capture_window_png(out_path, window_id)?;
+    let mut captured = capture_window_png(out_path, window_id, Some(&window_bounds))?;
     let capture_elapsed = capture_started.elapsed().as_millis();
     if capture_elapsed > CAPTURE_BUDGET_MS {
         trace::log(format!(
@@ -335,7 +335,7 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
         window_meta.native_window_id,
         window_meta.capture_bounds.as_ref(),
     ) {
-        let mut captured = capture_window_png(None, native_window_id)?;
+        let mut captured = capture_window_png(None, native_window_id, Some(capture_bounds))?;
         crop_window_capture_to_bounds(&mut captured, capture_bounds, &window_meta.bounds)?;
         captured
     } else {

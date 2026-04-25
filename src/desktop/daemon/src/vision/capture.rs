@@ -80,6 +80,7 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
 pub(crate) fn capture_window_png(
     _out_path: Option<PathBuf>,
     _window_id: u32,
+    _logical_bounds: Option<&desktop_core::protocol::Bounds>,
 ) -> Result<CapturedImage, AppError> {
     Err(AppError::backend_unavailable(
         "background window capture is supported only on macOS; switch to frontmost mode",
@@ -267,6 +268,7 @@ pub fn capture_screen_png(_out_path: Option<PathBuf>) -> Result<CapturedImage, A
 pub(crate) fn capture_window_png(
     _out_path: Option<PathBuf>,
     _window_id: u32,
+    _logical_bounds: Option<&desktop_core::protocol::Bounds>,
 ) -> Result<CapturedImage, AppError> {
     Err(AppError::backend_unavailable(format!(
         "background window capture is unsupported on {}; switch to frontmost mode",
