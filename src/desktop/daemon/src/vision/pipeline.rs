@@ -273,7 +273,22 @@ fn window_capture_crop_rect(
     capture_bounds: &Bounds,
     target_bounds: &Bounds,
 ) -> Option<(u32, u32, u32, u32)> {
-    if capture_bounds.width <= 0.0 || capture_bounds.height <= 0.0 {
+    if capture_bounds.width <= 0.0
+        || capture_bounds.height <= 0.0
+        || target_bounds.width <= 0.0
+        || target_bounds.height <= 0.0
+    {
+        return None;
+    }
+    let target_right = target_bounds.x + target_bounds.width;
+    let target_bottom = target_bounds.y + target_bounds.height;
+    let capture_right = capture_bounds.x + capture_bounds.width;
+    let capture_bottom = capture_bounds.y + capture_bounds.height;
+    if target_bounds.x < capture_bounds.x
+        || target_bounds.y < capture_bounds.y
+        || target_right > capture_right
+        || target_bottom > capture_bottom
+    {
         return None;
     }
     let local_bounds = Bounds {
@@ -1082,6 +1097,23 @@ mod tests {
         let rect =
             window_capture_crop_rect(1600, 1200, &capture_bounds, &target_bounds).expect("rect");
         assert_eq!(rect, (400, 300, 200, 160));
+    }
+
+    #[test]
+    fn window_capture_crop_rect_rejects_region_outside_window() {
+        let capture_bounds = Bounds {
+            x: 300.0,
+            y: 120.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let target_bounds = Bounds {
+            x: 250.0,
+            y: 160.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        assert!(window_capture_crop_rect(1600, 1200, &capture_bounds, &target_bounds).is_none());
     }
 
     #[test]
