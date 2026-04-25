@@ -2,6 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::error::AppError;
+use crate::protocol::Bounds;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Point {
@@ -35,6 +36,19 @@ pub trait Automation {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BackgroundInputTarget {
+    pub pid: i32,
+    pub window_id: u32,
+    pub bounds: Bounds,
+}
+
+pub trait BackgroundInputBackend {
+    fn preflight(&self, target: &BackgroundInputTarget) -> Result<(), AppError>;
+    fn left_click(&self, target: &BackgroundInputTarget, point: Point) -> Result<(), AppError>;
+    fn type_text(&self, target: &BackgroundInputTarget, text: &str) -> Result<(), AppError>;
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -65,6 +79,21 @@ pub fn new_backend() -> Result<Box<dyn Automation>, AppError> {
     {
         Err(AppError::backend_unavailable(format!(
             "unsupported platform: {}",
+            std::env::consts::OS
+        )))
+    }
+}
+
+pub fn new_background_input_backend() -> Result<Box<dyn BackgroundInputBackend>, AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(macos::MacosBackgroundInput::new()))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(AppError::backend_unavailable(format!(
+            "background input is unsupported on {}; switch to frontmost mode",
             std::env::consts::OS
         )))
     }

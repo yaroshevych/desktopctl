@@ -69,8 +69,8 @@ use screen_image::{logical_bounds_to_image_rect, write_capture_overlay};
 use text_match::{compact_for_log, ranked_text_candidates, select_text_candidate};
 use window_context::{
     append_tokenize_new_window_hint, assert_active_window_id_matches, attach_window_ref_to_payload,
-    backfill_tokenize_window_positions, bind_active_window_reference,
-    collect_tokenize_new_window_hint_snapshot,
+    backfill_tokenize_window_positions, background_input_target_for_window,
+    bind_active_window_reference, collect_tokenize_new_window_hint_snapshot,
     collect_tokenize_new_window_hint_snapshot_from_windows, enrich_window_refs,
     explicit_background_capture_window_id, remap_tokenize_window_id_field,
     resolve_active_window_target, resolve_observe_scope_bounds,

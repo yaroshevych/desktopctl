@@ -439,6 +439,7 @@ name = "desktop-core"
 version = "0.1.0"
 dependencies = [
  "core-graphics",
+ "foreign-types",
  "interprocess",
  "serde",
  "serde_json",

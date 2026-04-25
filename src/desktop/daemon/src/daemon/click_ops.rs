@@ -76,7 +76,7 @@ pub(super) fn click_text_target(
             target.bounds.width,
             target.bounds.height
         ));
-        perform_click(&target.bounds, button)?;
+        perform_click_for_target_window(&target.bounds, button, explicit_target.as_ref())?;
         return Ok((
             json!({
                 "snapshot_id": payload.snapshot_id,
@@ -331,7 +331,7 @@ pub(super) fn click_element_id_target(
         target.bounds.height,
         compact_for_log(target.text.as_deref().unwrap_or(""))
     ));
-    perform_click(&target.bounds, button)?;
+    perform_click_for_target_window(&target.bounds, button, explicit_target.as_ref())?;
     Ok((
         json!({
             "click_target": {
@@ -740,6 +740,37 @@ pub(super) fn perform_click(
     perform_click_at(center_x, center_y, button)
 }
 
+fn perform_click_for_target_window(
+    bounds: &desktop_core::protocol::Bounds,
+    button: PointerButton,
+    target_window: Option<&platform::windowing::WindowInfo>,
+) -> Result<Point, AppError> {
+    let center_x = (bounds.x + bounds.width / 2.0).max(0.0).round() as u32;
+    let center_y = (bounds.y + bounds.height / 2.0).max(0.0).round() as u32;
+    if background_input_gate_enabled()
+        && target_window.is_some()
+        && !matches!(button, PointerButton::Left)
+    {
+        return Err(AppError::backend_unavailable(
+            "background input currently supports left click and text input only; right click requires switching to frontmost mode",
+        ));
+    }
+    if background_input_gate_enabled()
+        && let Some(window) = target_window
+    {
+        let point = Point::new(center_x, center_y);
+        let target = background_input_target_for_window(window)?;
+        let backend = desktop_core::automation::new_background_input_backend()?;
+        backend.left_click(&target, point)?;
+        trace::log(format!(
+            "background_input:click_target ok pid={} window_id={} point=({}, {})",
+            target.pid, target.window_id, point.x, point.y
+        ));
+        return Ok(point);
+    }
+    perform_click_at(center_x, center_y, button)
+}
+
 pub(super) fn perform_click_at(x: u32, y: u32, button: PointerButton) -> Result<Point, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
@@ -761,6 +792,12 @@ pub(super) fn perform_click_at(x: u32, y: u32, button: PointerButton) -> Result<
         }
     }
     Ok(point)
+}
+
+fn background_input_gate_enabled() -> bool {
+    std::env::var("DESKTOPCTL_BACKGROUND_INPUT")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("skylight"))
 }
 
 pub(super) fn click_scope_window_bounds(

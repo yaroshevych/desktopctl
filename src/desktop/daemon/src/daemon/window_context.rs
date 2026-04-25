@@ -245,6 +245,20 @@ pub(super) fn explicit_background_capture_window_id(
     })
 }
 
+pub(super) fn background_input_target_for_window(
+    window: &platform::windowing::WindowInfo,
+) -> Result<desktop_core::automation::BackgroundInputTarget, AppError> {
+    Ok(desktop_core::automation::BackgroundInputTarget {
+        pid: i32::try_from(window.pid).map_err(|_| {
+            AppError::backend_unavailable(
+                "background input target pid is out of range; switch to frontmost mode",
+            )
+        })?,
+        window_id: explicit_background_capture_window_id(window)?,
+        bounds: window.bounds.clone(),
+    })
+}
+
 fn select_explicit_window_target_from_windows(
     reference: &str,
     windows: &[platform::windowing::WindowInfo],
@@ -677,7 +691,7 @@ pub(super) fn append_tokenize_new_window_hint(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_desktopctl_window_app, native_window_id_for_capture,
+        background_input_target_for_window, is_desktopctl_window_app, native_window_id_for_capture,
         select_explicit_window_target_from_windows,
     };
     use crate::platform;
@@ -768,6 +782,18 @@ mod tests {
     fn native_window_id_for_capture_parses_cg_window_number() {
         let window = test_window("123:456", 123, "Notes", "Project", None, false);
         assert_eq!(native_window_id_for_capture(&window), Some(456));
+    }
+
+    #[test]
+    fn background_input_target_uses_pid_window_id_and_bounds() {
+        let window = test_window("123:456", 123, "Notes", "Project", None, false);
+
+        let target = background_input_target_for_window(&window).expect("target");
+
+        assert_eq!(target.pid, 123);
+        assert_eq!(target.window_id, 456);
+        assert_eq!(target.bounds.x, 10.0);
+        assert_eq!(target.bounds.y, 20.0);
     }
 
     #[test]
