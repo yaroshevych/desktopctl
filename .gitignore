@@ -18,3 +18,8 @@ src/desktop/daemon/tests/fixtures/settings-screenshots/out/
 __pycache__
 src/desktop/daemon/tests/fixtures/golden/manifest.json
 .vscode
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
