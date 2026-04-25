@@ -13,19 +13,37 @@ pub(super) fn click_text_target(
         ));
     }
     if active_window {
-        if let Some(reference) = active_window_id {
-            assert_active_window_id_matches(reference)?;
-        }
-        if let Some(result) = try_click_text_active_window_ax(query, button)? {
+        let explicit_target = active_window_id
+            .map(assert_active_window_id_matches)
+            .transpose()?;
+        if explicit_target.is_none()
+            && let Some(result) = try_click_text_active_window_ax(query, button)?
+        {
             return Ok((result, None));
         }
-        let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
-            AppError::target_not_found("frontmost window bounds unavailable for click --text")
-        })?;
-        let app = request_frontmost_app(request_context);
+        let bounds = explicit_target
+            .as_ref()
+            .map(|target| target.bounds.clone())
+            .or_else(|| click_scope_window_bounds(request_context))
+            .ok_or_else(|| {
+                AppError::target_not_found("target window bounds unavailable for click --text")
+            })?;
+        let app = explicit_target
+            .as_ref()
+            .map(|target| target.app.clone())
+            .or_else(|| request_frontmost_app(request_context));
+        let title = explicit_target
+            .as_ref()
+            .map(|target| target.title.clone())
+            .or_else(|| app.clone())
+            .unwrap_or_else(|| "active_window".to_string());
+        let id = explicit_target
+            .as_ref()
+            .map(|target| target.id.clone())
+            .unwrap_or_else(|| "frontmost:1".to_string());
         let window_meta = vision::pipeline::TokenizeWindowMeta {
-            id: "frontmost:1".to_string(),
-            title: app.clone().unwrap_or_else(|| "active_window".to_string()),
+            id,
+            title,
             app,
             bounds,
         };
@@ -34,7 +52,7 @@ pub(super) fn click_text_target(
         let tokenize_texts = tokenize_payload_texts_for_click(&payload);
         if tokenize_texts.is_empty() {
             return Err(AppError::target_not_found(
-                "no tokenize text detected in frontmost window; cannot click target safely",
+                "no tokenize text detected in target window; cannot click target safely",
             ));
         }
         let target = select_text_candidate(&tokenize_texts, query)?;
@@ -219,26 +237,42 @@ pub(super) fn click_element_id_target(
             "pointer click --id requires --active-window",
         ));
     }
-    if let Some(reference) = active_window_id {
-        assert_active_window_id_matches(reference)?;
-    }
+    let explicit_target = active_window_id
+        .map(assert_active_window_id_matches)
+        .transpose()?;
     permissions::ensure_screen_recording_permission()?;
     let needle = id.trim();
     if needle.is_empty() {
         return Err(AppError::invalid_argument("empty element id selector"));
     }
-    if is_ax_element_id(needle) {
+    if explicit_target.is_none() && is_ax_element_id(needle) {
         if let Some(result) = try_click_ax_element_id_target(needle, button)? {
             return Ok((result, None));
         }
     }
-    let bounds = click_scope_window_bounds(request_context).ok_or_else(|| {
-        AppError::target_not_found("frontmost window bounds unavailable for click --id")
-    })?;
-    let app = request_frontmost_app(request_context);
+    let bounds = explicit_target
+        .as_ref()
+        .map(|target| target.bounds.clone())
+        .or_else(|| click_scope_window_bounds(request_context))
+        .ok_or_else(|| {
+            AppError::target_not_found("target window bounds unavailable for click --id")
+        })?;
+    let app = explicit_target
+        .as_ref()
+        .map(|target| target.app.clone())
+        .or_else(|| request_frontmost_app(request_context));
+    let title = explicit_target
+        .as_ref()
+        .map(|target| target.title.clone())
+        .or_else(|| app.clone())
+        .unwrap_or_else(|| "active_window".to_string());
+    let id = explicit_target
+        .as_ref()
+        .map(|target| target.id.clone())
+        .unwrap_or_else(|| "frontmost:1".to_string());
     let window_meta = vision::pipeline::TokenizeWindowMeta {
-        id: "frontmost:1".to_string(),
-        title: app.clone().unwrap_or_else(|| "active_window".to_string()),
+        id,
+        title,
         app,
         bounds,
     };
@@ -258,7 +292,7 @@ pub(super) fn click_element_id_target(
     ));
     if matches.is_empty() {
         return Err(AppError::target_not_found(format!(
-            "element id \"{needle}\" was not found in frontmost window"
+            "element id \"{needle}\" was not found in target window"
         )));
     }
     if matches.len() > 1 {
@@ -306,34 +340,48 @@ pub(super) fn resolve_element_id_target(
     active_window_id: Option<&str>,
     request_context: &RequestContext,
 ) -> Result<TokenizeClickElementCandidate, AppError> {
-    if let Some(reference) = active_window_id {
-        assert_active_window_id_matches(reference)?;
-    }
+    let explicit_target = active_window_id
+        .map(assert_active_window_id_matches)
+        .transpose()?;
     let needle = id.trim();
     if needle.is_empty() {
         return Err(AppError::invalid_argument("empty element id selector"));
     }
 
-    if let Some(target) = resolve_ax_element_id_target(needle)? {
+    if explicit_target.is_none()
+        && let Some(target) = resolve_ax_element_id_target(needle)?
+    {
         return Ok(target);
     }
 
-    let bounds = if active_window {
-        let target = if let Some(reference) = active_window_id {
-            assert_active_window_id_matches(reference)?
-        } else {
-            resolve_active_window_target()?
-        };
-        target.bounds
+    let resolved_target = if active_window {
+        Some(explicit_target.unwrap_or(resolve_active_window_target()?))
     } else {
-        click_scope_window_bounds(request_context).ok_or_else(|| {
-            AppError::target_not_found("frontmost window bounds unavailable for element id lookup")
-        })?
+        None
     };
-    let app = request_frontmost_app(request_context);
+    let bounds = resolved_target
+        .as_ref()
+        .map(|target| target.bounds.clone())
+        .or_else(|| click_scope_window_bounds(request_context))
+        .ok_or_else(|| {
+            AppError::target_not_found("target window bounds unavailable for element id lookup")
+        })?;
+    let app = resolved_target
+        .as_ref()
+        .map(|target| target.app.clone())
+        .or_else(|| request_frontmost_app(request_context));
+    let title = resolved_target
+        .as_ref()
+        .map(|target| target.title.clone())
+        .or_else(|| app.clone())
+        .unwrap_or_else(|| "active_window".to_string());
+    let id = resolved_target
+        .as_ref()
+        .map(|target| target.id.clone())
+        .unwrap_or_else(|| "frontmost:1".to_string());
     let window_meta = vision::pipeline::TokenizeWindowMeta {
-        id: "frontmost:1".to_string(),
-        title: app.clone().unwrap_or_else(|| "active_window".to_string()),
+        id,
+        title,
         app,
         bounds,
     };
@@ -352,7 +400,7 @@ pub(super) fn resolve_element_id_target(
     ));
     if matches.is_empty() {
         return Err(AppError::target_not_found(format!(
-            "element id \"{needle}\" was not found in frontmost window"
+            "element id \"{needle}\" was not found in target window"
         )));
     }
     if matches.len() > 1 {

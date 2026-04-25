@@ -210,16 +210,16 @@ pub(crate) fn tokenize(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                if let Ok(app_windows) = window_target::list_frontmost_app_windows() {
-                    active_window_prefetched_windows = Some(app_windows.clone());
+                if let Ok(mut windows) = window_target::list_windows() {
+                    super::super::enrich_window_refs(&mut windows);
+                    active_window_prefetched_windows = Some(windows.clone());
                     let reference = reference.to_string();
                     let (reply_tx, reply_rx) =
                         mpsc::channel::<Option<super::super::TokenizeHintSnapshot>>();
                     std::thread::spawn(move || {
                         let snapshot =
                             super::super::collect_tokenize_new_window_hint_snapshot_from_windows(
-                                &reference,
-                                app_windows,
+                                &reference, windows,
                             );
                         let _ = reply_tx.send(snapshot);
                     });
@@ -271,25 +271,6 @@ pub(crate) fn tokenize(
                             vision::pipeline::tokenize_window(meta)
                         }));
                         trace::log("active_window_tokenize:speculative_start source=prefetched");
-                    }
-                } else if let Some(frontmost_bounds) = window_target::frontmost_window_bounds() {
-                    if let Ok(bounds) = super::super::resolve_tokenize_region_bounds(
-                        frontmost_bounds,
-                        region.as_ref(),
-                    ) {
-                        let app = window_target::frontmost_app_name();
-                        let title = app.clone().unwrap_or_else(|| "active_window".to_string());
-                        let meta = vision::pipeline::TokenizeWindowMeta {
-                            id: reference_owned.clone(),
-                            title,
-                            app,
-                            bounds: bounds.clone(),
-                        };
-                        speculative_bounds = Some(bounds);
-                        speculative_handle = Some(std::thread::spawn(move || {
-                            vision::pipeline::tokenize_window(meta)
-                        }));
-                        trace::log("active_window_tokenize:speculative_start source=frontmost");
                     }
                 }
 

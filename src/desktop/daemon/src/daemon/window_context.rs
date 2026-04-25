@@ -9,6 +9,13 @@ fn is_restricted_window(window: &platform::windowing::WindowInfo) -> bool {
     is_desktopctl_window_app(&window.app)
 }
 
+fn is_targetable_window(window: &platform::windowing::WindowInfo) -> bool {
+    window.visible
+        && window.bounds.width > 8.0
+        && window.bounds.height > 8.0
+        && !is_restricted_window(window)
+}
+
 fn restricted_window_error() -> AppError {
     AppError::target_not_found("DesktopCtl windows cannot be targeted; focus another app window")
 }
@@ -188,37 +195,91 @@ pub(super) fn assert_active_window_id_matches(
             "active window id must not be empty",
         ));
     }
-    if let Some((expected_pid, expected_window_id)) = window_refs::resolve_native_for_ref(trimmed) {
-        if let Ok(mut current_app_windows) = window_target::list_frontmost_app_windows() {
-            enrich_window_refs(&mut current_app_windows);
-            if let Some(active) = current_app_windows.into_iter().find(|window| {
-                window.visible
-                    && window.bounds.width > 8.0
-                    && window.bounds.height > 8.0
-                    && window.pid == expected_pid
-                    && window.id == expected_window_id
-            }) {
-                if is_restricted_window(&active) {
-                    return Err(restricted_window_error());
-                }
-                trace::log("active_window_id_match:fastpath_hit");
-                return Ok(active);
-            }
-            trace::log("active_window_id_match:fastpath_miss");
-        }
+
+    resolve_explicit_window_target(trimmed)
+}
+
+pub(super) fn resolve_explicit_window_target(
+    reference: &str,
+) -> Result<platform::windowing::WindowInfo, AppError> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::invalid_argument(
+            "active window id must not be empty",
+        ));
     }
 
-    let active = resolve_active_window_target()?;
-    let active_ref = active
-        .window_ref
-        .clone()
-        .ok_or_else(|| AppError::target_not_found("active window id is unavailable"))?;
-    if active_ref != trimmed {
+    let mut windows = window_target::list_windows()?;
+    enrich_window_refs(&mut windows);
+    select_explicit_window_target_from_windows(trimmed, &windows)
+}
+
+fn select_explicit_window_target_from_windows(
+    reference: &str,
+    windows: &[platform::windowing::WindowInfo],
+) -> Result<platform::windowing::WindowInfo, AppError> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::invalid_argument(
+            "active window id must not be empty",
+        ));
+    }
+
+    if let Some((expected_pid, expected_window_id)) = window_refs::resolve_native_for_ref(trimmed) {
+        for window in windows {
+            if window.pid == expected_pid && window.id == expected_window_id {
+                if is_restricted_window(window) {
+                    return Err(restricted_window_error());
+                }
+                if is_targetable_window(window) {
+                    trace::log("active_window_id_match:resolved_ref_all_windows");
+                    return Ok(window.clone());
+                }
+            }
+        }
         return Err(AppError::target_not_found(format!(
-            "active window does not match requested id \"{trimmed}\""
+            "window id \"{trimmed}\" was not found or is not visible"
         )));
     }
-    Ok(active)
+
+    let exact_matches: Vec<&platform::windowing::WindowInfo> = windows
+        .iter()
+        .filter(|window| {
+            window.id == trimmed
+                || window.window_ref.as_deref() == Some(trimmed)
+                || format!("{}:{}", window.pid, window.id) == trimmed
+        })
+        .collect();
+    if exact_matches
+        .iter()
+        .any(|window| is_restricted_window(window))
+    {
+        return Err(restricted_window_error());
+    }
+    let exact_targetable: Vec<&platform::windowing::WindowInfo> = exact_matches
+        .into_iter()
+        .filter(|window| is_targetable_window(window))
+        .collect();
+    if exact_targetable.len() == 1 {
+        trace::log("active_window_id_match:resolved_exact_all_windows");
+        return Ok(exact_targetable[0].clone());
+    }
+    if exact_targetable.len() > 1 {
+        return Err(AppError::ambiguous_target(format!(
+            "multiple windows matched id \"{trimmed}\""
+        ))
+        .with_details(json!({
+            "query": trimmed,
+            "candidates": exact_targetable.iter().map(|w| w.as_json()).collect::<Vec<Value>>()
+        })));
+    }
+
+    let targetable: Vec<platform::windowing::WindowInfo> = windows
+        .iter()
+        .filter(|window| is_targetable_window(window))
+        .cloned()
+        .collect();
+    window_target::select_window_candidate(&targetable, trimmed).cloned()
 }
 
 pub(super) fn bind_active_window_reference(
@@ -395,7 +456,27 @@ pub(super) fn collect_tokenize_new_window_hint_snapshot_from_windows(
     }
     let mut app_windows = app_windows;
     enrich_window_refs(&mut app_windows);
-    let context = app_windows.iter().find_map(|window| {
+    let target_app = app_windows.iter().find_map(|window| {
+        let ref_match = window.window_ref.as_deref() == Some(active_window_id);
+        let native_match = window.id == active_window_id;
+        let issued_ref_match = window_refs::resolve_native_for_ref(active_window_id)
+            .is_some_and(|(pid, id)| window.pid == pid && window.id == id);
+        if ref_match || native_match || issued_ref_match {
+            Some(window.app.clone())
+        } else {
+            None
+        }
+    });
+    let scoped_windows = app_windows
+        .into_iter()
+        .filter(|window| {
+            target_app
+                .as_ref()
+                .map(|app| window.app.eq_ignore_ascii_case(app))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    let context = scoped_windows.iter().find_map(|window| {
         let app = window.app.trim();
         if app.is_empty() {
             None
@@ -403,7 +484,7 @@ pub(super) fn collect_tokenize_new_window_hint_snapshot_from_windows(
             Some(format!("app {app}"))
         }
     });
-    let current_windows = app_windows
+    let current_windows = scoped_windows
         .into_iter()
         .filter(|window| window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0)
         .filter_map(|window| {
@@ -568,7 +649,37 @@ pub(super) fn append_tokenize_new_window_hint(
 
 #[cfg(test)]
 mod tests {
-    use super::is_desktopctl_window_app;
+    use super::{is_desktopctl_window_app, select_explicit_window_target_from_windows};
+    use crate::platform;
+    use desktop_core::{error::ErrorCode, protocol::Bounds};
+
+    fn test_window(
+        id: &str,
+        pid: i64,
+        app: &str,
+        title: &str,
+        window_ref: Option<&str>,
+        frontmost: bool,
+    ) -> platform::windowing::WindowInfo {
+        platform::windowing::WindowInfo {
+            id: id.to_string(),
+            window_ref: window_ref.map(str::to_string),
+            parent_id: None,
+            pid,
+            index: 1,
+            app: app.to_string(),
+            title: title.to_string(),
+            bounds: Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            frontmost,
+            visible: true,
+            modal: None,
+        }
+    }
 
     #[test]
     fn desktopctl_app_windows_are_blocked() {
@@ -580,5 +691,80 @@ mod tests {
     fn non_desktopctl_app_windows_are_allowed() {
         assert!(!is_desktopctl_window_app("Safari"));
         assert!(!is_desktopctl_window_app("Notes"));
+    }
+
+    #[test]
+    fn explicit_window_target_resolves_window_ref_when_terminal_is_frontmost() {
+        let windows = vec![
+            test_window(
+                "term-native",
+                10,
+                "Ghostty",
+                "shell",
+                Some("ghostty_111111"),
+                true,
+            ),
+            test_window(
+                "notes-native",
+                20,
+                "Notes",
+                "Project",
+                Some("notes_222222"),
+                false,
+            ),
+        ];
+
+        let selected = select_explicit_window_target_from_windows("notes_222222", &windows)
+            .expect("background target should resolve");
+
+        assert_eq!(selected.app, "Notes");
+        assert_eq!(selected.id, "notes-native");
+    }
+
+    #[test]
+    fn explicit_window_target_resolves_native_id() {
+        let windows = vec![
+            test_window("term-native", 10, "Ghostty", "shell", None, true),
+            test_window("notes-native", 20, "Notes", "Project", None, false),
+        ];
+
+        let selected = select_explicit_window_target_from_windows("notes-native", &windows)
+            .expect("native id should resolve");
+
+        assert_eq!(selected.app, "Notes");
+    }
+
+    #[test]
+    fn explicit_window_target_reports_ambiguous_app_query() {
+        let windows = vec![
+            test_window("notes-1", 20, "Notes", "Project A", None, false),
+            test_window("notes-2", 20, "Notes", "Project B", None, false),
+        ];
+
+        let err = select_explicit_window_target_from_windows("Notes", &windows)
+            .expect_err("ambiguous app query should fail");
+
+        assert_eq!(err.code, ErrorCode::AmbiguousTarget);
+    }
+
+    #[test]
+    fn explicit_window_target_rejects_desktopctl_window() {
+        let windows = vec![test_window(
+            "desktopctl-native",
+            30,
+            "DesktopCtl",
+            "DesktopCtl",
+            Some("desktopctl_333333"),
+            true,
+        )];
+
+        let err = select_explicit_window_target_from_windows("desktopctl_333333", &windows)
+            .expect_err("DesktopCtl windows should be blocked");
+
+        assert_eq!(err.code, ErrorCode::TargetNotFound);
+        assert!(
+            err.message
+                .contains("DesktopCtl windows cannot be targeted")
+        );
     }
 }
