@@ -209,6 +209,17 @@ pub(super) fn resolve_explicit_window_target(
         ));
     }
 
+    if let Ok(mut frontmost_windows) = window_target::list_frontmost_app_windows() {
+        enrich_window_refs(&mut frontmost_windows);
+        match select_explicit_window_target_from_windows(trimmed, &frontmost_windows) {
+            Ok(window) => return Ok(window),
+            Err(err) if matches!(err.code, desktop_core::error::ErrorCode::TargetNotFound) => {
+                trace::log("active_window_id_match:frontmost_fastpath_miss");
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
     let mut windows = window_target::list_windows()?;
     enrich_window_refs(&mut windows);
     select_explicit_window_target_from_windows(trimmed, &windows)
@@ -467,14 +478,10 @@ pub(super) fn collect_tokenize_new_window_hint_snapshot_from_windows(
             None
         }
     });
+    let target_app = target_app?;
     let scoped_windows = app_windows
         .into_iter()
-        .filter(|window| {
-            target_app
-                .as_ref()
-                .map(|app| window.app.eq_ignore_ascii_case(app))
-                .unwrap_or(true)
-        })
+        .filter(|window| window.app.eq_ignore_ascii_case(&target_app))
         .collect::<Vec<_>>();
     let context = scoped_windows.iter().find_map(|window| {
         let app = window.app.trim();

@@ -340,6 +340,11 @@ pub(super) fn resolve_element_id_target(
     active_window_id: Option<&str>,
     request_context: &RequestContext,
 ) -> Result<TokenizeClickElementCandidate, AppError> {
+    if active_window_id.is_some() && !active_window {
+        return Err(AppError::invalid_argument(
+            "active window id requires --active-window",
+        ));
+    }
     let explicit_target = active_window_id
         .map(assert_active_window_id_matches)
         .transpose()?;
