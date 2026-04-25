@@ -21,7 +21,7 @@ use crate::trace;
 
 use super::{
     ax_merge::{AxMergeMetrics, merge_elements},
-    capture::capture_screen_png,
+    capture::{capture_screen_png, capture_window_png},
     coord_map::CoordMap,
     diff::{diff_region, thumbnail_from_rgba, upscale_region},
     element_normalizer::{ElementBuilder, finalize_elements},
@@ -43,6 +43,8 @@ pub struct TokenizeWindowMeta {
     pub title: String,
     pub app: Option<String>,
     pub bounds: Bounds,
+    pub native_window_id: Option<u32>,
+    pub capture_bounds: Option<Bounds>,
 }
 
 const CAPTURE_BUDGET_MS: u128 = 80;
@@ -65,6 +67,55 @@ pub fn capture_and_update_active_window(
         focused_app_override,
         lookup_focused_app,
     )
+}
+
+pub fn capture_and_update_window(
+    out_path: Option<PathBuf>,
+    window_id: u32,
+    window_bounds: Bounds,
+    crop_bounds: Option<Bounds>,
+    focused_app_override: Option<String>,
+) -> Result<CaptureResult, AppError> {
+    trace::log("pipeline:capture_and_update_window:start");
+    let capture_started = Instant::now();
+    let mut captured = capture_window_png(out_path, window_id)?;
+    let capture_elapsed = capture_started.elapsed().as_millis();
+    if capture_elapsed > CAPTURE_BUDGET_MS {
+        trace::log(format!(
+            "perf:warn capture_and_update_window capture_ms={} budget_ms={}",
+            capture_elapsed, CAPTURE_BUDGET_MS
+        ));
+    }
+    if let Some(bounds) = crop_bounds.as_ref() {
+        crop_window_capture_to_bounds(&mut captured, &window_bounds, bounds)?;
+        trace::log(format!(
+            "pipeline:capture_and_update_window:crop_ok size={}x{}",
+            captured.frame.width, captured.frame.height
+        ));
+    }
+    let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
+    let texts = recognize_text(&captured.image)?;
+    let frame = captured.frame;
+    let image_path = frame.image_path.clone();
+    let image = captured.image;
+    let frame_png = Some(Arc::<[u8]>::from(encode_png(&image)?));
+    with_state(move |state| {
+        let roi = state
+            .latest_thumbnail()
+            .and_then(|prev| diff_region(prev, &thumb, 8))
+            .map(|region| {
+                upscale_region(region, frame.width, frame.height, thumb.width, thumb.height)
+            });
+        let update =
+            state.record_capture(frame, frame_png, thumb, focused_app_override, texts, roi);
+        let event_ids = state.event_ids(update.snapshot.snapshot_id);
+        CaptureResult {
+            snapshot: update.snapshot,
+            image_path,
+            image,
+            event_ids,
+        }
+    })
 }
 
 fn capture_and_update_internal(
@@ -185,6 +236,65 @@ fn crop_capture_to_bounds(
     Ok(())
 }
 
+fn crop_window_capture_to_bounds(
+    captured: &mut super::types::CapturedImage,
+    capture_bounds: &Bounds,
+    target_bounds: &Bounds,
+) -> Result<(), AppError> {
+    let image_width = captured.image.width();
+    let image_height = captured.image.height();
+    let (x, y, width, height) =
+        window_capture_crop_rect(image_width, image_height, capture_bounds, target_bounds)
+            .ok_or_else(|| {
+                AppError::target_not_found(
+                    "target region bounds are outside the captured window area",
+                )
+            })?;
+    let cropped = crop_imm(&captured.image, x, y, width, height).to_image();
+    captured.image = cropped;
+    captured.frame.width = width;
+    captured.frame.height = height;
+    if let Some(path) = captured.frame.image_path.as_ref() {
+        captured
+            .image
+            .save_with_format(path, ImageFormat::Png)
+            .map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "failed to write cropped window capture image: {err}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+fn window_capture_crop_rect(
+    image_width: u32,
+    image_height: u32,
+    capture_bounds: &Bounds,
+    target_bounds: &Bounds,
+) -> Option<(u32, u32, u32, u32)> {
+    if capture_bounds.width <= 0.0 || capture_bounds.height <= 0.0 {
+        return None;
+    }
+    let local_bounds = Bounds {
+        x: target_bounds.x - capture_bounds.x,
+        y: target_bounds.y - capture_bounds.y,
+        width: target_bounds.width,
+        height: target_bounds.height,
+    };
+    let mapper = CoordMap::new(
+        Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: capture_bounds.width,
+            height: capture_bounds.height,
+        },
+        image_width,
+        image_height,
+    );
+    mapper.logical_to_image_rect_u32(&local_bounds)
+}
+
 fn window_crop_rect(
     image_width: u32,
     image_height: u32,
@@ -221,7 +331,18 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let tokenize_started = Instant::now();
     let cache_key = tokenize_cache_key(&window_meta);
     let capture_started = Instant::now();
-    let mut captured = capture_screen_png(None)?;
+    let captured = if let (Some(native_window_id), Some(capture_bounds)) = (
+        window_meta.native_window_id,
+        window_meta.capture_bounds.as_ref(),
+    ) {
+        let mut captured = capture_window_png(None, native_window_id)?;
+        crop_window_capture_to_bounds(&mut captured, capture_bounds, &window_meta.bounds)?;
+        captured
+    } else {
+        let mut captured = capture_screen_png(None)?;
+        crop_capture_to_bounds(&mut captured, &window_meta.bounds)?;
+        captured
+    };
     let capture_elapsed = capture_started.elapsed().as_millis();
     if capture_elapsed > CAPTURE_BUDGET_MS {
         trace::log(format!(
@@ -229,7 +350,6 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
             capture_elapsed, CAPTURE_BUDGET_MS
         ));
     }
-    crop_capture_to_bounds(&mut captured, &window_meta.bounds)?;
     let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
     let fingerprint = frame_fingerprint(&captured.image);
 
@@ -319,14 +439,15 @@ fn frame_fingerprint(image: &image::RgbaImage) -> u64 {
 
 fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
     format!(
-        "{}|{}|{}|{:.0}:{:.0}:{:.0}:{:.0}",
+        "{}|{}|{}|{:.0}:{:.0}:{:.0}:{:.0}|native={:?}",
         meta.id,
         meta.title,
         meta.app.as_deref().unwrap_or_default(),
         meta.bounds.x,
         meta.bounds.y,
         meta.bounds.width,
-        meta.bounds.height
+        meta.bounds.height,
+        meta.native_window_id
     )
 }
 
@@ -571,7 +692,11 @@ fn detect_vision_elements(
 }
 
 fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax::AxElement> {
-    if window_meta.is_none() {
+    let Some(meta) = window_meta else {
+        return Vec::new();
+    };
+    if meta.native_window_id.is_some() {
+        trace::log("pipeline:tokenize:ax_skip reason=background_window_capture");
         return Vec::new();
     }
     match super::ax::collect_frontmost_window_elements() {
@@ -905,7 +1030,8 @@ mod tests {
     use image::{Rgba, RgbaImage};
 
     use super::{
-        TokenizeWindowMeta, build_window_elements, window_crop_rect, write_tokenize_overlay,
+        TokenizeWindowMeta, build_window_elements, window_capture_crop_rect, window_crop_rect,
+        write_tokenize_overlay,
     };
 
     fn golden_fixture_path(name: &str) -> PathBuf {
@@ -937,6 +1063,25 @@ mod tests {
         };
         let rect = window_crop_rect(1000, 600, 1000, 600, &bounds).expect("rect");
         assert_eq!(rect, (900, 500, 100, 100));
+    }
+
+    #[test]
+    fn window_capture_crop_rect_maps_absolute_region_into_window_image() {
+        let capture_bounds = Bounds {
+            x: 300.0,
+            y: 120.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let target_bounds = Bounds {
+            x: 500.0,
+            y: 270.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        let rect =
+            window_capture_crop_rect(1600, 1200, &capture_bounds, &target_bounds).expect("rect");
+        assert_eq!(rect, (400, 300, 200, 160));
     }
 
     #[test]
@@ -987,6 +1132,8 @@ mod tests {
                 width: 220.0,
                 height: 140.0,
             },
+            native_window_id: None,
+            capture_bounds: None,
         };
         let (meta, windows) = build_window_elements(
             &snapshot,
@@ -1061,6 +1208,8 @@ mod tests {
                 width: 240.0,
                 height: 150.0,
             },
+            native_window_id: None,
+            capture_bounds: None,
         };
         let (_, run_a) = build_window_elements(
             &snapshot,

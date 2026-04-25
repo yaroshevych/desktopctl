@@ -41,11 +41,21 @@ pub(super) fn click_text_target(
             .as_ref()
             .map(|target| target.id.clone())
             .unwrap_or_else(|| "frontmost:1".to_string());
+        let (native_window_id, capture_bounds) = if let Some(target) = explicit_target.as_ref() {
+            (
+                Some(explicit_background_capture_window_id(target)?),
+                Some(target.bounds.clone()),
+            )
+        } else {
+            (None, None)
+        };
         let window_meta = vision::pipeline::TokenizeWindowMeta {
             id,
             title,
             app,
             bounds,
+            native_window_id,
+            capture_bounds,
         };
         let payload = vision::pipeline::tokenize_window(window_meta)?;
         let pre_click_tokens = observe_seed_tokens_from_tokenize_payload(&payload);
@@ -270,11 +280,21 @@ pub(super) fn click_element_id_target(
         .as_ref()
         .map(|target| target.id.clone())
         .unwrap_or_else(|| "frontmost:1".to_string());
+    let (native_window_id, capture_bounds) = if let Some(target) = explicit_target.as_ref() {
+        (
+            Some(explicit_background_capture_window_id(target)?),
+            Some(target.bounds.clone()),
+        )
+    } else {
+        (None, None)
+    };
     let window_meta = vision::pipeline::TokenizeWindowMeta {
         id,
         title,
         app,
         bounds,
+        native_window_id,
+        capture_bounds,
     };
     let payload = vision::pipeline::tokenize_window(window_meta)?;
     let pre_click_tokens = observe_seed_tokens_from_tokenize_payload(&payload);
@@ -384,11 +404,23 @@ pub(super) fn resolve_element_id_target(
         .as_ref()
         .map(|target| target.id.clone())
         .unwrap_or_else(|| "frontmost:1".to_string());
+    let (native_window_id, capture_bounds) = if active_window_id.is_some()
+        && let Some(target) = resolved_target.as_ref()
+    {
+        (
+            Some(explicit_background_capture_window_id(target)?),
+            Some(target.bounds.clone()),
+        )
+    } else {
+        (None, None)
+    };
     let window_meta = vision::pipeline::TokenizeWindowMeta {
         id,
         title,
         app,
         bounds,
+        native_window_id,
+        capture_bounds,
     };
     let payload = vision::pipeline::tokenize_window(window_meta)?;
     let candidates = tokenize_payload_elements_for_click(&payload);
@@ -582,6 +614,8 @@ pub(super) fn tokenize_click_text_candidate(
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
         app,
         bounds,
+        native_window_id: None,
+        capture_bounds: None,
     };
     let payload = vision::pipeline::tokenize_window(window_meta)?;
     let tokenize_texts = tokenize_payload_texts_for_click(&payload);

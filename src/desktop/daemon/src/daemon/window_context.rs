@@ -225,6 +225,26 @@ pub(super) fn resolve_explicit_window_target(
     select_explicit_window_target_from_windows(trimmed, &windows)
 }
 
+pub(super) fn native_window_id_for_capture(
+    window: &platform::windowing::WindowInfo,
+) -> Option<u32> {
+    window
+        .id
+        .rsplit(':')
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+pub(super) fn explicit_background_capture_window_id(
+    window: &platform::windowing::WindowInfo,
+) -> Result<u32, AppError> {
+    native_window_id_for_capture(window).ok_or_else(|| {
+        AppError::backend_unavailable(
+            "background window capture requires a native macOS window id; switch to frontmost mode",
+        )
+    })
+}
+
 fn select_explicit_window_target_from_windows(
     reference: &str,
     windows: &[platform::windowing::WindowInfo],
@@ -656,7 +676,10 @@ pub(super) fn append_tokenize_new_window_hint(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_desktopctl_window_app, select_explicit_window_target_from_windows};
+    use super::{
+        is_desktopctl_window_app, native_window_id_for_capture,
+        select_explicit_window_target_from_windows,
+    };
     use crate::platform;
     use desktop_core::{error::ErrorCode, protocol::Bounds};
 
@@ -739,6 +762,12 @@ mod tests {
             .expect("native id should resolve");
 
         assert_eq!(selected.app, "Notes");
+    }
+
+    #[test]
+    fn native_window_id_for_capture_parses_cg_window_number() {
+        let window = test_window("123:456", 123, "Notes", "Project", None, false);
+        assert_eq!(native_window_id_for_capture(&window), Some(456));
     }
 
     #[test]

@@ -7,7 +7,14 @@ use std::{
 };
 
 use block2::RcBlock;
-use core_graphics::display::CGDisplay;
+use core_graphics::{
+    display::CGDisplay,
+    geometry::CGRect as CgRect,
+    window::{
+        create_image, kCGWindowImageBestResolution, kCGWindowImageBoundsIgnoreFraming,
+        kCGWindowListOptionIncludingWindow,
+    },
+};
 use desktop_core::{error::AppError, protocol::now_millis};
 use image::{ImageFormat, RgbaImage, imageops::FilterType};
 use objc2::runtime::AnyClass;
@@ -128,6 +135,61 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
     })
 }
 
+pub(crate) fn capture_window_png(
+    out_path: Option<PathBuf>,
+    window_id: u32,
+) -> Result<CapturedImage, AppError> {
+    trace::log(format!("capture:window_png:start window_id={window_id}"));
+    let cg_image = create_image(
+        CgRect::default(),
+        kCGWindowListOptionIncludingWindow,
+        window_id,
+        kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution,
+    )
+    .ok_or_else(|| {
+        AppError::backend_unavailable(format!(
+            "background window capture failed for window {window_id}; switch to frontmost mode"
+        ))
+    })?;
+    let image = cg_image_to_rgba(&cg_image)?;
+    if image.width() == 0 || image.height() == 0 {
+        return Err(AppError::backend_unavailable(format!(
+            "background window capture returned an empty image for window {window_id}; switch to frontmost mode"
+        )));
+    }
+
+    let image_path = if let Some(path) = out_path {
+        save_capture_png(&image, &path)?;
+        Some(path)
+    } else {
+        None
+    };
+
+    trace::log(format!(
+        "capture:window_png:ok window_id={} path={} size={}x{}",
+        window_id,
+        image_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<memory>".to_string()),
+        image.width(),
+        image.height()
+    ));
+
+    Ok(CapturedImage {
+        frame: CapturedFrame {
+            snapshot_id: now_millis() as u64,
+            timestamp: now_millis().to_string(),
+            display_id: window_id,
+            width: image.width(),
+            height: image.height(),
+            scale: 1.0,
+            image_path,
+        },
+        image,
+    })
+}
+
 pub(crate) fn default_capture_path() -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -210,6 +272,10 @@ fn capture_with_coregraphics(display: &CGDisplay) -> Result<RgbaImage, AppError>
     let cg_image = display.image().ok_or_else(|| {
         AppError::backend_unavailable("CoreGraphics fallback failed to capture display image")
     })?;
+    cg_image_to_rgba(&cg_image)
+}
+
+fn cg_image_to_rgba(cg_image: &core_graphics::image::CGImage) -> Result<RgbaImage, AppError> {
     let width = cg_image.width();
     let height = cg_image.height();
     let bytes_per_row = cg_image.bytes_per_row();

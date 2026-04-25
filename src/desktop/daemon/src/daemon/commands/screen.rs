@@ -55,6 +55,26 @@ fn bounds_match_with_tolerance(
         && (a.height - b.height).abs() <= tolerance_px
 }
 
+fn tokenize_meta_for_window(
+    window: &platform::windowing::WindowInfo,
+    bounds: Bounds,
+    require_background_capture: bool,
+) -> Result<vision::pipeline::TokenizeWindowMeta, AppError> {
+    let native_window_id = if require_background_capture {
+        Some(super::super::explicit_background_capture_window_id(window)?)
+    } else {
+        None
+    };
+    Ok(vision::pipeline::TokenizeWindowMeta {
+        id: window.id.clone(),
+        title: window.title.clone(),
+        app: Some(window.app.clone()),
+        bounds,
+        native_window_id,
+        capture_bounds: native_window_id.map(|_| window.bounds.clone()),
+    })
+}
+
 pub(crate) fn screenshot(
     out_path: Option<String>,
     overlay: bool,
@@ -66,16 +86,23 @@ pub(crate) fn screenshot(
     permissions::ensure_screen_recording_permission()?;
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
+    let mut background_capture_target: Option<(platform::windowing::WindowInfo, Bounds)> = None;
     let capture_bounds = if active_window {
-        let base = if let Some(reference) = guard.bound_active_window_id.as_deref() {
-            super::super::assert_active_window_id_matches(reference)?.bounds
+        if let Some(reference) = guard.bound_active_window_id.as_deref() {
+            let target = super::super::assert_active_window_id_matches(reference)?;
+            let bounds = super::super::resolve_capture_region_bounds(
+                target.bounds.clone(),
+                region.as_ref(),
+            )?;
+            background_capture_target = Some((target, bounds.clone()));
+            Some(bounds)
         } else {
-            super::super::resolve_active_window_target()?.bounds
-        };
-        Some(super::super::resolve_capture_region_bounds(
-            base,
-            region.as_ref(),
-        )?)
+            let base = super::super::resolve_active_window_target()?.bounds;
+            Some(super::super::resolve_capture_region_bounds(
+                base,
+                region.as_ref(),
+            )?)
+        }
     } else if region.is_some() {
         let base = window_target::main_display_bounds().ok_or_else(|| {
             AppError::target_not_found("display bounds unavailable for screenshot --region")
@@ -87,10 +114,44 @@ pub(crate) fn screenshot(
     } else {
         None
     };
-    let capture_out_path: Option<PathBuf> = out_path
+    capture_screenshot_response(
+        capture_out_path_from(out_path),
+        overlay,
+        if active_window {
+            "active_window"
+        } else if region.is_some() {
+            "region"
+        } else {
+            "display"
+        },
+        capture_bounds.clone(),
+        background_capture_target,
+    )
+}
+
+fn capture_out_path_from(out_path: Option<String>) -> Option<PathBuf> {
+    out_path
         .map(Into::into)
-        .or_else(|| Some(platform::capture::default_capture_path()));
-    let capture = if let Some(bounds) = capture_bounds.clone() {
+        .or_else(|| Some(platform::capture::default_capture_path()))
+}
+
+fn capture_screenshot_response(
+    capture_out_path: Option<PathBuf>,
+    overlay: bool,
+    capture_scope: &'static str,
+    capture_bounds: Option<Bounds>,
+    background_capture_target: Option<(platform::windowing::WindowInfo, Bounds)>,
+) -> Result<Value, AppError> {
+    let capture = if let Some((target, bounds)) = background_capture_target {
+        let native_window_id = super::super::explicit_background_capture_window_id(&target)?;
+        platform::capture::capture_window(
+            capture_out_path.clone(),
+            native_window_id,
+            target.bounds,
+            Some(bounds),
+            Some(target.app),
+        )?
+    } else if let Some(bounds) = capture_bounds.clone() {
         platform::capture::capture_bounds(capture_out_path.clone(), bounds, None, true)?
     } else {
         platform::capture::capture_display(capture_out_path)?
@@ -114,13 +175,7 @@ pub(crate) fn screenshot(
             .as_ref()
             .map(|path| path.display().to_string()),
         "overlay_path": overlay_path,
-        "capture_scope": if active_window {
-            "active_window"
-        } else if region.is_some() {
-            "region"
-        } else {
-            "display"
-        },
+        "capture_scope": capture_scope,
         "window_bounds": capture_bounds,
         "display": capture.snapshot.display,
         "focused_app": capture.snapshot.focused_app,
@@ -253,24 +308,26 @@ pub(crate) fn tokenize(
                         });
 
                 if let Some(prefetched) = prefetched_match.as_ref() {
-                    let prefetched_title = prefetched.title.clone();
-                    let prefetched_app = Some(prefetched.app.clone());
                     if let Ok(bounds) = super::super::resolve_tokenize_region_bounds(
                         prefetched.bounds.clone(),
                         region.as_ref(),
                     ) {
                         trace::log("active_window_id_match:prefetched_windows_hit");
-                        let meta = vision::pipeline::TokenizeWindowMeta {
-                            id: prefetched.id.clone(),
-                            title: prefetched_title,
-                            app: prefetched_app,
-                            bounds: bounds.clone(),
-                        };
-                        speculative_bounds = Some(bounds);
-                        speculative_handle = Some(std::thread::spawn(move || {
-                            vision::pipeline::tokenize_window(meta)
-                        }));
-                        trace::log("active_window_tokenize:speculative_start source=prefetched");
+                        match tokenize_meta_for_window(prefetched, bounds.clone(), true) {
+                            Ok(meta) => {
+                                speculative_bounds = Some(bounds);
+                                speculative_handle = Some(std::thread::spawn(move || {
+                                    vision::pipeline::tokenize_window(meta)
+                                }));
+                                trace::log(
+                                    "active_window_tokenize:speculative_start source=prefetched",
+                                );
+                            }
+                            Err(err) => trace::log(format!(
+                                "active_window_tokenize:speculative_skip {}",
+                                err.message
+                            )),
+                        }
                     }
                 }
 
@@ -287,14 +344,8 @@ pub(crate) fn tokenize(
                 stage_done!("active_window_resolve");
                 stage_done!("active_window_region_resolve");
 
-                let strict_app = Some(strict_window.app.clone());
-                let strict_title = strict_window.title.clone();
-                let strict_meta = vision::pipeline::TokenizeWindowMeta {
-                    id: strict_window.id.clone(),
-                    title: strict_title,
-                    app: strict_app,
-                    bounds: strict_bounds.clone(),
-                };
+                let strict_meta =
+                    tokenize_meta_for_window(&strict_window, strict_bounds.clone(), true)?;
                 let run_strict = || vision::pipeline::tokenize_window(strict_meta.clone());
 
                 let payload = if let (Some(handle), Some(bounds)) =
@@ -322,14 +373,12 @@ pub(crate) fn tokenize(
                                         trace::log(
                                             "active_window_tokenize:speculative_discard reason=post_validate_mismatch",
                                         );
-                                        vision::pipeline::tokenize_window(
-                                            vision::pipeline::TokenizeWindowMeta {
-                                                id: post_window.id,
-                                                title: post_window.title,
-                                                app: Some(post_window.app),
-                                                bounds: post_bounds,
-                                            },
-                                        )?
+                                        let meta = tokenize_meta_for_window(
+                                            &post_window,
+                                            post_bounds,
+                                            true,
+                                        )?;
+                                        vision::pipeline::tokenize_window(meta)?
                                     }
                                 } else {
                                     trace::log(
@@ -382,16 +431,8 @@ pub(crate) fn tokenize(
                     });
                     hint_snapshot_prefetch_rx = Some(reply_rx);
                 }
-                let app = Some(resolved.app.clone());
-                let title = resolved.title.clone();
-                let window_query = resolved.id.clone();
-                let payload =
-                    vision::pipeline::tokenize_window(vision::pipeline::TokenizeWindowMeta {
-                        id: window_query,
-                        title,
-                        app,
-                        bounds,
-                    })?;
+                let meta = tokenize_meta_for_window(&resolved, bounds, false)?;
+                let payload = vision::pipeline::tokenize_window(meta)?;
                 (resolved, payload)
             };
             bound_hint_active_window_id = active_window_id
@@ -444,6 +485,8 @@ pub(crate) fn tokenize(
                     title: "active_window".to_string(),
                     app: None,
                     bounds,
+                    native_window_id: None,
+                    capture_bounds: None,
                 };
                 let payload = vision::pipeline::tokenize_window(window_meta)?;
                 stage_done!("frontmost_tokenize");
@@ -460,6 +503,8 @@ pub(crate) fn tokenize(
                     title,
                     app,
                     bounds,
+                    native_window_id: None,
+                    capture_bounds: None,
                 };
                 let payload = vision::pipeline::tokenize_window(window_meta)?;
                 stage_done!("frontmost_tokenize");
@@ -476,12 +521,7 @@ pub(crate) fn tokenize(
                     region.as_ref(),
                 )?;
                 stage_done!("window_region_resolve");
-                let window_meta = vision::pipeline::TokenizeWindowMeta {
-                    id: target.id.clone(),
-                    title: target.title.clone(),
-                    app: Some(target.app.clone()),
-                    bounds,
-                };
+                let window_meta = tokenize_meta_for_window(&target, bounds, false)?;
                 let mut payload = vision::pipeline::tokenize_window(window_meta)?;
                 stage_done!("window_tokenize");
                 if let Some(first) = payload.windows.first_mut() {
@@ -503,12 +543,7 @@ pub(crate) fn tokenize(
                 region.as_ref(),
             )?;
             stage_done!("window_region_resolve");
-            let window_meta = vision::pipeline::TokenizeWindowMeta {
-                id: target.id.clone(),
-                title: target.title.clone(),
-                app: Some(target.app.clone()),
-                bounds,
-            };
+            let window_meta = tokenize_meta_for_window(&target, bounds, true)?;
             let mut payload = vision::pipeline::tokenize_window(window_meta)?;
             stage_done!("window_tokenize");
             if let Some(first) = payload.windows.first_mut() {

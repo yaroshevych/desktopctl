@@ -5,6 +5,8 @@ mod macos_impl;
 #[cfg(target_os = "macos")]
 pub use macos_impl::capture_screen_png;
 #[cfg(target_os = "macos")]
+pub(crate) use macos_impl::capture_window_png;
+#[cfg(target_os = "macos")]
 pub(crate) use macos_impl::default_capture_path;
 
 #[cfg(target_os = "windows")]
@@ -72,6 +74,16 @@ pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, Ap
         },
         image: captured.image,
     })
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn capture_window_png(
+    _out_path: Option<PathBuf>,
+    _window_id: u32,
+) -> Result<CapturedImage, AppError> {
+    Err(AppError::backend_unavailable(
+        "background window capture is supported only on macOS; switch to frontmost mode",
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -249,6 +261,17 @@ pub fn capture_screen_png(_out_path: Option<PathBuf>) -> Result<CapturedImage, A
     Err(AppError::backend_unavailable(
         "screen capture backend not implemented for this platform",
     ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn capture_window_png(
+    _out_path: Option<PathBuf>,
+    _window_id: u32,
+) -> Result<CapturedImage, AppError> {
+    Err(AppError::backend_unavailable(format!(
+        "background window capture is unsupported on {}; switch to frontmost mode",
+        std::env::consts::OS
+    )))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

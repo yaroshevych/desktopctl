@@ -25,3 +25,19 @@ pub fn capture_bounds(
         lookup_focused_app,
     )
 }
+
+pub fn capture_window(
+    out_path: Option<PathBuf>,
+    window_id: u32,
+    window_bounds: Bounds,
+    crop_bounds: Option<Bounds>,
+    focused_app_override: Option<String>,
+) -> Result<CaptureResult, AppError> {
+    pipeline::capture_and_update_window(
+        out_path,
+        window_id,
+        window_bounds,
+        crop_bounds,
+        focused_app_override,
+    )
+}

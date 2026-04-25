@@ -72,7 +72,8 @@ use window_context::{
     backfill_tokenize_window_positions, bind_active_window_reference,
     collect_tokenize_new_window_hint_snapshot,
     collect_tokenize_new_window_hint_snapshot_from_windows, enrich_window_refs,
-    remap_tokenize_window_id_field, resolve_active_window_target, resolve_observe_scope_bounds,
+    explicit_background_capture_window_id, remap_tokenize_window_id_field,
+    resolve_active_window_target, resolve_observe_scope_bounds,
 };
 
 #[cfg(target_os = "macos")]

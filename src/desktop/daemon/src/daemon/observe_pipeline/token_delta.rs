@@ -110,6 +110,8 @@ fn remap_observe_ocr_ids_to_tokenize_ids(
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
         app,
         bounds: window_bounds,
+        native_window_id: None,
+        capture_bounds: None,
     };
     let payload = match vision::pipeline::tokenize_window(window_meta) {
         Ok(payload) => payload,
