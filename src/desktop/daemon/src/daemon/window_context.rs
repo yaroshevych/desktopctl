@@ -327,10 +327,10 @@ fn select_explicit_window_target_from_windows(
     window_target::select_window_candidate(&targetable, trimmed).cloned()
 }
 
-pub(super) fn bind_active_window_reference(
+pub(super) fn resolve_active_window_for_guard(
     active_window: bool,
     active_window_id: Option<&str>,
-) -> Result<Option<String>, AppError> {
+) -> Result<Option<platform::windowing::WindowInfo>, AppError> {
     if active_window_id.is_some() && !active_window {
         return Err(AppError::invalid_argument(
             "active window id requires --active-window",
@@ -339,35 +339,15 @@ pub(super) fn bind_active_window_reference(
     if !active_window {
         return Ok(None);
     }
-    let target = if let Some(reference) = active_window_id {
+    let mut target = if let Some(reference) = active_window_id {
         assert_active_window_id_matches(reference)?
     } else {
         resolve_active_window_target()?
     };
-    let bound = target
-        .window_ref
-        .ok_or_else(|| AppError::target_not_found("active window id is unavailable"))?;
-    Ok(Some(bound))
-}
-
-pub(super) fn resolve_observe_scope_bounds(
-    active_window: bool,
-    active_window_id: Option<&str>,
-) -> Result<Option<desktop_core::protocol::Bounds>, AppError> {
-    if active_window_id.is_some() && !active_window {
-        return Err(AppError::invalid_argument(
-            "active window id requires --active-window",
-        ));
+    if target.window_ref.is_none() {
+        target.window_ref = Some(window_refs::issue_for_window(&target));
     }
-    if !active_window {
-        return Ok(None);
-    }
-    let target = if let Some(reference) = active_window_id {
-        assert_active_window_id_matches(reference)?
-    } else {
-        resolve_active_window_target()?
-    };
-    Ok(Some(target.bounds))
+    Ok(Some(target))
 }
 
 pub(super) fn attach_window_ref_to_payload(payload: &mut desktop_core::protocol::TokenizePayload) {

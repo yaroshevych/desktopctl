@@ -747,15 +747,13 @@ fn perform_click_for_target_window(
 ) -> Result<Point, AppError> {
     let center_x = (bounds.x + bounds.width / 2.0).max(0.0).round() as u32;
     let center_y = (bounds.y + bounds.height / 2.0).max(0.0).round() as u32;
-    if background_input_gate_enabled()
+    if background_input_enabled()
         && target_window.is_some()
         && !matches!(button, PointerButton::Left)
     {
-        return Err(AppError::backend_unavailable(
-            "background input currently supports left click and text input only; right click requires switching to frontmost mode",
-        ));
+        return Err(background_input_unsupported("right click"));
     }
-    if background_input_gate_enabled()
+    if background_input_enabled()
         && let Some(window) = target_window
     {
         let point = Point::new(center_x, center_y);
@@ -792,12 +790,6 @@ pub(super) fn perform_click_at(x: u32, y: u32, button: PointerButton) -> Result<
         }
     }
     Ok(point)
-}
-
-fn background_input_gate_enabled() -> bool {
-    std::env::var("DESKTOPCTL_BACKGROUND_INPUT")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("skylight"))
 }
 
 pub(super) fn click_scope_window_bounds(

@@ -4,6 +4,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveWindowGuard {
     pub(crate) bound_active_window_id: Option<String>,
+    pub(crate) bound_active_window: Option<crate::platform::windowing::WindowInfo>,
     pub(crate) observe_scope: Option<desktop_core::protocol::Bounds>,
 }
 
@@ -11,12 +12,17 @@ pub(crate) fn prepare_active_window(
     active_window: bool,
     active_window_id: Option<&str>,
 ) -> Result<ActiveWindowGuard, AppError> {
-    let bound_active_window_id =
-        super::bind_active_window_reference(active_window, active_window_id)?;
-    let observe_scope =
-        super::resolve_observe_scope_bounds(active_window, bound_active_window_id.as_deref())?;
+    let bound_active_window =
+        super::resolve_active_window_for_guard(active_window, active_window_id)?;
+    let bound_active_window_id = bound_active_window
+        .as_ref()
+        .and_then(|window| window.window_ref.clone());
+    let observe_scope = bound_active_window
+        .as_ref()
+        .map(|window| window.bounds.clone());
     Ok(ActiveWindowGuard {
         bound_active_window_id,
+        bound_active_window,
         observe_scope,
     })
 }

@@ -118,13 +118,13 @@ pub(crate) fn pointer_click(
         guard.bound_active_window_id.as_deref(),
         request_context,
     )?;
-    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     if !try_background_left_click(
         explicit_active_window_id,
-        guard.bound_active_window_id.as_deref(),
+        guard.bound_active_window.as_ref(),
         point,
         button,
     )? {
+        super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
         backend.move_mouse(point)?;
         match button {
             PointerButton::Left => backend.left_click(point)?,
@@ -254,7 +254,7 @@ pub(crate) fn key_type(
     let observe_start = super::super::guards::capture_observe_start(&observe);
     if !try_background_type_text(
         explicit_active_window_id,
-        guard.bound_active_window_id.as_deref(),
+        guard.bound_active_window.as_ref(),
         &text,
     )? {
         backend.type_text(&text)?;
@@ -272,21 +272,20 @@ pub(crate) fn key_type(
 
 fn try_background_left_click(
     explicit_active_window_id: bool,
-    bound_active_window_id: Option<&str>,
+    bound_active_window: Option<&crate::platform::windowing::WindowInfo>,
     point: Point,
     button: PointerButton,
 ) -> Result<bool, AppError> {
-    if !explicit_active_window_id || !background_input_gate_enabled() {
+    if !explicit_active_window_id || !super::super::background_input_enabled() {
         return Ok(false);
     }
     if !matches!(button, PointerButton::Left) {
-        return Err(background_input_unsupported("right click"));
+        return Err(super::super::background_input_unsupported("right click"));
     }
-    let Some(reference) = bound_active_window_id else {
+    let Some(target_window) = bound_active_window else {
         return Ok(false);
     };
-    let target_window = super::super::assert_active_window_id_matches(reference)?;
-    let target = super::super::background_input_target_for_window(&target_window)?;
+    let target = super::super::background_input_target_for_window(target_window)?;
     let backend = new_background_input_backend()?;
     backend.left_click(&target, point)?;
     trace::log(format!(
@@ -298,17 +297,16 @@ fn try_background_left_click(
 
 fn try_background_type_text(
     explicit_active_window_id: bool,
-    bound_active_window_id: Option<&str>,
+    bound_active_window: Option<&crate::platform::windowing::WindowInfo>,
     text: &str,
 ) -> Result<bool, AppError> {
-    if !explicit_active_window_id || !background_input_gate_enabled() {
+    if !explicit_active_window_id || !super::super::background_input_enabled() {
         return Ok(false);
     }
-    let Some(reference) = bound_active_window_id else {
+    let Some(target_window) = bound_active_window else {
         return Ok(false);
     };
-    let target_window = super::super::assert_active_window_id_matches(reference)?;
-    let target = super::super::background_input_target_for_window(&target_window)?;
+    let target = super::super::background_input_target_for_window(target_window)?;
     let backend = new_background_input_backend()?;
     backend.type_text(&target, text)?;
     trace::log(format!(
@@ -320,30 +318,18 @@ fn try_background_type_text(
     Ok(true)
 }
 
-fn background_input_gate_enabled() -> bool {
-    std::env::var("DESKTOPCTL_BACKGROUND_INPUT")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("skylight"))
-}
-
 fn reject_unsupported_background_input(
     command_name: &str,
     active_window_id: Option<&str>,
 ) -> Result<(), AppError> {
-    if background_input_gate_enabled()
+    if super::super::background_input_enabled()
         && active_window_id
             .map(str::trim)
             .is_some_and(|value| !value.is_empty())
     {
-        return Err(background_input_unsupported(command_name));
+        return Err(super::super::background_input_unsupported(command_name));
     }
     Ok(())
-}
-
-fn background_input_unsupported(command_name: &str) -> AppError {
-    AppError::backend_unavailable(format!(
-        "background input currently supports left click and text input only; {command_name} requires switching to frontmost mode"
-    ))
 }
 
 pub(crate) fn key_hotkey(
