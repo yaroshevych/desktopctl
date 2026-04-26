@@ -117,7 +117,9 @@ impl Automation for MacosAutomation {
 
 impl BackgroundInputBackend for MacosBackgroundInput {
     fn preflight(&self, target: &BackgroundInputTarget) -> Result<(), AppError> {
+        trace_background_target("background_input:preflight_start", target);
         if target.pid <= 0 || target.window_id == 0 {
+            trace_mouse("background_input:preflight_error reason=missing_pid_or_window_id");
             return Err(background_input_unavailable(
                 "background input target is missing pid/window id",
             ));
@@ -125,11 +127,18 @@ impl BackgroundInputBackend for MacosBackgroundInput {
         let symbols = skylight_symbols()?;
         let routing = resolve_background_routing(target, symbols)?;
         preflight_window_server_target(target, routing.psn, symbols)?;
+        trace_mouse(format!(
+            "background_input:preflight_ok {} {}",
+            format_target(target),
+            format_routing(routing)
+        ));
         Ok(())
     }
 
     fn left_click(&self, target: &BackgroundInputTarget, point: Point) -> Result<(), AppError> {
+        trace_background_target("background_input:left_click_start", target);
         if target.pid <= 0 || target.window_id == 0 {
+            trace_mouse("background_input:left_click_error reason=missing_pid_or_window_id");
             return Err(background_input_unavailable(
                 "background input target is missing pid/window id",
             ));
@@ -139,6 +148,17 @@ impl BackgroundInputBackend for MacosBackgroundInput {
         preflight_window_server_target(target, routing.psn, symbols)?;
         let target_point = BackgroundMousePoint::from_screen_point(target, point);
         let primer_point = BackgroundMousePoint::offscreen_primer();
+        trace_mouse(format!(
+            "background_input:left_click_route {} {} requested_point=({}, {}) target_screen=({:.1}, {:.1}) target_local=({:.1}, {:.1})",
+            format_target(target),
+            format_routing(routing),
+            point.x,
+            point.y,
+            target_point.screen.x,
+            target_point.screen.y,
+            target_point.window_local.x,
+            target_point.window_local.y
+        ));
         post_background_mouse_event(
             target,
             routing,
@@ -178,11 +198,19 @@ impl BackgroundInputBackend for MacosBackgroundInput {
             CGEventType::LeftMouseUp,
             1,
             symbols,
-        )
+        )?;
+        trace_mouse(format!(
+            "background_input:left_click_dispatched result=sent_unverified {} {}",
+            format_target(target),
+            format_routing(routing)
+        ));
+        Ok(())
     }
 
     fn type_text(&self, target: &BackgroundInputTarget, text: &str) -> Result<(), AppError> {
+        trace_background_target("background_input:type_text_start", target);
         if target.pid <= 0 || target.window_id == 0 {
+            trace_mouse("background_input:type_text_error reason=missing_pid_or_window_id");
             return Err(background_input_unavailable(
                 "background input target is missing pid/window id",
             ));
@@ -190,10 +218,22 @@ impl BackgroundInputBackend for MacosBackgroundInput {
         let symbols = skylight_symbols()?;
         let routing = resolve_background_routing(target, symbols)?;
         preflight_window_server_target(target, routing.psn, symbols)?;
+        trace_mouse(format!(
+            "background_input:type_text_route {} {} chars={}",
+            format_target(target),
+            format_routing(routing),
+            text.chars().count()
+        ));
         for ch in text.chars() {
             post_background_text_event(target, routing, ch, true, symbols)?;
             post_background_text_event(target, routing, ch, false, symbols)?;
         }
+        trace_mouse(format!(
+            "background_input:type_text_dispatched result=sent_unverified {} {} chars={}",
+            format_target(target),
+            format_routing(routing),
+            text.chars().count()
+        ));
         Ok(())
     }
 }
@@ -247,10 +287,12 @@ fn post_background_mouse_event(
         symbols,
     );
     trace_mouse(format!(
-        "background_input:post_mouse type={:?} pid={} window_id={} screen=({:.1}, {:.1}) local=({:.1}, {:.1})",
+        "background_input:post_mouse type={:?} constructor={:?} click_state={} {} {} screen=({:.1}, {:.1}) local=({:.1}, {:.1})",
         event_type,
-        target.pid,
-        target.window_id,
+        background_mouse_event_constructor(),
+        click_state,
+        format_target(target),
+        format_routing(routing),
         point.screen.x,
         point.screen.y,
         point.window_local.x,
@@ -364,8 +406,11 @@ fn post_background_text_event(
     event.set_string(&ch.to_string());
     stamp_background_event(&event, target, routing, None, 0, symbols);
     trace_mouse(format!(
-        "background_input:post_text keydown={} pid={} window_id={} char={:?}",
-        keydown, target.pid, target.window_id, ch
+        "background_input:post_text keydown={} {} {} char={:?}",
+        keydown,
+        format_target(target),
+        format_routing(routing),
+        ch
     ));
     post_event_to_pid(target.pid, &event, symbols)
 }
@@ -437,6 +482,20 @@ fn stamp_background_event(
     if let Some(window_local) = window_local {
         unsafe { (symbols.set_window_location)(event.as_ptr().cast::<c_void>(), window_local) };
     }
+    trace_mouse(format!(
+        "background_input:stamp_event {} {} window_local={} click_state={} private_fields=pid,{},{},{},{},{}",
+        format_target(target),
+        format_routing(routing),
+        window_local
+            .map(|point| format!("({:.1},{:.1})", point.x, point.y))
+            .unwrap_or_else(|| "none".to_string()),
+        click_state,
+        PRIVATE_EVENT_TARGET_WINDOW_ID_FIELD,
+        PRIVATE_EVENT_OWNER_CONNECTION_FIELD,
+        PRIVATE_EVENT_OWNER_CONNECTION_FIELD_ALT,
+        EventField::MOUSE_EVENT_WINDOW_UNDER_MOUSE_POINTER,
+        EventField::MOUSE_EVENT_WINDOW_UNDER_MOUSE_POINTER_THAT_CAN_HANDLE_THIS_EVENT
+    ));
 }
 
 fn set_skylight_integer(event: &CGEvent, symbols: SkyLightSymbols, field: u32, value: i64) {
@@ -532,22 +591,35 @@ struct SkyLightSymbols {
 fn skylight_symbols() -> Result<SkyLightSymbols, AppError> {
     static SYMBOLS: OnceLock<Result<SkyLightSymbols, String>> = OnceLock::new();
     match SYMBOLS.get_or_init(load_skylight_symbols) {
-        Ok(symbols) => Ok(*symbols),
-        Err(message) => Err(background_input_unavailable(message.clone())),
+        Ok(symbols) => {
+            trace_mouse("background_input:skylight_symbols status=ok cached=true");
+            Ok(*symbols)
+        }
+        Err(message) => {
+            trace_mouse(format!(
+                "background_input:skylight_symbols status=error cached=true error={message}"
+            ));
+            Err(background_input_unavailable(message.clone()))
+        }
     }
 }
 
 fn load_skylight_symbols() -> Result<SkyLightSymbols, String> {
+    trace_mouse("background_input:skylight_symbols_load start");
     let framework = CString::new("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight")
         .expect("static path has no nul");
     let handle = unsafe { dlopen(framework.as_ptr(), RTLD_NOW) };
     if handle.is_null() {
-        return Err(format!(
+        let message = format!(
             "SkyLight framework unavailable: {}; switch to frontmost mode",
             dlerror_message()
+        );
+        trace_mouse(format!(
+            "background_input:skylight_symbols_load status=error error={message}"
         ));
+        return Err(message);
     }
-    Ok(SkyLightSymbols {
+    let symbols = SkyLightSymbols {
         post_to_pid: load_symbol(handle, "SLEventPostToPid")?,
         set_integer_field: load_symbol(handle, "SLEventSetIntegerValueField")?,
         set_window_location: load_symbol(handle, "CGEventSetWindowLocation")?,
@@ -555,18 +627,27 @@ fn load_skylight_symbols() -> Result<SkyLightSymbols, String> {
         get_window_owner: load_symbol(handle, "CGSGetWindowOwner")?,
         get_connection_psn: load_symbol(handle, "CGSGetConnectionPSN")?,
         post_event_record_to: load_symbol(handle, "SLPSPostEventRecordTo")?,
-    })
+    };
+    trace_mouse("background_input:skylight_symbols_load status=ok");
+    Ok(symbols)
 }
 
 fn load_symbol<T>(handle: *mut c_void, name: &str) -> Result<T, String> {
     let symbol = CString::new(name).expect("static symbol has no nul");
     let ptr = unsafe { dlsym(handle, symbol.as_ptr()) };
     if ptr.is_null() {
-        return Err(format!(
+        let message = format!(
             "SkyLight {name} unavailable: {}; switch to frontmost mode",
             dlerror_message()
+        );
+        trace_mouse(format!(
+            "background_input:skylight_symbol name={name} status=error error={message}"
         ));
+        return Err(message);
     }
+    trace_mouse(format!(
+        "background_input:skylight_symbol name={name} status=ok"
+    ));
     Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&ptr) })
 }
 
@@ -574,14 +655,22 @@ fn resolve_background_routing(
     target: &BackgroundInputTarget,
     symbols: SkyLightSymbols,
 ) -> Result<BackgroundRouting, AppError> {
+    trace_mouse(format!(
+        "background_input:routing_start {}",
+        format_target(target)
+    ));
     let mut owner_connection: c_int = 0;
+    let main_connection = unsafe { (symbols.main_connection_id)() };
     let owner_status = unsafe {
-        (symbols.get_window_owner)(
-            (symbols.main_connection_id)(),
-            target.window_id,
-            &mut owner_connection,
-        )
+        (symbols.get_window_owner)(main_connection, target.window_id, &mut owner_connection)
     };
+    trace_mouse(format!(
+        "background_input:routing_owner_status status={} main_connection={} owner_connection={} {}",
+        owner_status,
+        main_connection,
+        owner_connection,
+        format_target(target)
+    ));
     if owner_status != 0 {
         return Err(background_input_unavailable(format!(
             "CGSGetWindowOwner status={owner_status} for window {}; switch to frontmost mode",
@@ -590,15 +679,29 @@ fn resolve_background_routing(
     }
     let mut psn = ProcessSerialNumber { high: 0, low: 0 };
     let psn_status = unsafe { (symbols.get_connection_psn)(owner_connection, &mut psn) };
+    trace_mouse(format!(
+        "background_input:routing_psn_status status={} owner_connection={} psn_high={} psn_low={} psn_packed={}",
+        psn_status,
+        owner_connection,
+        psn.high,
+        psn.low,
+        psn.as_i64()
+    ));
     if psn_status != 0 {
         return Err(background_input_unavailable(format!(
             "CGSGetConnectionPSN status={psn_status} for owner connection {owner_connection}; switch to frontmost mode"
         )));
     }
-    Ok(BackgroundRouting {
+    let routing = BackgroundRouting {
         owner_connection,
         psn,
-    })
+    };
+    trace_mouse(format!(
+        "background_input:routing_ok {} {}",
+        format_target(target),
+        format_routing(routing)
+    ));
+    Ok(routing)
 }
 
 fn preflight_window_server_target(
@@ -606,6 +709,13 @@ fn preflight_window_server_target(
     psn: ProcessSerialNumber,
     symbols: SkyLightSymbols,
 ) -> Result<(), AppError> {
+    trace_mouse(format!(
+        "background_input:preflight_window_server_start window_id={} psn_high={} psn_low={} psn_packed={}",
+        target.window_id,
+        psn.high,
+        psn.low,
+        psn.as_i64()
+    ));
     let record = target_only_focus_record(target.window_id);
     let status = unsafe {
         (symbols.post_event_record_to)(
@@ -613,6 +723,14 @@ fn preflight_window_server_target(
             record.as_ptr(),
         )
     };
+    trace_mouse(format!(
+        "background_input:preflight_window_server_status status={} window_id={} psn_high={} psn_low={} psn_packed={}",
+        status,
+        target.window_id,
+        psn.high,
+        psn.low,
+        psn.as_i64()
+    ));
     if status == 0 {
         Ok(())
     } else {
@@ -637,8 +755,43 @@ fn stamp_window_id_le(window_id: u32, record: &mut [u8], offset: usize) {
 }
 
 fn post_event_to_pid(pid: i32, event: &CGEvent, symbols: SkyLightSymbols) -> Result<(), AppError> {
+    trace_mouse(format!(
+        "background_input:dispatch_attempt method=SLEventPostToPid pid={} event_type={:?}",
+        pid,
+        event.get_type()
+    ));
     unsafe { (symbols.post_to_pid)(pid as c_int, event.as_ptr().cast::<c_void>()) };
+    trace_mouse(format!(
+        "background_input:dispatch_return method=SLEventPostToPid pid={} result=sent_unverified",
+        pid
+    ));
     Ok(())
+}
+
+fn trace_background_target(prefix: &str, target: &BackgroundInputTarget) {
+    trace_mouse(format!("{prefix} {}", format_target(target)));
+}
+
+fn format_target(target: &BackgroundInputTarget) -> String {
+    format!(
+        "pid={} window_id={} bounds=({:.1},{:.1},{:.1},{:.1})",
+        target.pid,
+        target.window_id,
+        target.bounds.x,
+        target.bounds.y,
+        target.bounds.width,
+        target.bounds.height
+    )
+}
+
+fn format_routing(routing: BackgroundRouting) -> String {
+    format!(
+        "owner_connection={} psn_high={} psn_low={} psn_packed={}",
+        routing.owner_connection,
+        routing.psn.high,
+        routing.psn.low,
+        routing.psn.as_i64()
+    )
 }
 
 fn dlerror_message() -> String {
