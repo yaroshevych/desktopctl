@@ -249,6 +249,7 @@ fn semantic_fingerprint(target: &BackgroundInputTarget) -> Result<SemanticFinger
         title: String::new(),
         app: None,
         bounds: bounds.clone(),
+        pid: Some(target.pid),
         native_window_id: Some(target.window_id),
         capture_bounds: Some(bounds),
     })?;

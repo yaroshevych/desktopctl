@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::mpsc, time::Instant};
 
 use desktop_core::{automation::new_backend, error::AppError, protocol::Bounds};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
     daemon::{window_refs, window_target},
@@ -60,6 +60,7 @@ fn tokenize_meta_for_window(
     bounds: Bounds,
     require_background_capture: bool,
 ) -> Result<vision::pipeline::TokenizeWindowMeta, AppError> {
+    let background_capture = should_use_background_capture(window, require_background_capture);
     let native_window_id = if should_use_background_capture(window, require_background_capture) {
         Some(super::super::explicit_background_capture_window_id(window)?)
     } else {
@@ -70,6 +71,9 @@ fn tokenize_meta_for_window(
         title: window.title.clone(),
         app: Some(window.app.clone()),
         bounds,
+        pid: background_capture
+            .then(|| i32::try_from(window.pid).ok())
+            .flatten(),
         native_window_id,
         capture_bounds: native_window_id.map(|_| window.bounds.clone()),
     })
@@ -492,6 +496,7 @@ pub(crate) fn tokenize(
                     title: "active_window".to_string(),
                     app: None,
                     bounds,
+                    pid: None,
                     native_window_id: None,
                     capture_bounds: None,
                 };
@@ -510,6 +515,7 @@ pub(crate) fn tokenize(
                     title,
                     app,
                     bounds,
+                    pid: None,
                     native_window_id: None,
                     capture_bounds: None,
                 };

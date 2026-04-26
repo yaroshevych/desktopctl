@@ -80,6 +80,14 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
     Ok(out)
 }
 
+pub fn collect_window_elements(
+    _pid: i32,
+    _native_window_id: u32,
+    _target_window_bounds: Option<&Bounds>,
+) -> Result<Vec<AxElement>, AppError> {
+    Ok(Vec::new())
+}
+
 pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
     with_uia_context(|automation| {
         let focused = match automation.get_focused_element() {

@@ -43,6 +43,7 @@ pub struct TokenizeWindowMeta {
     pub title: String,
     pub app: Option<String>,
     pub bounds: Bounds,
+    pub pid: Option<i32>,
     pub native_window_id: Option<u32>,
     pub capture_bounds: Option<Bounds>,
 }
@@ -455,10 +456,13 @@ fn frame_fingerprint(image: &image::RgbaImage) -> u64 {
 
 fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
     format!(
-        "{}|{}|{}|{:.0}:{:.0}:{:.0}:{:.0}|native={:?}",
+        "{}|{}|{}|pid={}|{:.0}:{:.0}:{:.0}:{:.0}|native={:?}",
         meta.id,
         meta.title,
         meta.app.as_deref().unwrap_or_default(),
+        meta.pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         meta.bounds.x,
         meta.bounds.y,
         meta.bounds.width,
@@ -711,11 +715,21 @@ fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax
     let Some(meta) = window_meta else {
         return Vec::new();
     };
-    if meta.native_window_id.is_some() {
-        trace::log("pipeline:tokenize:ax_skip reason=background_window_capture");
-        return Vec::new();
-    }
-    match super::ax::collect_frontmost_window_elements() {
+    let result = match (meta.pid, meta.native_window_id) {
+        (Some(pid), Some(native_window_id)) => super::ax::collect_window_elements(
+            pid,
+            native_window_id,
+            meta.capture_bounds.as_ref().or(Some(&meta.bounds)),
+        ),
+        (None, Some(native_window_id)) => {
+            trace::log(format!(
+                "pipeline:tokenize:ax_skip reason=background_window_missing_pid window_id={native_window_id}"
+            ));
+            return Vec::new();
+        }
+        _ => super::ax::collect_frontmost_window_elements(),
+    };
+    match result {
         Ok(items) => items,
         Err(err) => {
             trace::log(format!("pipeline:tokenize:ax_warn {err}"));
@@ -1046,8 +1060,8 @@ mod tests {
     use image::{Rgba, RgbaImage};
 
     use super::{
-        TokenizeWindowMeta, build_window_elements, window_capture_crop_rect, window_crop_rect,
-        write_tokenize_overlay,
+        TokenizeWindowMeta, build_window_elements, tokenize_cache_key, window_capture_crop_rect,
+        window_crop_rect, write_tokenize_overlay,
     };
 
     fn golden_fixture_path(name: &str) -> PathBuf {
@@ -1165,6 +1179,7 @@ mod tests {
                 width: 220.0,
                 height: 140.0,
             },
+            pid: None,
             native_window_id: None,
             capture_bounds: None,
         };
@@ -1241,6 +1256,7 @@ mod tests {
                 width: 240.0,
                 height: 150.0,
             },
+            pid: None,
             native_window_id: None,
             capture_bounds: None,
         };
@@ -1420,6 +1436,43 @@ mod tests {
 
         let _ = std::fs::remove_file(&source_path);
         let _ = std::fs::remove_file(&overlay_path);
+    }
+
+    #[test]
+    fn tokenize_cache_key_separates_background_ax_targets() {
+        let first = TokenizeWindowMeta {
+            id: "native:1".to_string(),
+            title: "Window".to_string(),
+            app: Some("App".to_string()),
+            bounds: Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            pid: Some(100),
+            native_window_id: Some(1),
+            capture_bounds: Some(Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 200.0,
+            }),
+        };
+
+        let mut different_pid = first.clone();
+        different_pid.pid = Some(200);
+        assert_ne!(
+            tokenize_cache_key(&first),
+            tokenize_cache_key(&different_pid)
+        );
+
+        let mut different_window = first.clone();
+        different_window.native_window_id = Some(2);
+        assert_ne!(
+            tokenize_cache_key(&first),
+            tokenize_cache_key(&different_window)
+        );
     }
 
     #[test]

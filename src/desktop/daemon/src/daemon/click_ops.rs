@@ -54,6 +54,9 @@ pub(super) fn click_text_target(
             title,
             app,
             bounds,
+            pid: explicit_target
+                .as_ref()
+                .and_then(|target| i32::try_from(target.pid).ok()),
             native_window_id,
             capture_bounds,
         };
@@ -293,6 +296,9 @@ pub(super) fn click_element_id_target(
         title,
         app,
         bounds,
+        pid: explicit_target
+            .as_ref()
+            .and_then(|target| i32::try_from(target.pid).ok()),
         native_window_id,
         capture_bounds,
     };
@@ -419,6 +425,9 @@ pub(super) fn resolve_element_id_target(
         title,
         app,
         bounds,
+        pid: resolved_target
+            .as_ref()
+            .and_then(|target| i32::try_from(target.pid).ok()),
         native_window_id,
         capture_bounds,
     };
@@ -614,6 +623,7 @@ pub(super) fn tokenize_click_text_candidate(
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
         app,
         bounds,
+        pid: None,
         native_window_id: None,
         capture_bounds: None,
     };

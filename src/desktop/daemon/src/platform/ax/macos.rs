@@ -15,11 +15,12 @@ pub struct AxElement {
 use crate::trace;
 use accessibility::{AXAttribute, AXUIElement, AXUIElementAttributes};
 use accessibility_sys::{
-    AXUIElementCopyMultipleAttributeValues, AXValueGetType, AXValueGetValue, AXValueRef,
-    kAXChildrenAttribute, kAXDescriptionAttribute, kAXErrorSuccess, kAXFocusedApplicationAttribute,
-    kAXFocusedUIElementAttribute, kAXIdentifierAttribute, kAXLabelValueAttribute,
-    kAXPositionAttribute, kAXRoleAttribute, kAXSizeAttribute, kAXTitleAttribute, kAXValueAttribute,
-    kAXValueTypeAXError, kAXValueTypeCGPoint, kAXValueTypeCGSize,
+    AXUIElementCopyMultipleAttributeValues, AXUIElementRef, AXValueGetType, AXValueGetValue,
+    AXValueRef, kAXChildrenAttribute, kAXDescriptionAttribute, kAXErrorSuccess,
+    kAXFocusedApplicationAttribute, kAXFocusedUIElementAttribute, kAXIdentifierAttribute,
+    kAXLabelValueAttribute, kAXPositionAttribute, kAXRoleAttribute, kAXSizeAttribute,
+    kAXTitleAttribute, kAXValueAttribute, kAXValueTypeAXError, kAXValueTypeCGPoint,
+    kAXValueTypeCGSize,
 };
 use core_foundation::{
     array::{CFArray, CFArrayRef},
@@ -44,6 +45,10 @@ struct CGSize {
     height: f64,
 }
 
+unsafe extern "C" {
+    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> i32;
+}
+
 pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
     let system = AXUIElement::system_wide();
     let focused_app_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(
@@ -61,6 +66,51 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
         .or_else(|_| app.main_window())
         .map_err(ax_err)?;
 
+    collect_window_tree_elements(&window)
+}
+
+pub fn collect_window_elements(
+    pid: i32,
+    native_window_id: u32,
+    target_window_bounds: Option<&Bounds>,
+) -> Result<Vec<AxElement>, AppError> {
+    let app = AXUIElement::application(pid);
+    let windows = app.windows().map_err(ax_err)?;
+    let mut best_fallback: Option<(AXUIElement, f64)> = None;
+
+    for window in windows.iter() {
+        if ax_window_id(&window) == Some(native_window_id) {
+            trace::log(format!(
+                "ax:background_window_match source=native pid={pid} window_id={native_window_id}"
+            ));
+            return collect_window_tree_elements(&window);
+        }
+
+        if let (Some(target), Some(bounds)) = (target_window_bounds, element_bounds(&window)) {
+            let score = iou(target, &bounds);
+            if score > 0.5
+                && best_fallback
+                    .as_ref()
+                    .is_none_or(|(_, best_score)| score > *best_score)
+            {
+                best_fallback = Some((window.clone(), score));
+            }
+        }
+    }
+
+    if let Some((window, score)) = best_fallback {
+        trace::log(format!(
+            "ax:background_window_match source=bounds pid={pid} window_id={native_window_id} iou={score:.3}"
+        ));
+        return collect_window_tree_elements(&window);
+    }
+
+    Err(AppError::target_not_found(format!(
+        "AX window for pid {pid} native window id {native_window_id} was not found"
+    )))
+}
+
+fn collect_window_tree_elements(window: &AXUIElement) -> Result<Vec<AxElement>, AppError> {
     let mut elements = Vec::new();
     let Some(batch) = fetch_batch(&window) else {
         return Ok(elements);
@@ -79,6 +129,16 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
         }
     }
     Ok(elements)
+}
+
+fn ax_window_id(window: &AXUIElement) -> Option<u32> {
+    let mut window_id = 0_u32;
+    let err = unsafe { _AXUIElementGetWindow(window.as_concrete_TypeRef(), &mut window_id) };
+    if err == kAXErrorSuccess && window_id != 0 {
+        Some(window_id)
+    } else {
+        None
+    }
 }
 
 pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
@@ -341,6 +401,31 @@ fn bounds_intersect(a: &Bounds, b: &Bounds) -> bool {
     let bx2 = b.x + b.width;
     let by2 = b.y + b.height;
     a.x < bx2 && b.x < ax2 && a.y < by2 && b.y < ay2
+}
+
+fn overlap_area(a: &Bounds, b: &Bounds) -> f64 {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx2 = b.x + b.width;
+    let by2 = b.y + b.height;
+    let x1 = a.x.max(b.x);
+    let y1 = a.y.max(b.y);
+    let x2 = ax2.min(bx2);
+    let y2 = ay2.min(by2);
+    let w = (x2 - x1).max(0.0);
+    let h = (y2 - y1).max(0.0);
+    w * h
+}
+
+fn iou(a: &Bounds, b: &Bounds) -> f64 {
+    let inter = overlap_area(a, b);
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let aa = (a.width.max(0.0) * a.height.max(0.0)).max(0.0);
+    let ba = (b.width.max(0.0) * b.height.max(0.0)).max(0.0);
+    let union = aa + ba - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
 }
 
 fn batch_bounds(batch: &[Option<CFType>]) -> Option<Bounds> {

@@ -110,6 +110,7 @@ fn remap_observe_ocr_ids_to_tokenize_ids(
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
         app,
         bounds: window_bounds,
+        pid: None,
         native_window_id: None,
         capture_bounds: None,
     };
