@@ -99,32 +99,34 @@ For more details, see README.md and docs/QUICKSTART.md.
 
 ## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session**, complete ALL steps below. **Do NOT push** - that is done by human.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd dolt push
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
+4. **Notify human** - Inform human that work is ready for push
 5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
+6. **Verify** - All changes committed locally
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+- NEVER push or pull - remote operations are human-only
+- NEVER run `git push`, `git pull`, `bd dolt push/pull`
 
 <!-- END BEADS INTEGRATION -->
 
+## Remote Operations
+
+**IMPORTANT**: All remote operations (push, pull, fetch, dolt push/pull) are **DONE BY HUMAN ONLY**.
+
+## Commits
+
+When making commits, keep messages brief and descriptive:
+- Use imperative mood ("Add", "Fix", "Update", not "Added", "Fixed")
+- Be concise: "Windows permissions dialog" not "This commit adds a dialog..."
+- Include scope when helpful: "tray: embedded idle+active icons"
 
 ## Build & Test
 
@@ -142,4 +144,9 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+### Tools
+- Use `rg` instead of `grep`
+- Use `fd` instead of `find`
+
+### Known Issues
+- Test `golden_controls_have_expected_text_fields_and_buttons` is currently failing - **do NOT attempt to fix this test**
