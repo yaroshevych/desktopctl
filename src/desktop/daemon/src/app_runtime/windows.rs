@@ -124,7 +124,7 @@ pub(crate) fn run() -> Result<(), AppError> {
     let tray = TrayIconBuilder::new()
         .with_tooltip("DesktopCtl")
         .with_menu(Box::new(menu))
-        .with_icon(placeholder_icon())
+        .with_icon(icon_idle())
         .build()
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
 
@@ -163,9 +163,107 @@ fn enable_per_monitor_dpi_awareness() {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
-/// Minimal placeholder: 18x18 white RGBA square
-fn placeholder_icon() -> tray_icon::Icon {
-    let w = 18u32;
-    let rgba = vec![0xffu8; (w * w * 4) as usize]; // solid white square
-    tray_icon::Icon::from_rgba(rgba, w, w).expect("placeholder icon")
+/// Idle icon: aperture/camera iris — circle with 6 blade cutouts at 32x32
+fn icon_idle() -> tray_icon::Icon {
+    const SIZE: u32 = 32;
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+
+    let center = SIZE as i32 / 2;
+    let radius = 10;
+
+    // Draw filled circle with aperture blades
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let idx = ((y * SIZE + x) * 4) as usize;
+            let dx = x as i32 - center;
+            let dy = y as i32 - center;
+            let dist_sq = dx * dx + dy * dy;
+            let radius_sq = radius * radius;
+
+            // Draw circle outline and filled blades
+            if dist_sq <= radius_sq {
+                let angle = (dy as f64).atan2(dx as f64);
+                let normalized_angle = ((angle + std::f64::consts::PI) / std::f64::consts::PI) % 2.0;
+
+                // Create 6 aperture blades by dividing circle into sections
+                let blade_index = (normalized_angle * 3.0) as i32 % 3;
+                let in_blade = (normalized_angle * 3.0) % 1.0 > 0.3;
+
+                if in_blade || dist_sq <= (radius - 3) * (radius - 3) {
+                    // White/light gray aperture (RGBA)
+                    rgba[idx] = 200;
+                    rgba[idx + 1] = 200;
+                    rgba[idx + 2] = 200;
+                    rgba[idx + 3] = 255;
+                } else if dist_sq > (radius - 2) * (radius - 2) {
+                    // Outline
+                    rgba[idx] = 100;
+                    rgba[idx + 1] = 100;
+                    rgba[idx + 2] = 100;
+                    rgba[idx + 3] = 255;
+                }
+            }
+        }
+    }
+
+    tray_icon::Icon::from_rgba(rgba, SIZE, SIZE).expect("idle icon")
+}
+
+/// Active icon: viewfinder frame with centered aperture — 32x32
+fn icon_active() -> tray_icon::Icon {
+    const SIZE: u32 = 32;
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+
+    let center = SIZE as i32 / 2;
+
+    // Draw outer frame (viewfinder square)
+    let frame_half = 14;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let idx = ((y * SIZE + x) * 4) as usize;
+            let dx = (x as i32 - center).abs();
+            let dy = (y as i32 - center).abs();
+
+            // Outer frame edges
+            if (dx == frame_half || dy == frame_half) && dx <= frame_half && dy <= frame_half {
+                rgba[idx] = 150;
+                rgba[idx + 1] = 150;
+                rgba[idx + 2] = 150;
+                rgba[idx + 3] = 255;
+            } else if (dx == frame_half - 1 || dy == frame_half - 1) && dx <= frame_half - 1 && dy <= frame_half - 1 {
+                // Double line for visibility
+                rgba[idx] = 120;
+                rgba[idx + 1] = 120;
+                rgba[idx + 2] = 120;
+                rgba[idx + 3] = 255;
+            }
+
+            // Inner aperture circle (70% of idle radius)
+            let inner_radius = 7;
+            let px = x as i32 - center;
+            let py = y as i32 - center;
+            let dist_sq = px * px + py * py;
+            let radius_sq = inner_radius * inner_radius;
+
+            if dist_sq <= radius_sq {
+                let angle = (py as f64).atan2(px as f64);
+                let normalized_angle = ((angle + std::f64::consts::PI) / std::f64::consts::PI) % 2.0;
+                let in_blade = (normalized_angle * 3.0) % 1.0 > 0.3;
+
+                if in_blade || dist_sq <= (inner_radius - 2) * (inner_radius - 2) {
+                    rgba[idx] = 220;
+                    rgba[idx + 1] = 220;
+                    rgba[idx + 2] = 220;
+                    rgba[idx + 3] = 255;
+                } else if dist_sq > (inner_radius - 1) * (inner_radius - 1) {
+                    rgba[idx] = 100;
+                    rgba[idx + 1] = 100;
+                    rgba[idx + 2] = 100;
+                    rgba[idx + 3] = 255;
+                }
+            }
+        }
+    }
+
+    tray_icon::Icon::from_rgba(rgba, SIZE, SIZE).expect("active icon")
 }
