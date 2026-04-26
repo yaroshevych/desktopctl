@@ -21,10 +21,12 @@ use desktop_core::{
 };
 use image::{ImageFormat, RgbaImage, imageops::FilterType};
 use objc2::runtime::AnyClass;
+use objc2::{AnyThread, rc::Retained};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSError, NSURL};
 use objc2_screen_capture_kit::{
-    SCScreenshotConfiguration, SCScreenshotManager, SCScreenshotOutput,
+    SCContentFilter, SCScreenshotConfiguration, SCScreenshotManager, SCScreenshotOutput,
+    SCShareableContent, SCWindow,
 };
 
 use crate::trace;
@@ -144,6 +146,36 @@ pub(crate) fn capture_window_png(
     logical_bounds: Option<&Bounds>,
 ) -> Result<CapturedImage, AppError> {
     trace::log(format!("capture:window_png:start window_id={window_id}"));
+    if screencapturekit_window_api_available() {
+        let sck_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_window_with_screencapturekit(window_id, logical_bounds, out_path.clone())
+        }));
+        match sck_result {
+            Ok(Ok(capture)) => {
+                trace::log(format!("capture:window_png:sck_ok window_id={window_id}"));
+                return Ok(capture);
+            }
+            Ok(Err(err)) => {
+                trace::log(format!(
+                    "capture:window_png:sck_error fallback=coregraphics window_id={} err={}",
+                    window_id, err.message
+                ));
+            }
+            Err(payload) => {
+                let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    (*msg).to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                trace::log(format!(
+                    "capture:window_png:sck_panic fallback=coregraphics window_id={window_id} panic={panic_message}"
+                ));
+            }
+        }
+    }
+
     let cg_image = create_image(
         CgRect::default(),
         kCGWindowListOptionIncludingWindow,
@@ -196,6 +228,60 @@ pub(crate) fn capture_window_png(
     })
 }
 
+fn capture_window_with_screencapturekit(
+    window_id: u32,
+    logical_bounds: Option<&Bounds>,
+    out_path: Option<PathBuf>,
+) -> Result<CapturedImage, AppError> {
+    let target_path = out_path.clone().unwrap_or_else(default_capture_path);
+    let remove_after_read = out_path.is_none();
+    ensure_capture_parent(&target_path)?;
+    let window = screencapturekit_window_for_id(window_id)?;
+    let filter = unsafe {
+        SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
+    };
+    let file_url = NSURL::from_file_path(&target_path).ok_or_else(|| {
+        AppError::invalid_argument(format!(
+            "invalid capture output path: {}",
+            target_path.display()
+        ))
+    })?;
+    let config = unsafe { SCScreenshotConfiguration::new() };
+    unsafe {
+        config.setShowsCursor(false);
+        config.setFileURL(Some(&file_url));
+    }
+    capture_screencapturekit_filter_to_path(&filter, &config, &target_path)?;
+    let image = image::open(&target_path)
+        .map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to open ScreenCaptureKit window capture image: {err}"
+            ))
+        })?
+        .to_rgba8();
+    if remove_after_read {
+        let _ = fs::remove_file(&target_path);
+    }
+    if image.width() == 0 || image.height() == 0 {
+        return Err(AppError::backend_unavailable(format!(
+            "ScreenCaptureKit window capture returned an empty image for window {window_id}; switch to frontmost mode"
+        )));
+    }
+    let scale = infer_window_capture_scale(image.width(), image.height(), logical_bounds);
+    Ok(CapturedImage {
+        frame: CapturedFrame {
+            snapshot_id: now_millis() as u64,
+            timestamp: now_millis().to_string(),
+            display_id: window_id,
+            width: image.width(),
+            height: image.height(),
+            scale,
+            image_path: out_path,
+        },
+        image,
+    })
+}
+
 fn infer_window_capture_scale(
     image_width: u32,
     image_height: u32,
@@ -239,10 +325,75 @@ fn screencapturekit_screenshot_api_available() -> bool {
     AnyClass::get(&manager).is_some() && AnyClass::get(&config).is_some()
 }
 
+fn screencapturekit_window_api_available() -> bool {
+    let manager = CString::new("SCScreenshotManager").expect("valid class name");
+    let config = CString::new("SCScreenshotConfiguration").expect("valid class name");
+    let content = CString::new("SCShareableContent").expect("valid class name");
+    let filter = CString::new("SCContentFilter").expect("valid class name");
+    AnyClass::get(&manager).is_some()
+        && AnyClass::get(&config).is_some()
+        && AnyClass::get(&content).is_some()
+        && AnyClass::get(&filter).is_some()
+}
+
+fn screencapturekit_window_for_id(window_id: u32) -> Result<Retained<SCWindow>, AppError> {
+    let (tx, rx) = mpsc::channel::<Result<usize, String>>();
+    let callback = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+        if !err.is_null() {
+            let message = unsafe { (&*err).localizedDescription().to_string() };
+            let _ = tx.send(Err(message));
+            return;
+        }
+        if content.is_null() {
+            let _ = tx.send(Err("shareable content returned empty content".to_string()));
+            return;
+        }
+        let windows = unsafe { (&*content).windows() };
+        for window in windows.to_vec() {
+            if unsafe { window.windowID() } == window_id {
+                let ptr = Retained::into_raw(window);
+                let _ = tx.send(Ok(ptr as usize));
+                return;
+            }
+        }
+        let _ = tx.send(Err(format!(
+            "ScreenCaptureKit shareable content did not include window {window_id}"
+        )));
+    });
+
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+            true,
+            false,
+            &*callback,
+        );
+    }
+
+    let ptr = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(ptr)) => ptr,
+        Ok(Err(message)) => {
+            return Err(AppError::backend_unavailable(format!(
+                "screencapturekit shareable content failed: {message}"
+            )));
+        }
+        Err(_) => {
+            return Err(AppError::timeout(
+                "timed out waiting for ScreenCaptureKit shareable content callback",
+            ));
+        }
+    };
+    unsafe { Retained::from_raw(ptr as *mut SCWindow) }.ok_or_else(|| {
+        AppError::backend_unavailable(
+            "ScreenCaptureKit shareable content returned a null window pointer",
+        )
+    })
+}
+
 fn capture_with_screencapturekit_to_path(
     rect: CGRect,
     target_path: &PathBuf,
 ) -> Result<(), AppError> {
+    ensure_capture_parent(target_path)?;
     let file_url = NSURL::from_file_path(target_path).ok_or_else(|| {
         AppError::invalid_argument(format!(
             "invalid capture output path: {}",
@@ -300,6 +451,67 @@ fn capture_with_screencapturekit_to_path(
     Ok(())
 }
 
+fn capture_screencapturekit_filter_to_path(
+    filter: &SCContentFilter,
+    config: &SCScreenshotConfiguration,
+    target_path: &PathBuf,
+) -> Result<(), AppError> {
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let callback = RcBlock::new(move |output: *mut SCScreenshotOutput, err: *mut NSError| {
+        if !err.is_null() {
+            let message = unsafe { (&*err).localizedDescription().to_string() };
+            let _ = tx.send(Err(message));
+            return;
+        }
+        if output.is_null() {
+            let _ = tx.send(Err(
+                "window capture returned empty screenshot output".to_string()
+            ));
+            return;
+        }
+        let _ = tx.send(Ok(()));
+    });
+
+    unsafe {
+        SCScreenshotManager::captureScreenshotWithFilter_configuration_completionHandler(
+            filter,
+            config,
+            Some(&*callback),
+        );
+    }
+
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => {
+            return Err(AppError::backend_unavailable(format!(
+                "screencapturekit window screenshot failed: {message}"
+            )));
+        }
+        Err(_) => {
+            return Err(AppError::timeout(
+                "timed out waiting for ScreenCaptureKit window screenshot callback",
+            ));
+        }
+    }
+
+    if !target_path.exists() {
+        return Err(AppError::backend_unavailable(format!(
+            "ScreenCaptureKit window capture completed but no file was written at {}",
+            target_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_capture_parent(target_path: &PathBuf) -> Result<(), AppError> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::backend_unavailable(format!("failed to create capture directory: {err}"))
+        })?;
+    }
+    Ok(())
+}
+
 fn capture_with_coregraphics(display: &CGDisplay) -> Result<RgbaImage, AppError> {
     let cg_image = display.image().ok_or_else(|| {
         AppError::backend_unavailable("CoreGraphics fallback failed to capture display image")
@@ -352,11 +564,7 @@ fn cg_image_to_rgba(cg_image: &core_graphics::image::CGImage) -> Result<RgbaImag
 }
 
 fn save_capture_png(image: &RgbaImage, target_path: &PathBuf) -> Result<(), AppError> {
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            AppError::backend_unavailable(format!("failed to create capture directory: {err}"))
-        })?;
-    }
+    ensure_capture_parent(target_path)?;
     image
         .save_with_format(target_path, ImageFormat::Png)
         .map_err(|err| {
