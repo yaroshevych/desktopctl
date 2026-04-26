@@ -27,3 +27,7 @@ pub fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
         std::env::consts::OS
     )))
 }
+
+pub fn list_windows_for_pid(_pid: i64) -> Result<Vec<WindowInfo>, AppError> {
+    list_windows()
+}

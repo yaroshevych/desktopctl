@@ -217,6 +217,16 @@ pub fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
     Ok(windows)
 }
 
+pub fn list_windows_for_pid(pid: i64) -> Result<Vec<WindowInfo>, AppError> {
+    let mut windows = list_cg_windows_for_pid(pid)?;
+    let frontmost = crate::platform::ax::frontmost_app_pid() == Some(pid);
+    for window in windows.iter_mut() {
+        window.frontmost = frontmost;
+    }
+    windows.sort_by_key(|window| std::cmp::Reverse(window_area(&window.bounds)));
+    Ok(windows)
+}
+
 fn list_cg_windows_for_pid(target_pid: i64) -> Result<Vec<WindowInfo>, AppError> {
     use core_foundation::{
         base::{CFType, TCFType},

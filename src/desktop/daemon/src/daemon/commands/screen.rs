@@ -44,6 +44,32 @@ fn resolve_active_window_from_app_windows(
     None
 }
 
+fn resolve_active_window_from_cached_ref(
+    reference: &str,
+) -> Option<(
+    platform::windowing::WindowInfo,
+    Vec<platform::windowing::WindowInfo>,
+)> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return None;
+    }
+    let (expected_pid, expected_window_id) = window_refs::resolve_native_for_ref(reference)?;
+    let mut windows = window_target::list_windows_for_pid(expected_pid).ok()?;
+    super::super::enrich_window_refs(&mut windows);
+    let found = windows
+        .iter()
+        .find(|window| {
+            window.visible
+                && window.bounds.width > 8.0
+                && window.bounds.height > 8.0
+                && window.pid == expected_pid
+                && window.id == expected_window_id
+        })
+        .cloned()?;
+    Some((found, windows))
+}
+
 fn bounds_match_with_tolerance(
     a: &desktop_core::protocol::Bounds,
     b: &desktop_core::protocol::Bounds,
@@ -294,9 +320,18 @@ pub(crate) fn tokenize(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                if let Ok(mut windows) = window_target::list_windows() {
+                let mut cached_windows_for_hint: Option<Vec<platform::windowing::WindowInfo>> =
+                    None;
+                if let Some((_, windows)) = resolve_active_window_from_cached_ref(reference) {
+                    trace::log("active_window_id_match:cached_ref_pid_prefetch_hit");
+                    active_window_prefetched_windows = Some(windows.clone());
+                    cached_windows_for_hint = Some(windows);
+                } else if let Ok(mut windows) = window_target::list_windows() {
                     super::super::enrich_window_refs(&mut windows);
                     active_window_prefetched_windows = Some(windows.clone());
+                    cached_windows_for_hint = Some(windows);
+                }
+                if let Some(windows) = cached_windows_for_hint {
                     let reference = reference.to_string();
                     let (reply_tx, reply_rx) =
                         mpsc::channel::<Option<super::super::TokenizeHintSnapshot>>();

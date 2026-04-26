@@ -165,6 +165,10 @@ pub(crate) fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> 
     platform::windowing::list_frontmost_app_windows()
 }
 
+pub(crate) fn list_windows_for_pid(pid: i64) -> Result<Vec<WindowInfo>, AppError> {
+    platform::windowing::list_windows_for_pid(pid)
+}
+
 pub(crate) fn resolve_tokenize_window_target(
     windows: &[WindowInfo],
     query: Option<&str>,

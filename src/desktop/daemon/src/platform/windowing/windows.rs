@@ -140,6 +140,13 @@ pub fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
         .collect())
 }
 
+pub fn list_windows_for_pid(pid: i64) -> Result<Vec<WindowInfo>, AppError> {
+    Ok(list_windows()?
+        .into_iter()
+        .filter(|window| window.pid == pid)
+        .collect())
+}
+
 unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
     // SAFETY: lparam is provided by list_windows and points to Vec<RawWindow>.
     let rows = unsafe { &mut *(lparam as *mut Vec<RawWindow>) };
