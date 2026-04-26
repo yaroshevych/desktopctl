@@ -7,6 +7,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[allow(deprecated)]
+use cocoa::{
+    appkit::{NSEvent, NSEventModifierFlags, NSEventType},
+    base::nil,
+    foundation::{NSInteger, NSPoint},
+};
 use core_graphics::{
     display::CGDisplay,
     event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField, ScrollEventUnit},
@@ -231,10 +237,7 @@ fn post_background_mouse_event(
     click_state: i64,
     symbols: SkyLightSymbols,
 ) -> Result<(), AppError> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-        .map_err(|_| AppError::backend_unavailable("failed to create CoreGraphics event source"))?;
-    let event = CGEvent::new_mouse_event(source, event_type, point.screen, CGMouseButton::Left)
-        .map_err(|_| AppError::backend_unavailable("failed to create background mouse event"))?;
+    let event = new_background_mouse_event(event_type, point, click_state)?;
     stamp_background_event(
         &event,
         target,
@@ -254,6 +257,97 @@ fn post_background_mouse_event(
         point.window_local.y
     ));
     post_event_to_pid(target.pid, &event, symbols)
+}
+
+fn new_background_mouse_event(
+    event_type: CGEventType,
+    point: BackgroundMousePoint,
+    click_state: i64,
+) -> Result<CGEvent, AppError> {
+    match background_mouse_event_constructor() {
+        BackgroundMouseEventConstructor::CoreGraphics => {
+            let source =
+                CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| {
+                    AppError::backend_unavailable("failed to create CoreGraphics event source")
+                })?;
+            CGEvent::new_mouse_event(source, event_type, point.screen, CGMouseButton::Left).map_err(
+                |_| AppError::backend_unavailable("failed to create background mouse event"),
+            )
+        }
+        BackgroundMouseEventConstructor::NsEvent => {
+            new_nsevent_backed_mouse_event(event_type, point.window_local, click_state)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundMouseEventConstructor {
+    CoreGraphics,
+    NsEvent,
+}
+
+fn background_mouse_event_constructor() -> BackgroundMouseEventConstructor {
+    std::env::var("DESKTOPCTL_BACKGROUND_MOUSE_EVENT")
+        .ok()
+        .filter(|value| value.trim().eq_ignore_ascii_case("nsevent"))
+        .map(|_| BackgroundMouseEventConstructor::NsEvent)
+        .unwrap_or(BackgroundMouseEventConstructor::CoreGraphics)
+}
+
+#[allow(deprecated)]
+fn new_nsevent_backed_mouse_event(
+    event_type: CGEventType,
+    window_local: CGPoint,
+    click_state: i64,
+) -> Result<CGEvent, AppError> {
+    let event_type = nsevent_type_for_mouse_event(event_type)?;
+    let location = NSPoint::new(window_local.x, window_local.y);
+    let pressure = if click_state > 0 { 1.0 } else { 0.0 };
+    let event = unsafe {
+        NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+            nil,
+            event_type,
+            location,
+            NSEventModifierFlags::empty(),
+            0.0,
+            0 as NSInteger,
+            nil,
+            0 as NSInteger,
+            click_state as NSInteger,
+            pressure,
+        )
+    };
+    if event == nil {
+        return Err(AppError::backend_unavailable(
+            "failed to create NSEvent-backed background mouse event",
+        ));
+    }
+    let cg_event = unsafe { event.CGEvent() };
+    if cg_event.is_null() {
+        return Err(AppError::backend_unavailable(
+            "NSEvent-backed background mouse event did not produce a CGEvent",
+        ));
+    }
+    let retained = unsafe { CFRetain(cg_event.cast::<c_void>()) };
+    if retained.is_null() {
+        return Err(AppError::backend_unavailable(
+            "failed to retain NSEvent-backed CGEvent",
+        ));
+    }
+    Ok(unsafe { CGEvent::from_ptr(retained.cast()) })
+}
+
+#[allow(deprecated)]
+fn nsevent_type_for_mouse_event(event_type: CGEventType) -> Result<NSEventType, AppError> {
+    match event_type {
+        CGEventType::MouseMoved => Ok(NSEventType::NSMouseMoved),
+        CGEventType::LeftMouseDown => Ok(NSEventType::NSLeftMouseDown),
+        CGEventType::LeftMouseUp => Ok(NSEventType::NSLeftMouseUp),
+        CGEventType::LeftMouseDragged => Ok(NSEventType::NSLeftMouseDragged),
+        _ => Err(AppError::backend_unavailable(format!(
+            "NSEvent-backed background mouse event does not support {event_type:?}"
+        ))),
+    }
 }
 
 fn post_background_text_event(
@@ -574,6 +668,7 @@ unsafe extern "C" {
     fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
+    fn CFRetain(cf: *const c_void) -> *mut c_void;
 }
 
 fn to_core_graphics_point(point: Point) -> CGPoint {
@@ -691,8 +786,11 @@ mod tests {
 
     use super::{
         BackgroundInputTarget, BackgroundMousePoint, Point, ProcessSerialNumber,
-        applescript_hotkey, target_only_focus_record,
+        applescript_hotkey, nsevent_type_for_mouse_event, target_only_focus_record,
     };
+    #[allow(deprecated)]
+    use cocoa::appkit::NSEventType;
+    use core_graphics::event::CGEventType;
 
     #[test]
     fn hotkey_supports_standalone_delete() {
@@ -758,6 +856,28 @@ mod tests {
         assert_eq!(primer.screen.y, -1.0);
         assert_eq!(primer.window_local.x, -1.0);
         assert_eq!(primer.window_local.y, -1.0);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn nsevent_mouse_type_mapping_covers_supported_background_mouse_events() {
+        assert_eq!(
+            nsevent_type_for_mouse_event(CGEventType::MouseMoved).expect("mouse moved"),
+            NSEventType::NSMouseMoved
+        );
+        assert_eq!(
+            nsevent_type_for_mouse_event(CGEventType::LeftMouseDown).expect("left down"),
+            NSEventType::NSLeftMouseDown
+        );
+        assert_eq!(
+            nsevent_type_for_mouse_event(CGEventType::LeftMouseUp).expect("left up"),
+            NSEventType::NSLeftMouseUp
+        );
+        assert_eq!(
+            nsevent_type_for_mouse_event(CGEventType::LeftMouseDragged).expect("left drag"),
+            NSEventType::NSLeftMouseDragged
+        );
+        assert!(nsevent_type_for_mouse_event(CGEventType::ScrollWheel).is_err());
     }
 }
 
