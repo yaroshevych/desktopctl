@@ -464,7 +464,7 @@ fn new_background_mouse_event(
             )
         }
         BackgroundMouseEventConstructor::NsEvent => {
-            new_nsevent_backed_mouse_event(event_type, point.window_local, click_state)
+            new_nsevent_backed_mouse_event(event_type, point, click_state)
         }
     }
 }
@@ -486,11 +486,11 @@ fn background_mouse_event_constructor() -> BackgroundMouseEventConstructor {
 #[allow(deprecated)]
 fn new_nsevent_backed_mouse_event(
     event_type: CGEventType,
-    window_local: CGPoint,
+    point: BackgroundMousePoint,
     click_state: i64,
 ) -> Result<CGEvent, AppError> {
     let event_type = nsevent_type_for_mouse_event(event_type)?;
-    let location = NSPoint::new(window_local.x, window_local.y);
+    let location = NSPoint::new(point.screen.x, point.screen.y);
     let pressure = if click_state > 0 { 1.0 } else { 0.0 };
     let event = unsafe {
         NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
