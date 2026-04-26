@@ -6,7 +6,7 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 
 use crate::{daemon, trace};
-use super::about;
+use super::{about, permissions_dialog};
 
 thread_local! {
     static TRAY: RefCell<Option<tray_icon::TrayIcon>> = RefCell::new(None);
@@ -100,7 +100,7 @@ pub(crate) fn run() -> Result<(), AppError> {
             return;
         }
         if event.id == check_permissions_id {
-            trace::log("menu:check_permissions click");
+            permissions_dialog::show();
             return;
         }
         if event.id == app_access_policy_id {

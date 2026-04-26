@@ -8,6 +8,8 @@ mod app_policy_dialog;
 mod macos;
 #[cfg(target_os = "macos")]
 mod permissions_dialog;
+#[cfg(target_os = "windows")]
+mod permissions_dialog;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod unsupported;
 #[cfg(target_os = "windows")]
