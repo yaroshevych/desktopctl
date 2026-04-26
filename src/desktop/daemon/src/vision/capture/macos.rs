@@ -352,7 +352,9 @@ fn screencapturekit_window_for_id(window_id: u32) -> Result<Retained<SCWindow>, 
         for window in windows.to_vec() {
             if unsafe { window.windowID() } == window_id {
                 let ptr = Retained::into_raw(window);
-                let _ = tx.send(Ok(ptr as usize));
+                if tx.send(Ok(ptr as usize)).is_err() {
+                    drop(unsafe { Retained::from_raw(ptr as *mut SCWindow) });
+                }
                 return;
             }
         }
