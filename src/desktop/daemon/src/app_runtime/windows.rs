@@ -6,7 +6,7 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 
 use crate::{daemon, trace};
-use super::{about, permissions_dialog};
+use super::{about, permissions_dialog_windows as permissions_dialog};
 
 thread_local! {
     static TRAY: RefCell<Option<tray_icon::TrayIcon>> = RefCell::new(None);
