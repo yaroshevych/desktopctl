@@ -55,6 +55,26 @@ fn bounds_match_with_tolerance(
         && (a.height - b.height).abs() <= tolerance_px
 }
 
+fn mark_frontmost_if_current(
+    mut window: platform::windowing::WindowInfo,
+) -> platform::windowing::WindowInfo {
+    if window.frontmost {
+        return window;
+    }
+    let Ok(mut frontmost_windows) = window_target::list_frontmost_app_windows() else {
+        return window;
+    };
+    super::super::enrich_window_refs(&mut frontmost_windows);
+    if frontmost_windows
+        .iter()
+        .any(|frontmost| frontmost.pid == window.pid && frontmost.id == window.id)
+    {
+        trace::log("active_window_tokenize:frontmost_confirmed_for_explicit_id");
+        window.frontmost = true;
+    }
+    window
+}
+
 fn tokenize_meta_for_window(
     window: &platform::windowing::WindowInfo,
     bounds: Bounds,
@@ -309,12 +329,12 @@ pub(crate) fn tokenize(
                     >,
                 > = None;
                 let reference_owned = reference.to_string();
-                let prefetched_match =
-                    active_window_prefetched_windows
-                        .as_deref()
-                        .and_then(|windows| {
-                            resolve_active_window_from_app_windows(&reference_owned, windows)
-                        });
+                let prefetched_match = active_window_prefetched_windows
+                    .as_deref()
+                    .and_then(|windows| {
+                        resolve_active_window_from_app_windows(&reference_owned, windows)
+                    })
+                    .map(mark_frontmost_if_current);
 
                 if let Some(prefetched) = prefetched_match.as_ref() {
                     if let Ok(bounds) = super::super::resolve_tokenize_region_bounds(
@@ -344,7 +364,9 @@ pub(crate) fn tokenize(
                     trace::log("active_window_resolve:strict_prefetched_hit");
                     prefetched
                 } else {
-                    super::super::assert_active_window_id_matches(&reference_owned)?
+                    mark_frontmost_if_current(super::super::assert_active_window_id_matches(
+                        &reference_owned,
+                    )?)
                 };
                 let strict_bounds = super::super::resolve_tokenize_region_bounds(
                     strict_window.bounds.clone(),
@@ -366,6 +388,7 @@ pub(crate) fn tokenize(
                                 let post_validate =
                                     super::super::assert_active_window_id_matches(&reference_owned)
                                         .ok()
+                                        .map(mark_frontmost_if_current)
                                         .and_then(|window| {
                                             super::super::resolve_tokenize_region_bounds(
                                                 window.bounds.clone(),
