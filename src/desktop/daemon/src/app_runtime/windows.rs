@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use desktop_core::error::AppError;
 use windows_sys::Win32::UI::HiDpi::{
@@ -7,6 +8,10 @@ use windows_sys::Win32::UI::HiDpi::{
 
 use crate::{daemon, trace};
 use super::{about, permissions_dialog_windows as permissions_dialog, app_policy_dialog_windows};
+
+// WM_APP + 1: update toggle label. wParam = 1 (disabled) or 0 (enabled).
+const WM_UPDATE_TOGGLE_LABEL: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     static TRAY: RefCell<Option<tray_icon::TrayIcon>> = RefCell::new(None);
@@ -27,13 +32,19 @@ fn cli_gui_toggle_menu_label(disabled: bool) -> &'static str {
 }
 
 fn on_gui_ops_state_changed(disabled: bool) {
-    MENU_STATE.with(|cell| {
-        if let Some(state) = cell.borrow().as_ref() {
-            state
-                .toggle_cli_gui_ops
-                .set_text(cli_gui_toggle_menu_label(disabled));
-        }
-    });
+    let tid = MAIN_THREAD_ID.load(Ordering::Relaxed);
+    if tid == 0 {
+        return;
+    }
+    // Called from a background IPC thread — post to main thread's message queue.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+            tid,
+            WM_UPDATE_TOGGLE_LABEL,
+            disabled as usize,
+            0,
+        );
+    }
 }
 
 pub(crate) fn run() -> Result<(), AppError> {
@@ -131,24 +142,40 @@ pub(crate) fn run() -> Result<(), AppError> {
 
     TRAY.with(|cell| *cell.borrow_mut() = Some(tray));
 
+    // Store main thread ID so on_gui_ops_state_changed can PostThreadMessage here.
+    MAIN_THREAD_ID.store(
+        unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
+        Ordering::Relaxed,
+    );
+
     // Run the Win32 message loop for the tray icon
     run_message_loop()
 }
 
 fn run_message_loop() -> Result<(), AppError> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetMessageW, TranslateMessage, DispatchMessageW, MSG,
+        DispatchMessageW, GetMessageW, TranslateMessage, MSG,
     };
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
 
     loop {
+        // NULL hwnd = thread messages + all window messages
         let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if ret == 0 || ret == -1 {
             if ret == -1 {
                 return Err(AppError::backend_unavailable("GetMessageW failed"));
             }
             break;
+        }
+        if msg.message == WM_UPDATE_TOGGLE_LABEL {
+            let disabled = msg.wParam != 0;
+            MENU_STATE.with(|cell| {
+                if let Some(state) = cell.borrow().as_ref() {
+                    state.toggle_cli_gui_ops.set_text(cli_gui_toggle_menu_label(disabled));
+                }
+            });
+            continue;
         }
         unsafe {
             TranslateMessage(&msg);
