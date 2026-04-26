@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 mod about;
 #[cfg(target_os = "windows")]
-mod about;
+mod about_windows;
 #[cfg(target_os = "macos")]
 mod app_policy_dialog;
 #[cfg(target_os = "windows")]

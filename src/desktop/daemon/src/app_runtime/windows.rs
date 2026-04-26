@@ -7,7 +7,7 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 
 use crate::{daemon, trace};
-use super::{about, permissions_dialog_windows as permissions_dialog, app_policy_dialog_windows};
+use super::{about_windows as about, permissions_dialog_windows as permissions_dialog, app_policy_dialog_windows};
 
 // WM_APP + 1: update toggle label. wParam = 1 (disabled) or 0 (enabled).
 const WM_UPDATE_TOGGLE_LABEL: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
