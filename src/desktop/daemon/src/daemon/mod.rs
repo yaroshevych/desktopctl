@@ -911,6 +911,8 @@ pub(super) fn wait_for_open_app(app_name: &str, timeout_ms: u64) -> Result<(), A
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
     use super::execute;
     use desktop_core::{
         error::ErrorCode,
@@ -921,16 +923,26 @@ mod tests {
     };
     use image::{Rgba, RgbaImage};
 
+    fn gui_ops_disabled_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("gui ops test lock");
+        super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        guard
+    }
+
     #[test]
     fn ping_returns_message() {
-        super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _guard = gui_ops_disabled_guard();
         let result = execute(desktop_core::protocol::Command::Ping).expect("ping");
         assert_eq!(result["message"], "pong");
     }
 
     #[test]
     fn disable_gui_sets_daemon_gate() {
-        super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _guard = gui_ops_disabled_guard();
         let result = execute(desktop_core::protocol::Command::DisableGui).expect("disable");
         assert_eq!(result, serde_json::json!({}));
         assert!(super::GUI_OPS_DISABLED.load(std::sync::atomic::Ordering::SeqCst));
@@ -939,6 +951,7 @@ mod tests {
 
     #[test]
     fn gui_commands_blocked_when_disabled() {
+        let _guard = gui_ops_disabled_guard();
         super::GUI_OPS_DISABLED.store(true, std::sync::atomic::Ordering::SeqCst);
         let err = super::enforce_gui_ops_enabled(&desktop_core::protocol::Command::ScreenCapture {
             out_path: None,
