@@ -36,8 +36,21 @@ pub(crate) fn assert_bound_window_matches(
     Ok(())
 }
 
-pub(crate) fn capture_observe_start(observe: &ObserveOptions) -> super::ObserveStartState {
-    super::capture_observe_start_state(observe)
+pub(crate) fn capture_observe_start(
+    observe: &ObserveOptions,
+    observe_target: Option<&crate::platform::windowing::WindowInfo>,
+) -> super::ObserveStartState {
+    super::capture_observe_start_state(observe, observe_target)
+}
+
+pub(crate) fn explicit_observe_target<'a>(
+    guard: &'a ActiveWindowGuard,
+    active_window_id: Option<&str>,
+) -> Option<&'a crate::platform::windowing::WindowInfo> {
+    active_window_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|_| guard.bound_active_window.as_ref())
 }
 
 pub(crate) fn append_observe(

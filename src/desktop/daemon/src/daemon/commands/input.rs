@@ -132,7 +132,10 @@ pub(crate) fn pointer_click(
         .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let point = super::super::resolve_pointer_click_point(
         x,
         y,
@@ -195,7 +198,10 @@ pub(crate) fn pointer_scroll(
         .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let mut target_point = None;
     if let Some(element_id) = id.as_deref() {
         let target = super::super::resolve_element_id_target(
@@ -316,7 +322,10 @@ pub(crate) fn key_type(
         .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let background_attempt = try_background_type_text(
         explicit_active_window_id,
         guard.bound_active_window.as_ref(),
@@ -540,7 +549,10 @@ pub(crate) fn key_hotkey(
         .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let background_attempt = try_background_hotkey(
         explicit_active_window_id,
         guard.bound_active_window.as_ref(),
@@ -577,7 +589,10 @@ pub(crate) fn key_enter(
         .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let background_attempt = try_background_enter(
         explicit_active_window_id,
         guard.bound_active_window.as_ref(),
@@ -613,7 +628,10 @@ pub(crate) fn key_escape(
         .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let background_attempt = try_background_escape(
         explicit_active_window_id,
         guard.bound_active_window.as_ref(),

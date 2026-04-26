@@ -11,7 +11,10 @@ pub(crate) fn click_text(
 ) -> Result<Value, AppError> {
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let (mut result, pre_click_tokens) = super::super::click_text_target(
         &text,
         button,
@@ -39,7 +42,10 @@ pub(crate) fn click_id(
 ) -> Result<Value, AppError> {
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    let observe_start = super::super::guards::capture_observe_start(&observe);
+    let observe_start = super::super::guards::capture_observe_start(
+        &observe,
+        super::super::guards::explicit_observe_target(&guard, active_window_id.as_deref()),
+    );
     let (mut result, pre_click_tokens) = super::super::click_element_id_target(
         &id,
         button,

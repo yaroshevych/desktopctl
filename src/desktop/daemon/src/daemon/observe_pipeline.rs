@@ -18,16 +18,24 @@ pub(super) fn append_observe_payload(result: &mut Value, observe: Option<Value>)
     }
 }
 
-pub(super) fn capture_observe_start_state(options: &ObserveOptions) -> ObserveStartState {
+pub(super) fn capture_observe_start_state(
+    options: &ObserveOptions,
+    observe_target: Option<&platform::windowing::WindowInfo>,
+) -> ObserveStartState {
     if !options.enabled {
         return ObserveStartState::default();
     }
-    let active_window_id = resolve_active_window_target()
-        .ok()
+    let active_window = observe_target
+        .cloned()
+        .or_else(|| resolve_active_window_target().ok());
+    let active_window_id = active_window
+        .as_ref()
         .and_then(|window| window.window_ref.clone());
+    let active_window_bounds = active_window.map(|window| window.bounds);
     let focused_element_id = focused_element_id_from_ax();
     ObserveStartState {
         active_window_id,
+        active_window_bounds,
         focused_element_id,
     }
 }
@@ -45,10 +53,18 @@ fn focused_element_id_from_ax() -> Option<String> {
 }
 
 fn observe_transition_state(start_state: &ObserveStartState) -> ObserveEndState {
-    let active_window = resolve_active_window_target().ok();
-    let active_window_id = active_window
-        .as_ref()
-        .and_then(|window| window.window_ref.clone());
+    let (active_window_id, active_window_bounds) =
+        if let Some(bounds) = start_state.active_window_bounds.clone() {
+            (start_state.active_window_id.clone(), Some(bounds))
+        } else {
+            let active_window = resolve_active_window_target().ok();
+            (
+                active_window
+                    .as_ref()
+                    .and_then(|window| window.window_ref.clone()),
+                active_window.map(|window| window.bounds),
+            )
+        };
     let focused_element_id = focused_element_id_from_ax();
     let active_window_changed = active_window_id != start_state.active_window_id;
     let focus_changed = focused_element_id != start_state.focused_element_id;
@@ -57,7 +73,7 @@ fn observe_transition_state(start_state: &ObserveStartState) -> ObserveEndState 
         focused_element_id,
         active_window_changed,
         active_window_id,
-        active_window_bounds: active_window.map(|window| window.bounds),
+        active_window_bounds,
     }
 }
 
@@ -734,6 +750,34 @@ mod tests {
             None,
         );
         assert_eq!(action, ObservePostSampleAction::NoChange);
+    }
+
+    #[test]
+    fn observe_transition_state_uses_bound_active_window_scope() {
+        let bounds = desktop_core::protocol::Bounds {
+            x: 10.0,
+            y: 20.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let start_state = ObserveStartState {
+            active_window_id: Some("system_settings_123".to_string()),
+            active_window_bounds: Some(bounds.clone()),
+            focused_element_id: None,
+        };
+
+        let end_state = observe_transition_state(&start_state);
+
+        assert_eq!(
+            end_state.active_window_id.as_deref(),
+            Some("system_settings_123")
+        );
+        let end_bounds = end_state.active_window_bounds.expect("bound window bounds");
+        assert!((end_bounds.x - bounds.x).abs() < 0.001);
+        assert!((end_bounds.y - bounds.y).abs() < 0.001);
+        assert!((end_bounds.width - bounds.width).abs() < 0.001);
+        assert!((end_bounds.height - bounds.height).abs() < 0.001);
+        assert!(!end_state.active_window_changed);
     }
 
     #[test]

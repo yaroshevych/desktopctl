@@ -172,6 +172,7 @@ struct RequestContext {
 #[derive(Debug, Clone, Default)]
 struct ObserveStartState {
     active_window_id: Option<String>,
+    active_window_bounds: Option<desktop_core::protocol::Bounds>,
     focused_element_id: Option<String>,
 }
 
