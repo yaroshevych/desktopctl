@@ -23,3 +23,6 @@ src/desktop/daemon/tests/fixtures/golden/manifest.json
 .dolt/
 *.db
 .beads-credential-key
+/.beads
+/backup
+/embeddeddolt
