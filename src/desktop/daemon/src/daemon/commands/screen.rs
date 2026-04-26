@@ -385,38 +385,49 @@ pub(crate) fn tokenize(
                     if bounds_match_with_tolerance(&bounds, &strict_bounds, 2.0) {
                         match handle.join() {
                             Ok(Ok(payload)) => {
-                                let post_validate =
-                                    super::super::assert_active_window_id_matches(&reference_owned)
+                                if strict_window.frontmost {
+                                    trace::log(
+                                        "active_window_tokenize:speculative_keep reason=frontmost_prevalidated",
+                                    );
+                                    payload
+                                } else {
+                                    let post_validate =
+                                        super::super::assert_active_window_id_matches(
+                                            &reference_owned,
+                                        )
                                         .ok()
                                         .map(mark_frontmost_if_current)
-                                        .and_then(|window| {
-                                            super::super::resolve_tokenize_region_bounds(
-                                                window.bounds.clone(),
-                                                region.as_ref(),
-                                            )
-                                            .ok()
-                                            .map(|resolved_bounds| (window, resolved_bounds))
-                                        });
-                                if let Some((post_window, post_bounds)) = post_validate {
-                                    if bounds_match_with_tolerance(&bounds, &post_bounds, 2.0) {
-                                        trace::log("active_window_tokenize:speculative_keep");
-                                        payload
+                                        .and_then(
+                                            |window| {
+                                                super::super::resolve_tokenize_region_bounds(
+                                                    window.bounds.clone(),
+                                                    region.as_ref(),
+                                                )
+                                                .ok()
+                                                .map(|resolved_bounds| (window, resolved_bounds))
+                                            },
+                                        );
+                                    if let Some((post_window, post_bounds)) = post_validate {
+                                        if bounds_match_with_tolerance(&bounds, &post_bounds, 2.0) {
+                                            trace::log("active_window_tokenize:speculative_keep");
+                                            payload
+                                        } else {
+                                            trace::log(
+                                                "active_window_tokenize:speculative_discard reason=post_validate_mismatch",
+                                            );
+                                            let meta = tokenize_meta_for_window(
+                                                &post_window,
+                                                post_bounds,
+                                                true,
+                                            )?;
+                                            vision::pipeline::tokenize_window(meta)?
+                                        }
                                     } else {
                                         trace::log(
-                                            "active_window_tokenize:speculative_discard reason=post_validate_mismatch",
+                                            "active_window_tokenize:speculative_discard reason=post_validate_unavailable",
                                         );
-                                        let meta = tokenize_meta_for_window(
-                                            &post_window,
-                                            post_bounds,
-                                            true,
-                                        )?;
-                                        vision::pipeline::tokenize_window(meta)?
+                                        run_strict()?
                                     }
-                                } else {
-                                    trace::log(
-                                        "active_window_tokenize:speculative_discard reason=post_validate_unavailable",
-                                    );
-                                    run_strict()?
                                 }
                             }
                             Ok(Err(err)) => {
