@@ -104,7 +104,6 @@ pub(crate) fn verify_after_action(
             "background_input:verify_transport_failed action={} pid={} window_id={} err={}",
             action, target.pid, target.window_id, err
         ));
-        let _classification = BackgroundInputVerification::transport_failed(err.to_string());
         return Err(err);
     }
 
