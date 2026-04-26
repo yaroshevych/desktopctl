@@ -8,7 +8,10 @@ use desktop_core::{automation::BackgroundInputTarget, error::AppError, protocol:
 use image::RgbaImage;
 use serde_json::{Value, json};
 
-use crate::{trace, vision};
+use crate::{
+    trace,
+    vision::{self, pipeline::TokenizeWindowMeta},
+};
 
 const DEFAULT_SETTLE_MS: u64 = 150;
 
@@ -94,7 +97,7 @@ pub(crate) fn verify_after_action(
         "background_input:verify_start action={} pid={} window_id={}",
         action, target.pid, target.window_id
     ));
-    let before = capture_fingerprint(target);
+    let before = VerificationSnapshot::capture(target);
     let dispatch = action_fn();
     if let Err(err) = dispatch {
         trace::log(format!(
@@ -106,7 +109,7 @@ pub(crate) fn verify_after_action(
     }
 
     std::thread::sleep(Duration::from_millis(settle_ms()));
-    let after = capture_fingerprint(target);
+    let after = VerificationSnapshot::capture(target);
     let verification = classify(action, before, after);
     trace::log(format!(
         "background_input:verify_done action={} pid={} window_id={} status={} reason={}",
@@ -120,6 +123,39 @@ pub(crate) fn verify_after_action(
 }
 
 fn classify(
+    action: &str,
+    before: VerificationSnapshot,
+    after: VerificationSnapshot,
+) -> BackgroundInputVerification {
+    if let (Some(before), Some(after)) = (before.semantic.as_ref(), after.semantic.as_ref()) {
+        if before != after {
+            return BackgroundInputVerification::new(
+                BackgroundInputVerificationStatus::Success,
+                format!("{action} changed target window token/AX content"),
+            );
+        }
+    }
+
+    if let (Ok(before), Ok(after)) = (before.capture.as_ref(), after.capture.as_ref())
+        && before != after
+    {
+        return BackgroundInputVerification::new(
+            BackgroundInputVerificationStatus::Success,
+            format!("{action} changed the target window capture"),
+        );
+    }
+
+    if before.semantic.is_some() && after.semantic.is_some() {
+        return BackgroundInputVerification::new(
+            BackgroundInputVerificationStatus::EffectNotVerified,
+            format!("{action} produced no target window token/AX or capture delta"),
+        );
+    }
+
+    classify_capture_only(action, before.capture, after.capture)
+}
+
+fn classify_capture_only(
     action: &str,
     before: Result<CaptureFingerprint, AppError>,
     after: Result<CaptureFingerprint, AppError>,
@@ -164,18 +200,81 @@ struct CaptureFingerprint {
     hash: u64,
 }
 
+#[derive(Debug)]
+struct VerificationSnapshot {
+    capture: Result<CaptureFingerprint, AppError>,
+    semantic: Option<SemanticFingerprint>,
+}
+
+impl VerificationSnapshot {
+    fn capture(target: &BackgroundInputTarget) -> Self {
+        let capture = capture_fingerprint(target);
+        let semantic = match semantic_fingerprint(target) {
+            Ok(snapshot) => Some(snapshot),
+            Err(err) => {
+                trace::log(format!(
+                    "background_input:verify_semantic_warn pid={} window_id={} err={}",
+                    target.pid, target.window_id, err
+                ));
+                None
+            }
+        };
+        Self { capture, semantic }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticFingerprint {
+    elements: Vec<String>,
+}
+
+fn target_bounds(target: &BackgroundInputTarget) -> Bounds {
+    Bounds {
+        x: target.bounds.x,
+        y: target.bounds.y,
+        width: target.bounds.width,
+        height: target.bounds.height,
+    }
+}
+
 fn capture_fingerprint(target: &BackgroundInputTarget) -> Result<CaptureFingerprint, AppError> {
-    let captured = vision::capture::capture_window_png(
-        None,
-        target.window_id,
-        Some(&Bounds {
-            x: target.bounds.x,
-            y: target.bounds.y,
-            width: target.bounds.width,
-            height: target.bounds.height,
-        }),
-    )?;
+    let captured =
+        vision::capture::capture_window_png(None, target.window_id, Some(&target_bounds(target)))?;
     Ok(fingerprint_image(&captured.image))
+}
+
+fn semantic_fingerprint(target: &BackgroundInputTarget) -> Result<SemanticFingerprint, AppError> {
+    let bounds = target_bounds(target);
+    let payload = vision::pipeline::tokenize_window(TokenizeWindowMeta {
+        id: target.window_id.to_string(),
+        title: String::new(),
+        app: None,
+        bounds: bounds.clone(),
+        native_window_id: Some(target.window_id),
+        capture_bounds: Some(bounds),
+    })?;
+    let mut elements = Vec::new();
+    for window in payload.windows {
+        for element in window.elements {
+            elements.push(format!(
+                "{}|{}|{}|{}|{}|{:.1},{:.1},{:.1},{:.1}",
+                element.source,
+                element.kind,
+                element.text.unwrap_or_default(),
+                element
+                    .checked
+                    .map(|value| format!("{value:?}"))
+                    .unwrap_or_default(),
+                element.scrollable.unwrap_or(false),
+                element.bbox[0],
+                element.bbox[1],
+                element.bbox[2],
+                element.bbox[3]
+            ));
+        }
+    }
+    elements.sort();
+    Ok(SemanticFingerprint { elements })
 }
 
 fn fingerprint_image(image: &RgbaImage) -> CaptureFingerprint {
@@ -201,24 +300,40 @@ fn settle_ms() -> u64 {
 mod tests {
     use super::{
         BackgroundInputVerification, BackgroundInputVerificationStatus, CaptureFingerprint,
-        classify,
+        SemanticFingerprint, VerificationSnapshot, classify,
     };
     use desktop_core::error::AppError;
 
     #[test]
     fn classify_success_when_capture_changes() {
+        let result = classify("click", snapshot_with_capture(1), snapshot_with_capture(2));
+        assert_eq!(result.status, BackgroundInputVerificationStatus::Success);
+    }
+
+    #[test]
+    fn classify_success_when_semantic_snapshot_changes() {
         let result = classify(
-            "click",
-            Ok(CaptureFingerprint {
-                width: 2,
-                height: 2,
-                hash: 1,
-            }),
-            Ok(CaptureFingerprint {
-                width: 2,
-                height: 2,
-                hash: 2,
-            }),
+            "type_text",
+            VerificationSnapshot {
+                capture: Ok(CaptureFingerprint {
+                    width: 2,
+                    height: 2,
+                    hash: 1,
+                }),
+                semantic: Some(SemanticFingerprint {
+                    elements: vec!["text|before".to_string()],
+                }),
+            },
+            VerificationSnapshot {
+                capture: Ok(CaptureFingerprint {
+                    width: 2,
+                    height: 2,
+                    hash: 1,
+                }),
+                semantic: Some(SemanticFingerprint {
+                    elements: vec!["text|after".to_string()],
+                }),
+            },
         );
         assert_eq!(result.status, BackgroundInputVerificationStatus::Success);
     }
@@ -227,16 +342,8 @@ mod tests {
     fn classify_unverified_when_capture_is_identical() {
         let result = classify(
             "type_text",
-            Ok(CaptureFingerprint {
-                width: 2,
-                height: 2,
-                hash: 1,
-            }),
-            Ok(CaptureFingerprint {
-                width: 2,
-                height: 2,
-                hash: 1,
-            }),
+            snapshot_with_capture(1),
+            snapshot_with_capture(1),
         );
         assert_eq!(
             result.status,
@@ -248,12 +355,11 @@ mod tests {
     fn classify_ambiguous_when_capture_fails() {
         let result = classify(
             "scroll",
-            Err(AppError::backend_unavailable("capture failed")),
-            Ok(CaptureFingerprint {
-                width: 2,
-                height: 2,
-                hash: 1,
-            }),
+            VerificationSnapshot {
+                capture: Err(AppError::backend_unavailable("capture failed")),
+                semantic: None,
+            },
+            snapshot_with_capture(1),
         );
         assert_eq!(result.status, BackgroundInputVerificationStatus::Ambiguous);
     }
@@ -265,5 +371,16 @@ mod tests {
             result.to_json()["status"],
             BackgroundInputVerificationStatus::TransportFailed.as_str()
         );
+    }
+
+    fn snapshot_with_capture(hash: u64) -> VerificationSnapshot {
+        VerificationSnapshot {
+            capture: Ok(CaptureFingerprint {
+                width: 2,
+                height: 2,
+                hash,
+            }),
+            semantic: None,
+        }
     }
 }
