@@ -604,6 +604,7 @@ fn post_background_scroll_event(
             .map_err(|_| {
                 AppError::backend_unavailable("failed to create background scroll event")
             })?;
+    unsafe { CGEventSetLocation(event.as_ptr().cast::<c_void>(), point.screen) };
     stamp_background_event(
         &event,
         target,
@@ -1035,6 +1036,7 @@ unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
     fn CFRetain(cf: *const c_void) -> *mut c_void;
+    fn CGEventSetLocation(event: *mut c_void, location: CGPoint);
 }
 
 fn to_core_graphics_point(point: Point) -> CGPoint {
