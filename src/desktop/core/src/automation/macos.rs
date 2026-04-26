@@ -4,8 +4,14 @@ use std::{
     io::Write,
     process::Command,
     sync::OnceLock,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn mach_absolute_time() -> u64;
+}
 
 #[allow(deprecated)]
 use cocoa::{
@@ -149,6 +155,8 @@ impl BackgroundInputBackend for MacosBackgroundInput {
         let symbols = skylight_symbols()?;
         let routing = resolve_background_routing(target, symbols)?;
         preflight_window_server_target(target, routing.psn, symbols)?;
+        // Delay after preflight to allow WindowServer focus to settle (reference: usleep(50_000))
+        thread::sleep(Duration::from_micros(50_000));
         let target_point = BackgroundMousePoint::from_screen_point(target, point);
         let primer_point = BackgroundMousePoint::offscreen_primer();
         trace_mouse(format!(
@@ -170,6 +178,8 @@ impl BackgroundInputBackend for MacosBackgroundInput {
             0,
             symbols,
         )?;
+        // Delay between events (reference: usleep(30_000))
+        thread::sleep(Duration::from_micros(30_000));
         post_background_mouse_event(
             target,
             routing,
@@ -178,6 +188,7 @@ impl BackgroundInputBackend for MacosBackgroundInput {
             1,
             symbols,
         )?;
+        thread::sleep(Duration::from_micros(30_000));
         post_background_mouse_event(
             target,
             routing,
@@ -186,6 +197,7 @@ impl BackgroundInputBackend for MacosBackgroundInput {
             1,
             symbols,
         )?;
+        thread::sleep(Duration::from_micros(30_000));
         post_background_mouse_event(
             target,
             routing,
@@ -194,6 +206,7 @@ impl BackgroundInputBackend for MacosBackgroundInput {
             1,
             symbols,
         )?;
+        thread::sleep(Duration::from_micros(30_000));
         post_background_mouse_event(
             target,
             routing,
@@ -424,7 +437,7 @@ fn post_background_mouse_event(
     click_state: i64,
     symbols: SkyLightSymbols,
 ) -> Result<(), AppError> {
-    let event = new_background_mouse_event(event_type, point, click_state)?;
+    let event = new_background_mouse_event(event_type, point, click_state, target.window_id)?;
     stamp_background_event(
         &event,
         target,
@@ -432,6 +445,7 @@ fn post_background_mouse_event(
         Some(point.window_local),
         click_state,
         symbols,
+        point.screen,
     );
     trace_mouse(format!(
         "background_input:post_mouse type={:?} constructor={:?} click_state={} {} {} screen=({:.1}, {:.1}) local=({:.1}, {:.1})",
@@ -452,6 +466,7 @@ fn new_background_mouse_event(
     event_type: CGEventType,
     point: BackgroundMousePoint,
     click_state: i64,
+    window_id: u32,
 ) -> Result<CGEvent, AppError> {
     match background_mouse_event_constructor() {
         BackgroundMouseEventConstructor::CoreGraphics => {
@@ -464,7 +479,7 @@ fn new_background_mouse_event(
             )
         }
         BackgroundMouseEventConstructor::NsEvent => {
-            new_nsevent_backed_mouse_event(event_type, point, click_state)
+            new_nsevent_backed_mouse_event(event_type, point, click_state, window_id)
         }
     }
 }
@@ -488,9 +503,12 @@ fn new_nsevent_backed_mouse_event(
     event_type: CGEventType,
     point: BackgroundMousePoint,
     click_state: i64,
+    window_id: u32,
 ) -> Result<CGEvent, AppError> {
     let event_type = nsevent_type_for_mouse_event(event_type)?;
-    let location = NSPoint::new(point.screen.x, point.screen.y);
+    let location = NSPoint::new(point.window_local.x, point.window_local.y);
+    // Use system uptime in seconds (reference uses ProcessInfo.processInfo.systemUptime)
+    let timestamp = unsafe { mach_absolute_time() as f64 / 1_000_000_000.0 };
     let pressure = if click_state > 0 { 1.0 } else { 0.0 };
     let event = unsafe {
         NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
@@ -498,10 +516,10 @@ fn new_nsevent_backed_mouse_event(
             event_type,
             location,
             NSEventModifierFlags::empty(),
-            0.0,
-            0 as NSInteger,
+            timestamp,
+            window_id as NSInteger,
             nil,
-            0 as NSInteger,
+            1 as NSInteger, // eventNumber: 1 (matching reference)
             click_state as NSInteger,
             pressure,
         )
@@ -551,7 +569,15 @@ fn post_background_text_event(
     let event = CGEvent::new_keyboard_event(source, 0, keydown)
         .map_err(|_| AppError::backend_unavailable("failed to create background keyboard event"))?;
     event.set_string(&ch.to_string());
-    stamp_background_event(&event, target, routing, None, 0, symbols);
+    stamp_background_event(
+        &event,
+        target,
+        routing,
+        None,
+        0,
+        symbols,
+        CGPoint::new(0.0, 0.0),
+    );
     trace_mouse(format!(
         "background_input:post_text keydown={} {} {} char={:?}",
         keydown,
@@ -575,7 +601,15 @@ fn post_background_key_event(
     let event = CGEvent::new_keyboard_event(source, keycode, keydown)
         .map_err(|_| AppError::backend_unavailable("failed to create background keyboard event"))?;
     event.set_flags(flags);
-    stamp_background_event(&event, target, routing, None, 0, symbols);
+    stamp_background_event(
+        &event,
+        target,
+        routing,
+        None,
+        0,
+        symbols,
+        CGPoint::new(0.0, 0.0),
+    );
     trace_mouse(format!(
         "background_input:post_key keydown={} {} {} keycode={} flags=0x{:x}",
         keydown,
@@ -612,6 +646,7 @@ fn post_background_scroll_event(
         Some(point.window_local),
         0,
         symbols,
+        point.screen,
     );
     trace_mouse(format!(
         "background_input:post_scroll {} {} screen=({:.1}, {:.1}) local=({:.1}, {:.1}) dx={} dy={} wheel1={} wheel2={}",
@@ -636,7 +671,10 @@ fn stamp_background_event(
     window_local: Option<CGPoint>,
     click_state: i64,
     symbols: SkyLightSymbols,
+    screen_point: CGPoint,
 ) {
+    // Set CGEvent location to screen coordinates (reference does: event.location = point)
+    unsafe { CGEventSetLocation(event.as_ptr().cast::<c_void>(), screen_point) };
     event.set_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID, target.pid as i64);
     event.set_integer_value_field(
         EventField::EVENT_TARGET_PROCESS_SERIAL_NUMBER,

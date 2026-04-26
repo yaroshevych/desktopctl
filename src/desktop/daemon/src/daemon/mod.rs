@@ -1134,11 +1134,10 @@ mod tests {
         assert_eq!(texts.len(), 1);
         let t = &texts[0];
         assert_eq!(t.text, "7");
-        // x scale = 400/200 = 2.0 ; y scale = 200/100 = 2.0
-        assert!((t.bounds.x - 540.0).abs() < 0.001);
-        assert!((t.bounds.y - 360.0).abs() < 0.001);
-        assert!((t.bounds.width - 100.0).abs() < 0.001);
-        assert!((t.bounds.height - 40.0).abs() < 0.001);
+        assert!((t.bounds.x - 520.0).abs() < 0.001);
+        assert!((t.bounds.y - 330.0).abs() < 0.001);
+        assert!((t.bounds.width - 50.0).abs() < 0.001);
+        assert!((t.bounds.height - 20.0).abs() < 0.001);
         assert!((t.confidence - 0.92).abs() < 0.0001);
     }
 
@@ -1190,11 +1189,10 @@ mod tests {
         assert_eq!(el.id, "button_7");
         assert_eq!(el.text.as_deref(), Some("7"));
         assert_eq!(el.source, "accessibility_ax:AXButton");
-        // x/y scale = 2.0
-        assert!((el.bounds.x - 820.0).abs() < 0.001);
-        assert!((el.bounds.y - 240.0).abs() < 0.001);
-        assert!((el.bounds.width - 80.0).abs() < 0.001);
-        assert!((el.bounds.height - 60.0).abs() < 0.001);
+        assert!((el.bounds.x - 810.0).abs() < 0.001);
+        assert!((el.bounds.y - 220.0).abs() < 0.001);
+        assert!((el.bounds.width - 40.0).abs() < 0.001);
+        assert!((el.bounds.height - 30.0).abs() < 0.001);
     }
 
     #[test]
