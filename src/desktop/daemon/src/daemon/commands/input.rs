@@ -161,10 +161,14 @@ pub(crate) fn pointer_scroll(
     ));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    reject_unsupported_background_input("pointer scroll", active_window_id.as_deref())?;
+    let explicit_active_window_id = active_window_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let observe_start = super::super::guards::capture_observe_start(&observe);
+    let mut target_point = None;
     if let Some(element_id) = id.as_deref() {
         let target = super::super::resolve_element_id_target(
             element_id,
@@ -173,10 +177,21 @@ pub(crate) fn pointer_scroll(
             request_context,
         )?;
         let center = super::super::center_point(&target.bounds);
-        backend.move_mouse(center)?;
+        target_point = Some(center);
+        if !explicit_active_window_id || !super::super::background_input_enabled() {
+            backend.move_mouse(center)?;
+        }
     }
-    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
-    backend.scroll_wheel(dx, dy)?;
+    if !try_background_scroll(
+        explicit_active_window_id,
+        guard.bound_active_window.as_ref(),
+        target_point,
+        dx,
+        dy,
+    )? {
+        super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
+        backend.scroll_wheel(dx, dy)?;
+    }
     trace::log(format!("pointer_scroll:ok dx={dx} dy={dy}"));
     let mut result = json!({});
     if let Some(element_id) = id {
@@ -209,27 +224,38 @@ pub(crate) fn pointer_drag(
     ));
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    reject_unsupported_background_input("pointer drag", active_window_id.as_deref())?;
+    let explicit_active_window_id = active_window_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
-    super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
     let start = Point::new(x1, y1);
     let end = Point::new(x2, y2);
-    backend.move_mouse(start)?;
-    backend.left_down(start)?;
-    backend.sleep_ms(hold_ms.max(30));
-    let dx = i64::from(x2) - i64::from(x1);
-    let dy = i64::from(y2) - i64::from(y1);
-    let max_axis = dx.unsigned_abs().max(dy.unsigned_abs());
-    let steps = ((max_axis / 40).max(1)).min(24) as u32;
-    for step in 1..=steps {
-        let x = i64::from(x1) + (dx * i64::from(step)) / i64::from(steps);
-        let y = i64::from(y1) + (dy * i64::from(step)) / i64::from(steps);
-        let px = x.clamp(0, u32::MAX as i64) as u32;
-        let py = y.clamp(0, u32::MAX as i64) as u32;
-        backend.left_drag(Point::new(px, py))?;
+    if !try_background_drag(
+        explicit_active_window_id,
+        guard.bound_active_window.as_ref(),
+        start,
+        end,
+        hold_ms,
+    )? {
+        super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
+        backend.move_mouse(start)?;
+        backend.left_down(start)?;
+        backend.sleep_ms(hold_ms.max(30));
+        let dx = i64::from(x2) - i64::from(x1);
+        let dy = i64::from(y2) - i64::from(y1);
+        let max_axis = dx.unsigned_abs().max(dy.unsigned_abs());
+        let steps = ((max_axis / 40).max(1)).min(24) as u32;
+        for step in 1..=steps {
+            let x = i64::from(x1) + (dx * i64::from(step)) / i64::from(steps);
+            let y = i64::from(y1) + (dy * i64::from(step)) / i64::from(steps);
+            let px = x.clamp(0, u32::MAX as i64) as u32;
+            let py = y.clamp(0, u32::MAX as i64) as u32;
+            backend.left_drag(Point::new(px, py))?;
+        }
+        backend.left_up(end)?;
     }
-    backend.left_up(end)?;
     trace::log(format!(
         "pointer_drag:ok from=({}, {}) to=({}, {}) hold_ms={}",
         x1, y1, x2, y2, hold_ms
@@ -318,6 +344,114 @@ fn try_background_type_text(
     Ok(true)
 }
 
+fn try_background_scroll(
+    explicit_active_window_id: bool,
+    bound_active_window: Option<&crate::platform::windowing::WindowInfo>,
+    point: Option<Point>,
+    dx: i32,
+    dy: i32,
+) -> Result<bool, AppError> {
+    if !explicit_active_window_id || !super::super::background_input_enabled() {
+        return Ok(false);
+    }
+    let Some(target_window) = bound_active_window else {
+        return Err(super::super::background_input_unsupported("pointer scroll"));
+    };
+    let target = super::super::background_input_target_for_window(target_window)?;
+    let point = point.unwrap_or_else(|| super::super::center_point(&target_window.bounds));
+    let backend = new_background_input_backend()?;
+    backend.scroll_wheel(&target, point, dx, dy)?;
+    trace::log(format!(
+        "background_input:scroll ok pid={} window_id={} point=({}, {}) dx={} dy={}",
+        target.pid, target.window_id, point.x, point.y, dx, dy
+    ));
+    Ok(true)
+}
+
+fn try_background_drag(
+    explicit_active_window_id: bool,
+    bound_active_window: Option<&crate::platform::windowing::WindowInfo>,
+    start: Point,
+    end: Point,
+    hold_ms: u64,
+) -> Result<bool, AppError> {
+    if !explicit_active_window_id || !super::super::background_input_enabled() {
+        return Ok(false);
+    }
+    let Some(target_window) = bound_active_window else {
+        return Err(super::super::background_input_unsupported("pointer drag"));
+    };
+    let target = super::super::background_input_target_for_window(target_window)?;
+    let backend = new_background_input_backend()?;
+    backend.left_drag(&target, start, end, hold_ms)?;
+    trace::log(format!(
+        "background_input:drag ok pid={} window_id={} start=({}, {}) end=({}, {}) hold_ms={}",
+        target.pid, target.window_id, start.x, start.y, end.x, end.y, hold_ms
+    ));
+    Ok(true)
+}
+
+fn try_background_hotkey(
+    explicit_active_window_id: bool,
+    bound_active_window: Option<&crate::platform::windowing::WindowInfo>,
+    hotkey: &str,
+) -> Result<bool, AppError> {
+    if !explicit_active_window_id || !super::super::background_input_enabled() {
+        return Ok(false);
+    }
+    let Some(target_window) = bound_active_window else {
+        return Err(super::super::background_input_unsupported("key hotkey"));
+    };
+    let target = super::super::background_input_target_for_window(target_window)?;
+    let backend = new_background_input_backend()?;
+    backend.press_hotkey(&target, hotkey)?;
+    trace::log(format!(
+        "background_input:hotkey ok pid={} window_id={} hotkey={:?}",
+        target.pid, target.window_id, hotkey
+    ));
+    Ok(true)
+}
+
+fn try_background_enter(
+    explicit_active_window_id: bool,
+    bound_active_window: Option<&crate::platform::windowing::WindowInfo>,
+) -> Result<bool, AppError> {
+    if !explicit_active_window_id || !super::super::background_input_enabled() {
+        return Ok(false);
+    }
+    let Some(target_window) = bound_active_window else {
+        return Err(super::super::background_input_unsupported("key enter"));
+    };
+    let target = super::super::background_input_target_for_window(target_window)?;
+    let backend = new_background_input_backend()?;
+    backend.press_enter(&target)?;
+    trace::log(format!(
+        "background_input:enter ok pid={} window_id={}",
+        target.pid, target.window_id
+    ));
+    Ok(true)
+}
+
+fn try_background_escape(
+    explicit_active_window_id: bool,
+    bound_active_window: Option<&crate::platform::windowing::WindowInfo>,
+) -> Result<bool, AppError> {
+    if !explicit_active_window_id || !super::super::background_input_enabled() {
+        return Ok(false);
+    }
+    let Some(target_window) = bound_active_window else {
+        return Err(super::super::background_input_unsupported("key escape"));
+    };
+    let target = super::super::background_input_target_for_window(target_window)?;
+    let backend = new_background_input_backend()?;
+    backend.press_escape(&target)?;
+    trace::log(format!(
+        "background_input:escape ok pid={} window_id={}",
+        target.pid, target.window_id
+    ));
+    Ok(true)
+}
+
 fn reject_unsupported_background_input(
     command_name: &str,
     active_window_id: Option<&str>,
@@ -340,11 +474,20 @@ pub(crate) fn key_hotkey(
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    reject_unsupported_background_input("key hotkey", active_window_id.as_deref())?;
+    let explicit_active_window_id = active_window_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let observe_start = super::super::guards::capture_observe_start(&observe);
-    backend.press_hotkey(&hotkey)?;
+    if !try_background_hotkey(
+        explicit_active_window_id,
+        guard.bound_active_window.as_ref(),
+        &hotkey,
+    )? {
+        backend.press_hotkey(&hotkey)?;
+    }
     let mut result = json!({});
     super::super::guards::append_observe(
         &mut result,
@@ -363,11 +506,19 @@ pub(crate) fn key_enter(
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    reject_unsupported_background_input("key enter", active_window_id.as_deref())?;
+    let explicit_active_window_id = active_window_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let observe_start = super::super::guards::capture_observe_start(&observe);
-    backend.press_enter()?;
+    if !try_background_enter(
+        explicit_active_window_id,
+        guard.bound_active_window.as_ref(),
+    )? {
+        backend.press_enter()?;
+    }
     let mut result = json!({});
     super::super::guards::append_observe(
         &mut result,
@@ -386,11 +537,19 @@ pub(crate) fn key_escape(
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
-    reject_unsupported_background_input("key escape", active_window_id.as_deref())?;
+    let explicit_active_window_id = active_window_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let guard =
         super::super::guards::prepare_active_window(active_window, active_window_id.as_deref())?;
     let observe_start = super::super::guards::capture_observe_start(&observe);
-    backend.press_escape()?;
+    if !try_background_escape(
+        explicit_active_window_id,
+        guard.bound_active_window.as_ref(),
+    )? {
+        backend.press_escape()?;
+    }
     let mut result = json!({});
     super::super::guards::append_observe(
         &mut result,

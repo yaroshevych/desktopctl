@@ -15,7 +15,10 @@ use cocoa::{
 };
 use core_graphics::{
     display::CGDisplay,
-    event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField, ScrollEventUnit},
+    event::{
+        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+        ScrollEventUnit,
+    },
     event_source::{CGEventSource, CGEventSourceStateID},
     geometry::CGPoint,
 };
@@ -207,6 +210,117 @@ impl BackgroundInputBackend for MacosBackgroundInput {
         Ok(())
     }
 
+    fn left_drag(
+        &self,
+        target: &BackgroundInputTarget,
+        start: Point,
+        end: Point,
+        hold_ms: u64,
+    ) -> Result<(), AppError> {
+        trace_background_target("background_input:left_drag_start", target);
+        if target.pid <= 0 || target.window_id == 0 {
+            trace_mouse("background_input:left_drag_error reason=missing_pid_or_window_id");
+            return Err(background_input_unavailable(
+                "background input target is missing pid/window id",
+            ));
+        }
+        let symbols = skylight_symbols()?;
+        let routing = resolve_background_routing(target, symbols)?;
+        preflight_window_server_target(target, routing.psn, symbols)?;
+        let start_point = BackgroundMousePoint::from_screen_point(target, start);
+        let end_point = BackgroundMousePoint::from_screen_point(target, end);
+        trace_mouse(format!(
+            "background_input:left_drag_route {} {} start=({}, {}) end=({}, {}) hold_ms={}",
+            format_target(target),
+            format_routing(routing),
+            start.x,
+            start.y,
+            end.x,
+            end.y,
+            hold_ms
+        ));
+        post_background_mouse_event(
+            target,
+            routing,
+            start_point,
+            CGEventType::MouseMoved,
+            0,
+            symbols,
+        )?;
+        post_background_mouse_event(
+            target,
+            routing,
+            start_point,
+            CGEventType::LeftMouseDown,
+            1,
+            symbols,
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(hold_ms.max(30)));
+        let dx = i64::from(end.x) - i64::from(start.x);
+        let dy = i64::from(end.y) - i64::from(start.y);
+        let max_axis = dx.unsigned_abs().max(dy.unsigned_abs());
+        let steps = ((max_axis / 40).max(1)).min(24) as u32;
+        for step in 1..=steps {
+            let x = i64::from(start.x) + (dx * i64::from(step)) / i64::from(steps);
+            let y = i64::from(start.y) + (dy * i64::from(step)) / i64::from(steps);
+            let px = x.clamp(0, u32::MAX as i64) as u32;
+            let py = y.clamp(0, u32::MAX as i64) as u32;
+            post_background_mouse_event(
+                target,
+                routing,
+                BackgroundMousePoint::from_screen_point(target, Point::new(px, py)),
+                CGEventType::LeftMouseDragged,
+                1,
+                symbols,
+            )?;
+        }
+        post_background_mouse_event(
+            target,
+            routing,
+            end_point,
+            CGEventType::LeftMouseUp,
+            1,
+            symbols,
+        )?;
+        trace_mouse(format!(
+            "background_input:left_drag_dispatched result=sent_unverified {} {}",
+            format_target(target),
+            format_routing(routing)
+        ));
+        Ok(())
+    }
+
+    fn scroll_wheel(
+        &self,
+        target: &BackgroundInputTarget,
+        point: Point,
+        dx: i32,
+        dy: i32,
+    ) -> Result<(), AppError> {
+        trace_background_target("background_input:scroll_start", target);
+        if target.pid <= 0 || target.window_id == 0 {
+            trace_mouse("background_input:scroll_error reason=missing_pid_or_window_id");
+            return Err(background_input_unavailable(
+                "background input target is missing pid/window id",
+            ));
+        }
+        let symbols = skylight_symbols()?;
+        let routing = resolve_background_routing(target, symbols)?;
+        preflight_window_server_target(target, routing.psn, symbols)?;
+        let target_point = BackgroundMousePoint::from_screen_point(target, point);
+        post_background_scroll_event(target, routing, target_point, dx, dy, symbols)?;
+        trace_mouse(format!(
+            "background_input:scroll_dispatched result=sent_unverified {} {} point=({}, {}) dx={} dy={}",
+            format_target(target),
+            format_routing(routing),
+            point.x,
+            point.y,
+            dx,
+            dy
+        ));
+        Ok(())
+    }
+
     fn type_text(&self, target: &BackgroundInputTarget, text: &str) -> Result<(), AppError> {
         trace_background_target("background_input:type_text_start", target);
         if target.pid <= 0 || target.window_id == 0 {
@@ -233,6 +347,39 @@ impl BackgroundInputBackend for MacosBackgroundInput {
             format_target(target),
             format_routing(routing),
             text.chars().count()
+        ));
+        Ok(())
+    }
+
+    fn press_hotkey(&self, target: &BackgroundInputTarget, hotkey: &str) -> Result<(), AppError> {
+        trace_background_target("background_input:hotkey_start", target);
+        if target.pid <= 0 || target.window_id == 0 {
+            trace_mouse("background_input:hotkey_error reason=missing_pid_or_window_id");
+            return Err(background_input_unavailable(
+                "background input target is missing pid/window id",
+            ));
+        }
+        let key = parse_background_hotkey(hotkey)?;
+        let symbols = skylight_symbols()?;
+        let routing = resolve_background_routing(target, symbols)?;
+        preflight_window_server_target(target, routing.psn, symbols)?;
+        trace_mouse(format!(
+            "background_input:hotkey_route {} {} key={} keycode={} flags=0x{:x}",
+            format_target(target),
+            format_routing(routing),
+            key.label,
+            key.keycode,
+            key.flags.bits()
+        ));
+        post_background_key_event(target, routing, key.keycode, key.flags, true, symbols)?;
+        post_background_key_event(target, routing, key.keycode, key.flags, false, symbols)?;
+        trace_mouse(format!(
+            "background_input:hotkey_dispatched result=sent_unverified {} {} key={} keycode={} flags=0x{:x}",
+            format_target(target),
+            format_routing(routing),
+            key.label,
+            key.keycode,
+            key.flags.bits()
         ));
         Ok(())
     }
@@ -411,6 +558,72 @@ fn post_background_text_event(
         format_target(target),
         format_routing(routing),
         ch
+    ));
+    post_event_to_pid(target.pid, &event, symbols)
+}
+
+fn post_background_key_event(
+    target: &BackgroundInputTarget,
+    routing: BackgroundRouting,
+    keycode: u16,
+    flags: CGEventFlags,
+    keydown: bool,
+    symbols: SkyLightSymbols,
+) -> Result<(), AppError> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| AppError::backend_unavailable("failed to create CoreGraphics event source"))?;
+    let event = CGEvent::new_keyboard_event(source, keycode, keydown)
+        .map_err(|_| AppError::backend_unavailable("failed to create background keyboard event"))?;
+    event.set_flags(flags);
+    stamp_background_event(&event, target, routing, None, 0, symbols);
+    trace_mouse(format!(
+        "background_input:post_key keydown={} {} {} keycode={} flags=0x{:x}",
+        keydown,
+        format_target(target),
+        format_routing(routing),
+        keycode,
+        flags.bits()
+    ));
+    post_event_to_pid(target.pid, &event, symbols)
+}
+
+fn post_background_scroll_event(
+    target: &BackgroundInputTarget,
+    routing: BackgroundRouting,
+    point: BackgroundMousePoint,
+    dx: i32,
+    dy: i32,
+    symbols: SkyLightSymbols,
+) -> Result<(), AppError> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| AppError::backend_unavailable("failed to create CoreGraphics event source"))?;
+    let vertical = -dy;
+    let horizontal = dx;
+    let event =
+        CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 2, vertical, horizontal, 0)
+            .map_err(|_| {
+                AppError::backend_unavailable("failed to create background scroll event")
+            })?;
+    stamp_background_event(
+        &event,
+        target,
+        routing,
+        Some(point.window_local),
+        0,
+        symbols,
+    );
+    trace_mouse(format!(
+        "background_input:post_scroll {} {} screen=({:.1}, {:.1}) local=({:.1}, {:.1}) dx={} dy={} wheel1={} wheel2={}",
+        format_target(target),
+        format_routing(routing),
+        point.screen.x,
+        point.screen.y,
+        point.window_local.x,
+        point.window_local.y,
+        dx,
+        dy,
+        vertical,
+        horizontal
     ));
     post_event_to_pid(target.pid, &event, symbols)
 }
@@ -854,12 +1067,7 @@ fn run_osascript(script: &str) -> Result<(), AppError> {
 }
 
 fn applescript_hotkey(input: &str) -> Result<String, AppError> {
-    let lower = input.trim().to_lowercase();
-    let parts: Vec<&str> = lower
-        .split('+')
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-        .collect();
+    let parts = parse_hotkey_parts(input)?;
     if parts.is_empty() {
         return Err(AppError::invalid_argument(format!(
             "invalid hotkey format: {input}"
@@ -871,7 +1079,7 @@ fn applescript_hotkey(input: &str) -> Result<String, AppError> {
         .ok_or_else(|| AppError::invalid_argument(format!("invalid hotkey format: {input}")))?;
     let modifiers = parts[..parts.len() - 1]
         .iter()
-        .map(|p| match *p {
+        .map(|p| match p.as_str() {
             "cmd" | "command" => Ok("command down"),
             "shift" => Ok("shift down"),
             "ctrl" | "control" => Ok("control down"),
@@ -899,6 +1107,58 @@ fn applescript_hotkey(input: &str) -> Result<String, AppError> {
     };
 
     Ok(script)
+}
+
+fn parse_hotkey_parts(input: &str) -> Result<Vec<String>, AppError> {
+    let lower = input.trim().to_lowercase();
+    let parts: Vec<String> = lower
+        .split('+')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if parts.is_empty() {
+        return Err(AppError::invalid_argument(format!(
+            "invalid hotkey format: {input}"
+        )));
+    }
+    Ok(parts)
+}
+
+#[derive(Debug, Clone)]
+struct BackgroundHotkey {
+    keycode: u16,
+    flags: CGEventFlags,
+    label: String,
+}
+
+fn parse_background_hotkey(input: &str) -> Result<BackgroundHotkey, AppError> {
+    let parts = parse_hotkey_parts(input)?;
+    let key = parts
+        .last()
+        .ok_or_else(|| AppError::invalid_argument(format!("invalid hotkey format: {input}")))?;
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    for modifier in &parts[..parts.len() - 1] {
+        flags |= match modifier.as_str() {
+            "cmd" | "command" => CGEventFlags::CGEventFlagCommand,
+            "shift" => CGEventFlags::CGEventFlagShift,
+            "ctrl" | "control" => CGEventFlags::CGEventFlagControl,
+            "opt" | "option" | "alt" => CGEventFlags::CGEventFlagAlternate,
+            _ => {
+                return Err(AppError::invalid_argument(format!(
+                    "invalid hotkey format: {input}"
+                )));
+            }
+        };
+    }
+    let keycode = keycode_for_name(key)
+        .or_else(|| keycode_for_char(key))
+        .ok_or_else(|| AppError::invalid_argument(format!("invalid hotkey format: {input}")))?;
+    Ok(BackgroundHotkey {
+        keycode,
+        flags,
+        label: key.clone(),
+    })
 }
 
 fn keycode_for_name(name: &str) -> Option<u16> {
@@ -933,13 +1193,70 @@ fn keycode_for_name(name: &str) -> Option<u16> {
     }
 }
 
+fn keycode_for_char(key: &str) -> Option<u16> {
+    if key.chars().count() != 1 {
+        return None;
+    }
+    match key.chars().next()? {
+        'a' => Some(0),
+        's' => Some(1),
+        'd' => Some(2),
+        'f' => Some(3),
+        'h' => Some(4),
+        'g' => Some(5),
+        'z' => Some(6),
+        'x' => Some(7),
+        'c' => Some(8),
+        'v' => Some(9),
+        'b' => Some(11),
+        'q' => Some(12),
+        'w' => Some(13),
+        'e' => Some(14),
+        'r' => Some(15),
+        'y' => Some(16),
+        't' => Some(17),
+        '1' => Some(18),
+        '2' => Some(19),
+        '3' => Some(20),
+        '4' => Some(21),
+        '6' => Some(22),
+        '5' => Some(23),
+        '=' => Some(24),
+        '9' => Some(25),
+        '7' => Some(26),
+        '-' => Some(27),
+        '8' => Some(28),
+        '0' => Some(29),
+        ']' => Some(30),
+        'o' => Some(31),
+        'u' => Some(32),
+        '[' => Some(33),
+        'i' => Some(34),
+        'p' => Some(35),
+        'l' => Some(37),
+        'j' => Some(38),
+        '\'' => Some(39),
+        'k' => Some(40),
+        ';' => Some(41),
+        '\\' => Some(42),
+        ',' => Some(43),
+        '/' => Some(44),
+        'n' => Some(45),
+        'm' => Some(46),
+        '.' => Some(47),
+        '`' => Some(50),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::protocol::Bounds;
 
     use super::{
         BackgroundInputTarget, BackgroundMousePoint, Point, ProcessSerialNumber,
-        applescript_hotkey, nsevent_type_for_mouse_event, target_only_focus_record,
+        applescript_hotkey, nsevent_type_for_mouse_event, parse_background_hotkey,
+        target_only_focus_record,
     };
     #[allow(deprecated)]
     use cocoa::appkit::NSEventType;
@@ -967,6 +1284,36 @@ mod tests {
             script,
             r#"tell application "System Events" to keystroke "a""#
         );
+    }
+
+    #[test]
+    fn background_hotkey_supports_enter_escape_and_modified_character() {
+        let enter = parse_background_hotkey("enter").expect("enter");
+        assert_eq!(enter.keycode, 36);
+        assert_eq!(
+            enter.flags,
+            core_graphics::event::CGEventFlags::CGEventFlagNull
+        );
+
+        let escape = parse_background_hotkey("escape").expect("escape");
+        assert_eq!(escape.keycode, 53);
+        assert_eq!(
+            escape.flags,
+            core_graphics::event::CGEventFlags::CGEventFlagNull
+        );
+
+        let select_all = parse_background_hotkey("cmd+a").expect("cmd+a");
+        assert_eq!(select_all.keycode, 0);
+        assert!(
+            select_all
+                .flags
+                .contains(core_graphics::event::CGEventFlags::CGEventFlagCommand)
+        );
+    }
+
+    #[test]
+    fn background_hotkey_rejects_unknown_key() {
+        assert!(parse_background_hotkey("cmd+definitely-not-a-key").is_err());
     }
 
     #[test]

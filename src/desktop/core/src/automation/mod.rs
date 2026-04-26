@@ -46,7 +46,28 @@ pub struct BackgroundInputTarget {
 pub trait BackgroundInputBackend {
     fn preflight(&self, target: &BackgroundInputTarget) -> Result<(), AppError>;
     fn left_click(&self, target: &BackgroundInputTarget, point: Point) -> Result<(), AppError>;
+    fn left_drag(
+        &self,
+        target: &BackgroundInputTarget,
+        start: Point,
+        end: Point,
+        hold_ms: u64,
+    ) -> Result<(), AppError>;
+    fn scroll_wheel(
+        &self,
+        target: &BackgroundInputTarget,
+        point: Point,
+        dx: i32,
+        dy: i32,
+    ) -> Result<(), AppError>;
     fn type_text(&self, target: &BackgroundInputTarget, text: &str) -> Result<(), AppError>;
+    fn press_hotkey(&self, target: &BackgroundInputTarget, hotkey: &str) -> Result<(), AppError>;
+    fn press_enter(&self, target: &BackgroundInputTarget) -> Result<(), AppError> {
+        self.press_hotkey(target, "enter")
+    }
+    fn press_escape(&self, target: &BackgroundInputTarget) -> Result<(), AppError> {
+        self.press_hotkey(target, "escape")
+    }
 }
 
 #[cfg(target_os = "macos")]
