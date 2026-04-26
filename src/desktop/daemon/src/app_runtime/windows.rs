@@ -6,6 +6,7 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 
 use crate::{daemon, trace};
+use super::about;
 
 thread_local! {
     static TRAY: RefCell<Option<tray_icon::TrayIcon>> = RefCell::new(None);
@@ -95,7 +96,7 @@ pub(crate) fn run() -> Result<(), AppError> {
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == about_id {
-            trace::log("menu:about click");
+            about::show();
             return;
         }
         if event.id == check_permissions_id {
