@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::mpsc, time::Instant};
 
 use desktop_core::{automation::new_backend, error::AppError, protocol::Bounds};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::{
     daemon::{window_refs, window_target},
@@ -60,7 +60,7 @@ fn tokenize_meta_for_window(
     bounds: Bounds,
     require_background_capture: bool,
 ) -> Result<vision::pipeline::TokenizeWindowMeta, AppError> {
-    let native_window_id = if require_background_capture {
+    let native_window_id = if should_use_background_capture(window, require_background_capture) {
         Some(super::super::explicit_background_capture_window_id(window)?)
     } else {
         None
@@ -73,6 +73,13 @@ fn tokenize_meta_for_window(
         native_window_id,
         capture_bounds: native_window_id.map(|_| window.bounds.clone()),
     })
+}
+
+fn should_use_background_capture(
+    window: &platform::windowing::WindowInfo,
+    require_background_capture: bool,
+) -> bool {
+    require_background_capture && !window.frontmost
 }
 
 pub(crate) fn screenshot(
@@ -733,4 +740,45 @@ pub(crate) fn wait_text(
     disappear: bool,
 ) -> Result<Value, AppError> {
     super::super::wait_for_text(&text, timeout_ms, interval_ms, disappear)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(frontmost: bool) -> platform::windowing::WindowInfo {
+        platform::windowing::WindowInfo {
+            id: "123".to_string(),
+            window_ref: Some("app_123".to_string()),
+            parent_id: None,
+            pid: 42,
+            index: 0,
+            app: "App".to_string(),
+            title: "Title".to_string(),
+            bounds: Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            frontmost,
+            visible: true,
+            modal: None,
+        }
+    }
+
+    #[test]
+    fn foreground_explicit_active_window_keeps_ax_available() {
+        assert!(!should_use_background_capture(&window(true), true));
+    }
+
+    #[test]
+    fn background_explicit_active_window_uses_window_capture() {
+        assert!(should_use_background_capture(&window(false), true));
+    }
+
+    #[test]
+    fn implicit_active_window_uses_foreground_capture() {
+        assert!(!should_use_background_capture(&window(false), false));
+    }
 }
