@@ -32,6 +32,7 @@ use interprocess::local_socket::{
 };
 use serde_json::{Value, json};
 
+mod background_verification;
 mod click_ops;
 mod commands;
 mod geometry;
@@ -127,7 +128,7 @@ fn background_input_enabled() -> bool {
 
 fn background_input_unsupported(command_name: &str) -> AppError {
     AppError::backend_unavailable(format!(
-        "background input currently supports left click and text input only; {command_name} requires switching to frontmost mode"
+        "background input does not support {command_name}; switch to frontmost mode"
     ))
 }
 const OBSERVE_SAMPLE_INTERVAL_MS: u64 = 40;
