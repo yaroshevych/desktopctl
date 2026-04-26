@@ -84,6 +84,7 @@ pub fn collect_window_elements(
     _pid: i32,
     _native_window_id: u32,
     _target_window_bounds: Option<&Bounds>,
+    _target_window_title: Option<&str>,
 ) -> Result<Vec<AxElement>, AppError> {
     Ok(Vec::new())
 }

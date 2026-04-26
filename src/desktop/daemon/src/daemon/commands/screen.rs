@@ -61,11 +61,9 @@ fn tokenize_meta_for_window(
     require_background_capture: bool,
 ) -> Result<vision::pipeline::TokenizeWindowMeta, AppError> {
     let background_capture = should_use_background_capture(window, require_background_capture);
-    let native_window_id = if should_use_background_capture(window, require_background_capture) {
-        Some(super::super::explicit_background_capture_window_id(window)?)
-    } else {
-        None
-    };
+    let native_window_id = background_capture
+        .then(|| super::super::explicit_background_capture_window_id(window))
+        .transpose()?;
     Ok(vision::pipeline::TokenizeWindowMeta {
         id: window.id.clone(),
         title: window.title.clone(),

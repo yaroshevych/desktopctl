@@ -16,9 +16,15 @@ pub fn collect_window_elements(
     pid: i32,
     native_window_id: u32,
     target_window_bounds: Option<&desktop_core::protocol::Bounds>,
+    target_window_title: Option<&str>,
 ) -> Result<Vec<AxElement>, desktop_core::error::AppError> {
     collect_with_retry(|| {
-        platform::ax::collect_window_elements(pid, native_window_id, target_window_bounds)
+        platform::ax::collect_window_elements(
+            pid,
+            native_window_id,
+            target_window_bounds,
+            target_window_title,
+        )
     })
 }
 

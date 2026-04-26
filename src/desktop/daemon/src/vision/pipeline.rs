@@ -455,19 +455,29 @@ fn frame_fingerprint(image: &image::RgbaImage) -> u64 {
 }
 
 fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
+    let capture_bounds = meta
+        .capture_bounds
+        .as_ref()
+        .map(format_bounds_for_cache_key)
+        .unwrap_or_else(|| "-".to_string());
     format!(
-        "{}|{}|{}|pid={}|{:.0}:{:.0}:{:.0}:{:.0}|native={:?}",
+        "{}|{}|{}|pid={}|bounds={}|capture_bounds={}|native={:?}",
         meta.id,
         meta.title,
         meta.app.as_deref().unwrap_or_default(),
         meta.pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "-".to_string()),
-        meta.bounds.x,
-        meta.bounds.y,
-        meta.bounds.width,
-        meta.bounds.height,
+        format_bounds_for_cache_key(&meta.bounds),
+        capture_bounds,
         meta.native_window_id
+    )
+}
+
+fn format_bounds_for_cache_key(bounds: &Bounds) -> String {
+    format!(
+        "{:.0}:{:.0}:{:.0}:{:.0}",
+        bounds.x, bounds.y, bounds.width, bounds.height
     )
 }
 
@@ -720,10 +730,23 @@ fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax
             pid,
             native_window_id,
             meta.capture_bounds.as_ref().or(Some(&meta.bounds)),
+            Some(&meta.title),
         ),
+        (Some(pid), None) => {
+            trace::log(format!(
+                "pipeline:tokenize:ax_skip reason=target_window_missing_native_id pid={pid} app={} title=\"{}\" id={}",
+                meta.app.as_deref().unwrap_or_default(),
+                meta.title,
+                meta.id
+            ));
+            return Vec::new();
+        }
         (None, Some(native_window_id)) => {
             trace::log(format!(
-                "pipeline:tokenize:ax_skip reason=background_window_missing_pid window_id={native_window_id}"
+                "pipeline:tokenize:ax_skip reason=background_window_missing_pid window_id={native_window_id} app={} title=\"{}\" id={}",
+                meta.app.as_deref().unwrap_or_default(),
+                meta.title,
+                meta.id
             ));
             return Vec::new();
         }
@@ -1060,8 +1083,8 @@ mod tests {
     use image::{Rgba, RgbaImage};
 
     use super::{
-        TokenizeWindowMeta, build_window_elements, tokenize_cache_key, window_capture_crop_rect,
-        window_crop_rect, write_tokenize_overlay,
+        TokenizeWindowMeta, build_window_elements, detect_ax_elements, tokenize_cache_key,
+        window_capture_crop_rect, window_crop_rect, write_tokenize_overlay,
     };
 
     fn golden_fixture_path(name: &str) -> PathBuf {
@@ -1473,6 +1496,37 @@ mod tests {
             tokenize_cache_key(&first),
             tokenize_cache_key(&different_window)
         );
+
+        let mut different_capture_bounds = first.clone();
+        different_capture_bounds.capture_bounds = Some(Bounds {
+            x: 20.0,
+            y: 30.0,
+            width: 300.0,
+            height: 200.0,
+        });
+        assert_ne!(
+            tokenize_cache_key(&first),
+            tokenize_cache_key(&different_capture_bounds)
+        );
+    }
+
+    #[test]
+    fn detect_ax_elements_skips_underspecified_target_pid() {
+        let window_meta = TokenizeWindowMeta {
+            id: "target-without-native-id".to_string(),
+            title: "Window".to_string(),
+            app: Some("App".to_string()),
+            bounds: Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            pid: Some(100),
+            native_window_id: None,
+            capture_bounds: None,
+        };
+        assert!(detect_ax_elements(Some(&window_meta)).is_empty());
     }
 
     #[test]

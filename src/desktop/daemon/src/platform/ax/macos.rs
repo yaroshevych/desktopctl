@@ -73,10 +73,14 @@ pub fn collect_window_elements(
     pid: i32,
     native_window_id: u32,
     target_window_bounds: Option<&Bounds>,
+    target_window_title: Option<&str>,
 ) -> Result<Vec<AxElement>, AppError> {
     let app = AXUIElement::application(pid);
     let windows = app.windows().map_err(ax_err)?;
-    let mut best_fallback: Option<(AXUIElement, f64)> = None;
+    let mut best_fallback: Option<(AXUIElement, f64, String)> = None;
+    let target_title = target_window_title
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
 
     for window in windows.iter() {
         if ax_window_id(&window) == Some(native_window_id) {
@@ -88,19 +92,30 @@ pub fn collect_window_elements(
 
         if let (Some(target), Some(bounds)) = (target_window_bounds, element_bounds(&window)) {
             let score = iou(target, &bounds);
-            if score > 0.5
-                && best_fallback
+            let window_title = window
+                .title()
+                .ok()
+                .map(|title| title.to_string())
+                .unwrap_or_default();
+            let title_matches = target_title.is_some_and(|target_title| {
+                !window_title.trim().is_empty() && window_title.eq_ignore_ascii_case(target_title)
+            });
+            if score >= 0.9 && title_matches {
+                let better = best_fallback
                     .as_ref()
-                    .is_none_or(|(_, best_score)| score > *best_score)
-            {
-                best_fallback = Some((window.clone(), score));
+                    .map(|(_, best_score, _)| score > *best_score)
+                    .unwrap_or(true);
+                if better {
+                    best_fallback = Some((window.clone(), score, window_title));
+                }
             }
         }
     }
 
-    if let Some((window, score)) = best_fallback {
+    if let Some((window, score, title)) = best_fallback {
         trace::log(format!(
-            "ax:background_window_match source=bounds pid={pid} window_id={native_window_id} iou={score:.3}"
+            "ax:background_window_match source=bounds_title pid={pid} window_id={native_window_id} iou={score:.3} title=\"{}\"",
+            compact_for_log(&title, 80)
         ));
         return collect_window_tree_elements(&window);
     }
