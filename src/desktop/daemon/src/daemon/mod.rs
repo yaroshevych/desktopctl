@@ -525,6 +525,18 @@ fn enforce_frontmost_app_policy(
         );
     }
 
+    if app_policy::command_is_clipboard_operation(command) && !cfg.clipboard_allowed {
+        return Err(
+            AppError::permission_denied("clipboard operations are disabled by current policy")
+                .with_details(json!({
+                    "policy_mode": cfg.policy_mode,
+                    "apps": cfg.apps,
+                    "clipboard_allowed": cfg.clipboard_allowed,
+                    "remediation": "open DesktopCtl menu -> App Access Policy and enable Allow clipboard access"
+                })),
+        );
+    }
+
     if let Some(target_app) = app_policy::command_target_app_name(command) {
         return enforce_app_name_policy(&cfg, target_app, "target app", "target_app");
     }
@@ -992,6 +1004,7 @@ mod tests {
             apps: vec!["Notes".to_string()],
             allow_full_screen_capture: true,
             agent_access_disabled: false,
+            clipboard_allowed: true,
         };
         let err = super::enforce_app_name_policy(&cfg, "Notes", "target app", "target_app")
             .expect_err("target app should be blocked");

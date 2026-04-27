@@ -19,7 +19,7 @@ use std::{
 use crate::app_policy::{self, AppPolicyConfig, PolicyMode};
 
 const W: f64 = 448.0;
-const H: f64 = 270.0;
+const H: f64 = 300.0;
 const SAVE_DEBOUNCE_MS: u64 = 500;
 static SAVE_DEBOUNCE_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -64,6 +64,7 @@ struct DialogState {
     mode_popup: Retained<AnyObject>,
     apps_field: Retained<AnyObject>,
     full_screen_checkbox: Retained<AnyObject>,
+    clipboard_checkbox: Retained<AnyObject>,
     warning_label: Retained<NSTextField>,
 }
 
@@ -157,6 +158,7 @@ fn persist_policy_from_dialog() {
                 apps: apps.clone(),
                 allow_full_screen_capture: bool_state(&state.full_screen_checkbox),
                 agent_access_disabled: app_policy::current().agent_access_disabled,
+                clipboard_allowed: bool_state(&state.clipboard_checkbox),
             };
             if let Err(err) = app_policy::save(&cfg) {
                 eprintln!("failed to save app policy config: {err}");
@@ -317,7 +319,7 @@ fn show_on_main() {
         let full_screen_checkbox: *mut AnyObject = msg_send![class!(NSButton), alloc];
         let full_screen_checkbox: *mut AnyObject = msg_send![
             full_screen_checkbox,
-            initWithFrame: NSRect::new(NSPoint::new(20.0, 78.0), NSSize::new(408.0, 18.0))
+            initWithFrame: NSRect::new(NSPoint::new(20.0, 98.0), NSSize::new(408.0, 18.0))
         ];
         let _: () = msg_send![full_screen_checkbox, setButtonType: 3usize];
         let _: () = msg_send![
@@ -331,6 +333,24 @@ fn show_on_main() {
         let _: () = msg_send![full_screen_checkbox, setTarget: target];
         let _: () = msg_send![full_screen_checkbox, setAction: sel!(appPolicyModeChanged:)];
         let _: () = msg_send![&*cv, addSubview: full_screen_checkbox];
+
+        let clipboard_checkbox: *mut AnyObject = msg_send![class!(NSButton), alloc];
+        let clipboard_checkbox: *mut AnyObject = msg_send![
+            clipboard_checkbox,
+            initWithFrame: NSRect::new(NSPoint::new(20.0, 78.0), NSSize::new(408.0, 18.0))
+        ];
+        let _: () = msg_send![clipboard_checkbox, setButtonType: 3usize];
+        let _: () = msg_send![
+            clipboard_checkbox,
+            setTitle: &*NSString::from_str("Allow clipboard access")
+        ];
+        let _: () = msg_send![
+            clipboard_checkbox,
+            setState: if cfg.clipboard_allowed { 1isize } else { 0isize }
+        ];
+        let _: () = msg_send![clipboard_checkbox, setTarget: target];
+        let _: () = msg_send![clipboard_checkbox, setAction: sel!(appPolicyModeChanged:)];
+        let _: () = msg_send![&*cv, addSubview: clipboard_checkbox];
 
         let helper = NSTextField::wrappingLabelWithString(
             &NSString::from_str("Comma-separated app names. Example: Safari, Slack"),
@@ -373,6 +393,7 @@ fn show_on_main() {
             mode_popup: Retained::from_raw(mode_popup).unwrap(),
             apps_field: Retained::from_raw(apps_field).unwrap(),
             full_screen_checkbox: Retained::from_raw(full_screen_checkbox).unwrap(),
+            clipboard_checkbox: Retained::from_raw(clipboard_checkbox).unwrap(),
             warning_label: warning,
         };
 

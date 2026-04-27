@@ -21,6 +21,10 @@ fn default_allow_full_screen_capture() -> bool {
     true
 }
 
+fn default_allow_clipboard_access() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPolicyConfig {
     #[serde(default)]
@@ -31,6 +35,8 @@ pub struct AppPolicyConfig {
     pub allow_full_screen_capture: bool,
     #[serde(default)]
     pub agent_access_disabled: bool,
+    #[serde(default = "default_allow_clipboard_access")]
+    pub clipboard_allowed: bool,
 }
 
 impl Default for AppPolicyConfig {
@@ -40,6 +46,7 @@ impl Default for AppPolicyConfig {
             apps: Vec::new(),
             allow_full_screen_capture: default_allow_full_screen_capture(),
             agent_access_disabled: false,
+            clipboard_allowed: default_allow_clipboard_access(),
         }
     }
 }
@@ -226,6 +233,8 @@ pub fn command_requires_policy(command: &Command) -> bool {
             | Command::KeyHotkey { .. }
             | Command::KeyEnter { .. }
             | Command::KeyEscape { .. }
+            | Command::ClipboardRead
+            | Command::ClipboardWrite { .. }
     )
 }
 
@@ -245,6 +254,10 @@ pub fn command_is_full_screen_capture(command: &Command) -> bool {
             ..
         }
     )
+}
+
+pub fn command_is_clipboard_operation(command: &Command) -> bool {
+    matches!(command, Command::ClipboardRead | Command::ClipboardWrite { .. })
 }
 
 fn normalize_apps(apps: &[String]) -> Vec<String> {
@@ -282,6 +295,7 @@ mod tests {
             apps: vec!["Safari".to_string(), "Slack".to_string()],
             allow_full_screen_capture: false,
             agent_access_disabled: false,
+            clipboard_allowed: true,
         };
         assert!(is_app_allowed(&cfg, "safari"));
         assert!(!is_app_allowed(&cfg, "Terminal"));
@@ -294,6 +308,7 @@ mod tests {
             apps: vec!["Slack".to_string()],
             allow_full_screen_capture: false,
             agent_access_disabled: false,
+            clipboard_allowed: true,
         };
         assert!(!is_app_allowed(&cfg, "slack"));
         assert!(is_app_allowed(&cfg, "Safari"));

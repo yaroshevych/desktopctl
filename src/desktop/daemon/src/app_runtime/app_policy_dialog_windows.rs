@@ -9,22 +9,27 @@ pub(crate) fn show() {
 
     let message = match cfg.policy_mode {
         app_policy::PolicyMode::AllowAll => {
-            "Agent Access Policy: Allow All Apps\n\n\
-            DesktopCtl is currently configured to allow agent access to all applications.\n\n\
-            To manage specific app permissions, use the CLI:\n\
-            desktopctl policy list\n\
-            desktopctl policy set --mode allow-only --apps \"App1, App2\""
-                .to_string()
+            format!(
+                "Agent Access Policy: Allow All Apps\n\n\
+                DesktopCtl is currently configured to allow agent access to all applications.\n\n\
+                Clipboard access allowed: {}\n\n\
+                To manage specific app permissions, use the CLI:\n\
+                desktopctl policy list\n\
+                desktopctl policy set --mode allow-only --apps \"App1, App2\"",
+                cfg.clipboard_allowed
+            )
         }
         app_policy::PolicyMode::AllowOnlySelected => {
             let apps_list = cfg.apps.join(", ");
             format!(
                 "Agent Access Policy: Allow Only Selected Apps\n\n\
                 Allowed apps: {}\n\n\
+                Clipboard access allowed: {}\n\n\
                 To change permissions, use the CLI:\n\
                 desctopctl policy list\n\
                 desktopctl policy set --mode allow-only --apps \"App1, App2\"",
-                if apps_list.is_empty() { "(none)" } else { &apps_list }
+                if apps_list.is_empty() { "(none)" } else { &apps_list },
+                cfg.clipboard_allowed
             )
         }
         app_policy::PolicyMode::AllowAllExcept => {
@@ -32,10 +37,12 @@ pub(crate) fn show() {
             format!(
                 "Agent Access Policy: Allow All Except\n\n\
                 Blocked apps: {}\n\n\
+                Clipboard access allowed: {}\n\n\
                 To change permissions, use the CLI:\n\
                 desktopctl policy list\n\
                 desktopctl policy set --mode allow-all-except --apps \"App1, App2\"",
-                if apps_list.is_empty() { "(none)" } else { &apps_list }
+                if apps_list.is_empty() { "(none)" } else { &apps_list },
+                cfg.clipboard_allowed
             )
         }
     };
