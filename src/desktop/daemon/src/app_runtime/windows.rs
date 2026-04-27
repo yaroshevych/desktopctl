@@ -6,10 +6,7 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 
-use super::{
-    about_windows as about, app_policy_dialog_windows,
-    permissions_dialog_windows as permissions_dialog,
-};
+use super::about_windows as about;
 use crate::{daemon, trace};
 
 // WM_APP + 1: update toggle label. wParam = 1 (disabled) or 0 (enabled).
@@ -73,21 +70,10 @@ pub(crate) fn run() -> Result<(), AppError> {
         true,
         None,
     );
-    let app_access_policy = MenuItem::new("Agent Permissions", true, None);
-    let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
-    let check_permissions = MenuItem::new("Setup Access", true, None);
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
 
     menu.append(&toggle_cli_gui_ops)
-        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&app_access_policy)
-        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&PredefinedMenuItem::separator())
-        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&toggle_overlay)
-        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&check_permissions)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&about)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
@@ -97,9 +83,6 @@ pub(crate) fn run() -> Result<(), AppError> {
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
 
     let toggle_cli_gui_ops_id = toggle_cli_gui_ops.id().clone();
-    let toggle_overlay_id = toggle_overlay.id().clone();
-    let check_permissions_id = check_permissions.id().clone();
-    let app_access_policy_id = app_access_policy.id().clone();
     let about_id = about.id().clone();
     let quit_id = quit.id().clone();
 
@@ -116,22 +99,10 @@ pub(crate) fn run() -> Result<(), AppError> {
             about::show();
             return;
         }
-        if event.id == check_permissions_id {
-            permissions_dialog::show();
-            return;
-        }
-        if event.id == app_access_policy_id {
-            app_policy_dialog_windows::show();
-            return;
-        }
         if event.id == toggle_cli_gui_ops_id {
             let disabled = !daemon::gui_ops_disabled();
             daemon::set_gui_ops_disabled(disabled);
             trace::log(format!("menu:toggle_cli_gui_ops disabled={disabled}"));
-            return;
-        }
-        if event.id == toggle_overlay_id {
-            trace::log("menu:toggle_overlay click");
             return;
         }
         if event.id == quit_id {

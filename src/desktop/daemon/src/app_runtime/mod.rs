@@ -4,14 +4,10 @@ mod about;
 mod about_windows;
 #[cfg(target_os = "macos")]
 mod app_policy_dialog;
-#[cfg(target_os = "windows")]
-mod app_policy_dialog_windows;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 mod permissions_dialog;
-#[cfg(target_os = "windows")]
-mod permissions_dialog_windows;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod unsupported;
 #[cfg(target_os = "windows")]
