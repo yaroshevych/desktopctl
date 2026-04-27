@@ -47,12 +47,20 @@ impl TextBox {
     }
 
     fn merge_refs_with_separator(items: &[&TextBox], separator: &str, order: SortOrder) -> TextBox {
-        let merged_bounds = items
-            .iter()
-            .skip(1)
-            .fold(items[0].bounds.clone(), |acc, tb| {
-                union_bounds(&acc, &tb.bounds)
-            });
+        let Some(first) = items.first() else {
+            return TextBox {
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                text: String::new(),
+            };
+        };
+        let merged_bounds = items.iter().skip(1).fold(first.bounds.clone(), |acc, tb| {
+            union_bounds(&acc, &tb.bounds)
+        });
 
         let mut sorted: Vec<&TextBox> = items.to_vec();
         match order {
@@ -1012,6 +1020,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_refs_handles_empty_items() {
+        let merged = TextBox::merge_refs(&[]);
+        assert_eq!(merged.text, "");
+        assert_eq!(merged.bounds.x, 0.0);
+        assert_eq!(merged.bounds.y, 0.0);
+        assert_eq!(merged.bounds.width, 0.0);
+        assert_eq!(merged.bounds.height, 0.0);
+    }
 
     #[test]
     fn group_words_merges_same_line() {

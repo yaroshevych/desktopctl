@@ -336,22 +336,31 @@ fn accept_loop(listener: IpcListener, config: DaemonConfig) -> Result<(), AppErr
         match listener.accept() {
             Ok(stream) => {
                 last_activity = Instant::now();
-                let active = active_clients.load(Ordering::SeqCst);
-                if active >= MAX_CONCURRENT_CLIENTS {
-                    trace::log(format!(
-                        "accept:client_rejected too_many_active_clients active={} max={}",
-                        active, MAX_CONCURRENT_CLIENTS
-                    ));
-                    continue;
-                }
+                let active = active_clients
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+                        (active < MAX_CONCURRENT_CLIENTS).then_some(active + 1)
+                    })
+                    .map(|previous| previous + 1);
+                let active = match active {
+                    Ok(active) => active,
+                    Err(active) => {
+                        trace::log(format!(
+                            "accept:client_rejected too_many_active_clients active={} max={}",
+                            active, MAX_CONCURRENT_CLIENTS
+                        ));
+                        continue;
+                    }
+                };
                 if let Err(err) = stream.set_nonblocking(false) {
-                    eprintln!("failed to set client stream blocking mode: {err}");
-                    trace::log(format!("accept:set_blocking_failed error={err}"));
+                    trace::log(format!(
+                        "accept:set_blocking_failed active={} error={}",
+                        active, err
+                    ));
+                    active_clients.fetch_sub(1, Ordering::SeqCst);
                     continue;
                 }
-                trace::log("accept:client_connected");
+                trace::log(format!("accept:client_connected active={active}"));
                 let active_clients = Arc::clone(&active_clients);
-                active_clients.fetch_add(1, Ordering::SeqCst);
                 thread::spawn(move || {
                     if let Err(err) = handle_client(stream) {
                         eprintln!("daemon client error: {err}");
