@@ -73,14 +73,28 @@ fn renders_version_for_top_level_version_flag() {
 
 #[test]
 fn background_flag_is_cli_option_not_command_argument() {
-    let (options, args) = split_cli_options(
-        &["--background", "--json", "debug", "ping"].map(str::to_string),
-    )
-    .expect("cli options should parse");
+    let (options, args) =
+        split_cli_options(&["--background", "--json", "debug", "ping"].map(str::to_string))
+            .expect("cli options should parse");
 
     assert!(options.background);
     assert_eq!(options.output_mode, OutputMode::Json);
     assert_eq!(args, ["debug", "ping"].map(str::to_string));
+}
+
+#[test]
+fn app_open_background_flag_is_command_argument() {
+    let (options, args) = split_cli_options(
+        &["app", "open", "Calculator", "--background", "--json"].map(str::to_string),
+    )
+    .expect("cli options should parse");
+
+    assert!(!options.background);
+    assert_eq!(options.output_mode, OutputMode::Json);
+    assert_eq!(
+        args,
+        ["app", "open", "Calculator", "--background"].map(str::to_string)
+    );
 }
 
 #[test]
@@ -207,11 +221,33 @@ fn parses_app_open_with_wait() {
             name,
             wait,
             timeout_ms,
+            background,
             ..
         } => {
             assert_eq!(name, "Calculator");
             assert!(wait);
             assert_eq!(timeout_ms, Some(1500));
+            assert!(!background);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_app_open_in_background() {
+    let args = vec![
+        "app".to_string(),
+        "open".to_string(),
+        "Calculator".to_string(),
+        "--background".to_string(),
+    ];
+    let command = parse_command(&args).expect("app open --background should parse");
+    match command {
+        Command::OpenApp {
+            name, background, ..
+        } => {
+            assert_eq!(name, "Calculator");
+            assert!(background);
         }
         other => panic!("unexpected command: {other:?}"),
     }

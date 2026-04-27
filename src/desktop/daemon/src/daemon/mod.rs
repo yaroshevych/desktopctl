@@ -679,7 +679,8 @@ fn execute_with_context(
             args,
             wait,
             timeout_ms,
-        } => commands::app::open(name, args, wait, timeout_ms),
+            background,
+        } => commands::app::open(name, args, wait, timeout_ms, background),
         Command::PointerMove {
             x,
             y,

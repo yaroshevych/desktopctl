@@ -111,6 +111,7 @@ fn parse_app(m: &ArgMatches) -> Result<Command, AppError> {
                 .get_one::<String>("timeout")
                 .map(|v| parse_u64(v, "timeout_ms"))
                 .transpose()?,
+            background: sub.get_flag("app_background"),
         }),
         _ => Err(AppError::invalid_argument("unknown app action")),
     }
@@ -605,7 +606,6 @@ fn clap_app() -> ClapCommand {
         .arg(
             Arg::new("background")
                 .long("background")
-                .global(true)
                 .action(ArgAction::SetTrue)
                 .help("Auto-start DesktopCtl in background input mode"),
         )
@@ -669,6 +669,12 @@ Policy:\n\
                 )
                 .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue))
                 .arg(Arg::new("timeout").long("timeout").value_name("ms"))
+                .arg(
+                    Arg::new("app_background")
+                        .long("background")
+                        .action(ArgAction::SetTrue)
+                        .help("Open without activating the application"),
+                )
                 .arg(
                     Arg::new("open_args")
                         .last(true)

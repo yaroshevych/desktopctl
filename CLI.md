@@ -32,8 +32,8 @@ desktopctl screen tokenize --active-window "$win_id"
 
 ## App and Window
 ```bash
-# open an app; optionally wait until it is ready
-desktopctl app open <application> [--wait] [--timeout <ms>] [-- <open-args...>]
+# open an app; optionally wait until it is ready or avoid activating it
+desktopctl app open <application> [--wait] [--timeout <ms>] [--background] [-- <open-args...>]
 
 # hide other visible apps and activate target app
 desktopctl app isolate <application>

@@ -67,6 +67,8 @@ pub enum Command {
         args: Vec<String>,
         wait: bool,
         timeout_ms: Option<u64>,
+        #[serde(default)]
+        background: bool,
     },
     PointerMove {
         x: u32,

@@ -1390,6 +1390,7 @@ mod tests {
             args: vec![],
             wait: false,
             timeout_ms: None,
+            background: false,
         };
         let response = ResponseEnvelope::success("r1", json!({ "window_id": "notes_859606" }));
 
@@ -1407,6 +1408,7 @@ mod tests {
             args: vec![],
             wait: false,
             timeout_ms: None,
+            background: false,
         };
         let response = ResponseEnvelope::success("r1", json!({ "window_id": "notes_859606" }));
 

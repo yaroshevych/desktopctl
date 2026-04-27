@@ -257,7 +257,10 @@ pub fn command_is_full_screen_capture(command: &Command) -> bool {
 }
 
 pub fn command_is_clipboard_operation(command: &Command) -> bool {
-    matches!(command, Command::ClipboardRead | Command::ClipboardWrite { .. })
+    matches!(
+        command,
+        Command::ClipboardRead | Command::ClipboardWrite { .. }
+    )
 }
 
 fn normalize_apps(apps: &[String]) -> Vec<String> {
@@ -336,6 +339,7 @@ mod tests {
             args: Vec::new(),
             wait: false,
             timeout_ms: None,
+            background: false,
         };
         assert!(command_requires_policy(&command));
         assert_eq!(command_target_app_name(&command), Some("Notes"));

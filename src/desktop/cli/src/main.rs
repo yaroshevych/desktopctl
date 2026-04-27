@@ -76,8 +76,8 @@ fn run(args: &[String], request_id: &str, options: CliOptions) -> Result<i32, Ap
     let run_started = Instant::now();
     let command = parse_command(args)?;
     let passthrough_stored_response = matches!(command, Command::RequestResponse { .. });
-    let request =
-        RequestEnvelope::new(request_id.to_string(), command).with_background_input(options.background);
+    let request = RequestEnvelope::new(request_id.to_string(), command)
+        .with_background_input(options.background);
     trace_log(format!(
         "run:request_start request_id={} command={}",
         request.request_id,
@@ -133,7 +133,7 @@ fn split_cli_options(args: &[String]) -> Result<(CliOptions, Vec<String>), AppEr
         match arg.as_str() {
             "--json" => mode = OutputMode::Json,
             "--markdown" => mode = OutputMode::Markdown,
-            "--background" => background = true,
+            "--background" if !is_app_open_context(&filtered) => background = true,
             _ => filtered.push(arg.clone()),
         }
     }
@@ -149,6 +149,10 @@ fn split_cli_options(args: &[String]) -> Result<(CliOptions, Vec<String>), AppEr
         },
         filtered,
     ))
+}
+
+fn is_app_open_context(filtered: &[String]) -> bool {
+    filtered.len() >= 2 && filtered[0] == "app" && filtered[1] == "open"
 }
 
 fn print_error(request_id: &str, err: &AppError, output_mode: OutputMode) {
