@@ -14,6 +14,7 @@ stable_legacy_cli_path := stable_runtime_dir + "/desktopctl"
 manifest_path := workspace_dir + "/Cargo.toml"
 windows_msvc_target := "x86_64-pc-windows-msvc"
 windows_gnu_target := "x86_64-pc-windows-gnu"
+windows_arm64_target := "aarch64-pc-windows-gnullvm"
 
 build:
   cd {{workspace_dir}} && cargo build --release -p desktopctld -p desktopctl
@@ -51,6 +52,65 @@ build-windows-gnu:
   cd {{workspace_dir}} && cargo build --release --target {{windows_gnu_target}} -p desktopctld
   echo "Built: {{workspace_dir}}/target/{{windows_gnu_target}}/release/desktopctl.exe"
   echo "Built: {{workspace_dir}}/target/{{windows_gnu_target}}/release/desktopctld.exe"
+
+build-windows-arm64:
+  cd {{workspace_dir}} && rustup target add {{windows_arm64_target}}
+  cd {{workspace_dir}} && cargo build --release --target {{windows_arm64_target}} -p desktopctl -p desktopctld
+  echo "Built: {{workspace_dir}}/target/{{windows_arm64_target}}/release/desktopctl.exe"
+  echo "Built: {{workspace_dir}}/target/{{windows_arm64_target}}/release/desktopctl-cli.exe"
+  echo "Built: {{workspace_dir}}/target/{{windows_arm64_target}}/release/desktopctld.exe"
+
+package-macos-arm64 tag:
+  if [[ -z "{{tag}}" ]]; then echo "usage: just package-macos-arm64 <tag>"; exit 2; fi
+  if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then echo "package-macos-arm64 must run on macOS arm64"; exit 2; fi
+  just -f {{workspace_dir}}/Justfile build
+  mkdir -p {{dist_dir}}/release
+  cd {{dist_dir}} && ditto -c -k --sequesterRsrc --keepParent DesktopCtl.app release/DesktopCtl-{{tag}}-macos-arm64.zip
+  echo "Built: {{dist_dir}}/release/DesktopCtl-{{tag}}-macos-arm64.zip"
+
+package-windows-x64 tag target="x86_64-pc-windows-gnu":
+  if [[ -z "{{tag}}" ]]; then echo "usage: just package-windows-x64 <tag> [target]"; exit 2; fi
+  cd {{workspace_dir}} && rustup target add {{target}}
+  cd {{workspace_dir}} && cargo build --release --target {{target}} -p desktopctl -p desktopctld
+  rm -rf {{dist_dir}}/release/windows-x64 {{dist_dir}}/release/DesktopCtl-{{tag}}-windows-x64.zip
+  mkdir -p {{dist_dir}}/release/windows-x64/DesktopCtl
+  cp {{workspace_dir}}/target/{{target}}/release/desktopctl.exe {{dist_dir}}/release/windows-x64/DesktopCtl/
+  cp {{workspace_dir}}/target/{{target}}/release/desktopctl-cli.exe {{dist_dir}}/release/windows-x64/DesktopCtl/
+  cp {{workspace_dir}}/target/{{target}}/release/desktopctld.exe {{dist_dir}}/release/windows-x64/DesktopCtl/
+  cd {{dist_dir}}/release/windows-x64 && zip -qr ../DesktopCtl-{{tag}}-windows-x64.zip DesktopCtl
+  echo "Built: {{dist_dir}}/release/DesktopCtl-{{tag}}-windows-x64.zip"
+
+package-windows-arm64 tag target="aarch64-pc-windows-gnullvm":
+  if [[ -z "{{tag}}" ]]; then echo "usage: just package-windows-arm64 <tag> [target]"; exit 2; fi
+  cd {{workspace_dir}} && rustup target add {{target}}
+  cd {{workspace_dir}} && cargo build --release --target {{target}} -p desktopctl -p desktopctld
+  rm -rf {{dist_dir}}/release/windows-arm64 {{dist_dir}}/release/DesktopCtl-{{tag}}-windows-arm64.zip
+  mkdir -p {{dist_dir}}/release/windows-arm64/DesktopCtl
+  cp {{workspace_dir}}/target/{{target}}/release/desktopctl.exe {{dist_dir}}/release/windows-arm64/DesktopCtl/
+  cp {{workspace_dir}}/target/{{target}}/release/desktopctl-cli.exe {{dist_dir}}/release/windows-arm64/DesktopCtl/
+  cp {{workspace_dir}}/target/{{target}}/release/desktopctld.exe {{dist_dir}}/release/windows-arm64/DesktopCtl/
+  cd {{dist_dir}}/release/windows-arm64 && zip -qr ../DesktopCtl-{{tag}}-windows-arm64.zip DesktopCtl
+  echo "Built: {{dist_dir}}/release/DesktopCtl-{{tag}}-windows-arm64.zip"
+
+package-release-assets tag:
+  if [[ -z "{{tag}}" ]]; then echo "usage: just package-release-assets <tag>"; exit 2; fi
+  just -f {{workspace_dir}}/Justfile package-macos-arm64 "{{tag}}"
+  just -f {{workspace_dir}}/Justfile package-windows-x64 "{{tag}}"
+  just -f {{workspace_dir}}/Justfile package-windows-arm64 "{{tag}}"
+  echo "Release assets are in: {{dist_dir}}/release"
+
+release-all tag target="main" repo="yaroshevych/desktopctl":
+  if [[ -z "{{tag}}" ]]; then echo "usage: just release-all <tag> [target] [repo]"; exit 2; fi
+  if ! command -v gh >/dev/null 2>&1; then echo "gh CLI is required. Install with: brew install gh"; exit 1; fi
+  just -f {{workspace_dir}}/Justfile package-release-assets "{{tag}}"
+  assets=( {{dist_dir}}/release/DesktopCtl-{{tag}}-*.zip )
+  if [[ ! -e "${assets[0]}" ]]; then echo "no release assets found in {{dist_dir}}/release"; exit 1; fi
+  if gh release view "{{tag}}" --repo "{{repo}}" >/dev/null 2>&1; then \
+    gh release upload "{{tag}}" "${assets[@]}" --repo "{{repo}}" --clobber; \
+  else \
+    gh release create "{{tag}}" "${assets[@]}" --repo "{{repo}}" --target "{{target}}" --title "{{tag}}" --generate-notes; \
+  fi
+  echo "Release ready: https://github.com/{{repo}}/releases/tag/{{tag}}"
 
 run: build
   open {{app_dir}}
