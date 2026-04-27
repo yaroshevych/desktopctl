@@ -20,6 +20,7 @@ pub(crate) fn click_text(
         button,
         active_window,
         guard.bound_active_window_id.as_deref(),
+        guard.bound_active_window.as_ref(),
         request_context,
     )?;
     super::super::guards::append_observe(
@@ -51,6 +52,7 @@ pub(crate) fn click_id(
         button,
         active_window,
         guard.bound_active_window_id.as_deref(),
+        guard.bound_active_window.as_ref(),
         request_context,
     )?;
     super::super::guards::append_observe(

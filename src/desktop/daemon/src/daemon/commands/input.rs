@@ -208,6 +208,7 @@ pub(crate) fn pointer_scroll(
             element_id,
             active_window,
             guard.bound_active_window_id.as_deref(),
+            guard.bound_active_window.as_ref(),
             request_context,
         )?;
         let center = super::super::center_point(&target.bounds);

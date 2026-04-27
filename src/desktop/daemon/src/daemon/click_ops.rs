@@ -5,6 +5,7 @@ pub(super) fn click_text_target(
     button: PointerButton,
     active_window: bool,
     active_window_id: Option<&str>,
+    bound_active_window: Option<&platform::windowing::WindowInfo>,
     request_context: &RequestContext,
 ) -> Result<(Value, Option<Vec<Value>>), AppError> {
     if active_window_id.is_some() && !active_window {
@@ -14,7 +15,11 @@ pub(super) fn click_text_target(
     }
     if active_window {
         let explicit_target = active_window_id
-            .map(assert_active_window_id_matches)
+            .map(|_| {
+                bound_active_window.cloned().ok_or_else(|| {
+                    AppError::target_not_found("bound active window unavailable for click --text")
+                })
+            })
             .transpose()?;
         if explicit_target.is_none()
             && let Some(result) = try_click_text_active_window_ax(query, button)?
@@ -243,6 +248,7 @@ pub(super) fn click_element_id_target(
     button: PointerButton,
     active_window: bool,
     active_window_id: Option<&str>,
+    bound_active_window: Option<&platform::windowing::WindowInfo>,
     request_context: &RequestContext,
 ) -> Result<(Value, Option<Vec<Value>>), AppError> {
     if !active_window {
@@ -251,7 +257,11 @@ pub(super) fn click_element_id_target(
         ));
     }
     let explicit_target = active_window_id
-        .map(assert_active_window_id_matches)
+        .map(|_| {
+            bound_active_window.cloned().ok_or_else(|| {
+                AppError::target_not_found("bound active window unavailable for click --id")
+            })
+        })
         .transpose()?;
     permissions::ensure_screen_recording_permission()?;
     let needle = id.trim();
@@ -364,6 +374,7 @@ pub(super) fn resolve_element_id_target(
     id: &str,
     active_window: bool,
     active_window_id: Option<&str>,
+    bound_active_window: Option<&platform::windowing::WindowInfo>,
     request_context: &RequestContext,
 ) -> Result<TokenizeClickElementCandidate, AppError> {
     if active_window_id.is_some() && !active_window {
@@ -372,7 +383,11 @@ pub(super) fn resolve_element_id_target(
         ));
     }
     let explicit_target = active_window_id
-        .map(assert_active_window_id_matches)
+        .map(|_| {
+            bound_active_window.cloned().ok_or_else(|| {
+                AppError::target_not_found("bound active window unavailable for element id lookup")
+            })
+        })
         .transpose()?;
     let needle = id.trim();
     if needle.is_empty() {
