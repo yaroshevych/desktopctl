@@ -50,7 +50,10 @@ fn show_about_dialog() {
 }
 
 fn format_about_message() -> String {
-    format!("DesktopCtl\n\n{}\n\nClick 'Yes' to open website or 'No' to open GitHub.", ABOUT_TEXT)
+    format!(
+        "DesktopCtl\n\n{}\n\nClick 'Yes' to open website or 'No' to open GitHub.",
+        ABOUT_TEXT
+    )
 }
 
 fn open_url(url: &str) {

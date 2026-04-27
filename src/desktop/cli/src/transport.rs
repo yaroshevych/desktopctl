@@ -124,10 +124,9 @@ fn launch_daemon() -> Result<(), AppError> {
         trace_log(format!("launch:daemon_bin={}", daemon_bin.display()));
         let mut cmd = ProcessCommand::new(daemon_bin);
         cmd.arg("--on-demand");
-        cmd.spawn()
-            .map_err(|err| {
-                AppError::backend_unavailable(format!("failed to launch daemon binary: {err}"))
-            })?;
+        cmd.spawn().map_err(|err| {
+            AppError::backend_unavailable(format!("failed to launch daemon binary: {err}"))
+        })?;
         trace_log("launch:daemon_bin_ok");
         return Ok(());
     }

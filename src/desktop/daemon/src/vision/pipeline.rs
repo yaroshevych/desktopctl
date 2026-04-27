@@ -445,8 +445,7 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     with_state(|state| {
         state.update_tokenize_cache(cache_key, fingerprint, std::sync::Arc::clone(&payload_arc))
     })?;
-    let payload = std::sync::Arc::try_unwrap(payload_arc)
-        .unwrap_or_else(|arc| (*arc).clone());
+    let payload = std::sync::Arc::try_unwrap(payload_arc).unwrap_or_else(|arc| (*arc).clone());
     let total_elapsed = tokenize_started.elapsed().as_millis();
     if total_elapsed > TOKENIZE_BUDGET_MS {
         trace::log(format!(
@@ -618,8 +617,7 @@ fn tokenize_from_snapshot(
     with_state(|state| state.replace_token_map(raw_tokens))?;
     trace::log(format!(
         "pipeline:tokenize:ok snapshot_id={} tokens={}",
-        snapshot_id,
-        token_count
+        snapshot_id, token_count
     ));
     Ok(TokenizePayload {
         snapshot_id,

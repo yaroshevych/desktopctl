@@ -1,6 +1,6 @@
-use std::thread;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use crate::error::AppError;

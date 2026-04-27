@@ -60,7 +60,9 @@ pub(crate) fn run() -> Result<(), AppError> {
     let args: Vec<String> = std::env::args().collect();
     let background = args.iter().any(|a| a == "--background");
     if args.iter().any(|a| a == "--on-demand") {
-        return daemon::run_blocking(daemon::DaemonConfig::on_demand().with_background_input(background));
+        return daemon::run_blocking(
+            daemon::DaemonConfig::on_demand().with_background_input(background),
+        );
     }
 
     use objc2::MainThreadMarker;

@@ -28,7 +28,11 @@ pub(crate) fn show() {
                 To change permissions, use the CLI:\n\
                 desctopctl policy list\n\
                 desktopctl policy set --mode allow-only --apps \"App1, App2\"",
-                if apps_list.is_empty() { "(none)" } else { &apps_list },
+                if apps_list.is_empty() {
+                    "(none)"
+                } else {
+                    &apps_list
+                },
                 cfg.clipboard_allowed
             )
         }
@@ -41,7 +45,11 @@ pub(crate) fn show() {
                 To change permissions, use the CLI:\n\
                 desktopctl policy list\n\
                 desktopctl policy set --mode allow-all-except --apps \"App1, App2\"",
-                if apps_list.is_empty() { "(none)" } else { &apps_list },
+                if apps_list.is_empty() {
+                    "(none)"
+                } else {
+                    &apps_list
+                },
                 cfg.clipboard_allowed
             )
         }
@@ -55,5 +63,8 @@ pub(crate) fn show() {
 }
 
 fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }

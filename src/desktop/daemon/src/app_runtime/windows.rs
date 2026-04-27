@@ -6,8 +6,11 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 
+use super::{
+    about_windows as about, app_policy_dialog_windows,
+    permissions_dialog_windows as permissions_dialog,
+};
 use crate::{daemon, trace};
-use super::{about_windows as about, permissions_dialog_windows as permissions_dialog, app_policy_dialog_windows};
 
 // WM_APP + 1: update toggle label. wParam = 1 (disabled) or 0 (enabled).
 const WM_UPDATE_TOGGLE_LABEL: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
@@ -52,7 +55,9 @@ pub(crate) fn run() -> Result<(), AppError> {
     let args: Vec<String> = std::env::args().collect();
     let background = args.iter().any(|a| a == "--background");
     if args.iter().any(|a| a == "--on-demand") {
-        return daemon::run_blocking(daemon::DaemonConfig::on_demand().with_background_input(background));
+        return daemon::run_blocking(
+            daemon::DaemonConfig::on_demand().with_background_input(background),
+        );
     }
 
     use tray_icon::{
@@ -155,7 +160,7 @@ pub(crate) fn run() -> Result<(), AppError> {
 
 fn run_message_loop() -> Result<(), AppError> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+        DispatchMessageW, GetMessageW, MSG, TranslateMessage,
     };
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -173,7 +178,9 @@ fn run_message_loop() -> Result<(), AppError> {
             let disabled = msg.wParam != 0;
             MENU_STATE.with(|cell| {
                 if let Some(state) = cell.borrow().as_ref() {
-                    state.toggle_cli_gui_ops.set_text(cli_gui_toggle_menu_label(disabled));
+                    state
+                        .toggle_cli_gui_ops
+                        .set_text(cli_gui_toggle_menu_label(disabled));
                 }
             });
             continue;
@@ -212,7 +219,8 @@ fn icon_idle() -> tray_icon::Icon {
             // Draw circle outline and filled blades
             if dist_sq <= radius_sq {
                 let angle = (dy as f64).atan2(dx as f64);
-                let normalized_angle = ((angle + std::f64::consts::PI) / std::f64::consts::PI) % 2.0;
+                let normalized_angle =
+                    ((angle + std::f64::consts::PI) / std::f64::consts::PI) % 2.0;
 
                 // Create 6 aperture blades by dividing circle into sections
                 let blade_index = (normalized_angle * 3.0) as i32 % 3;
@@ -259,7 +267,10 @@ fn icon_active() -> tray_icon::Icon {
                 rgba[idx + 1] = 150;
                 rgba[idx + 2] = 150;
                 rgba[idx + 3] = 255;
-            } else if (dx == frame_half - 1 || dy == frame_half - 1) && dx <= frame_half - 1 && dy <= frame_half - 1 {
+            } else if (dx == frame_half - 1 || dy == frame_half - 1)
+                && dx <= frame_half - 1
+                && dy <= frame_half - 1
+            {
                 // Double line for visibility
                 rgba[idx] = 120;
                 rgba[idx + 1] = 120;
@@ -276,7 +287,8 @@ fn icon_active() -> tray_icon::Icon {
 
             if dist_sq <= radius_sq {
                 let angle = (py as f64).atan2(px as f64);
-                let normalized_angle = ((angle + std::f64::consts::PI) / std::f64::consts::PI) % 2.0;
+                let normalized_angle =
+                    ((angle + std::f64::consts::PI) / std::f64::consts::PI) % 2.0;
                 let in_blade = (normalized_angle * 3.0) % 1.0 > 0.3;
 
                 if in_blade || dist_sq <= (inner_radius - 2) * (inner_radius - 2) {
