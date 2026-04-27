@@ -247,19 +247,6 @@ fn map_identifier_for_element(element: &UIElement) -> Option<String> {
         }
     }
 
-    if let Ok(runtime_id) = element.get_runtime_id()
-        && !runtime_id.is_empty()
-    {
-        let joined = runtime_id
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<String>>()
-            .join("-");
-        if !joined.is_empty() {
-            return Some(format!("runtime-{joined}"));
-        }
-    }
-
     None
 }
 
