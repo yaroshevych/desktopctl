@@ -12,6 +12,8 @@ stable_app_dir := stable_runtime_dir + "/DesktopCtl.app"
 stable_cli_path := stable_app_dir + "/Contents/MacOS/desktopctl"
 stable_legacy_cli_path := stable_runtime_dir + "/desktopctl"
 manifest_path := workspace_dir + "/Cargo.toml"
+windows_msvc_target := "x86_64-pc-windows-msvc"
+windows_gnu_target := "x86_64-pc-windows-gnu"
 
 build:
   cd {{workspace_dir}} && cargo build --release -p desktopctld -p desktopctl
@@ -29,6 +31,26 @@ build:
   echo "Built: {{app_dir}}"
   echo "Built: {{cli_path}}"
   echo "Linked: {{legacy_cli_path}} -> ./DesktopCtl.app/Contents/MacOS/desktopctl"
+
+build-windows:
+  if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* || "$(uname -s)" == Windows_NT ]]; then \
+    just -f {{workspace_dir}}/Justfile build-windows-msvc; \
+  else \
+    just -f {{workspace_dir}}/Justfile build-windows-gnu; \
+  fi
+
+build-windows-msvc:
+  cd {{workspace_dir}} && rustup target add {{windows_msvc_target}}
+  cd {{workspace_dir}} && cargo build --release --target {{windows_msvc_target}}
+  echo "Built: {{workspace_dir}}/target/{{windows_msvc_target}}/release/desktopctl.exe"
+  echo "Built: {{workspace_dir}}/target/{{windows_msvc_target}}/release/desktopctld.exe"
+
+build-windows-gnu:
+  cd {{workspace_dir}} && rustup target add {{windows_gnu_target}}
+  cd {{workspace_dir}} && cargo build --release --target {{windows_gnu_target}} -p desktopctl
+  cd {{workspace_dir}} && cargo build --release --target {{windows_gnu_target}} -p desktopctld
+  echo "Built: {{workspace_dir}}/target/{{windows_gnu_target}}/release/desktopctl.exe"
+  echo "Built: {{workspace_dir}}/target/{{windows_gnu_target}}/release/desktopctld.exe"
 
 run: build
   open {{app_dir}}
