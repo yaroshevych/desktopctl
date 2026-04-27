@@ -293,7 +293,13 @@ pub(super) fn click_element_id_target(
         .as_ref()
         .map(|target| target.id.clone())
         .unwrap_or_else(|| "frontmost:1".to_string());
-    let (native_window_id, capture_bounds) = if let Some(target) = explicit_target.as_ref() {
+    let background_capture = explicit_target
+        .as_ref()
+        .is_some_and(|target| !target.frontmost);
+    let (native_window_id, capture_bounds) = if background_capture {
+        let target = explicit_target
+            .as_ref()
+            .expect("background capture requires explicit target");
         (
             Some(explicit_background_capture_window_id(target)?),
             Some(target.bounds.clone()),
