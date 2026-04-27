@@ -20,7 +20,6 @@ pub(crate) enum BackgroundInputVerificationStatus {
     Success,
     EffectNotVerified,
     Ambiguous,
-    TransportFailed,
 }
 
 impl BackgroundInputVerificationStatus {
@@ -29,7 +28,6 @@ impl BackgroundInputVerificationStatus {
             Self::Success => "success",
             Self::EffectNotVerified => "effect_not_verified",
             Self::Ambiguous => "ambiguous",
-            Self::TransportFailed => "transport_failed",
         }
     }
 }
@@ -48,10 +46,6 @@ impl BackgroundInputVerification {
             reason: reason.into(),
             settle_ms: settle_ms(),
         }
-    }
-
-    pub(crate) fn transport_failed(reason: impl Into<String>) -> Self {
-        Self::new(BackgroundInputVerificationStatus::TransportFailed, reason)
     }
 
     pub(crate) fn to_json(&self) -> Value {
@@ -362,15 +356,6 @@ mod tests {
             snapshot_with_capture(1),
         );
         assert_eq!(result.status, BackgroundInputVerificationStatus::Ambiguous);
-    }
-
-    #[test]
-    fn transport_failed_serializes_classification() {
-        let result = BackgroundInputVerification::transport_failed("post failed");
-        assert_eq!(
-            result.to_json()["status"],
-            BackgroundInputVerificationStatus::TransportFailed.as_str()
-        );
     }
 
     fn snapshot_with_capture(hash: u64) -> VerificationSnapshot {
