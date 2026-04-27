@@ -43,7 +43,19 @@ pub(super) fn capture_observe_start_state(
 }
 
 fn focused_element_id_from_ax() -> Option<String> {
-    let ax = platform::ax::focused_frontmost_element().ok()??;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(platform::ax::focused_frontmost_element());
+    });
+    let ax = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result.ok()??,
+        Err(_) => {
+            trace::log("observe:ax_focused timeout — skipping focused element id");
+            return None;
+        }
+    };
     vision::ax_merge::primary_id_for_ax(&ax).or_else(|| {
         let role = ax.role.trim().to_ascii_lowercase();
         if role.is_empty() {

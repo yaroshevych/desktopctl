@@ -11,10 +11,7 @@ pub(super) fn observe_tokens_for_regions(
 ) -> (Vec<Value>, bool, usize) {
     let observe_started = Instant::now();
     let mut tokens: Vec<Value> = Vec::new();
-    let (ax_available, ax_elements) = match platform::ax::collect_frontmost_window_elements() {
-        Ok(items) => (true, items),
-        Err(_) => (false, Vec::new()),
-    };
+    let (ax_available, ax_elements) = collect_ax_elements_with_timeout();
 
     let mut ocr_regions = Vec::new();
     let mut ocr_tokens = 0usize;
@@ -168,6 +165,27 @@ pub(super) fn observe_tokens_for_regions(
     ));
 
     (tokens, ax_available, ax_count)
+}
+
+// Accessibility API calls are cross-process and can block if the target app's
+// UI thread is busy (e.g. processing keystrokes). Run on a background thread
+// with a timeout so the observe pipeline always completes.
+fn collect_ax_elements_with_timeout() -> (bool, Vec<platform::ax::AxElement>) {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(platform::ax::collect_frontmost_window_elements());
+    });
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(items)) => (true, items),
+        Ok(Err(_)) => (false, Vec::new()),
+        Err(_) => {
+            trace::log("observe:ax_collect timeout — UIA call exceeded 2s, skipping ax tokens");
+            (false, Vec::new())
+        }
+    }
 }
 
 fn prioritize_observe_regions_for_ocr(

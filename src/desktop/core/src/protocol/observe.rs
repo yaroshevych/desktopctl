@@ -25,13 +25,17 @@ pub struct ObserveOptions {
 impl Default for ObserveOptions {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: default_observe_enabled(),
             until: ObserveUntil::Stable,
             timeout_ms: DEFAULT_OBSERVE_TIMEOUT_MS,
             settle_ms: DEFAULT_OBSERVE_SETTLE_MS,
             save_crops: false,
         }
     }
+}
+
+fn default_observe_enabled() -> bool {
+    !cfg!(target_os = "windows")
 }
 
 fn default_observe_settle_ms() -> u64 {
