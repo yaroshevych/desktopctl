@@ -46,14 +46,8 @@ pub(super) fn click_text_target(
             .as_ref()
             .map(|target| target.id.clone())
             .unwrap_or_else(|| "frontmost:1".to_string());
-        let (native_window_id, capture_bounds) = if let Some(target) = explicit_target.as_ref() {
-            (
-                Some(explicit_background_capture_window_id(target)?),
-                Some(target.bounds.clone()),
-            )
-        } else {
-            (None, None)
-        };
+        let (native_window_id, capture_bounds) =
+            background_capture_for_explicit_target(explicit_target.as_ref())?;
         let window_meta = vision::pipeline::TokenizeWindowMeta {
             id,
             title,
@@ -293,20 +287,8 @@ pub(super) fn click_element_id_target(
         .as_ref()
         .map(|target| target.id.clone())
         .unwrap_or_else(|| "frontmost:1".to_string());
-    let background_capture = explicit_target
-        .as_ref()
-        .is_some_and(|target| !target.frontmost);
-    let (native_window_id, capture_bounds) = if background_capture {
-        let target = explicit_target
-            .as_ref()
-            .expect("background capture requires explicit target");
-        (
-            Some(explicit_background_capture_window_id(target)?),
-            Some(target.bounds.clone()),
-        )
-    } else {
-        (None, None)
-    };
+    let (native_window_id, capture_bounds) =
+        background_capture_for_explicit_target(explicit_target.as_ref())?;
     let window_meta = vision::pipeline::TokenizeWindowMeta {
         id,
         title,
@@ -431,13 +413,8 @@ pub(super) fn resolve_element_id_target(
         .as_ref()
         .map(|target| target.id.clone())
         .unwrap_or_else(|| "frontmost:1".to_string());
-    let (native_window_id, capture_bounds) = if active_window_id.is_some()
-        && let Some(target) = resolved_target.as_ref()
-    {
-        (
-            Some(explicit_background_capture_window_id(target)?),
-            Some(target.bounds.clone()),
-        )
+    let (native_window_id, capture_bounds) = if active_window_id.is_some() {
+        background_capture_for_explicit_target(resolved_target.as_ref())?
     } else {
         (None, None)
     };
@@ -476,6 +453,21 @@ pub(super) fn resolve_element_id_target(
         )));
     }
     Ok(matches[0].clone())
+}
+
+fn background_capture_for_explicit_target(
+    target: Option<&platform::windowing::WindowInfo>,
+) -> Result<(Option<u32>, Option<desktop_core::protocol::Bounds>), AppError> {
+    let Some(target) = target else {
+        return Ok((None, None));
+    };
+    if !background_input_enabled() || target.frontmost {
+        return Ok((None, None));
+    }
+    Ok((
+        Some(explicit_background_capture_window_id(target)?),
+        Some(target.bounds.clone()),
+    ))
 }
 
 pub(super) fn resolve_ax_element_id_target(
