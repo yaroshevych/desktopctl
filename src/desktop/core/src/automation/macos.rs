@@ -734,6 +734,7 @@ fn stamp_background_event(
     if let Some(window_local) = window_local {
         unsafe { (symbols.set_window_location)(event.as_ptr().cast::<c_void>(), window_local) };
     }
+    event.set_flags(CGEventFlags::CGEventFlagNull);
     trace_mouse(format!(
         "background_input:stamp_event {} {} window_local={} click_state={} private_fields=pid,{},{},{},{},{}",
         format_target(target),
