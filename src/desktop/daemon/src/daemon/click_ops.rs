@@ -53,9 +53,11 @@ pub(super) fn click_text_target(
             title,
             app,
             bounds,
-            pid: explicit_target
-                .as_ref()
-                .and_then(|target| i32::try_from(target.pid).ok()),
+            pid: native_window_id.and_then(|_| {
+                explicit_target
+                    .as_ref()
+                    .and_then(|target| i32::try_from(target.pid).ok())
+            }),
             native_window_id,
             capture_bounds,
         };
@@ -294,9 +296,11 @@ pub(super) fn click_element_id_target(
         title,
         app,
         bounds,
-        pid: explicit_target
-            .as_ref()
-            .and_then(|target| i32::try_from(target.pid).ok()),
+        pid: native_window_id.and_then(|_| {
+            explicit_target
+                .as_ref()
+                .and_then(|target| i32::try_from(target.pid).ok())
+        }),
         native_window_id,
         capture_bounds,
     };
@@ -423,9 +427,11 @@ pub(super) fn resolve_element_id_target(
         title,
         app,
         bounds,
-        pid: resolved_target
-            .as_ref()
-            .and_then(|target| i32::try_from(target.pid).ok()),
+        pid: native_window_id.and_then(|_| {
+            resolved_target
+                .as_ref()
+                .and_then(|target| i32::try_from(target.pid).ok())
+        }),
         native_window_id,
         capture_bounds,
     };
