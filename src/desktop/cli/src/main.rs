@@ -12,7 +12,7 @@ use std::time::Instant;
 pub(crate) use parse::parse_command;
 #[cfg(test)]
 pub(crate) use transport::send_request_with_hooks;
-use transport::{LaunchOptions, map_error_code, next_request_id, send_request_with_autostart, trace_log};
+use transport::{map_error_code, next_request_id, send_request_with_autostart, trace_log};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutputMode {
@@ -76,19 +76,15 @@ fn run(args: &[String], request_id: &str, options: CliOptions) -> Result<i32, Ap
     let run_started = Instant::now();
     let command = parse_command(args)?;
     let passthrough_stored_response = matches!(command, Command::RequestResponse { .. });
-    let request = RequestEnvelope::new(request_id.to_string(), command);
+    let request =
+        RequestEnvelope::new(request_id.to_string(), command).with_background_input(options.background);
     trace_log(format!(
         "run:request_start request_id={} command={}",
         request.request_id,
         request.command.name()
     ));
     let send_started = Instant::now();
-    let response = send_request_with_autostart(
-        &request,
-        LaunchOptions {
-            background: options.background,
-        },
-    )?;
+    let response = send_request_with_autostart(&request)?;
     let send_elapsed_ms = send_started.elapsed().as_millis();
 
     let render_started = Instant::now();

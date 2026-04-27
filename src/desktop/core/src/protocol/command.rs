@@ -14,6 +14,8 @@ pub enum PointerButton {
 pub struct RequestEnvelope {
     pub protocol_version: u32,
     pub request_id: String,
+    #[serde(default)]
+    pub options: RequestOptions,
     pub command: Command,
 }
 
@@ -22,9 +24,21 @@ impl RequestEnvelope {
         Self {
             protocol_version: PROTOCOL_VERSION,
             request_id,
+            options: RequestOptions::default(),
             command,
         }
     }
+
+    pub fn with_background_input(mut self, enabled: bool) -> Self {
+        self.options.background_input = enabled;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestOptions {
+    #[serde(default)]
+    pub background_input: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

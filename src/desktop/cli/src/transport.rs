@@ -12,16 +12,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct LaunchOptions {
-    pub background: bool,
-}
-
 pub(crate) fn send_request_with_autostart(
     request: &RequestEnvelope,
-    options: LaunchOptions,
 ) -> Result<ResponseEnvelope, AppError> {
-    send_request_with_hooks(request, ipc::send_request, || launch_daemon(options))
+    send_request_with_hooks(request, ipc::send_request, launch_daemon)
 }
 
 pub(crate) fn send_request_with_hooks<FSend, FLaunch>(
@@ -101,7 +95,7 @@ where
     }))
 }
 
-fn launch_daemon(options: LaunchOptions) -> Result<(), AppError> {
+fn launch_daemon() -> Result<(), AppError> {
     if let Some(app_path) = discover_daemon_app_path() {
         let autostart_mode =
             std::env::var("DESKTOPCTL_AUTOSTART_MODE").unwrap_or_else(|_| "resident".to_string());
@@ -114,11 +108,6 @@ fn launch_daemon(options: LaunchOptions) -> Result<(), AppError> {
         open_cmd.arg("-g").arg(app_path);
         if autostart_mode.eq_ignore_ascii_case("on-demand") {
             open_cmd.arg("--args").arg("--on-demand");
-            if options.background {
-                open_cmd.arg("--background");
-            }
-        } else if options.background {
-            open_cmd.arg("--args").arg("--background");
         }
 
         let status = open_cmd.status().map_err(|err| {
@@ -135,9 +124,6 @@ fn launch_daemon(options: LaunchOptions) -> Result<(), AppError> {
         trace_log(format!("launch:daemon_bin={}", daemon_bin.display()));
         let mut cmd = ProcessCommand::new(daemon_bin);
         cmd.arg("--on-demand");
-        if options.background {
-            cmd.arg("--background");
-        }
         cmd.spawn()
             .map_err(|err| {
                 AppError::backend_unavailable(format!("failed to launch daemon binary: {err}"))

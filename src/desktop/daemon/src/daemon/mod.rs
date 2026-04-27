@@ -95,6 +95,27 @@ struct CommandExecutionGuard<'a> {
     _guard: MutexGuard<'a, ()>,
 }
 
+struct BackgroundInputModeGuard {
+    previous: bool,
+}
+
+impl BackgroundInputModeGuard {
+    fn set(enabled: bool) -> Self {
+        let previous = BACKGROUND_INPUT_ENABLED.swap(enabled, Ordering::SeqCst);
+        #[cfg(target_os = "macos")]
+        desktop_core::automation::set_nsevent_background_mouse_events(enabled);
+        Self { previous }
+    }
+}
+
+impl Drop for BackgroundInputModeGuard {
+    fn drop(&mut self) {
+        BACKGROUND_INPUT_ENABLED.store(self.previous, Ordering::SeqCst);
+        #[cfg(target_os = "macos")]
+        desktop_core::automation::set_nsevent_background_mouse_events(self.previous);
+    }
+}
+
 fn command_execution_lock() -> &'static Mutex<()> {
     COMMAND_EXECUTION_LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -450,39 +471,43 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
     } else {
         let runtime_state = platform_runtime::begin_command(&command, &request_context);
         let response = match acquire_command_execution_slot() {
-            Ok(_slot) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                execute_with_context(
-                    command,
-                    runtime_state.overlay_token_updates_enabled,
-                    &request_context,
-                )
-            })) {
-                Ok(Ok(result)) => {
-                    trace::log("client:execute_ok");
-                    ResponseEnvelope::success(request_id.clone(), result)
+            Ok(_slot) => {
+                let _background_input_mode =
+                    BackgroundInputModeGuard::set(request.options.background_input);
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_with_context(
+                        command,
+                        runtime_state.overlay_token_updates_enabled,
+                        &request_context,
+                    )
+                })) {
+                    Ok(Ok(result)) => {
+                        trace::log("client:execute_ok");
+                        ResponseEnvelope::success(request_id.clone(), result)
+                    }
+                    Ok(Err(err)) => {
+                        trace::log(format!(
+                            "client:execute_err code={:?} msg={}",
+                            err.code, err.message
+                        ));
+                        ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+                    }
+                    Err(payload) => {
+                        let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                            (*msg).to_string()
+                        } else if let Some(msg) = payload.downcast_ref::<String>() {
+                            msg.clone()
+                        } else {
+                            "non-string panic payload".to_string()
+                        };
+                        trace::log(format!("client:execute_panic {panic_message}"));
+                        let err = AppError::internal(format!(
+                            "daemon panic during command execution: {panic_message}"
+                        ));
+                        ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+                    }
                 }
-                Ok(Err(err)) => {
-                    trace::log(format!(
-                        "client:execute_err code={:?} msg={}",
-                        err.code, err.message
-                    ));
-                    ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
-                }
-                Err(payload) => {
-                    let panic_message = if let Some(msg) = payload.downcast_ref::<&str>() {
-                        (*msg).to_string()
-                    } else if let Some(msg) = payload.downcast_ref::<String>() {
-                        msg.clone()
-                    } else {
-                        "non-string panic payload".to_string()
-                    };
-                    trace::log(format!("client:execute_panic {panic_message}"));
-                    let err = AppError::internal(format!(
-                        "daemon panic during command execution: {panic_message}"
-                    ));
-                    ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
-                }
-            },
+            }
             Err(err) => {
                 trace::log(format!(
                     "client:queue_timeout request_id={} command={} msg={}",
@@ -951,6 +976,8 @@ pub(super) fn wait_for_open_app(app_name: &str, timeout_ms: u64) -> Result<(), A
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use super::execute;
@@ -1312,6 +1339,16 @@ mod tests {
         let cfg = super::DaemonConfig::on_demand().with_background_input(true);
         assert!(cfg.background_input);
         assert_eq!(cfg.idle_timeout.map(|d| d.as_secs()), Some(8));
+    }
+
+    #[test]
+    fn background_input_mode_guard_overrides_and_restores() {
+        super::BACKGROUND_INPUT_ENABLED.store(false, Ordering::SeqCst);
+        {
+            let _guard = super::BackgroundInputModeGuard::set(true);
+            assert!(super::background_input_enabled());
+        }
+        assert!(!super::background_input_enabled());
     }
 
     #[test]

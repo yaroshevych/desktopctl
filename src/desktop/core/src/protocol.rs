@@ -3,7 +3,7 @@ mod observe;
 mod response;
 mod types;
 
-pub use command::{Command, PointerButton, RequestEnvelope};
+pub use command::{Command, PointerButton, RequestEnvelope, RequestOptions};
 pub use observe::{ObserveOptions, ObserveUntil};
 pub use response::{ErrorPayload, ErrorResponse, ResponseEnvelope, SuccessResponse};
 pub use types::{

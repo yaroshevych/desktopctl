@@ -84,6 +84,14 @@ fn background_flag_is_cli_option_not_command_argument() {
 }
 
 #[test]
+fn request_envelope_carries_background_option() {
+    let command = parse_command(&["debug", "ping"].map(str::to_string)).expect("ping parses");
+    let request = RequestEnvelope::new("r-bg".to_string(), command).with_background_input(true);
+
+    assert!(request.options.background_input);
+}
+
+#[test]
 fn help_mentions_background_flag() {
     let rendered = render_help_if_requested(&["--help".to_string()])
         .expect("help rendering should succeed")
