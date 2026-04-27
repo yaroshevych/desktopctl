@@ -124,6 +124,7 @@ fn launch_daemon() -> Result<(), AppError> {
         trace_log(format!("launch:daemon_bin={}", daemon_bin.display()));
         let mut cmd = ProcessCommand::new(daemon_bin);
         cmd.arg("--on-demand");
+        configure_daemon_spawn(&mut cmd);
         cmd.spawn().map_err(|err| {
             AppError::backend_unavailable(format!("failed to launch daemon binary: {err}"))
         })?;
@@ -146,6 +147,18 @@ fn launch_daemon() -> Result<(), AppError> {
         ))
     }
 }
+
+#[cfg(windows)]
+fn configure_daemon_spawn(cmd: &mut ProcessCommand) {
+    use std::os::windows::process::CommandExt;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_daemon_spawn(_cmd: &mut ProcessCommand) {}
 
 fn discover_daemon_app_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("DESKTOPCTL_APP_PATH") {
