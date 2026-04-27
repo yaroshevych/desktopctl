@@ -1,4 +1,6 @@
 use std::thread;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::error::AppError;
@@ -68,6 +70,19 @@ pub trait BackgroundInputBackend {
     fn press_escape(&self, target: &BackgroundInputTarget) -> Result<(), AppError> {
         self.press_hotkey(target, "escape")
     }
+}
+
+#[cfg(target_os = "macos")]
+static NSEVENT_BACKGROUND_MOUSE_EVENTS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+pub fn set_nsevent_background_mouse_events(enabled: bool) {
+    NSEVENT_BACKGROUND_MOUSE_EVENTS.store(enabled, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn nsevent_background_mouse_events_enabled() -> bool {
+    NSEVENT_BACKGROUND_MOUSE_EVENTS.load(Ordering::SeqCst)
 }
 
 #[cfg(target_os = "macos")]

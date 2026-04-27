@@ -603,6 +603,13 @@ fn clap_app() -> ClapCommand {
         .after_long_help(help_notes())
         .arg_required_else_help(true)
         .arg(
+            Arg::new("background")
+                .long("background")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Auto-start DesktopCtl in background input mode"),
+        )
+        .arg(
             Arg::new("markdown")
                 .long("markdown")
                 .global(true)

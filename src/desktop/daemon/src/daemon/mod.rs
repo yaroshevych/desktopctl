@@ -89,6 +89,7 @@ const COMMAND_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 static PRIVACY_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 static COMMAND_EXECUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static BACKGROUND_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 struct CommandExecutionGuard<'a> {
     _guard: MutexGuard<'a, ()>,
@@ -121,6 +122,9 @@ fn acquire_command_execution_slot() -> Result<CommandExecutionGuard<'static>, Ap
 }
 
 fn background_input_enabled() -> bool {
+    if BACKGROUND_INPUT_ENABLED.load(Ordering::SeqCst) {
+        return true;
+    }
     std::env::var("DESKTOPCTL_BACKGROUND_INPUT")
         .ok()
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("skylight"))
@@ -188,21 +192,32 @@ struct ObserveEndState {
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonConfig {
     pub idle_timeout: Option<Duration>,
+    pub background_input: bool,
 }
 
 impl DaemonConfig {
     pub fn resident() -> Self {
-        Self { idle_timeout: None }
+        Self {
+            idle_timeout: None,
+            background_input: false,
+        }
     }
 
     pub fn on_demand() -> Self {
         Self {
             idle_timeout: Some(Duration::from_secs(8)),
+            background_input: false,
         }
+    }
+
+    pub fn with_background_input(mut self, enabled: bool) -> Self {
+        self.background_input = enabled;
+        self
     }
 }
 
 pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
+    apply_runtime_config(config);
     let outcome = app_policy::reload_current_from_disk();
     set_gui_ops_disabled(outcome.config.agent_access_disabled);
     platform_runtime::bootstrap_overlay_glow();
@@ -216,11 +231,18 @@ pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
 }
 
 pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
+    apply_runtime_config(config);
     let outcome = app_policy::reload_current_from_disk();
     set_gui_ops_disabled(outcome.config.agent_access_disabled);
     platform_runtime::bootstrap_overlay_glow();
     let listener = bind_listener()?;
     accept_loop(listener, config)
+}
+
+fn apply_runtime_config(config: DaemonConfig) {
+    BACKGROUND_INPUT_ENABLED.store(config.background_input, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    desktop_core::automation::set_nsevent_background_mouse_events(config.background_input);
 }
 
 pub fn gui_ops_disabled() -> bool {
@@ -1281,6 +1303,19 @@ mod tests {
     #[test]
     fn on_demand_config_has_idle_timeout() {
         let cfg = super::DaemonConfig::on_demand();
+        assert_eq!(cfg.idle_timeout.map(|d| d.as_secs()), Some(8));
+    }
+
+    #[test]
+    fn daemon_config_defaults_to_foreground() {
+        assert!(!super::DaemonConfig::resident().background_input);
+        assert!(!super::DaemonConfig::on_demand().background_input);
+    }
+
+    #[test]
+    fn daemon_config_can_enable_background_input() {
+        let cfg = super::DaemonConfig::on_demand().with_background_input(true);
+        assert!(cfg.background_input);
         assert_eq!(cfg.idle_timeout.map(|d| d.as_secs()), Some(8));
     }
 

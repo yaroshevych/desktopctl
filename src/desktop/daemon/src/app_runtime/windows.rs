@@ -50,8 +50,9 @@ fn on_gui_ops_state_changed(disabled: bool) {
 pub(crate) fn run() -> Result<(), AppError> {
     enable_per_monitor_dpi_awareness();
     let args: Vec<String> = std::env::args().collect();
+    let background = args.iter().any(|a| a == "--background");
     if args.iter().any(|a| a == "--on-demand") {
-        return daemon::run_blocking(daemon::DaemonConfig::on_demand());
+        return daemon::run_blocking(daemon::DaemonConfig::on_demand().with_background_input(background));
     }
 
     use tray_icon::{
@@ -59,7 +60,7 @@ pub(crate) fn run() -> Result<(), AppError> {
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
 
-    daemon::start_background(daemon::DaemonConfig::resident())?;
+    daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
 
     let menu = Menu::new();
     let toggle_cli_gui_ops = MenuItem::new(

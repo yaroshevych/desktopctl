@@ -58,8 +58,9 @@ fn on_gui_ops_state_changed(disabled: bool) {
 
 pub(crate) fn run() -> Result<(), AppError> {
     let args: Vec<String> = std::env::args().collect();
+    let background = args.iter().any(|a| a == "--background");
     if args.iter().any(|a| a == "--on-demand") {
-        return daemon::run_blocking(daemon::DaemonConfig::on_demand());
+        return daemon::run_blocking(daemon::DaemonConfig::on_demand().with_background_input(background));
     }
 
     use objc2::MainThreadMarker;
@@ -77,7 +78,7 @@ pub(crate) fn run() -> Result<(), AppError> {
     let missing_permissions =
         !permissions::accessibility_granted() || !permissions::screen_recording_granted();
 
-    daemon::start_background(daemon::DaemonConfig::resident())?;
+    daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
 
     if missing_permissions {
         permissions_dialog::show();

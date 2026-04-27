@@ -12,7 +12,7 @@ use std::time::Instant;
 pub(crate) use parse::parse_command;
 #[cfg(test)]
 pub(crate) use transport::send_request_with_hooks;
-use transport::{map_error_code, next_request_id, send_request_with_autostart, trace_log};
+use transport::{LaunchOptions, map_error_code, next_request_id, send_request_with_autostart, trace_log};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutputMode {
@@ -48,7 +48,7 @@ fn main() {
             std::process::exit(map_error_code(&err.code));
         }
     }
-    let (output_mode, args) = match split_output_mode(&raw_args) {
+    let (cli_options, args) = match split_cli_options(&raw_args) {
         Ok(v) => v,
         Err(err) => {
             let request_id = next_request_id();
@@ -57,16 +57,22 @@ fn main() {
         }
     };
     let request_id = next_request_id();
-    match run(&args, &request_id, output_mode) {
+    match run(&args, &request_id, cli_options) {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            print_error(&request_id, &err, output_mode);
+            print_error(&request_id, &err, cli_options.output_mode);
             std::process::exit(map_error_code(&err.code));
         }
     }
 }
 
-fn run(args: &[String], request_id: &str, output_mode: OutputMode) -> Result<i32, AppError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CliOptions {
+    output_mode: OutputMode,
+    background: bool,
+}
+
+fn run(args: &[String], request_id: &str, options: CliOptions) -> Result<i32, AppError> {
     let run_started = Instant::now();
     let command = parse_command(args)?;
     let passthrough_stored_response = matches!(command, Command::RequestResponse { .. });
@@ -77,11 +83,16 @@ fn run(args: &[String], request_id: &str, output_mode: OutputMode) -> Result<i32
         request.command.name()
     ));
     let send_started = Instant::now();
-    let response = send_request_with_autostart(&request)?;
+    let response = send_request_with_autostart(
+        &request,
+        LaunchOptions {
+            background: options.background,
+        },
+    )?;
     let send_elapsed_ms = send_started.elapsed().as_millis();
 
     let render_started = Instant::now();
-    match output_mode {
+    match options.output_mode {
         OutputMode::Json => {
             let rendered =
                 output::render_response(&request.command, &response, passthrough_stored_response);
@@ -118,13 +129,15 @@ fn run(args: &[String], request_id: &str, output_mode: OutputMode) -> Result<i32
     Ok(code)
 }
 
-fn split_output_mode(args: &[String]) -> Result<(OutputMode, Vec<String>), AppError> {
+fn split_cli_options(args: &[String]) -> Result<(CliOptions, Vec<String>), AppError> {
     let mut mode = OutputMode::Markdown;
+    let mut background = false;
     let mut filtered: Vec<String> = Vec::new();
     for arg in args {
         match arg.as_str() {
             "--json" => mode = OutputMode::Json,
             "--markdown" => mode = OutputMode::Markdown,
+            "--background" => background = true,
             _ => filtered.push(arg.clone()),
         }
     }
@@ -133,7 +146,13 @@ fn split_output_mode(args: &[String]) -> Result<(OutputMode, Vec<String>), AppEr
             "missing command; run `desktopctl --help`",
         ));
     }
-    Ok((mode, filtered))
+    Ok((
+        CliOptions {
+            output_mode: mode,
+            background,
+        },
+        filtered,
+    ))
 }
 
 fn print_error(request_id: &str, err: &AppError, output_mode: OutputMode) {

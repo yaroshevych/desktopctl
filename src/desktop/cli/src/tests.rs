@@ -1,4 +1,7 @@
-use super::{parse::render_help_if_requested, parse_command, send_request_with_hooks};
+use super::{
+    OutputMode, parse::render_help_if_requested, parse_command, send_request_with_hooks,
+    split_cli_options,
+};
 use desktop_core::{
     error::{AppError, ErrorCode},
     protocol::{Command, PointerButton, RequestEnvelope, ResponseEnvelope},
@@ -66,6 +69,26 @@ fn renders_version_for_top_level_version_flag() {
         .expect("version rendering should succeed")
         .expect("version output should be present");
     assert!(rendered.starts_with("desktopctl "));
+}
+
+#[test]
+fn background_flag_is_cli_option_not_command_argument() {
+    let (options, args) = split_cli_options(
+        &["--background", "--json", "debug", "ping"].map(str::to_string),
+    )
+    .expect("cli options should parse");
+
+    assert!(options.background);
+    assert_eq!(options.output_mode, OutputMode::Json);
+    assert_eq!(args, ["debug", "ping"].map(str::to_string));
+}
+
+#[test]
+fn help_mentions_background_flag() {
+    let rendered = render_help_if_requested(&["--help".to_string()])
+        .expect("help rendering should succeed")
+        .expect("help output should be present");
+    assert!(rendered.contains("--background"));
 }
 
 #[test]

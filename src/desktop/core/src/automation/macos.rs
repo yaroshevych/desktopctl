@@ -491,6 +491,9 @@ enum BackgroundMouseEventConstructor {
 }
 
 fn background_mouse_event_constructor() -> BackgroundMouseEventConstructor {
+    if super::nsevent_background_mouse_events_enabled() {
+        return BackgroundMouseEventConstructor::NsEvent;
+    }
     std::env::var("DESKTOPCTL_BACKGROUND_MOUSE_EVENT")
         .ok()
         .filter(|value| value.trim().eq_ignore_ascii_case("nsevent"))
