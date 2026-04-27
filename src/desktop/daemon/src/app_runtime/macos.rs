@@ -74,17 +74,14 @@ pub(crate) fn run() -> Result<(), AppError> {
     let ns_app = NSApplication::sharedApplication(mtm);
     let _ = ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    let permission_requests = permissions::request_startup_permissions();
-    if permission_requests.accessibility_requested {
-        eprintln!("requested Accessibility permission for DesktopCtl.app");
-    }
-    if permission_requests.screen_recording_requested {
-        eprintln!("requested Screen Recording permission for DesktopCtl.app");
-    }
     let missing_permissions =
         !permissions::accessibility_granted() || !permissions::screen_recording_granted();
 
     daemon::start_background(daemon::DaemonConfig::resident())?;
+
+    if missing_permissions {
+        permissions_dialog::show();
+    }
 
     let menu = Menu::new();
     let toggle_cli_gui_ops = MenuItem::new(
