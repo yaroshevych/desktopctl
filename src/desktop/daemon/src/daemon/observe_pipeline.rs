@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::*;
 
 mod token_collect;
@@ -136,7 +138,7 @@ pub(super) fn observe_after_action(
     let mut prev_thumb =
         vision::diff::thumbnail_from_rgba(&prev.image, OBSERVE_THUMB_WIDTH, OBSERVE_THUMB_HEIGHT);
     let mut last_capture = prev;
-    let start_capture = last_capture.clone();
+    let start_capture = Arc::new(last_capture.clone());
     let mut changed_any = false;
     let mut last_change_at: Option<Instant> = None;
     let mut quiet_frames = 0u32;
@@ -148,7 +150,7 @@ pub(super) fn observe_after_action(
     loop {
         if observe_timeout_reached(start.elapsed().as_millis() as u64, effective_timeout_ms) {
             let final_regions =
-                final_observe_regions_from_images(&start_capture, &last_capture, observe_scope);
+                final_observe_regions_from_images(&*start_capture, &last_capture, observe_scope);
             let (tokens, _, _) =
                 observe_tokens_for_regions(&last_capture, &final_regions, observe_scope);
             let raw_tokens = tokens;
@@ -234,7 +236,7 @@ pub(super) fn observe_after_action(
             );
             if action == ObservePostSampleAction::FirstChange {
                 let final_regions =
-                    final_observe_regions_from_images(&start_capture, &curr, observe_scope);
+                    final_observe_regions_from_images(&*start_capture, &curr, observe_scope);
                 let (tokens, _, _) =
                     observe_tokens_for_regions(&curr, &final_regions, observe_scope);
                 let raw_tokens = tokens;
@@ -286,7 +288,7 @@ pub(super) fn observe_after_action(
             );
             if action == ObservePostSampleAction::Settled {
                 let final_regions =
-                    final_observe_regions_from_images(&start_capture, &curr, observe_scope);
+                    final_observe_regions_from_images(&*start_capture, &curr, observe_scope);
                 let (tokens, _, _) =
                     observe_tokens_for_regions(&curr, &final_regions, observe_scope);
                 let raw_tokens = tokens;
