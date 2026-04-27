@@ -54,6 +54,7 @@ build-windows-gnu:
   echo "Built: {{workspace_dir}}/target/{{windows_gnu_target}}/release/desktopctld.exe"
 
 build-windows-arm64:
+  if ! command -v aarch64-w64-mingw32-clang >/dev/null 2>&1; then echo "missing aarch64-w64-mingw32-clang; install with: brew install llvm-mingw"; exit 2; fi
   cd {{workspace_dir}} && rustup target add {{windows_arm64_target}}
   cd {{workspace_dir}} && cargo build --release --target {{windows_arm64_target}} -p desktopctl -p desktopctld
   echo "Built: {{workspace_dir}}/target/{{windows_arm64_target}}/release/desktopctl.exe"
@@ -82,6 +83,7 @@ package-windows-x64 tag target="x86_64-pc-windows-gnu":
 
 package-windows-arm64 tag target="aarch64-pc-windows-gnullvm":
   if [[ -z "{{tag}}" ]]; then echo "usage: just package-windows-arm64 <tag> [target]"; exit 2; fi
+  if ! command -v aarch64-w64-mingw32-clang >/dev/null 2>&1; then echo "missing aarch64-w64-mingw32-clang; install with: brew install llvm-mingw"; exit 2; fi
   cd {{workspace_dir}} && rustup target add {{target}}
   cd {{workspace_dir}} && cargo build --release --target {{target}} -p desktopctl -p desktopctld
   rm -rf {{dist_dir}}/release/windows-arm64 {{dist_dir}}/release/DesktopCtl-{{tag}}-windows-arm64.zip
@@ -103,8 +105,8 @@ release-all tag target="main" repo="yaroshevych/desktopctl":
   if [[ -z "{{tag}}" ]]; then echo "usage: just release-all <tag> [target] [repo]"; exit 2; fi
   if ! command -v gh >/dev/null 2>&1; then echo "gh CLI is required. Install with: brew install gh"; exit 1; fi
   just -f {{workspace_dir}}/Justfile package-release-assets "{{tag}}"
-  assets=( {{dist_dir}}/release/DesktopCtl-{{tag}}-*.zip )
-  if [[ ! -e "${assets[0]}" ]]; then echo "no release assets found in {{dist_dir}}/release"; exit 1; fi
+  assets=( {{dist_dir}}/release/DesktopCtl-{{tag}}-*.zip ); \
+  if [[ ! -e "${assets[0]}" ]]; then echo "no release assets found in {{dist_dir}}/release"; exit 1; fi; \
   if gh release view "{{tag}}" --repo "{{repo}}" >/dev/null 2>&1; then \
     gh release upload "{{tag}}" "${assets[@]}" --repo "{{repo}}" --clobber; \
   else \
