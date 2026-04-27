@@ -122,12 +122,7 @@ fn acquire_command_execution_slot() -> Result<CommandExecutionGuard<'static>, Ap
 }
 
 fn background_input_enabled() -> bool {
-    if BACKGROUND_INPUT_ENABLED.load(Ordering::SeqCst) {
-        return true;
-    }
-    std::env::var("DESKTOPCTL_BACKGROUND_INPUT")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("skylight"))
+    BACKGROUND_INPUT_ENABLED.load(Ordering::SeqCst)
 }
 
 fn background_input_unsupported(command_name: &str) -> AppError {
