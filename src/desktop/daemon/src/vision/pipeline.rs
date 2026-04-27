@@ -385,7 +385,15 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
             ocr_elapsed, OCR_BUDGET_MS
         ));
     }
-    let ax_elements = ax_handle.join().unwrap_or_else(|_| Vec::new());
+    let ax_elements = ax_handle.join().unwrap_or_else(|panic| {
+        let reason = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic>");
+        trace::log(format!("pipeline:tokenize:ax_thread_panic reason={reason}"));
+        Vec::new()
+    });
     let frame = captured.frame;
     let image = captured.image;
     let image_path = frame.image_path.clone();
