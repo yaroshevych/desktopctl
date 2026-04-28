@@ -6,6 +6,8 @@ mod about_windows;
 mod app_policy_dialog;
 #[cfg(target_os = "macos")]
 mod journal_dialog_macos;
+#[cfg(target_os = "windows")]
+mod journal_dialog_windows;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

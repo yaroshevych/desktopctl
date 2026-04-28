@@ -7,10 +7,12 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 
 use super::about_windows as about;
-use crate::{daemon, trace};
+use super::journal_dialog_windows;
+use crate::{daemon, journal, trace};
 
 // WM_APP + 1: update toggle label. wParam = 1 (disabled) or 0 (enabled).
 const WM_UPDATE_TOGGLE_LABEL: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+const WM_UPDATE_JOURNAL_LABEL: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
@@ -21,6 +23,7 @@ thread_local! {
 #[derive(Clone)]
 struct MenuState {
     toggle_cli_gui_ops: tray_icon::menu::MenuItem,
+    journal: tray_icon::menu::MenuItem,
 }
 
 fn cli_gui_toggle_menu_label(disabled: bool) -> &'static str {
@@ -47,6 +50,29 @@ fn on_gui_ops_state_changed(disabled: bool) {
     }
 }
 
+fn journal_menu_label(active: bool) -> &'static str {
+    if active {
+        "Journal (Active)"
+    } else {
+        "Journal (Inactive)"
+    }
+}
+
+fn on_journal_state_changed(active: bool) {
+    let tid = MAIN_THREAD_ID.load(Ordering::Relaxed);
+    if tid == 0 {
+        return;
+    }
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+            tid,
+            WM_UPDATE_JOURNAL_LABEL,
+            active as usize,
+            0,
+        );
+    }
+}
+
 pub(crate) fn run() -> Result<(), AppError> {
     enable_per_monitor_dpi_awareness();
     let args: Vec<String> = std::env::args().collect();
@@ -63,6 +89,7 @@ pub(crate) fn run() -> Result<(), AppError> {
     };
 
     daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
+    journal::start_from_disk();
 
     let menu = Menu::new();
     let toggle_cli_gui_ops = MenuItem::new(
@@ -70,10 +97,13 @@ pub(crate) fn run() -> Result<(), AppError> {
         true,
         None,
     );
+    let journal_item = MenuItem::new(journal_menu_label(journal::is_active()), true, None);
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
 
     menu.append(&toggle_cli_gui_ops)
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&journal_item)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&about)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
@@ -83,16 +113,19 @@ pub(crate) fn run() -> Result<(), AppError> {
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
 
     let toggle_cli_gui_ops_id = toggle_cli_gui_ops.id().clone();
+    let journal_id = journal_item.id().clone();
     let about_id = about.id().clone();
     let quit_id = quit.id().clone();
 
     MENU_STATE.with(|cell| {
         *cell.borrow_mut() = Some(MenuState {
             toggle_cli_gui_ops: toggle_cli_gui_ops.clone(),
+            journal: journal_item.clone(),
         });
     });
 
     daemon::register_gui_ops_state_hook(on_gui_ops_state_changed);
+    journal::register_state_hook(on_journal_state_changed);
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == about_id {
@@ -103,6 +136,10 @@ pub(crate) fn run() -> Result<(), AppError> {
             let disabled = !daemon::gui_ops_disabled();
             daemon::set_gui_ops_disabled(disabled);
             trace::log(format!("menu:toggle_cli_gui_ops disabled={disabled}"));
+            return;
+        }
+        if event.id == journal_id {
+            journal_dialog_windows::show();
             return;
         }
         if event.id == quit_id {
@@ -152,6 +189,15 @@ fn run_message_loop() -> Result<(), AppError> {
                     state
                         .toggle_cli_gui_ops
                         .set_text(cli_gui_toggle_menu_label(disabled));
+                }
+            });
+            continue;
+        }
+        if msg.message == WM_UPDATE_JOURNAL_LABEL {
+            let active = msg.wParam != 0;
+            MENU_STATE.with(|cell| {
+                if let Some(state) = cell.borrow().as_ref() {
+                    state.journal.set_text(journal_menu_label(active));
                 }
             });
             continue;
