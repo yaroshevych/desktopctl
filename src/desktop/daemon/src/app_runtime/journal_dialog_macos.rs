@@ -25,6 +25,11 @@ define_class!(
             choose_directory();
         }
 
+        #[unsafe(method(journalEnabledChanged:))]
+        fn journal_enabled_changed(&self, _: &AnyObject) {
+            sync_enabled_state();
+        }
+
         #[unsafe(method(saveJournalDialog:))]
         fn save_journal_dialog(&self, sender: &AnyObject) {
             unsafe {
@@ -60,6 +65,7 @@ struct DialogState {
     enabled_checkbox: Retained<AnyObject>,
     interval_field: Retained<AnyObject>,
     output_field: Retained<AnyObject>,
+    choose_button: Retained<NSButton>,
     warning_label: Retained<NSTextField>,
 }
 
@@ -129,6 +135,19 @@ fn persist_from_dialog() {
     });
 }
 
+fn sync_enabled_state() {
+    DIALOG.with(|cell| {
+        let borrowed = cell.borrow();
+        let Some(ref state) = *borrowed else { return };
+        unsafe {
+            let enabled = bool_state(&state.enabled_checkbox);
+            let _: () = msg_send![&*state.interval_field, setEnabled: enabled];
+            let _: () = msg_send![&*state.output_field, setEnabled: enabled];
+            state.choose_button.setEnabled(enabled);
+        }
+    });
+}
+
 fn choose_directory() {
     DIALOG.with(|cell| {
         let borrowed = cell.borrow();
@@ -193,39 +212,34 @@ fn show_on_main() {
             usingBlock: &*close_block
         ];
 
-        let title = NSTextField::wrappingLabelWithString(
-            &NSString::from_str("Capture active-window tokenize journals on an interval."),
-            mtm,
-        );
-        title.setFont(Some(&NSFont::systemFontOfSize(14.0)));
-        title.setFrame(NSRect::new(
-            NSPoint::new(20.0, 194.0),
-            NSSize::new(460.0, 28.0),
-        ));
-        cv.addSubview(&title);
-
         let enabled_checkbox: *mut AnyObject = msg_send![class!(NSButton), alloc];
         let enabled_checkbox: *mut AnyObject = msg_send![
             enabled_checkbox,
-            initWithFrame: NSRect::new(NSPoint::new(20.0, 160.0), NSSize::new(440.0, 22.0))
+            initWithFrame: NSRect::new(NSPoint::new(142.0, 174.0), NSSize::new(330.0, 22.0))
         ];
         let _: () = msg_send![enabled_checkbox, setButtonType: 3usize];
-        let _: () = msg_send![enabled_checkbox, setTitle: &*NSString::from_str("Enabled")];
+        let _: () = msg_send![
+            enabled_checkbox,
+            setTitle: &*NSString::from_str("Capture active window journal")
+        ];
         let _: () =
             msg_send![enabled_checkbox, setState: if cfg.enabled { 1isize } else { 0isize }];
+        let _: () = msg_send![enabled_checkbox, setTarget: target];
+        let _: () = msg_send![enabled_checkbox, setAction: sel!(journalEnabledChanged:)];
         let _: () = msg_send![&*cv, addSubview: enabled_checkbox];
 
         let interval_label =
-            NSTextField::labelWithString(&NSString::from_str("Timeout seconds"), mtm);
+            NSTextField::labelWithString(&NSString::from_str("Capture every:"), mtm);
         interval_label.setFrame(NSRect::new(
-            NSPoint::new(20.0, 122.0),
-            NSSize::new(130.0, 20.0),
+            NSPoint::new(22.0, 136.0),
+            NSSize::new(108.0, 20.0),
         ));
+        let _: () = msg_send![&*interval_label, setAlignment: 1isize];
         cv.addSubview(&interval_label);
         let interval_field: *mut AnyObject = msg_send![class!(NSTextField), alloc];
         let interval_field: *mut AnyObject = msg_send![
             interval_field,
-            initWithFrame: NSRect::new(NSPoint::new(160.0, 118.0), NSSize::new(90.0, 24.0))
+            initWithFrame: NSRect::new(NSPoint::new(142.0, 132.0), NSSize::new(72.0, 24.0))
         ];
         let _: () = msg_send![
             interval_field,
@@ -233,17 +247,24 @@ fn show_on_main() {
         ];
         let _: () = msg_send![&*cv, addSubview: interval_field];
 
-        let output_label =
-            NSTextField::labelWithString(&NSString::from_str("Output directory"), mtm);
-        output_label.setFrame(NSRect::new(
-            NSPoint::new(20.0, 82.0),
-            NSSize::new(130.0, 20.0),
+        let seconds_label = NSTextField::labelWithString(&NSString::from_str("seconds"), mtm);
+        seconds_label.setFrame(NSRect::new(
+            NSPoint::new(222.0, 136.0),
+            NSSize::new(90.0, 20.0),
         ));
+        cv.addSubview(&seconds_label);
+
+        let output_label = NSTextField::labelWithString(&NSString::from_str("Save to:"), mtm);
+        output_label.setFrame(NSRect::new(
+            NSPoint::new(22.0, 96.0),
+            NSSize::new(108.0, 20.0),
+        ));
+        let _: () = msg_send![&*output_label, setAlignment: 1isize];
         cv.addSubview(&output_label);
         let output_field: *mut AnyObject = msg_send![class!(NSTextField), alloc];
         let output_field: *mut AnyObject = msg_send![
             output_field,
-            initWithFrame: NSRect::new(NSPoint::new(160.0, 78.0), NSSize::new(230.0, 24.0))
+            initWithFrame: NSRect::new(NSPoint::new(142.0, 92.0), NSSize::new(250.0, 24.0))
         ];
         let _: () = msg_send![
             output_field,
@@ -258,8 +279,8 @@ fn show_on_main() {
             mtm,
         );
         choose_btn.setFrame(NSRect::new(
-            NSPoint::new(400.0, 74.0),
-            NSSize::new(80.0, 32.0),
+            NSPoint::new(402.0, 88.0),
+            NSSize::new(86.0, 32.0),
         ));
         cv.addSubview(&choose_btn);
 
@@ -267,8 +288,8 @@ fn show_on_main() {
         warning.setFont(Some(&NSFont::systemFontOfSize(12.0)));
         warning.setTextColor(Some(&NSColor::systemOrangeColor()));
         warning.setFrame(NSRect::new(
-            NSPoint::new(20.0, 54.0),
-            NSSize::new(460.0, 18.0),
+            NSPoint::new(142.0, 62.0),
+            NSSize::new(346.0, 18.0),
         ));
         cv.addSubview(&warning);
 
@@ -279,9 +300,10 @@ fn show_on_main() {
             mtm,
         );
         cancel_btn.setFrame(NSRect::new(
-            NSPoint::new(276.0, 18.0),
+            NSPoint::new(288.0, 20.0),
             NSSize::new(100.0, 32.0),
         ));
+        let _: () = msg_send![&*cancel_btn, setKeyEquivalent: &*NSString::from_str("\u{1b}")];
         cv.addSubview(&cancel_btn);
         let save_btn = NSButton::buttonWithTitle_target_action(
             &NSString::from_str("Save"),
@@ -290,9 +312,10 @@ fn show_on_main() {
             mtm,
         );
         save_btn.setFrame(NSRect::new(
-            NSPoint::new(384.0, 18.0),
+            NSPoint::new(396.0, 20.0),
             NSSize::new(96.0, 32.0),
         ));
+        let _: () = msg_send![&*save_btn, setKeyEquivalent: &*NSString::from_str("\r")];
         cv.addSubview(&save_btn);
 
         let state = DialogState {
@@ -303,6 +326,7 @@ fn show_on_main() {
             enabled_checkbox: Retained::from_raw(enabled_checkbox).unwrap(),
             interval_field: Retained::from_raw(interval_field).unwrap(),
             output_field: Retained::from_raw(output_field).unwrap(),
+            choose_button: choose_btn,
             warning_label: warning,
         };
 
@@ -311,5 +335,6 @@ fn show_on_main() {
         state.window.center();
         state.window.makeKeyAndOrderFront(None);
         DIALOG.with(|cell| *cell.borrow_mut() = Some(state));
+        sync_enabled_state();
     }
 }
