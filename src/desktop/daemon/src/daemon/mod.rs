@@ -652,9 +652,13 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
     )
 }
 
+pub(crate) fn execute_resident_command(command: Command) -> Result<Value, AppError> {
+    execute_with_context(command, true, &RequestContext::default())
+}
+
 #[cfg(test)]
 fn execute(command: Command) -> Result<Value, AppError> {
-    execute_with_context(command, true, &RequestContext::default())
+    execute_resident_command(command)
 }
 
 fn execute_with_context(

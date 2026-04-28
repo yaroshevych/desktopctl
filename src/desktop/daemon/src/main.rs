@@ -4,6 +4,7 @@ mod app_policy;
 mod app_runtime;
 mod clipboard;
 mod daemon;
+mod journal;
 mod overlay;
 mod platform;
 mod request_store;

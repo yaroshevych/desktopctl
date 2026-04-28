@@ -13,8 +13,8 @@ use desktop_core::{
     protocol::{Command, RequestEnvelope, ResponseEnvelope, now_millis},
 };
 
-use super::{about, app_policy_dialog, permissions_dialog};
-use crate::{daemon, overlay, platform::permissions, trace};
+use super::{about, app_policy_dialog, journal_dialog_macos, permissions_dialog};
+use crate::{daemon, journal, overlay, platform::permissions, trace};
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -42,6 +42,7 @@ static ICON_ACTIVE: OnceLock<tray_icon::Icon> = OnceLock::new();
 #[derive(Clone)]
 struct MenuState {
     toggle_cli_gui_ops: tray_icon::menu::MenuItem,
+    journal: tray_icon::menu::MenuItem,
 }
 
 fn on_gui_ops_state_changed(disabled: bool) {
@@ -51,6 +52,24 @@ fn on_gui_ops_state_changed(disabled: bool) {
                 state
                     .toggle_cli_gui_ops
                     .set_text(cli_gui_toggle_menu_label(disabled));
+            }
+        });
+    });
+}
+
+fn journal_menu_label(active: bool) -> &'static str {
+    if active {
+        "Journal (Active)"
+    } else {
+        "Journal (Inactive)"
+    }
+}
+
+fn on_journal_state_changed(active: bool) {
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        MENU_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                state.journal.set_text(journal_menu_label(active));
             }
         });
     });
@@ -81,6 +100,7 @@ pub(crate) fn run() -> Result<(), AppError> {
         !permissions::accessibility_granted() || !permissions::screen_recording_granted();
 
     daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
+    journal::start_from_disk();
 
     if missing_permissions {
         permissions_dialog::show();
@@ -93,6 +113,7 @@ pub(crate) fn run() -> Result<(), AppError> {
         None,
     );
     let app_access_policy = MenuItem::new("Agent Permissions", true, None);
+    let journal_item = MenuItem::new(journal_menu_label(journal::is_active()), true, None);
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
     let check_permissions = MenuItem::new("Setup Access", true, None);
     let about = MenuItem::new("About", true, None);
@@ -100,6 +121,8 @@ pub(crate) fn run() -> Result<(), AppError> {
     menu.append(&toggle_cli_gui_ops)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&app_access_policy)
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&journal_item)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&PredefinedMenuItem::separator())
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
@@ -116,6 +139,7 @@ pub(crate) fn run() -> Result<(), AppError> {
 
     let toggle_cli_gui_ops_id = toggle_cli_gui_ops.id().clone();
     let toggle_overlay_id = toggle_overlay.id().clone();
+    let journal_id = journal_item.id().clone();
     let check_permissions_id = check_permissions.id().clone();
     let app_access_policy_id = app_access_policy.id().clone();
     let about_id = about.id().clone();
@@ -123,9 +147,11 @@ pub(crate) fn run() -> Result<(), AppError> {
     MENU_STATE.with(|cell| {
         *cell.borrow_mut() = Some(MenuState {
             toggle_cli_gui_ops: toggle_cli_gui_ops.clone(),
+            journal: journal_item.clone(),
         });
     });
     daemon::register_gui_ops_state_hook(on_gui_ops_state_changed);
+    journal::register_state_hook(on_journal_state_changed);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == about_id {
             about::show();
@@ -137,6 +163,10 @@ pub(crate) fn run() -> Result<(), AppError> {
         }
         if event.id == app_access_policy_id {
             app_policy_dialog::show();
+            return;
+        }
+        if event.id == journal_id {
+            journal_dialog_macos::show();
             return;
         }
         if event.id == toggle_cli_gui_ops_id {
