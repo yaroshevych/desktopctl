@@ -50,6 +50,7 @@ pub fn open_screen_recording_settings() -> bool {
     matches!(status, Ok(s) if s.success())
 }
 
+#[allow(dead_code)]
 pub fn open_accessibility_settings() -> bool {
     let status = ProcessCommand::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")

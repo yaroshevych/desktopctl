@@ -26,3 +26,6 @@ src/desktop/daemon/tests/fixtures/golden/manifest.json
 /.beads
 /backup
 /embeddeddolt
+
+# bv (beads viewer) local config and caches
+.bv/

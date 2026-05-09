@@ -180,6 +180,5 @@ fn print_error(request_id: &str, err: &AppError, output_mode: OutputMode) {
     }
 }
 
-
 #[cfg(test)]
 mod tests;
