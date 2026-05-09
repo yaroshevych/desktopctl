@@ -72,17 +72,40 @@ pub(super) fn bezier_path(from: Point, to: Point) -> Vec<Point> {
 
 // ── Mouse movement ───────────────────────────────────────────────────────────
 
-/// Move the mouse along a curved Bezier path instead of jumping directly.
-/// Each step uses a fixed interval; ujt.4 replaces this with an ease-in-out profile.
+/// Smooth step: slow start → peak speed at midpoint → deceleration near target.
+fn ease_in_out(t: f64) -> f64 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Move the mouse along a curved Bezier path with an ease-in-out speed profile.
+/// Shorter moves are proportionally faster; longer moves plateau around 600 ms.
 pub(super) fn human_mouse_move(
     backend: &dyn Automation,
     from: Point,
     to: Point,
 ) -> Result<(), AppError> {
     let path = bezier_path(from, to);
-    for point in path {
+    let steps = path.len();
+    if steps == 0 {
+        return Ok(());
+    }
+
+    let dx = to.x as i64 - from.x as i64;
+    let dy = to.y as i64 - from.y as i64;
+    let dist = ((dx * dx + dy * dy) as f64).sqrt();
+    // Total travel time scales sub-linearly with distance: fast for short hops.
+    let total_ms = (dist * 1.8 + 180.0).min(600.0).max(60.0);
+
+    for (i, &point) in path.iter().enumerate() {
         backend.move_mouse(point)?;
-        std::thread::sleep(Duration::from_millis(8));
+        // Derive per-step sleep from the derivative of ease_in_out at this position.
+        let t0 = i as f64 / steps as f64;
+        let t1 = (i + 1) as f64 / steps as f64;
+        let dt = ease_in_out(t1) - ease_in_out(t0);
+        let step_ms = (dt * total_ms) as u64;
+        if step_ms > 0 {
+            std::thread::sleep(Duration::from_millis(step_ms));
+        }
     }
     Ok(())
 }
