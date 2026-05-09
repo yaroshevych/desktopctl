@@ -93,14 +93,17 @@ pub(crate) fn run() -> Result<(), AppError> {
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
+    let overlay_enabled = std::env::var("DESKTOPCTL_OVERLAY_MENU").is_ok();
     menu.append(&toggle_cli_gui_ops)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&settings_item)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&PredefinedMenuItem::separator())
-        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&toggle_overlay)
-        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    if overlay_enabled {
+        menu.append(&PredefinedMenuItem::separator())
+            .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+        menu.append(&toggle_overlay)
+            .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    }
     menu.append(&about)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&PredefinedMenuItem::separator())
