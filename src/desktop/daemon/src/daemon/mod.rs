@@ -5,7 +5,7 @@ use std::{
     fs,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -20,7 +20,8 @@ use desktop_core::{
     error::AppError,
     ipc::{read_framed_json, write_framed_json},
     protocol::{
-        Command, ObserveOptions, ObserveUntil, PointerButton, RequestEnvelope, ResponseEnvelope,
+        Command, HumanOptions, ObserveOptions, ObserveUntil, PointerButton, RequestEnvelope,
+        ResponseEnvelope,
     },
 };
 #[cfg(unix)]
@@ -37,6 +38,7 @@ mod click_ops;
 mod commands;
 mod geometry;
 mod guards;
+mod human;
 mod observe_pipeline;
 mod platform_runtime;
 mod query_ops;
@@ -90,6 +92,8 @@ static PRIVACY_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 static COMMAND_EXECUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static BACKGROUND_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
+// Last known mouse position packed as (x << 32) | y, updated after every move.
+static LAST_MOUSE_POS: AtomicU64 = AtomicU64::new(0);
 
 struct CommandExecutionGuard<'a> {
     _guard: MutexGuard<'a, ()>,
@@ -146,6 +150,16 @@ fn background_input_enabled() -> bool {
     BACKGROUND_INPUT_ENABLED.load(Ordering::SeqCst)
 }
 
+fn load_mouse_pos() -> Point {
+    let v = LAST_MOUSE_POS.load(Ordering::Relaxed);
+    Point::new((v >> 32) as u32, (v & 0xFFFF_FFFF) as u32)
+}
+
+fn store_mouse_pos(p: Point) {
+    let v = ((p.x as u64) << 32) | (p.y as u64);
+    LAST_MOUSE_POS.store(v, Ordering::Relaxed);
+}
+
 fn background_input_unsupported(command_name: &str) -> AppError {
     AppError::backend_unavailable(format!(
         "background input does not support {command_name}; switch to frontmost mode"
@@ -187,6 +201,7 @@ pub(crate) struct TokenizeHintSnapshot {
 #[derive(Debug, Clone, Default)]
 struct RequestContext {
     frontmost: Option<window_target::FrontmostSnapshot>,
+    human: Option<HumanOptions>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -455,6 +470,7 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
         } else {
             None
         },
+        human: request.options.human,
     };
     let response = if let Err(err) = enforce_gui_ops_enabled(&command) {
         trace::log(format!(

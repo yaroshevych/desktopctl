@@ -24,6 +24,9 @@ pub trait Automation {
     fn press_enter(&self) -> Result<(), AppError>;
     fn press_escape(&self) -> Result<(), AppError>;
     fn type_text(&self, text: &str) -> Result<(), AppError>;
+    fn type_char(&self, ch: char) -> Result<(), AppError> {
+        self.type_text(&ch.to_string())
+    }
     fn move_mouse(&self, point: Point) -> Result<(), AppError>;
     fn left_down(&self, point: Point) -> Result<(), AppError>;
     fn left_drag(&self, point: Point) -> Result<(), AppError>;

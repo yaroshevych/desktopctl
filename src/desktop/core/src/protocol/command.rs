@@ -35,10 +35,23 @@ impl RequestEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct HumanOptions {
+    /// Typing speed in words per minute; 0 keeps the current default
+    #[serde(default)]
+    pub wpm: u32,
+    /// Inter-operation jitter range in ms [min, max]; both 0 disables jitter
+    #[serde(default)]
+    pub jitter_ms: [u32; 2],
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct RequestOptions {
     #[serde(default)]
     pub background_input: bool,
+    /// When present, input commands use human-like timing and motion
+    #[serde(default)]
+    pub human: Option<HumanOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

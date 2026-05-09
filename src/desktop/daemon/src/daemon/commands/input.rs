@@ -55,7 +55,13 @@ pub(crate) fn pointer_move(
         request_context,
     )?;
     super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
-    backend.move_mouse(point)?;
+    if request_context.human.is_some() {
+        let from = super::super::load_mouse_pos();
+        super::super::human::human_mouse_move(backend.as_ref(), from, point)?;
+    } else {
+        backend.move_mouse(point)?;
+    }
+    super::super::store_mouse_pos(point);
     trace::log(format!(
         "pointer_move:ok x={} y={} absolute={absolute}",
         point.x, point.y
@@ -154,13 +160,19 @@ pub(crate) fn pointer_click(
         background_attempt.verification
     } else {
         super::super::guards::assert_bound_window_matches(guard.bound_active_window_id.as_deref())?;
-        backend.move_mouse(point)?;
+        if request_context.human.is_some() {
+            let from = super::super::load_mouse_pos();
+            super::super::human::human_mouse_move(backend.as_ref(), from, point)?;
+        } else {
+            backend.move_mouse(point)?;
+        }
         match button {
             PointerButton::Left => backend.left_click(point)?,
             PointerButton::Right => backend.right_click(point)?,
         }
         None
     };
+    super::super::store_mouse_pos(point);
     trace::log(format!(
         "pointer_click:ok x={} y={} absolute={absolute}",
         point.x, point.y

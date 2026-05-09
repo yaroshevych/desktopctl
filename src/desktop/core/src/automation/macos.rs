@@ -85,6 +85,24 @@ impl Automation for MacosAutomation {
         run_osascript(&script)
     }
 
+    fn type_char(&self, ch: char) -> Result<(), AppError> {
+        // Use CGEvent directly — faster than spawning osascript per character.
+        let s = ch.to_string();
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| AppError::backend_unavailable("failed to create event source"))?;
+        let down = CGEvent::new_keyboard_event(source, 0, true)
+            .map_err(|_| AppError::backend_unavailable("failed to create keydown event"))?;
+        down.set_string(&s);
+        down.post(CGEventTapLocation::HID);
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| AppError::backend_unavailable("failed to create event source"))?;
+        let up = CGEvent::new_keyboard_event(source, 0, false)
+            .map_err(|_| AppError::backend_unavailable("failed to create keyup event"))?;
+        up.set_string(&s);
+        up.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+
     fn move_mouse(&self, point: Point) -> Result<(), AppError> {
         post_mouse_event(CGEventType::MouseMoved, point, CGMouseButton::Left)
     }
