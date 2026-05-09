@@ -76,12 +76,14 @@ fn default_output_dir() -> PathBuf {
         .join("DesktopCtl Journal")
 }
 
+#[allow(dead_code)]
 pub fn register_state_hook(hook: StateHook) {
     if let Ok(mut hooks) = state_hooks().lock() {
         hooks.push(hook);
     }
 }
 
+#[allow(dead_code)]
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::SeqCst)
 }

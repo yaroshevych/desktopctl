@@ -35,6 +35,7 @@ pub fn accessibility_remediation() -> &'static str {
     ACCESSIBILITY_REMEDIATION
 }
 
+#[allow(dead_code)]
 pub fn open_screen_recording_settings() -> bool {
     let status = ProcessCommand::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
