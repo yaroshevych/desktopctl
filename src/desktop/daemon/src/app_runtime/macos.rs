@@ -240,8 +240,10 @@ fn notify_journal_needs_screen_recording() {
         );
         let _: () = msg_send![notif, setTitle: &*title];
         let _: () = msg_send![notif, setInformativeText: &*body];
-        let center: *mut AnyObject =
-            msg_send![class!(NSUserNotificationCenter), defaultUserNotificationCenter];
+        let center: *mut AnyObject = msg_send![
+            class!(NSUserNotificationCenter),
+            defaultUserNotificationCenter
+        ];
         if !center.is_null() {
             let _: () = msg_send![center, deliverNotification: notif];
         }

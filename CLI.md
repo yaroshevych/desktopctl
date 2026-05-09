@@ -30,6 +30,16 @@ desktopctl pointer click --text "All" --active-window "$win_id" --no-observe
 desktopctl screen tokenize --active-window "$win_id"
 ```
 
+## Examples
+```bash
+desktopctl app open "Calculator" --wait
+desktopctl window focus --title "Settings"
+desktopctl screen tokenize --active-window 12345
+desktopctl pointer click --id button_ok --active-window 12345
+desktopctl keyboard type "hello"
+desktopctl request response 12345
+```
+
 ## App and Window
 ```bash
 # open an app; optionally wait until it is ready or avoid activating it

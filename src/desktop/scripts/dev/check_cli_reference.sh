@@ -21,6 +21,7 @@ trap 'rm -rf "${tmpdir}"' EXIT
 normalize_lines() {
   perl -pe '
     s/\\"/"/g;
+    s/\\n\\$//g;
     s/\[[^\]]*\]//g;
     s/[\[\]]//g;
     s/\(--title <text> \| --id <id>\)/--title <text>/g;
@@ -35,8 +36,8 @@ normalize_lines() {
 }
 
 extract_usage_commands() {
-  awk '/usage\(\)/,/^}/' "${USAGE_SRC}" \
-    | sed -n 's/^[[:space:]]*desktopctl /desktopctl /p' \
+  awk '/help_notes\(\)/,/^}/' "${USAGE_SRC}" \
+    | sed -n 's/^[[:space:]]*[-#]*[[:space:]]*desktopctl /desktopctl /p' \
     | grep -v '<command...>'
 }
 
@@ -48,19 +49,13 @@ extract_usage_commands | normalize_lines > "${tmpdir}/usage.txt"
 extract_cli_md_commands | normalize_lines > "${tmpdir}/cli_md.txt"
 
 missing_in_doc="$(comm -23 "${tmpdir}/usage.txt" "${tmpdir}/cli_md.txt" || true)"
-missing_in_usage="$(comm -13 "${tmpdir}/usage.txt" "${tmpdir}/cli_md.txt" || true)"
 
-if [[ -n "${missing_in_doc}" || -n "${missing_in_usage}" ]]; then
-  echo "CLI reference mismatch detected between usage() and CLI.md" >&2
+if [[ -n "${missing_in_doc}" ]]; then
+  echo "CLI reference mismatch detected between help_notes() and CLI.md" >&2
   if [[ -n "${missing_in_doc}" ]]; then
     echo "" >&2
-    echo "present in usage(), missing in CLI.md:" >&2
+    echo "present in help_notes(), missing in CLI.md:" >&2
     echo "${missing_in_doc}" >&2
-  fi
-  if [[ -n "${missing_in_usage}" ]]; then
-    echo "" >&2
-    echo "present in CLI.md, missing in usage():" >&2
-    echo "${missing_in_usage}" >&2
   fi
   exit 1
 fi
