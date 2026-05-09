@@ -138,39 +138,42 @@ private struct JournalTabContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-        Text("Journal periodically captures the active window and saves a Markdown note to your directory. Save what you worked on across days — fully local, nothing sent to the cloud. Great for a personal LLM wiki, work diary, or using with AI assistants.")
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.top, 20)
-            .padding(.bottom, 2)
-        Form {
-            Section {
-                Toggle("Capture active window journal", isOn: $vm.enabled)
-                HStack(spacing: 8) {
-                    Text("Capture every:")
-                    Spacer()
-                    TextField("", text: $vm.intervalSeconds)
-                        .frame(width: 56)
-                        .multilineTextAlignment(.trailing)
-                    Text("seconds").foregroundStyle(.secondary)
+            Text("Journal periodically captures the active window and saves a Markdown note to your directory. Save what you worked on across days — fully local, nothing sent to the cloud. Great for a personal LLM wiki, work diary, or using with AI assistants.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 20)
+
+            Form {
+                Toggle("Enable", isOn: $vm.enabled)
+
+                LabeledContent("Save to:") {
+                    HStack {
+                        Text(vm.outputDir.isEmpty ? "Not set" : vm.outputDir)
+                            .lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(.secondary)
+                        Button("Choose…") { vm.chooseDirectory() }.fixedSize()
+                    }
                 }
                 .disabled(!vm.enabled)
-                HStack(spacing: 8) {
-                    Text("Save to:")
-                    Text(vm.outputDir.isEmpty ? "Not set" : vm.outputDir)
-                        .lineLimit(1).truncationMode(.middle)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Choose…") { vm.chooseDirectory() }.fixedSize()
+
+                LabeledContent("Interval:") {
+                    HStack {
+                        TextField("", text: $vm.intervalSeconds)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 56)
+                            .multilineTextAlignment(.trailing)
+                        Text("seconds").foregroundStyle(.secondary)
+                    }
                 }
                 .disabled(!vm.enabled)
             }
+            .formStyle(.columns)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
         }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
-        } // VStack
     }
 }
 
@@ -179,39 +182,39 @@ private struct PolicyTabContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-        Text("Applications which DesktopCtl can see, interact with, and journal. Restrict access, so AI agents and Journal never touch your banking, passwords, or similar apps — you stay in control of what they can reach.")
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.top, 20)
-            .padding(.bottom, 2)
-        Form {
-            Section {
-                Picker("Policy", selection: $vm.policyMode) {
+            Text("Applications which DesktopCtl can control and journal. Restrict access, so AI agents and Journal never touch your banking, passwords, or similar apps — you stay in control of what they can reach.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 20)
+
+            Form {
+                Picker("Mode:", selection: $vm.policyMode) {
                     ForEach(PolicyMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
                 .pickerStyle(.menu)
 
-                LabeledContent("Comma-separated app names") {
-                    TextField("", text: $vm.appsCsv, prompt: Text("e.g. Safari, Slack, Terminal"))
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(vm.policyMode == .allowAll)
+                TextField("Applications:", text: $vm.appsCsv, prompt: Text("e.g. Safari, Slack, Terminal"))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(vm.policyMode == .allowAll)
+
+                if !vm.warning.isEmpty {
+                    LabeledContent("") {
+                        Text(vm.warning).foregroundStyle(.orange)
+                    }
                 }
 
                 Toggle("Allow full-screen capture", isOn: $vm.allowFullScreenCapture)
                 Toggle("Allow clipboard access", isOn: $vm.clipboardAllowed)
-            } footer: {
-                if !vm.warning.isEmpty {
-                    Text(vm.warning).foregroundStyle(.orange)
-                }
             }
+            .formStyle(.columns)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
         }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
-        } // VStack
     }
 }
 
@@ -351,7 +354,7 @@ private struct DesktopCtlSettingsView: View {
                 }
             }
             .animation(.none, value: selectedTab)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(width: 520, height: 500)
         .onAppear {
