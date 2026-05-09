@@ -26,12 +26,48 @@ build:
   cp {{workspace_dir}}/daemon/packaging/macos/Info.plist {{contents_dir}}/Info.plist
   printf 'APPL????' > {{contents_dir}}/PkgInfo
   swift {{workspace_dir}}/scripts/gen_icns.swift {{contents_dir}}/Resources/AppIcon.icns
-  chmod +x {{macos_dir}}/desktopctld {{cli_path}}
+  just -f {{workspace_dir}}/Justfile build-swift-dialogs
+  chmod +x {{macos_dir}}/desktopctld {{cli_path}} {{macos_dir}}/desktopctl-dialogs
   codesign --force --sign - {{cli_path}} >/dev/null 2>&1 || true
   codesign --force --deep --sign - {{app_dir}} >/dev/null 2>&1 || true
   echo "Built: {{app_dir}}"
   echo "Built: {{cli_path}}"
   echo "Linked: {{legacy_cli_path}} -> ./DesktopCtl.app/Contents/MacOS/desktopctl"
+
+build-swift-dialogs:
+  mkdir -p {{macos_dir}}
+  swiftc \
+    -O \
+    -sdk "$(xcrun --show-sdk-path)" \
+    -target arm64-apple-macosx13.0 \
+    -framework AppKit \
+    -framework Foundation \
+    -framework SwiftUI \
+    {{workspace_dir}}/swift-dialogs/Models.swift \
+    {{workspace_dir}}/swift-dialogs/JournalDialog.swift \
+    {{workspace_dir}}/swift-dialogs/AppPolicyDialog.swift \
+    {{workspace_dir}}/swift-dialogs/SetupAccessDialog.swift \
+    {{workspace_dir}}/swift-dialogs/DesktopCtlSettings.swift \
+    {{workspace_dir}}/swift-dialogs/main.swift \
+    -o {{macos_dir}}/desktopctl-dialogs
+  echo "Built: {{macos_dir}}/desktopctl-dialogs"
+
+build-swift-dialogs-dev:
+  mkdir -p {{macos_dir}}
+  swiftc \
+    -sdk "$(xcrun --show-sdk-path)" \
+    -target arm64-apple-macosx13.0 \
+    -framework AppKit \
+    -framework Foundation \
+    -framework SwiftUI \
+    {{workspace_dir}}/swift-dialogs/Models.swift \
+    {{workspace_dir}}/swift-dialogs/JournalDialog.swift \
+    {{workspace_dir}}/swift-dialogs/AppPolicyDialog.swift \
+    {{workspace_dir}}/swift-dialogs/SetupAccessDialog.swift \
+    {{workspace_dir}}/swift-dialogs/DesktopCtlSettings.swift \
+    {{workspace_dir}}/swift-dialogs/main.swift \
+    -o {{macos_dir}}/desktopctl-dialogs
+  echo "Built (dev): {{macos_dir}}/desktopctl-dialogs"
 
 build-windows:
   if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* || "$(uname -s)" == Windows_NT ]]; then \
@@ -115,7 +151,10 @@ release-all tag target="main" repo="yaroshevych/desktopctl":
   echo "Release ready: https://github.com/{{repo}}/releases/tag/{{tag}}"
 
 run: build
-  open {{app_dir}}
+  pkill -f "{{macos_dir}}/desktopctl-dialogs" || true
+  pkill -f "{{macos_dir}}/desktopctld" || true
+  rm -f /tmp/desktopctl.sock
+  open -n {{app_dir}}
 
 clean:
   pkill -f desktopctld || true
