@@ -17,14 +17,10 @@ pub fn ensure_screen_recording_permission() -> Result<(), AppError> {
     if screen_recording_granted() {
         return Ok(());
     }
-
-    // Trigger macOS permission flow on demand for CLI/on-demand daemon paths.
-    let _ = request_screen_recording_permission_prompt();
-    if screen_recording_granted() {
-        return Ok(());
-    }
-    let _ = open_screen_recording_settings();
-
+    // On macOS 15+, CGRequestScreenCaptureAccess and open(systempreferences:) open System
+    // Settings directly, causing repeated popups every time this is called from the daemon
+    // (e.g. on every journal capture attempt). Return a structured error instead; the
+    // remediation message tells the user to visit System Settings manually.
     Err(
         AppError::permission_denied("screen recording permission is required")
             .with_details(json!({ "remediation": SCREEN_RECORDING_REMEDIATION })),
@@ -37,10 +33,6 @@ pub fn screen_recording_remediation() -> &'static str {
 
 pub fn accessibility_remediation() -> &'static str {
     ACCESSIBILITY_REMEDIATION
-}
-
-fn request_screen_recording_permission_prompt() -> bool {
-    unsafe { CGRequestScreenCaptureAccess() }
 }
 
 pub fn open_screen_recording_settings() -> bool {
@@ -62,5 +54,6 @@ pub fn open_accessibility_settings() -> bool {
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
     fn CGPreflightScreenCaptureAccess() -> bool;
+    #[allow(dead_code)]
     fn CGRequestScreenCaptureAccess() -> bool;
 }

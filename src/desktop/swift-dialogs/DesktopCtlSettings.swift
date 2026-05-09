@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 import SwiftUI
 
 // MARK: - Models
@@ -95,8 +94,16 @@ private final class SettingsPermissionsVM: ObservableObject {
 
     func refresh() {
         cliInstalled = Self.checkCli(candidateCliDirs: candidateCliDirs)
-        accessibilityGranted = AXIsProcessTrusted()
-        screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        // Query the daemon for permission state rather than calling OS APIs (like
+        // CGPreflightScreenCaptureAccess) directly. On macOS 15+, calling those APIs from a
+        // process that lacks screen recording permission triggers the system permission UI.
+        DispatchQueue.global().async {
+            guard let perms = DaemonIPC.checkPermissions() else { return }
+            DispatchQueue.main.async {
+                self.accessibilityGranted = perms.accessibility
+                self.screenRecordingGranted = perms.screenRecording
+            }
+        }
     }
 
     func installAgentTool() {
@@ -371,9 +378,10 @@ private struct DesktopCtlSettingsView: View {
         }
         .frame(width: 520, height: 530)
         .onAppear {
-            Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-                permissionsVM.refresh()
-            }
+            permissionsVM.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            permissionsVM.refresh()
         }
     }
 

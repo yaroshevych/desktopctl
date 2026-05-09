@@ -83,6 +83,10 @@ pub(crate) fn run() -> Result<(), AppError> {
     daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
     journal::start_from_disk();
 
+    if journal::current().enabled && !permissions::screen_recording_granted() {
+        notify_journal_needs_screen_recording();
+    }
+
     let menu = Menu::new();
     let toggle_cli_gui_ops = MenuItem::new(
         cli_gui_toggle_menu_label(daemon::gui_ops_disabled()),
@@ -220,6 +224,28 @@ pub(crate) fn run() -> Result<(), AppError> {
 
     ns_app.run();
     Ok(())
+}
+
+fn notify_journal_needs_screen_recording() {
+    use objc2::{class, msg_send, runtime::AnyObject};
+    use objc2_foundation::NSString;
+    unsafe {
+        let notif: *mut AnyObject = msg_send![class!(NSUserNotification), new];
+        if notif.is_null() {
+            return;
+        }
+        let title = NSString::from_str("DesktopCtl: Journal Paused");
+        let body = NSString::from_str(
+            "Grant Screen Recording in System Settings → Privacy & Security to enable Journal.",
+        );
+        let _: () = msg_send![notif, setTitle: &*title];
+        let _: () = msg_send![notif, setInformativeText: &*body];
+        let center: *mut AnyObject =
+            msg_send![class!(NSUserNotificationCenter), defaultUserNotificationCenter];
+        if !center.is_null() {
+            let _: () = msg_send![center, deliverNotification: notif];
+        }
+    }
 }
 
 /// Idle icon: just the aperture shutter, no frame.
