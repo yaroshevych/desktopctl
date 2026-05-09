@@ -68,7 +68,7 @@ fn renders_version_for_top_level_version_flag() {
     let rendered = render_help_if_requested(&["--version".to_string()])
         .expect("version rendering should succeed")
         .expect("version output should be present");
-    assert!(rendered.starts_with("desktopctl "));
+    assert_eq!(rendered.trim(), "desktopctl 0.2.0");
 }
 
 #[test]

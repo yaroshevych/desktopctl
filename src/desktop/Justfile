@@ -21,7 +21,7 @@ build:
   rm -rf {{app_dir}}
   mkdir -p {{macos_dir}} {{contents_dir}}/Resources {{dist_dir}}
   cp {{workspace_dir}}/target/release/desktopctld {{macos_dir}}/desktopctld
-  cp {{workspace_dir}}/target/release/desktopctl {{cli_path}}
+  cp {{workspace_dir}}/target/release/desktopctl-cli {{cli_path}}
   ln -sfn ./DesktopCtl.app/Contents/MacOS/desktopctl {{legacy_cli_path}}
   cp {{workspace_dir}}/daemon/packaging/macos/Info.plist {{contents_dir}}/Info.plist
   printf 'APPL????' > {{contents_dir}}/PkgInfo
