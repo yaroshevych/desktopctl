@@ -222,6 +222,14 @@ private struct PermissionsTabContent: View {
     @ObservedObject var vm: SettingsPermissionsVM
 
     var body: some View {
+        VStack(spacing: 0) {
+        Text("macOS Permissions for DesktopCtl to see your screen and control apps. Install the agent tool so AI assistants can reach your Mac from the terminal — fully local, no data sent to the cloud. Grant permissions via System Settings.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 4)
         Form {
             Section {
                 permRow(name: "Agent Tool", verb: "Install", granted: vm.cliInstalled,
@@ -238,17 +246,9 @@ private struct PermissionsTabContent: View {
                         action: { openURL("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"); vm.refresh() })
             }
 
-            Section {
-                HStack {
-                    Text("Learn more about DesktopCtl and how to get started.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Website") { openURL("https://desktopctl.com") }.fixedSize()
-                }
-            }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
+        } // VStack
     }
 
     private func permRow(name: String, verb: String, granted: Bool,
@@ -355,12 +355,36 @@ private struct DesktopCtlSettingsView: View {
             }
             .animation(.none, value: selectedTab)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            HStack(spacing: 16) {
+                HStack(spacing: 4) {
+                    Text("Website:").foregroundStyle(.secondary)
+                    linkButton("desktopctl.com", url: "https://desktopctl.com")
+                }
+                HStack(spacing: 4) {
+                    Text("GitHub:").foregroundStyle(.secondary)
+                    linkButton("desktopctl", url: "https://github.com/yaroshevych/desktopctl")
+                }
+            }
+            .font(.callout)
+            .padding(.vertical, 10)
         }
-        .frame(width: 520, height: 500)
+        .frame(width: 520, height: 530)
         .onAppear {
             Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
                 permissionsVM.refresh()
             }
+        }
+    }
+
+    private func linkButton(_ label: String, url: String) -> some View {
+        Button(label) {
+            if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.accentColor)
+        .onHover { inside in
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
     }
 }
@@ -413,7 +437,7 @@ enum DesktopCtlSettings {
         hosting.setFrameSize(hosting.fittingSize)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 530),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
