@@ -326,6 +326,7 @@ pub(crate) fn key_type(
     observe: ObserveOptions,
     active_window: bool,
     active_window_id: Option<String>,
+    request_context: &super::super::RequestContext,
 ) -> Result<Value, AppError> {
     let backend = new_backend()?;
     backend.check_accessibility_permission()?;
@@ -346,6 +347,9 @@ pub(crate) fn key_type(
     )?;
     let background_verification = if background_attempt.handled {
         background_attempt.verification
+    } else if let Some(human) = request_context.human {
+        super::super::human::human_type_text(backend.as_ref(), &text, human.wpm)?;
+        None
     } else {
         backend.type_text(&text)?;
         None

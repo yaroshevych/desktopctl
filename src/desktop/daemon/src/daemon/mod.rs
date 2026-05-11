@@ -779,7 +779,7 @@ fn execute_with_context(
             observe,
             active_window,
             active_window_id,
-        } => commands::input::key_type(text, observe, active_window, active_window_id),
+        } => commands::input::key_type(text, observe, active_window, active_window_id, request_context),
         Command::KeyHotkey {
             hotkey,
             observe,
