@@ -677,11 +677,34 @@ fn execute(command: Command) -> Result<Value, AppError> {
     execute_resident_command(command)
 }
 
+fn is_input_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::PointerMove { .. }
+            | Command::PointerDown { .. }
+            | Command::PointerUp { .. }
+            | Command::PointerClick { .. }
+            | Command::PointerClickText { .. }
+            | Command::PointerClickId { .. }
+            | Command::PointerScroll { .. }
+            | Command::PointerDrag { .. }
+            | Command::UiType { .. }
+            | Command::KeyHotkey { .. }
+            | Command::KeyEnter { .. }
+            | Command::KeyEscape { .. }
+    )
+}
+
 fn execute_with_context(
     command: Command,
     overlay_token_updates_enabled: bool,
     request_context: &RequestContext,
 ) -> Result<Value, AppError> {
+    if let Some(h) = request_context.human {
+        if is_input_command(&command) {
+            human::jitter_sleep(h.jitter_ms[0], h.jitter_ms[1]);
+        }
+    }
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
         Command::DisableGui => {
