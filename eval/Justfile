@@ -24,6 +24,7 @@ mlflow:
 
 # Backup Label Studio database to datasets/ls_backup_<timestamp>.sql.gz
 backup:
+    mkdir -p datasets/backup
     {{compose}} exec postgres pg_dump -U ${POSTGRES_USER:-desktopctl} labelstudio | gzip > datasets/backup/ls_backup_$(date +%Y%m%d_%H%M%S).sql.gz && echo "backed up"
 
 # Open psql in the labelstudio database
