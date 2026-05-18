@@ -48,7 +48,7 @@ Repository layout:
 ## Quick Start
 
 ```bash
-just build run
+make install
 ```
 
 ```bash
