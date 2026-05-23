@@ -293,8 +293,8 @@ fn settle_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundInputVerification, BackgroundInputVerificationStatus, CaptureFingerprint,
-        SemanticFingerprint, VerificationSnapshot, classify,
+        BackgroundInputVerificationStatus, CaptureFingerprint, SemanticFingerprint,
+        VerificationSnapshot, classify,
     };
     use desktop_core::error::AppError;
 

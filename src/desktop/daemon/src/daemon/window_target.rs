@@ -355,6 +355,19 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_target_accepts_window_ref_alias() {
+        let mut windows = vec![
+            test_window(20, 1, "Safari", "Tab A"),
+            test_window(22, 2, "Calculator", "Calculator"),
+        ];
+        windows[1].window_ref = Some("platform-window-22".to_string());
+        let selected =
+            resolve_tokenize_window_target(&windows, Some("platform-window-22")).expect("selected");
+        assert_eq!(selected.id, "22:2");
+        assert_eq!(selected.app, "Calculator");
+    }
+
+    #[test]
     fn tokenize_target_defaults_to_frontmost_visible() {
         let mut windows = vec![
             test_window(20, 1, "Safari", "Tab A"),
