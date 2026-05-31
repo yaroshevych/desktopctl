@@ -10,6 +10,18 @@ VM_USER=<vm-username>
 VM_WINDOW_APP=UTM
 ```
 
+## Justfile wrappers
+
+Prefer the `src/desktop/Justfile` recipes when running these from the repo
+root, so path and environment setup stay consistent:
+
+```bash
+just -f src/desktop/Justfile vm-enable-permissions
+just -f src/desktop/Justfile vm-smoke
+just -f src/desktop/Justfile vm-tokenize-phase0
+just -f src/desktop/Justfile vm-tokenize-phase1
+```
+
 ## Scripts
 
 - `enable_permissions.sh` — deploy DesktopCtl to the VM and grant Accessibility + Screen Recording permissions via host automation
