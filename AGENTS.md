@@ -130,13 +130,25 @@ When making commits, keep messages brief and descriptive:
 
 ## Build & Test
 
-_Add your build and test commands here_
+Primary desktop commands live in `src/desktop/Justfile`.
 
 ```bash
-# Example:
-# npm install
-# npm test
+# Build the macOS app and CLI artifacts
+just -f src/desktop/Justfile build
+
+# Compile CLI and daemon tests without running them
+just -f src/desktop/Justfile test-compile
+
+# Run release gates, excluding the stricter clippy pass
+just -f src/desktop/Justfile release-gates
+
+# Optional strict gate
+just -f src/desktop/Justfile release-gates-strict
 ```
+
+Note: `release-gates` currently runs the known failing
+`golden_controls_have_expected_text_fields_and_buttons` test. Do not fix that
+test unless explicitly asked.
 
 ## Architecture Overview
 
