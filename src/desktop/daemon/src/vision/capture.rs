@@ -17,12 +17,18 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 use super::types::CapturedImage;
-#[cfg(target_os = "windows")]
+#[cfg(target_os = "linux")]
 use super::types::{CapturedFrame, CapturedImage};
 #[cfg(target_os = "windows")]
+use super::types::{CapturedFrame, CapturedImage};
+#[cfg(target_os = "linux")]
 use desktop_core::{error::AppError, protocol::now_millis};
+#[cfg(target_os = "windows")]
+use desktop_core::{error::AppError, protocol::now_millis};
+#[cfg(target_os = "linux")]
+use image::RgbaImage;
 #[cfg(target_os = "windows")]
 use image::RgbaImage;
 #[cfg(target_os = "windows")]
@@ -249,15 +255,65 @@ pub(crate) fn default_capture_path() -> PathBuf {
         .join(format!("capture-{ts}.png"))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 use desktop_core::error::AppError;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, AppError> {
+    let session = crate::platform::linux::portal::start_screencast()?;
+    let frame = crate::platform::linux::capture::capture_one(&session)?;
+    session.close();
+
+    let image = RgbaImage::from_vec(frame.width, frame.height, frame.pixels).ok_or_else(|| {
+        AppError::backend_unavailable("failed to build RGBA capture image from PipeWire buffer")
+    })?;
+
+    let image_path = if let Some(path) = out_path {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                AppError::backend_unavailable(format!(
+                    "failed to create capture directory {}: {err}",
+                    parent.display()
+                ))
+            })?;
+        }
+        image.save(&path).map_err(|err| {
+            AppError::backend_unavailable(format!(
+                "failed to save capture PNG {}: {err}",
+                path.display()
+            ))
+        })?;
+        Some(path)
+    } else {
+        None
+    };
+
+    let now = now_millis();
+    Ok(CapturedImage {
+        frame: CapturedFrame {
+            snapshot_id: now as u64,
+            timestamp: now.to_string(),
+            display_id: 0,
+            width: image.width(),
+            height: image.height(),
+            scale: 1.0,
+            image_path,
+        },
+        image,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub fn capture_screen_png(_out_path: Option<PathBuf>) -> Result<CapturedImage, AppError> {
     Err(AppError::backend_unavailable(
         "screen capture backend not implemented for this platform",

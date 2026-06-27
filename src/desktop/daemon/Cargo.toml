@@ -37,3 +37,26 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [target.'cfg(all(target_os = "windows", target_env = "msvc"))'.dependencies]
 leptess = "0.14"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# D-Bus foundation for portals, AT-SPI, and the GNOME extension client.
+# Blocking API keeps the synchronous daemon model intact; async-only portal
+# flows (ashpd) are driven via a block_on boundary.
+zbus = { version = "5", features = ["blocking-api"] }
+# XDG ScreenCast + RemoteDesktop portals. No pipewire feature here: portal
+# negotiation is pure D-Bus; PipeWire fd consumption is a separate native layer.
+ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+# AT-SPI2 accessibility tree over session D-Bus.
+atspi = { version = "0.26", features = ["proxies", "connection", "zbus"] }
+# block_on boundary for async-only portal calls without making the daemon async.
+futures-lite = "2"
+# PipeWire frame ingestion for ScreenCast capture (needs libpipewire-0.3-dev).
+pipewire = "0.8"
+libspa = "0.8"
+# EIS input emission. reis is a pure-Rust EIS implementation, avoiding the
+# immature libei C bindings called out as the top risk in the spec.
+reis = "0.4"
+# Keymap handling for libei/EIS key events (needs libxkbcommon-dev).
+xkbcommon = "0.8"
+# Local OCR over captured frames (needs libtesseract-dev + leptonica).
+leptess = "0.14"

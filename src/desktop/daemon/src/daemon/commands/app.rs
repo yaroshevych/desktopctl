@@ -95,7 +95,7 @@ pub(crate) fn open(
         return Ok(json!({ "window_id": window_id }));
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
         let mut cmd = ProcessCommand::new("open");
         if background {
@@ -139,6 +139,33 @@ pub(crate) fn open(
         }
         let window_id = try_resolve_window_id_for_app(&name, !background);
         Ok(json!({ "window_id": window_id }))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = background;
+        let mut cmd = ProcessCommand::new(&name);
+        if !args.is_empty() {
+            cmd.args(&args);
+        }
+        cmd.spawn().map_err(|err| {
+            AppError::backend_unavailable(format!("failed to launch application '{name}': {err}"))
+        })?;
+
+        if wait {
+            super::super::wait_for_open_app(&name, timeout_ms.unwrap_or(8_000))?;
+        }
+        let window_id = try_resolve_window_id_for_app(&name, true);
+        Ok(json!({ "window_id": window_id }))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (args, wait, timeout_ms, background);
+        Err(AppError::backend_unavailable(format!(
+            "app open is unsupported on {}",
+            std::env::consts::OS
+        )))
     }
 }
 

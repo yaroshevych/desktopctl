@@ -1,0 +1,5 @@
+/* DesktopCtl panel-menu indicator styling. Minimal/optional. */
+
+.panel-button.desktopctl-active {
+    color: #4caf50;
+}

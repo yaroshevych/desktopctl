@@ -1,11 +1,11 @@
 use std::{path::PathBuf, sync::mpsc, time::Instant};
 
-use desktop_core::{automation::new_backend, error::AppError, protocol::Bounds};
+use desktop_core::{error::AppError, protocol::Bounds};
 use serde_json::{Value, json};
 
 use crate::{
     daemon::{window_refs, window_target},
-    platform::{self, permissions},
+    platform::{self, input::new_backend, permissions},
     trace, vision,
 };
 

@@ -16,7 +16,7 @@ use desktop_core::ipc::pipe_name;
 #[cfg(unix)]
 use desktop_core::ipc::socket_path;
 use desktop_core::{
-    automation::{Point, new_backend},
+    automation::Point,
     error::AppError,
     ipc::{read_framed_json, write_framed_json},
     protocol::{
@@ -26,6 +26,7 @@ use desktop_core::{
 };
 #[cfg(unix)]
 use interprocess::local_socket::{GenericFilePath, ToFsName};
+use crate::platform::input::new_backend;
 #[cfg(windows)]
 use interprocess::local_socket::{GenericNamespaced, ToNsName};
 use interprocess::local_socket::{

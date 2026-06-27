@@ -1,0 +1,9 @@
+{
+  "uuid": "desktopctl@desktopctl.sh",
+  "name": "DesktopCtl",
+  "description": "Exposes Mutter window management (enumerate, activate, close, move/resize, workspace) and a panel-menu control surface to the DesktopCtl daemon over a private session D-Bus interface (sh.desktopctl.Shell). The sanctioned escape hatch for external window control on GNOME Wayland.",
+  "shell-version": ["50"],
+  "url": "https://desktopctl.sh",
+  "version": 1,
+  "session-modes": ["user"]
+}
