@@ -96,6 +96,11 @@ where
 }
 
 fn launch_daemon() -> Result<(), AppError> {
+    #[cfg(target_os = "linux")]
+    if let Some(daemon_bin) = discover_daemon_binary_path() {
+        return launch_daemon_binary(&daemon_bin);
+    }
+
     if let Some(app_path) = discover_daemon_app_path() {
         let autostart_mode =
             std::env::var("DESKTOPCTL_AUTOSTART_MODE").unwrap_or_else(|_| "resident".to_string());
@@ -121,15 +126,7 @@ fn launch_daemon() -> Result<(), AppError> {
     }
 
     if let Some(daemon_bin) = discover_daemon_binary_path() {
-        trace_log(format!("launch:daemon_bin={}", daemon_bin.display()));
-        let mut cmd = ProcessCommand::new(daemon_bin);
-        cmd.arg("--on-demand");
-        configure_daemon_spawn(&mut cmd);
-        cmd.spawn().map_err(|err| {
-            AppError::backend_unavailable(format!("failed to launch daemon binary: {err}"))
-        })?;
-        trace_log("launch:daemon_bin_ok");
-        return Ok(());
+        return launch_daemon_binary(&daemon_bin);
     }
 
     trace_log("launch:no_binary_or_app");
@@ -146,6 +143,18 @@ fn launch_daemon() -> Result<(), AppError> {
             "unable to auto-start daemon; run `just build` and retry",
         ))
     }
+}
+
+fn launch_daemon_binary(daemon_bin: &Path) -> Result<(), AppError> {
+    trace_log(format!("launch:daemon_bin={}", daemon_bin.display()));
+    let mut cmd = ProcessCommand::new(daemon_bin);
+    cmd.arg("--on-demand");
+    configure_daemon_spawn(&mut cmd);
+    cmd.spawn().map_err(|err| {
+        AppError::backend_unavailable(format!("failed to launch daemon binary: {err}"))
+    })?;
+    trace_log("launch:daemon_bin_ok");
+    Ok(())
 }
 
 #[cfg(windows)]
