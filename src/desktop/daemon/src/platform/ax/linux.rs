@@ -53,6 +53,7 @@ const TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
 
 mod imp {
     use super::{AxElement, Bounds, MAX_DEPTH, MAX_NODES, TIME_BUDGET, ToggleState};
+    use crate::trace;
     use atspi::connection::AccessibilityConnection;
     use atspi::proxy::accessible::{AccessibleProxy, ObjectRefExt};
     use atspi::proxy::component::ComponentProxy;
@@ -326,6 +327,46 @@ mod imp {
         None
     }
 
+    fn object_name(conn: &Connection, obj: &ObjectRef) -> String {
+        accessible_for(conn, obj)
+            .ok()
+            .and_then(|acc| block_on(acc.name()).ok())
+            .unwrap_or_default()
+    }
+
+    fn log_collection(label: &str, elements: &[AxElement]) {
+        let mut with_text = 0usize;
+        let mut with_bounds = 0usize;
+        let mut roles = std::collections::BTreeMap::<&str, usize>::new();
+        for element in elements {
+            if element
+                .text
+                .as_deref()
+                .map(|text| !text.trim().is_empty())
+                .unwrap_or(false)
+            {
+                with_text += 1;
+            }
+            if element.bounds.width > 0.0 && element.bounds.height > 0.0 {
+                with_bounds += 1;
+            }
+            *roles.entry(element.role.as_str()).or_insert(0) += 1;
+        }
+        let roles = roles
+            .into_iter()
+            .take(24)
+            .map(|(role, count)| format!("{role}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        trace::log(format!(
+            "linux_ax:{label}:collected count={} with_text={} with_bounds={} roles=[{}]",
+            elements.len(),
+            with_text,
+            with_bounds,
+            roles
+        ));
+    }
+
     /// Pick the most appropriate window from a candidate list: title match
     /// first, then the active window, then the first available.
     fn select_window(
@@ -383,10 +424,16 @@ mod imp {
         let conn = connect()?;
         let bus = conn.connection();
         let Some((_app, win)) = active_window(bus) else {
+            trace::log("linux_ax:frontmost:no_active_window");
             return Ok(Vec::new());
         };
+        trace::log(format!(
+            "linux_ax:frontmost:active_window name=\"{}\"",
+            object_name(bus, &win)
+        ));
         let mut walk = Walk::new(bus);
         collect_subtree(&mut walk, &win, 0);
+        log_collection("frontmost", &walk.out);
         Ok(walk.out)
     }
 
@@ -403,12 +450,19 @@ mod imp {
         // window when the PID cannot be matched (e.g. the toolkit does not
         // expose a usable bus name).
         let mut target_app: Option<ObjectRef> = None;
+        let mut app_count = 0usize;
         for app in applications(bus) {
+            app_count += 1;
             if pid_for(bus, &app) == Some(i64::from(pid)) {
                 target_app = Some(app);
                 break;
             }
         }
+        trace::log(format!(
+            "linux_ax:window:resolve_app pid={pid} matched={} app_count={app_count} title=\"{}\"",
+            target_app.is_some(),
+            target_window_title.unwrap_or_default()
+        ));
 
         let windows: Vec<ObjectRef> = match &target_app {
             Some(app) => windows_of_app(bus, app),
@@ -417,13 +471,23 @@ mod imp {
                 None => return Ok(Vec::new()),
             },
         };
+        trace::log(format!(
+            "linux_ax:window:candidate_windows count={}",
+            windows.len()
+        ));
 
         let Some(win) = select_window(bus, &windows, target_window_title) else {
+            trace::log("linux_ax:window:no_selected_window");
             return Ok(Vec::new());
         };
+        trace::log(format!(
+            "linux_ax:window:selected name=\"{}\"",
+            object_name(bus, &win)
+        ));
 
         let mut walk = Walk::new(bus);
         collect_subtree(&mut walk, &win, 0);
+        log_collection("window", &walk.out);
         Ok(walk.out)
     }
 

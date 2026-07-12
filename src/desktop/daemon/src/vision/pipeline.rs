@@ -733,15 +733,40 @@ fn detect_vision_elements(
 
 fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax::AxElement> {
     let Some(meta) = window_meta else {
+        trace::log("pipeline:tokenize:ax_skip reason=missing_window_meta");
         return Vec::new();
     };
     let result = match (meta.pid, meta.native_window_id) {
-        (Some(pid), Some(native_window_id)) => super::ax::collect_window_elements(
-            pid,
-            native_window_id,
-            meta.capture_bounds.as_ref().or(Some(&meta.bounds)),
-            Some(&meta.title),
-        ),
+        (Some(pid), Some(native_window_id)) => {
+            trace::log(format!(
+                "pipeline:tokenize:ax_collect mode=pid_native pid={pid} native_window_id={native_window_id} app={} title=\"{}\" id={}",
+                meta.app.as_deref().unwrap_or_default(),
+                meta.title,
+                meta.id
+            ));
+            super::ax::collect_window_elements(
+                pid,
+                native_window_id,
+                meta.capture_bounds.as_ref().or(Some(&meta.bounds)),
+                Some(&meta.title),
+            )
+        }
+        #[cfg(target_os = "linux")]
+        (Some(pid), None) => {
+            trace::log(format!(
+                "pipeline:tokenize:ax_collect mode=linux_pid_title pid={pid} app={} title=\"{}\" id={}",
+                meta.app.as_deref().unwrap_or_default(),
+                meta.title,
+                meta.id
+            ));
+            super::ax::collect_window_elements(
+                pid,
+                0,
+                meta.capture_bounds.as_ref().or(Some(&meta.bounds)),
+                Some(&meta.title),
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
         (Some(pid), None) => {
             trace::log(format!(
                 "pipeline:tokenize:ax_skip reason=target_window_missing_native_id pid={pid} app={} title=\"{}\" id={}",
@@ -763,12 +788,51 @@ fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax
         _ => super::ax::collect_frontmost_window_elements(),
     };
     match result {
-        Ok(items) => items,
+        Ok(items) => {
+            trace::log(format!(
+                "pipeline:tokenize:ax_collect_ok {}",
+                summarize_ax_elements(&items)
+            ));
+            items
+        }
         Err(err) => {
             trace::log(format!("pipeline:tokenize:ax_warn {err}"));
             Vec::new()
         }
     }
+}
+
+fn summarize_ax_elements(items: &[super::ax::AxElement]) -> String {
+    let mut with_text = 0usize;
+    let mut with_bounds = 0usize;
+    let mut roles = std::collections::BTreeMap::<&str, usize>::new();
+    for item in items {
+        if item
+            .text
+            .as_deref()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
+        {
+            with_text += 1;
+        }
+        if item.bounds.width > 0.0 && item.bounds.height > 0.0 {
+            with_bounds += 1;
+        }
+        *roles.entry(item.role.as_str()).or_insert(0) += 1;
+    }
+    let roles = roles
+        .into_iter()
+        .take(16)
+        .map(|(role, count)| format!("{role}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "count={} with_text={} with_bounds={} roles=[{}]",
+        items.len(),
+        with_text,
+        with_bounds,
+        roles
+    )
 }
 
 fn merge_elements_stage(

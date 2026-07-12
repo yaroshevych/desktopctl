@@ -296,12 +296,24 @@ pub(crate) fn tokenize(
         stage_done!("screenshot_tokenize");
         payload
     } else {
+        trace::log("execute:screen_tokenize:before_screen_recording_permission");
         permissions::ensure_screen_recording_permission()?;
         stage_done!("screen_recording_permission");
-        let backend = new_backend()?;
-        stage_done!("automation_backend_init");
-        backend.check_accessibility_permission()?;
-        stage_done!("accessibility_permission");
+        #[cfg(not(target_os = "linux"))]
+        {
+            trace::log("execute:screen_tokenize:before_automation_backend_init");
+            let backend = new_backend()?;
+            stage_done!("automation_backend_init");
+            trace::log("execute:screen_tokenize:before_accessibility_permission");
+            backend.check_accessibility_permission()?;
+            stage_done!("accessibility_permission");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            trace::log("execute:screen_tokenize:skip_automation_backend_init platform=linux");
+            stage_done!("automation_backend_init_skipped");
+            stage_done!("accessibility_permission_skipped");
+        }
         if active_window_id.is_some() && !active_window {
             return Err(AppError::invalid_argument(
                 "active window id requires --active-window",
