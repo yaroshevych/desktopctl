@@ -50,14 +50,18 @@ struct CaptureState {
 
 /// Capture a single frame from the session's primary monitor stream.
 pub fn capture_one(session: &ScreenCastSession) -> Result<CapturedFrame, AppError> {
+    crate::trace::log("linux_pipewire:capture_one:start");
     let node_id = session.primary_node_id()?;
     let fd = session.pipewire_fd_cloned()?;
+    crate::trace::log(format!("linux_pipewire:capture_one:node node_id={node_id}"));
 
     pw::init();
 
+    crate::trace::log("linux_pipewire:capture_one:mainloop_start");
     let mainloop = pw::main_loop::MainLoop::new(None).map_err(pw_err)?;
     let context = pw::context::Context::new(&mainloop).map_err(pw_err)?;
     let core = context.connect_fd(fd, None).map_err(pw_err)?;
+    crate::trace::log("linux_pipewire:capture_one:connect_fd_ok");
 
     let state = Rc::new(RefCell::new(CaptureState::default()));
 
@@ -244,6 +248,7 @@ pub fn capture_one(session: &ScreenCastSession) -> Result<CapturedFrame, AppErro
             &mut params,
         )
         .map_err(pw_err)?;
+    crate::trace::log("linux_pipewire:capture_one:stream_connect_ok");
 
     // --- Bounded run -------------------------------------------------------
     // Arm a one-shot timer that quits the loop if no frame arrives in time.
@@ -260,7 +265,9 @@ pub fn capture_one(session: &ScreenCastSession) -> Result<CapturedFrame, AppErro
         .into_result()
         .map_err(|e| stream_failed(format!("failed to arm capture timer: {e:?}")))?;
 
+    crate::trace::log("linux_pipewire:capture_one:run_start");
     mainloop.run();
+    crate::trace::log("linux_pipewire:capture_one:run_done");
 
     // --- Result ------------------------------------------------------------
     let mut st = state.borrow_mut();

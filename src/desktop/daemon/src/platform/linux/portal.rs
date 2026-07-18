@@ -112,13 +112,17 @@ impl ScreenCastSession {
 ///
 /// Synchronous wrapper around the async portal flow.
 pub fn start_screencast() -> Result<ScreenCastSession, AppError> {
+    crate::trace::log("linux_portal:screencast:start");
     block_on(start_screencast_async())
 }
 
 async fn start_screencast_async() -> Result<ScreenCastSession, AppError> {
+    crate::trace::log("linux_portal:screencast:new_proxy_start");
     let proxy = Screencast::new().await.map_err(map_ashpd_err)?;
+    crate::trace::log("linux_portal:screencast:create_session_start");
 
     let session = proxy.create_session().await.map_err(map_ashpd_err)?;
+    crate::trace::log("linux_portal:screencast:select_sources_start");
 
     // Default source: a single monitor, with the cursor embedded into the
     // stream buffers, persisting until explicitly revoked.
@@ -133,6 +137,7 @@ async fn start_screencast_async() -> Result<ScreenCastSession, AppError> {
         )
         .await
         .map_err(map_ashpd_err)?;
+    crate::trace::log("linux_portal:screencast:start_request_start");
 
     let response = proxy
         .start(&session, None)
@@ -140,6 +145,7 @@ async fn start_screencast_async() -> Result<ScreenCastSession, AppError> {
         .map_err(map_ashpd_err)?
         .response()
         .map_err(map_ashpd_err)?;
+    crate::trace::log("linux_portal:screencast:start_response_ok");
 
     let restore_token = response.restore_token().map(ToOwned::to_owned);
 
@@ -158,11 +164,18 @@ async fn start_screencast_async() -> Result<ScreenCastSession, AppError> {
             "ScreenCast portal returned no streams (selection cancelled?)",
         ));
     }
+    crate::trace::log(format!(
+        "linux_portal:screencast:streams count={} first_node={}",
+        streams.len(),
+        streams[0].node_id
+    ));
 
+    crate::trace::log("linux_portal:screencast:open_pipewire_start");
     let pipewire_fd = proxy
         .open_pipe_wire_remote(&session)
         .await
         .map_err(map_ashpd_err)?;
+    crate::trace::log("linux_portal:screencast:open_pipewire_ok");
 
     Ok(ScreenCastSession {
         _proxy: proxy,

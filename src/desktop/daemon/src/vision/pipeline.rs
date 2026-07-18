@@ -348,12 +348,32 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
         window_meta.native_window_id,
         window_meta.capture_bounds.as_ref(),
     ) {
+        trace::log(format!(
+            "pipeline:tokenize:capture_start mode=window native_window_id={native_window_id}"
+        ));
         let mut captured = capture_window_png(None, native_window_id, Some(capture_bounds))?;
         crop_window_capture_to_bounds(&mut captured, capture_bounds, &window_meta.bounds)?;
+        trace::log(format!(
+            "pipeline:tokenize:capture_done mode=window width={} height={}",
+            captured.image.width(),
+            captured.image.height()
+        ));
         captured
     } else {
+        trace::log("pipeline:tokenize:capture_start mode=screen");
         let mut captured = capture_screen_png(None)?;
+        trace::log(format!(
+            "pipeline:tokenize:capture_done mode=screen width={} height={}",
+            captured.image.width(),
+            captured.image.height()
+        ));
+        trace::log("pipeline:tokenize:crop_start mode=screen");
         crop_capture_to_bounds(&mut captured, &window_meta.bounds)?;
+        trace::log(format!(
+            "pipeline:tokenize:crop_done mode=screen width={} height={}",
+            captured.image.width(),
+            captured.image.height()
+        ));
         captured
     };
     let capture_elapsed = capture_started.elapsed().as_millis();

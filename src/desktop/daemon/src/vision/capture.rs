@@ -270,9 +270,16 @@ use std::{
 
 #[cfg(target_os = "linux")]
 pub fn capture_screen_png(out_path: Option<PathBuf>) -> Result<CapturedImage, AppError> {
+    crate::trace::log("linux_capture:screen:start_screencast");
     let session = crate::platform::linux::portal::start_screencast()?;
+    crate::trace::log("linux_capture:screen:capture_one_start");
     let frame = crate::platform::linux::capture::capture_one(&session)?;
+    crate::trace::log(format!(
+        "linux_capture:screen:capture_one_done width={} height={}",
+        frame.width, frame.height
+    ));
     session.close();
+    crate::trace::log("linux_capture:screen:session_closed");
 
     let image = RgbaImage::from_vec(frame.width, frame.height, frame.pixels).ok_or_else(|| {
         AppError::backend_unavailable("failed to build RGBA capture image from PipeWire buffer")
