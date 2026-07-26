@@ -141,10 +141,33 @@ mod imp {
             .map(i64::from)
     }
 
-    /// Map an AT-SPI [`Role`] to the stable lowercase string the tokenizer
-    /// expects (matches libatspi's role names, e.g. "push button").
+    /// Map AT-SPI roles into the AX vocabulary already understood by the
+    /// tokenizer/normalizer.
     fn role_string(role: Role) -> String {
-        role.name().to_string()
+        let name = role.name().to_string();
+        let mapped = match name.as_str() {
+            "push button" | "button" => "AXButton",
+            "toggle button" => "AXButton",
+            "check box" | "check menu item" => "AXCheckBox",
+            "radio button" | "radio menu item" => "AXRadioButton",
+            "combo box" => "AXComboBox",
+            "entry" | "password text" | "search box" => "AXTextField",
+            "text" | "terminal" => "AXTextArea",
+            "page tab" => "AXTabItem",
+            "page tab list" => "AXTabGroup",
+            "menu" => "AXMenu",
+            "menu item" => "AXMenuItem",
+            "scroll bar" => "AXScrollBar",
+            "scroll pane" => "AXScrollArea",
+            "slider" => "AXSlider",
+            "spin button" => "AXIncrementor",
+            "split pane" => "AXSplitter",
+            "image" | "icon" => "AXImage",
+            "frame" | "window" | "dialog" => "AXWindow",
+            "form" | "grouping" | "panel" | "filler" | "viewport" => "AXGroup",
+            _ => return name.to_string(),
+        };
+        mapped.to_string()
     }
 
     /// Derive a [`ToggleState`] for checkable roles from the state set.

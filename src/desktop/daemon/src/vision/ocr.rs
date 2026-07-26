@@ -2,12 +2,16 @@
 #[path = "ocr/macos.rs"]
 mod macos_impl;
 
-#[cfg(any(all(target_os = "windows", target_env = "msvc"), target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "windows", target_env = "msvc"),
+    target_os = "windows"
+))]
 use desktop_core::protocol::Bounds;
 use desktop_core::{error::AppError, protocol::SnapshotText};
 use image::RgbaImage;
 
-#[cfg(all(target_os = "windows", target_env = "msvc"))]
+#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 use leptess::LepTess;
 
 #[cfg(target_os = "macos")]
@@ -26,7 +30,7 @@ pub fn recognize_text_from_image(
     macos_impl::recognize_text_from_image(path, image_width, image_height)
 }
 
-#[cfg(all(target_os = "windows", target_env = "msvc"))]
+#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> {
     let mut encoded = Vec::new();
     {
@@ -60,7 +64,7 @@ pub fn recognize_text(image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> 
     parse_tesseract_tsv(&tsv, image.width(), image.height())
 }
 
-#[cfg(all(target_os = "windows", target_env = "msvc"))]
+#[cfg(any(target_os = "linux", all(target_os = "windows", target_env = "msvc")))]
 #[allow(dead_code)]
 pub fn recognize_text_from_image(
     path: &std::path::Path,
@@ -210,7 +214,7 @@ fn tesseract_command() -> std::process::Command {
     std::process::Command::new("tesseract")
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn parse_tesseract_tsv(
     tsv: &str,
     image_width: u32,
@@ -277,12 +281,12 @@ fn temp_input_path(prefix: &str, ext: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("desktopctl-{prefix}-{ts}.{ext}"))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn recognize_text(_image: &RgbaImage) -> Result<Vec<SnapshotText>, AppError> {
     Ok(Vec::new())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[allow(dead_code)]
 pub fn recognize_text_from_image(
     _path: &std::path::Path,

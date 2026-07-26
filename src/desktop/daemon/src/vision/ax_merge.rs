@@ -30,6 +30,9 @@ pub fn merge_elements(
 
         let (merged_text, filled_from_ocr) =
             merged_ax_text(&ax.role, &local, elements, ax.text.as_deref());
+        if should_skip_ax_element(&ax.role, merged_text.as_deref()) {
+            continue;
+        }
         let ax_primary_id = primary_id_for_ax(ax)
             .or_else(|| Some(fallback_id_for_ax(ax, &local, &mut fallback_id_counts)));
         if filled_from_ocr {
@@ -59,7 +62,12 @@ pub fn merge_elements(
             let same_text =
                 !ax_text.is_empty() && !existing_text.is_empty() && ax_text == existing_text;
             let same_text_near = same_text && overlap_ratio >= 0.20;
+            let can_replace_by_region =
+                !is_structural_ax_role(&ax.role) && !is_structural_element(existing);
             if same_region || same_text_near {
+                if same_region && !same_text_near && !can_replace_by_region {
+                    continue;
+                }
                 let score = overlap_ratio + if same_text { 0.25 } else { 0.0 };
                 if score > replace_score {
                     replace_score = score;
@@ -227,6 +235,27 @@ fn sanitize_ax_id_component(raw: &str) -> Option<String> {
 
 fn should_prioritize_ax_text_region(role: &str, ax_text: &str) -> bool {
     !ax_text.is_empty() && matches!(role, "AXTextField" | "AXTextArea")
+}
+
+fn should_skip_ax_element(role: &str, text: Option<&str>) -> bool {
+    if !is_structural_ax_role(role) {
+        return false;
+    }
+    text.map(str::trim).is_none_or(str::is_empty)
+}
+
+fn is_structural_ax_role(role: &str) -> bool {
+    matches!(
+        role,
+        "AXGroup" | "AXWindow" | "AXScrollArea" | "AXTabGroup" | "AXSplitter"
+    )
+}
+
+fn is_structural_element(element: &TokenizeElement) -> bool {
+    element
+        .source
+        .strip_prefix("accessibility_ax:")
+        .is_some_and(is_structural_ax_role)
 }
 
 fn drop_ocr_text_inside_ax_region(elements: &mut Vec<TokenizeElement>, ax_bounds: &Bounds) {
