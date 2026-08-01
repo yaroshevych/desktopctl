@@ -110,14 +110,20 @@ fn tokenize_meta_for_window(
     let native_window_id = background_capture
         .then(|| super::super::explicit_background_capture_window_id(window))
         .transpose()?;
+    #[cfg(target_os = "linux")]
+    let pid = (window.pid > 0)
+        .then(|| i32::try_from(window.pid).ok())
+        .flatten();
+    #[cfg(not(target_os = "linux"))]
+    let pid = background_capture
+        .then(|| i32::try_from(window.pid).ok())
+        .flatten();
     Ok(vision::pipeline::TokenizeWindowMeta {
         id: window.id.clone(),
         title: window.title.clone(),
         app: Some(window.app.clone()),
         bounds,
-        pid: background_capture
-            .then(|| i32::try_from(window.pid).ok())
-            .flatten(),
+        pid,
         native_window_id,
         capture_bounds: native_window_id.map(|_| window.bounds.clone()),
     })
@@ -127,7 +133,15 @@ fn should_use_background_capture(
     window: &platform::windowing::WindowInfo,
     require_background_capture: bool,
 ) -> bool {
-    require_background_capture && !window.frontmost
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (window, require_background_capture);
+        return false;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        require_background_capture && !window.frontmost
+    }
 }
 
 pub(crate) fn screenshot(
@@ -857,6 +871,7 @@ mod tests {
         assert!(!should_use_background_capture(&window(true), true));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn background_explicit_active_window_uses_window_capture() {
         assert!(should_use_background_capture(&window(false), true));
@@ -865,5 +880,28 @@ mod tests {
     #[test]
     fn implicit_active_window_uses_foreground_capture() {
         assert!(!should_use_background_capture(&window(false), false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_window_query_uses_pid_without_native_capture_id() {
+        let mut target = window(false);
+        target.id = "w1".to_string();
+
+        let meta = tokenize_meta_for_window(
+            &target,
+            Bounds {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            true,
+        )
+        .expect("Linux window queries should not require a native capture ID");
+
+        assert_eq!(meta.pid, Some(42));
+        assert_eq!(meta.native_window_id, None);
+        assert_eq!(meta.capture_bounds, None);
     }
 }
