@@ -60,6 +60,29 @@ pub(crate) fn render_response(
     if !is_journal_tokenize && matches!(command, Command::OpenApp { .. }) {
         eligible_hints.push(open_app_hint_message(response));
     }
+    if cfg!(target_os = "macos") && matches!(response, ResponseEnvelope::Success(_)) {
+        match command {
+            Command::OpenApp { .. }
+            | Command::AppShow { .. }
+            | Command::AppIsolate { .. }
+            | Command::WindowFocus { .. }
+            | Command::ScreenTokenize { .. } => {
+                eligible_hints.push(menu_discovery_hint_message(response));
+            }
+            Command::MenuList { .. } => {
+                eligible_hints.extend(menu_list_usage_hints(response));
+            }
+            Command::MenuClick { .. } => {
+                if let Some(hint) = menu_click_shortcut_hint(response) {
+                    eligible_hints.push(hint);
+                }
+            }
+            _ => {}
+        }
+    }
+    if cfg!(target_os = "macos") && is_semantic_targeting_failure(command, response) {
+        eligible_hints.push(menu_discovery_hint_for_command(command));
+    }
     for hint in &json_hints {
         eligible_hints.push((*hint).to_string());
     }
@@ -291,11 +314,103 @@ fn open_app_hint_message(response: &ResponseEnvelope) -> String {
     format!("use --active-window {window_id} in follow-up commands to target this app window")
 }
 
+fn menu_discovery_hint_message(response: &ResponseEnvelope) -> String {
+    let suffix = resolve_window_id_from_response(response)
+        .map(|id| format!(" {id}"))
+        .unwrap_or_default();
+    format!(
+        "discover app commands and keyboard shortcuts with desktopctl menu list --active-window{suffix}"
+    )
+}
+
+fn menu_discovery_hint_for_command(command: &Command) -> String {
+    let suffix = explicit_active_window_id(command)
+        .map(|id| format!(" {id}"))
+        .unwrap_or_default();
+    format!(
+        "target may be available as an app command; inspect desktopctl menu list --active-window{suffix}"
+    )
+}
+
+fn menu_list_usage_hints(response: &ResponseEnvelope) -> Vec<String> {
+    let suffix = resolve_window_id_from_response(response)
+        .map(|id| format!(" --active-window {id}"))
+        .unwrap_or_default();
+    vec![
+        format!("invoke a returned menu ID with desktopctl menu click --id <menu_id>{suffix}"),
+        format!(
+            "shortcuts shown in parentheses can be sent with desktopctl keyboard press <shortcut>{suffix}"
+        ),
+    ]
+}
+
+fn menu_click_shortcut_hint(response: &ResponseEnvelope) -> Option<String> {
+    let success = match response {
+        ResponseEnvelope::Success(success) => success,
+        ResponseEnvelope::Error(_) => return None,
+    };
+    let shortcut = success
+        .result
+        .get("shortcut")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let suffix = resolve_window_id_from_response(response)
+        .map(|id| format!(" --active-window {id}"))
+        .unwrap_or_default();
+    Some(format!(
+        "next time use desktopctl keyboard press {shortcut}{suffix}"
+    ))
+}
+
+fn explicit_active_window_id(command: &Command) -> Option<&str> {
+    let id = match command {
+        Command::PointerClickText {
+            active_window_id, ..
+        }
+        | Command::PointerClickId {
+            active_window_id, ..
+        } => active_window_id.as_deref(),
+        _ => None,
+    }?;
+    let id = id.trim();
+    (!id.is_empty()).then_some(id)
+}
+
+fn is_semantic_targeting_failure(command: &Command, response: &ResponseEnvelope) -> bool {
+    if !matches!(
+        command,
+        Command::PointerClickText { .. }
+            | Command::PointerClickId { .. }
+            | Command::ScreenFindText { .. }
+    ) {
+        return false;
+    }
+    matches!(
+        response,
+        ResponseEnvelope::Error(error)
+            if matches!(
+                error.error.code,
+                desktop_core::error::ErrorCode::TargetNotFound
+                    | desktop_core::error::ErrorCode::AmbiguousTarget
+            )
+    )
+}
+
 fn resolve_window_id_from_response(response: &ResponseEnvelope) -> Option<String> {
     let success = match response {
         ResponseEnvelope::Success(success) => success,
         ResponseEnvelope::Error(_) => return None,
     };
+    if let Some(id) = success
+        .result
+        .get("active_window_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(id.to_string());
+    }
     if let Some(id) = success
         .result
         .get("observe")
@@ -1447,7 +1562,11 @@ fn to_title_case(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_markdown_response, render_response};
+    use super::{
+        is_semantic_targeting_failure, menu_click_shortcut_hint, menu_discovery_hint_for_command,
+        menu_discovery_hint_message, menu_list_usage_hints, render_markdown_response,
+        render_response,
+    };
     use desktop_core::protocol::{Command, ObserveOptions, PointerButton, ResponseEnvelope};
     use serde_json::json;
 
@@ -1590,9 +1709,104 @@ mod tests {
         let response = ResponseEnvelope::success("r1", json!({ "window_id": "notes_859606" }));
 
         let rendered = render_response(&command, &response, false);
+        let hint = rendered["hint"].as_str().expect("hint should be a string");
+        assert!(
+            [
+                "use --active-window notes_859606 in follow-up commands to target this app window",
+                "discover app commands and keyboard shortcuts with desktopctl menu list --active-window notes_859606",
+            ]
+            .contains(&hint)
+        );
         assert_eq!(
-            rendered["hint"],
-            "use --active-window notes_859606 in follow-up commands to target this app window"
+            menu_discovery_hint_message(&response),
+            "discover app commands and keyboard shortcuts with desktopctl menu list --active-window notes_859606"
+        );
+    }
+
+    #[test]
+    fn screen_tokenize_suggests_menu_discovery() {
+        let command = Command::ScreenTokenize {
+            overlay_out_path: None,
+            window_query: None,
+            screenshot_path: None,
+            journal: false,
+            list_all_windows: false,
+            active_window: true,
+            active_window_id: Some("notes_859606".to_string()),
+            region: None,
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "windows": [{
+                    "id": "notes_859606",
+                    "title": "Notes",
+                    "app": "Notes",
+                    "elements": []
+                }]
+            }),
+        );
+
+        let rendered = render_response(&command, &response, false);
+        let hint = rendered["hint"].as_str().expect("hint should be a string");
+        assert!(
+            [
+                "tokenize response includes request_id in JSON output; reuse it with desktopctl request response <request_id>",
+                "discover app commands and keyboard shortcuts with desktopctl menu list --active-window notes_859606",
+            ]
+            .contains(&hint)
+        );
+    }
+
+    #[test]
+    fn menu_list_rotates_click_and_keyboard_usage_hints() {
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({ "active_window_id": "notes_859606", "items": [] }),
+        );
+        assert_eq!(
+            menu_list_usage_hints(&response),
+            vec![
+                "invoke a returned menu ID with desktopctl menu click --id <menu_id> --active-window notes_859606",
+                "shortcuts shown in parentheses can be sent with desktopctl keyboard press <shortcut> --active-window notes_859606",
+            ]
+        );
+    }
+
+    #[test]
+    fn menu_click_teaches_resolved_shortcut() {
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "active_window_id": "safari_e51aeb",
+                "id": "menu_history_show_all_history",
+                "shortcut": "cmd+y"
+            }),
+        );
+        assert_eq!(
+            menu_click_shortcut_hint(&response).as_deref(),
+            Some("next time use desktopctl keyboard press cmd+y --active-window safari_e51aeb")
+        );
+    }
+
+    #[test]
+    fn failed_semantic_targeting_suggests_menu_fallback() {
+        let command = Command::PointerClickText {
+            text: "Show All History".to_string(),
+            button: PointerButton::Left,
+            active_window: true,
+            active_window_id: Some("safari_e51aeb".to_string()),
+            observe: ObserveOptions::default(),
+        };
+        let response = ResponseEnvelope::from_error(
+            "r1",
+            command.name(),
+            desktop_core::error::AppError::target_not_found("missing"),
+        );
+        assert!(is_semantic_targeting_failure(&command, &response));
+        assert_eq!(
+            menu_discovery_hint_for_command(&command),
+            "target may be available as an app command; inspect desktopctl menu list --active-window safari_e51aeb"
         );
     }
 

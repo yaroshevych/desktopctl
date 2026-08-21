@@ -71,8 +71,15 @@ pub(crate) fn click(
             "active window owner changed before menu action",
         ));
     }
-    platform::menu::click(bound_pid, &target.app, id.as_deref(), path.as_deref())?;
-    Ok(
-        json!({"active_window": true, "active_window_id": bound_ref, "app": target.app, "window_title": target.title, "id": id, "path": path}),
-    )
+    let action = platform::menu::click(bound_pid, &target.app, id.as_deref(), path.as_deref())?;
+    Ok(json!({
+        "active_window": true,
+        "active_window_id": bound_ref,
+        "app": target.app,
+        "window_title": target.title,
+        "id": action.id,
+        "path": path,
+        "title": action.title,
+        "shortcut": action.shortcut,
+    }))
 }

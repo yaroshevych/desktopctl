@@ -31,3 +31,10 @@ pub struct MenuNode {
 pub struct MenuSnapshot {
     pub items: Vec<MenuNode>,
 }
+
+#[derive(Debug, Clone)]
+pub struct MenuActionResult {
+    pub id: String,
+    pub title: String,
+    pub shortcut: Option<String>,
+}

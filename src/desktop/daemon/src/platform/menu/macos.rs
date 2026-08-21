@@ -1,4 +1,4 @@
-use super::{MenuNode, MenuSnapshot};
+use super::{MenuActionResult, MenuNode, MenuSnapshot};
 use accessibility::{AXAttribute, AXUIElement, Error as AxError};
 use accessibility_sys::{
     kAXEnabledAttribute, kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXMenuBarAttribute,
@@ -24,6 +24,7 @@ struct InternalNode {
     title: String,
     enabled: bool,
     action_supported: bool,
+    shortcut: Option<String>,
     element: AXUIElement,
     structural: bool,
     path: String,
@@ -43,7 +44,7 @@ pub fn click(
     app_name: &str,
     id: Option<&str>,
     path: Option<&str>,
-) -> Result<(), AppError> {
+) -> Result<MenuActionResult, AppError> {
     // Click resolution includes system nodes; `--system` controls list output only.
     let (_, internals) = build_tree(pid, app_name, true)?;
     let matches: Vec<&InternalNode> = if let Some(id) = id {
@@ -98,7 +99,11 @@ pub fn click(
     }
     let action = CFString::from_static_string(kAXPressAction);
     match node.element.perform_action(&action) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(MenuActionResult {
+            id: node.id.clone(),
+            title: node.title.clone(),
+            shortcut: node.shortcut.clone(),
+        }),
         Err(AxError::Ax(code)) if code == kAXErrorActionUnsupported => Err(AppError::new(
             ErrorCode::MenuActionUnsupported,
             "menu item does not support AXPress",
@@ -228,6 +233,7 @@ fn append_public(
         title: title.clone(),
         enabled,
         action_supported,
+        shortcut: shortcut.clone(),
         element: element.clone(),
         structural: kind == "group",
         path,

@@ -733,6 +733,7 @@ fn app_subcommand() -> ClapCommand {
 - desktopctl app hide \"Calculator\"\n\
 - desktopctl app show \"Calculator\"\n\
 - desktopctl app isolate \"Finder\"\n\
+- desktopctl menu list --active-window\n\
 \n\
 Policy:\n\
 - app access policy applies to `app open`; opening a blocked app is denied by target app name",
