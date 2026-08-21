@@ -66,6 +66,55 @@ desktopctl window focus --title <text>
 desktopctl window focus --id <id>
 ```
 
+## macOS Menus
+```bash
+# list native menus for the active window's application
+desktopctl menu list --active-window [<window_id>]
+
+# include the Apple/system menu (excluded by default)
+desktopctl menu list --system --active-window [<window_id>]
+
+# disable long-list truncation; combines independently with --system
+desktopctl menu list --all --active-window [<window_id>]
+desktopctl menu list --system --all --active-window [<window_id>]
+
+# invoke an item using an id returned by menu list
+desktopctl menu click --id <menu_id> --active-window [<window_id>]
+
+# invoke an item using an exact flattened title path
+desktopctl menu click "Edit > Find > Find…" --active-window [<window_id>]
+```
+
+Menu commands require `--active-window`. Its optional value is DesktopCtl's opaque guarded window reference, such as `safari_e51aeb`, not a numeric CGWindow ID.
+
+Returned IDs appear as trailing tokens:
+
+```markdown
+### History #menu_history
+  Show All History (cmd+y) #menu_history_show_all_history
+```
+
+Use `--id` when clicking an ID. A positional argument is interpreted as a title path:
+
+```bash
+# correct
+desktopctl menu click --id menu_history_show_all_history --active-window safari_e51aeb
+
+# path lookup, not id lookup
+desktopctl menu click "History > Show All History" --active-window safari_e51aeb
+```
+
+Default output:
+
+- Excludes the first structural Apple/system menu; `--system` includes it.
+- Omits separators.
+- Truncates any submenu with more than 20 children to its first 15 and reports the omitted count. `--all` disables recursive truncation.
+- Labels non-interactive titled sections as groups. Group IDs are inspectable but clicking them returns `MENU_ACTION_UNSUPPORTED`.
+
+JSON menu nodes include `id`, `title`, `role`, `kind`, `enabled`, `action_supported`, `shortcut`, `mark`, `children`, `truncated`, and `omitted_count`. `kind` is `item`, `submenu`, or `group`.
+
+Menu support uses macOS Accessibility only. Custom/non-native menus may expose incomplete data. No OCR fallback is attempted.
+
 ## Screen and OCR
 ```bash
 # common flags for screen screenshot/tokenize:

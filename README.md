@@ -36,6 +36,7 @@ Repository layout:
 - OCR-first perception pipeline
 - Tokenized screen output for agent grounding
 - Deterministic CLI primitives for click/type/wait flows
+- Native macOS menu enumeration and invocation through Accessibility
 
 ## Prerequisites
 
@@ -58,6 +59,15 @@ desktopctl keyboard press cmd+f --active-window "$win_id" --no-observe
 desktopctl keyboard type "Shopping list" --active-window "$win_id" --no-observe
 desktopctl screen tokenize --active-window "$win_id"
 ```
+
+List native menus, then invoke an item by its returned `#menu_*` ID:
+
+```bash
+desktopctl menu list --active-window "$win_id"
+desktopctl menu click --id menu_file_new_window --active-window "$win_id"
+```
+
+Menu listing omits the Apple/system menu, separators, and long-list overflow by default. Use `--system` to include the Apple menu and `--all` to show every item.
 
 ## Status / Roadmap
 
