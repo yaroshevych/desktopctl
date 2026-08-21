@@ -219,6 +219,8 @@ pub fn command_requires_policy(command: &Command) -> bool {
         Command::ScreenCapture { .. }
             | Command::OpenApp { .. }
             | Command::ScreenTokenize { .. }
+            | Command::MenuList { .. }
+            | Command::MenuClick { .. }
             | Command::ScreenFindText { .. }
             | Command::WaitText { .. }
             | Command::PointerMove { .. }

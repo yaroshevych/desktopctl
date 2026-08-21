@@ -275,5 +275,14 @@ pub(crate) fn map_error_code(code: &ErrorCode) -> i32 {
         ErrorCode::AmbiguousTarget => 8,
         ErrorCode::PostconditionFailed => 9,
         ErrorCode::Internal => 10,
+        ErrorCode::AccessibilityPermissionRequired
+        | ErrorCode::ActiveWindowRequired
+        | ErrorCode::MenuBarUnavailable
+        | ErrorCode::MenuItemNotFound
+        | ErrorCode::MenuItemIdNotFound
+        | ErrorCode::MenuItemAmbiguous
+        | ErrorCode::MenuItemDisabled
+        | ErrorCode::MenuActionUnsupported
+        | ErrorCode::UnsupportedPlatform => 6,
     }
 }

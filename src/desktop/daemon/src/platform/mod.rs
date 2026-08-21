@@ -4,5 +4,6 @@ pub mod capture;
 pub mod input;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod menu;
 pub mod permissions;
 pub mod windowing;

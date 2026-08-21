@@ -1,5 +1,6 @@
 pub(super) mod app;
 pub(super) mod input;
+pub(super) mod menu;
 pub(super) mod misc;
 pub(super) mod overlay;
 pub(super) mod pointer;

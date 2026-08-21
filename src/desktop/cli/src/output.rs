@@ -88,6 +88,9 @@ pub(crate) fn render_markdown_response(
     if matches!(command, Command::ScreenTokenize { .. }) {
         return render_tokenize_markdown(&rendered);
     }
+    if matches!(command, Command::MenuList { .. }) {
+        return render_menu_markdown(&rendered);
+    }
     render_generic_markdown(command, &rendered)
 }
 
@@ -123,6 +126,8 @@ fn command_supports_active_window(command: &Command) -> bool {
             | Command::KeyEscape { .. }
             | Command::ScreenCapture { .. }
             | Command::ScreenTokenize { .. }
+            | Command::MenuList { .. }
+            | Command::MenuClick { .. }
     )
 }
 
@@ -172,6 +177,15 @@ fn command_has_explicit_active_window_id(command: &Command) -> bool {
             active_window_id, ..
         }
         | Command::ScreenTokenize {
+            active_window_id, ..
+        } => active_window_id
+            .as_deref()
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false),
+        Command::MenuList {
+            active_window_id, ..
+        }
+        | Command::MenuClick {
             active_window_id, ..
         } => active_window_id
             .as_deref()
@@ -587,6 +601,139 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         append_compact_windows_section_with_title(&mut lines, "All Windows", &all_windows);
     }
     lines.join("\n")
+}
+
+fn render_menu_markdown(value: &serde_json::Value) -> String {
+    let ok = value
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !ok {
+        return render_error_markdown_from_value("Menu List", value);
+    }
+    let request_id = value
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let result = value.get("result").cloned().unwrap_or_default();
+    let mut lines = vec!["# Menu List".to_string(), String::new()];
+    push_kv_line(&mut lines, "request_id", request_id);
+    for (key, out_key) in [
+        ("app", "app"),
+        ("window_title", "window_title"),
+        ("active_window_id", "window_id"),
+    ] {
+        if let Some(v) = result
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.is_empty())
+        {
+            push_kv_line(&mut lines, out_key, v);
+        }
+    }
+    if let Some(hint) = value
+        .get("hint")
+        .and_then(serde_json::Value::as_str)
+        .filter(|v| !v.is_empty())
+    {
+        push_kv_line(&mut lines, "hint", hint);
+    }
+    push_section(&mut lines, "Menu Bar");
+    let items = result
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for item in items {
+        render_menu_node(
+            &mut lines,
+            &item,
+            0,
+            true,
+            result
+                .get("active_window_id")
+                .and_then(serde_json::Value::as_str),
+        );
+    }
+    lines.join("\n")
+}
+
+fn render_menu_node(
+    lines: &mut Vec<String>,
+    node: &serde_json::Value,
+    depth: usize,
+    heading: bool,
+    active_window_id: Option<&str>,
+) {
+    let title = node
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("untitled");
+    let id = node
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("menu_untitled");
+    let role = node
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let kind = node
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("item");
+    let enabled = node
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let separator = role == "AXMenuItem" && title.is_empty();
+    let shortcut = node
+        .get("shortcut")
+        .and_then(serde_json::Value::as_str)
+        .filter(|v| !v.is_empty());
+    let mut label = if separator {
+        "---".to_string()
+    } else if kind == "group" {
+        format!("**{title}**")
+    } else {
+        title.to_string()
+    };
+    if let Some(shortcut) = shortcut {
+        label.push_str(&format!(" ({shortcut})"));
+    }
+    if !enabled && kind != "group" {
+        label.push_str(" [disabled]");
+    }
+    label.push_str(&format!(" #{id}"));
+    if heading && depth == 0 {
+        lines.push(String::new());
+        lines.push(format!("### {title} #{id}"));
+    } else {
+        lines.push(format!("{}{}", "  ".repeat(depth), label));
+    }
+    if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+        for child in children {
+            render_menu_node(lines, child, depth + 1, false, active_window_id);
+        }
+    }
+    if node
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        let omitted = node
+            .get("omitted_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let window_id = active_window_id
+            .unwrap_or("unknown")
+            .replace('`', "'")
+            .replace('\n', " ")
+            .replace('\r', " ");
+        lines.push(format!(
+            "{}({omitted} more items; use `desktopctl menu list --all --active-window {window_id}`)",
+            "  ".repeat(depth + 1)
+        ));
+    }
 }
 
 fn render_generic_markdown(command: &Command, value: &serde_json::Value) -> String {
@@ -1303,6 +1450,54 @@ mod tests {
     use super::{render_markdown_response, render_response};
     use desktop_core::protocol::{Command, ObserveOptions, PointerButton, ResponseEnvelope};
     use serde_json::json;
+
+    #[test]
+    fn menu_markdown_renders_groups_as_labels() {
+        let command = Command::MenuList {
+            active_window: true,
+            active_window_id: Some("ghostty_1".to_string()),
+            system: false,
+            all: false,
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "active_window_id": "ghostty_1",
+                "app": "Ghostty",
+                "window_title": "Terminal",
+                "items": [{
+                    "id": "menu_window_move_resize",
+                    "title": "Move & Resize",
+                    "role": "AXMenuItem",
+                    "enabled": true,
+                    "action_supported": true,
+                    "shortcut": null,
+                    "mark": null,
+                    "kind": "submenu",
+                    "truncated": true,
+                    "omitted_count": 6,
+                    "children": [{
+                        "id": "menu_window_move_resize_halves",
+                        "title": "Halves",
+                        "role": "AXMenuItem",
+                        "enabled": false,
+                        "action_supported": false,
+                        "shortcut": null,
+                        "mark": null,
+                        "kind": "group",
+                        "children": []
+                    }]
+                }]
+            }),
+        );
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains("**Halves** #menu_window_move_resize_halves"));
+        assert!(!markdown.contains("Halves [disabled]"));
+        assert!(markdown.contains(
+            "(6 more items; use `desktopctl menu list --all --active-window ghostty_1`)"
+        ));
+        assert!(!markdown.contains("more items #"));
+    }
 
     #[test]
     fn request_response_passthrough_uses_embedded_envelope_shape() {

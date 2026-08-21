@@ -14,6 +14,15 @@ pub enum ErrorCode {
     InvalidArgument,
     DaemonNotRunning,
     BackendUnavailable,
+    AccessibilityPermissionRequired,
+    ActiveWindowRequired,
+    MenuBarUnavailable,
+    MenuItemNotFound,
+    MenuItemIdNotFound,
+    MenuItemAmbiguous,
+    MenuItemDisabled,
+    MenuActionUnsupported,
+    UnsupportedPlatform,
     Internal,
 }
 

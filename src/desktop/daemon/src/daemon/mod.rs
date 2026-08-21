@@ -24,9 +24,9 @@ use desktop_core::{
         ResponseEnvelope,
     },
 };
+use crate::platform::input::new_backend;
 #[cfg(unix)]
 use interprocess::local_socket::{GenericFilePath, ToFsName};
-use crate::platform::input::new_backend;
 #[cfg(windows)]
 use interprocess::local_socket::{GenericNamespaced, ToNsName};
 use interprocess::local_socket::{
@@ -850,6 +850,18 @@ fn execute_with_context(
             overlay_token_updates_enabled,
         ),
         Command::ScreenFindText { text, all } => commands::screen::find_text(text, all),
+        Command::MenuList {
+            active_window,
+            active_window_id,
+            system,
+            all,
+        } => commands::menu::list(active_window, active_window_id, system, all),
+        Command::MenuClick {
+            id,
+            path,
+            active_window,
+            active_window_id,
+        } => commands::menu::click(id, path, active_window, active_window_id),
         Command::OverlayStart { duration_ms } => commands::overlay::start(duration_ms),
         Command::OverlayStop => commands::overlay::stop(),
         Command::WaitText {

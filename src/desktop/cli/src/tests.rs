@@ -1079,3 +1079,97 @@ fn parses_pointer_move_absolute() {
         other => panic!("unexpected command: {other:?}"),
     }
 }
+
+#[test]
+fn parses_menu_list_with_active_window() {
+    let command =
+        parse_command(&["menu", "list", "--active-window", "safari_26af45"].map(str::to_string))
+            .expect("menu list should parse");
+    assert!(
+        matches!(command, Command::MenuList { active_window: true, active_window_id: Some(id), system: false, all: false } if id == "safari_26af45")
+    );
+    let system =
+        parse_command(&["menu", "list", "--system", "--active-window"].map(str::to_string))
+            .expect("menu list --system should parse");
+    assert!(matches!(
+        system,
+        Command::MenuList {
+            system: true,
+            all: false,
+            ..
+        }
+    ));
+    let both = parse_command(
+        &["menu", "list", "--all", "--system", "--active-window"].map(str::to_string),
+    )
+    .expect("menu list --all --system should parse");
+    assert!(matches!(
+        both,
+        Command::MenuList {
+            system: true,
+            all: true,
+            ..
+        }
+    ));
+    let encoded = serde_json::to_value(Command::MenuList {
+        active_window: true,
+        active_window_id: None,
+        system: true,
+        all: true,
+    })
+    .expect("menu list should serialize");
+    assert_eq!(encoded["system"], true);
+    let decoded: Command = serde_json::from_value(serde_json::json!({
+        "cmd": "menu_list",
+        "active_window": true,
+    }))
+    .expect("menu list system should default");
+    assert!(matches!(
+        decoded,
+        Command::MenuList {
+            system: false,
+            all: false,
+            ..
+        }
+    ));
+    assert!(
+        parse_command(
+            &[
+                "menu",
+                "click",
+                "--id",
+                "menu_file_open",
+                "--system",
+                "--active-window"
+            ]
+            .map(str::to_string),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn parses_menu_click_path_and_id() {
+    let path =
+        parse_command(&["menu", "click", "File > Open…", "--active-window"].map(str::to_string))
+            .expect("menu path click should parse");
+    assert!(
+        matches!(path, Command::MenuClick { path: Some(path), id: None, active_window: true, .. } if path == "File > Open…")
+    );
+    let id = parse_command(
+        &["menu", "click", "--id", "menu_file_open", "--active-window"].map(str::to_string),
+    )
+    .expect("menu id click should parse");
+    assert!(
+        matches!(id, Command::MenuClick { id: Some(id), path: None, .. } if id == "menu_file_open")
+    );
+}
+
+#[test]
+fn menu_help_has_no_literal_continuation_backslashes() {
+    let help = render_help_if_requested(&["menu".to_string(), "--help".to_string()])
+        .expect("menu help should render")
+        .expect("menu help should be present");
+    assert!(help.contains("desktopctl menu list --active-window"));
+    assert!(!help.lines().any(|line| line.trim() == "\\"));
+}

@@ -76,6 +76,7 @@ pub(crate) fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "app" => parse_app(sub),
         "window" => parse_window(sub),
         "screen" => parse_screen(sub),
+        "menu" => parse_menu(sub),
         "clipboard" => parse_clipboard(sub),
         "debug" => parse_debug(sub),
         "request" => parse_request(sub),
@@ -205,6 +206,43 @@ fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
             disappear: sub.get_flag("disappear"),
         }),
         _ => Err(AppError::invalid_argument("unknown screen action")),
+    }
+}
+
+fn parse_menu(m: &ArgMatches) -> Result<Command, AppError> {
+    let (name, sub) = m
+        .subcommand()
+        .ok_or_else(|| AppError::invalid_argument("missing menu action"))?;
+    let (active_window, active_window_id) = parse_active_window(sub)?;
+    if !active_window {
+        return Err(AppError::new(
+            desktop_core::error::ErrorCode::ActiveWindowRequired,
+            "menu commands require --active-window",
+        ));
+    }
+    match name {
+        "list" => Ok(Command::MenuList {
+            active_window,
+            active_window_id,
+            system: sub.get_flag("system"),
+            all: sub.get_flag("all"),
+        }),
+        "click" => {
+            let id = sub.get_one::<String>("id").cloned();
+            let path = sub.get_one::<String>("path").cloned();
+            if id.is_none() == path.is_none() {
+                return Err(AppError::invalid_argument(
+                    "menu click requires exactly one of --id or a menu path",
+                ));
+            }
+            Ok(Command::MenuClick {
+                id,
+                path,
+                active_window,
+                active_window_id,
+            })
+        }
+        _ => Err(AppError::invalid_argument("unknown menu action")),
     }
 }
 
@@ -627,12 +665,53 @@ fn clap_app() -> ClapCommand {
         .subcommand(disable_subcommand())
         .subcommand(window_subcommand())
         .subcommand(screen_subcommand())
+        .subcommand(menu_subcommand())
         .subcommand(pointer_subcommand())
         .subcommand(keyboard_subcommand())
         .subcommand(clipboard_subcommand())
         .subcommand(debug_subcommand())
         .subcommand(request_subcommand())
         .subcommand(replay_subcommand())
+}
+
+fn menu_subcommand() -> ClapCommand {
+    ClapCommand::new("menu")
+        .about("Enumerate and invoke macOS application menus")
+        .after_long_help(
+            "Examples:\n\
+- desktopctl menu list --active-window\n\
+- desktopctl menu click --id menu_file_export_as_pdf --active-window safari_26af45\n\
+- desktopctl menu click \"File > Export as PDF…\" --active-window safari_26af45",
+        )
+        .subcommand(
+            ClapCommand::new("list")
+                .about("List menus exposed by the active window application")
+                .arg(
+                    Arg::new("system")
+                        .long("system")
+                        .action(ArgAction::SetTrue)
+                        .help("Include the macOS system/Apple menu"),
+                )
+                .arg(
+                    Arg::new("all")
+                        .long("all")
+                        .action(ArgAction::SetTrue)
+                        .help("Include all menu children without truncation"),
+                )
+                .arg(active_window_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("click")
+                .about("Invoke a menu item by id or flattened title path")
+                .arg(
+                    Arg::new("id")
+                        .long("id")
+                        .value_name("menu_id")
+                        .conflicts_with("path"),
+                )
+                .arg(Arg::new("path").value_name("path").conflicts_with("id"))
+                .arg(active_window_arg()),
+        )
 }
 
 fn disable_subcommand() -> ClapCommand {

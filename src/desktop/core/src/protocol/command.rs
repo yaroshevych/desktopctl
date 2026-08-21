@@ -245,6 +245,26 @@ pub enum Command {
         text: String,
         all: bool,
     },
+    MenuList {
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
+        #[serde(default)]
+        system: bool,
+        #[serde(default)]
+        all: bool,
+    },
+    MenuClick {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        active_window: bool,
+        #[serde(default)]
+        active_window_id: Option<String>,
+    },
     OverlayStart {
         duration_ms: Option<u64>,
     },
@@ -313,6 +333,8 @@ impl Command {
             Command::ScreenCapture { .. } => "screen_capture",
             Command::ScreenTokenize { .. } => "screen_tokenize",
             Command::ScreenFindText { .. } => "screen_find_text",
+            Command::MenuList { .. } => "menu_list",
+            Command::MenuClick { .. } => "menu_click",
             Command::OverlayStart { .. } => "overlay_start",
             Command::OverlayStop => "overlay_stop",
             Command::ClipboardRead => "clipboard_read",
