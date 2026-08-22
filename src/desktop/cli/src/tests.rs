@@ -1,14 +1,14 @@
 use super::{
-    OutputMode, parse::render_help_if_requested, parse_command, send_request_with_hooks,
-    split_cli_options,
+    parse::render_help_if_requested, parse_command, send_request_with_hooks, split_cli_options,
+    OutputMode,
 };
 use desktop_core::{
     error::{AppError, ErrorCode},
     protocol::{Command, PointerButton, RequestEnvelope, ResponseEnvelope},
 };
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 #[test]
@@ -297,6 +297,82 @@ fn rejects_top_level_key_command() {
     let args = vec!["key".to_string(), "press".to_string(), "enter".to_string()];
     let err = parse_command(&args).expect_err("top-level key should be invalid");
     assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
+#[test]
+fn unknown_top_level_command_suggests_application_exploration() {
+    let err = parse_command(&["news".to_string()]).expect_err("news is not a command");
+    let hint = err.details.expect("hint details")["hint"]
+        .as_str()
+        .expect("hint string")
+        .to_string();
+    assert!(hint.contains("desktopctl app open \"news\" --wait"));
+    assert!(hint.contains("desktopctl menu list --active-window"));
+}
+
+#[test]
+fn unknown_app_action_suggests_window_first_exploration() {
+    let err = parse_command(&["app".to_string(), "enumerate".to_string()])
+        .expect_err("enumerate is not an app action");
+    let hint = err.details.expect("hint details")["hint"]
+        .as_str()
+        .expect("hint string")
+        .to_string();
+    assert!(hint.contains("desktopctl window list"));
+    assert!(hint.contains("returned window_id"));
+    assert!(hint.contains("desktopctl menu list"));
+}
+
+#[test]
+fn window_list_active_window_error_explains_selector_flow() {
+    let err = parse_command(&["window", "list", "--active-window", "news_123"].map(str::to_string))
+        .expect_err("window list does not accept active-window");
+    let hint = err.details.expect("hint details")["hint"]
+        .as_str()
+        .expect("hint string")
+        .to_string();
+    assert!(hint.contains("window list needs no selector"));
+    assert!(hint.contains("returned window_id"));
+}
+
+#[test]
+fn unsupported_window_flag_suggests_active_window() {
+    let err = parse_command(&["screen", "tokenize", "--window", "news_123"].map(str::to_string))
+        .expect_err("screen tokenize does not accept --window");
+    let hint = err.details.expect("hint details")["hint"]
+        .as_str()
+        .expect("hint string")
+        .to_string();
+    assert!(hint.contains("--active-window news_123"));
+}
+
+#[test]
+fn unsupported_window_id_flag_preserves_guarded_window_id() {
+    let err = parse_command(&["menu", "list", "--window-id", "news_dc711c"].map(str::to_string))
+        .expect_err("menu list does not accept --window-id");
+    let hint = err.details.expect("hint details")["hint"]
+        .as_str()
+        .expect("hint string")
+        .to_string();
+    assert!(hint.contains("--active-window news_dc711c"));
+}
+
+#[test]
+fn unsupported_inline_window_id_preserves_guarded_window_id() {
+    let err = parse_command(&["menu", "list", "--window-id=news_dc711c"].map(str::to_string))
+        .expect_err("menu list does not accept --window-id");
+    let hint = err.details.expect("hint details")["hint"]
+        .as_str()
+        .expect("hint string")
+        .to_string();
+    assert!(hint.contains("--active-window news_dc711c"));
+}
+
+#[test]
+fn invalid_help_target_does_not_suggest_opening_help_as_an_app() {
+    let err = parse_command(&["help", "nonsense"].map(str::to_string))
+        .expect_err("unknown help target should fail");
+    assert!(err.details.is_none());
 }
 
 #[test]
@@ -1132,20 +1208,18 @@ fn parses_menu_list_with_active_window() {
             ..
         }
     ));
-    assert!(
-        parse_command(
-            &[
-                "menu",
-                "click",
-                "--id",
-                "menu_file_open",
-                "--system",
-                "--active-window"
-            ]
-            .map(str::to_string),
-        )
-        .is_err()
-    );
+    assert!(parse_command(
+        &[
+            "menu",
+            "click",
+            "--id",
+            "menu_file_open",
+            "--system",
+            "--active-window"
+        ]
+        .map(str::to_string),
+    )
+    .is_err());
 }
 
 #[test]
@@ -1172,4 +1246,14 @@ fn menu_help_has_no_literal_continuation_backslashes() {
         .expect("menu help should be present");
     assert!(help.contains("desktopctl menu list --active-window"));
     assert!(!help.lines().any(|line| line.trim() == "\\"));
+}
+
+#[test]
+fn app_help_includes_explicit_exploration_recipe() {
+    let help = render_help_if_requested(&["app".to_string(), "--help".to_string()])
+        .expect("app help should render")
+        .expect("app help should be present");
+    assert!(help.contains("Explore an application:"));
+    assert!(help.contains("desktopctl app open \"News\" --wait"));
+    assert!(help.contains("desktopctl menu list --active-window"));
 }

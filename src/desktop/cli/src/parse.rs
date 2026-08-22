@@ -1,5 +1,5 @@
 use clap::{
-    Arg, ArgAction, ArgMatches, Command as ClapCommand, ValueHint, builder::PossibleValuesParser,
+    builder::PossibleValuesParser, Arg, ArgAction, ArgMatches, Command as ClapCommand, ValueHint,
 };
 use desktop_core::{
     error::AppError,
@@ -65,7 +65,7 @@ pub(crate) fn parse_command(args: &[String]) -> Result<Command, AppError> {
 
     let matches = clap_app()
         .try_get_matches_from(argv)
-        .map_err(|err| AppError::invalid_argument(err.to_string()))?;
+        .map_err(|err| invalid_cli_error(args, err.to_string()))?;
 
     let (name, sub) = matches
         .subcommand()
@@ -85,6 +85,77 @@ pub(crate) fn parse_command(args: &[String]) -> Result<Command, AppError> {
         "keyboard" => parse_keyboard(sub),
         _ => Err(AppError::invalid_argument("unknown command")),
     }
+}
+
+fn invalid_cli_error(args: &[String], message: String) -> AppError {
+    let hint = invalid_cli_hint(args);
+    let error = AppError::invalid_argument(message);
+    match hint {
+        Some(hint) => error.with_details(serde_json::json!({ "hint": hint })),
+        None => error,
+    }
+}
+
+fn invalid_cli_hint(args: &[String]) -> Option<String> {
+    let command = args.first()?.as_str();
+    if let Some((index, flag)) = args.iter().enumerate().find(|(_, value)| {
+        matches!(value.as_str(), "--window" | "--window-id")
+            || value.starts_with("--window=")
+            || value.starts_with("--window-id=")
+    }) {
+        let inline_target = flag.split_once('=').map(|(_, value)| value);
+        let target = inline_target
+            .or_else(|| {
+                args.get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                    .map(String::as_str)
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or("[<window_id>]");
+        return Some(format!(
+            "use --active-window {target} to target the active window or a specific guarded window"
+        ));
+    }
+    if command == "window"
+        && args.get(1).is_some_and(|value| value == "list")
+        && args.iter().any(|value| value == "--active-window")
+    {
+        return Some(
+            "window list needs no selector; run desktopctl window list, then use a returned window_id to explore a particular window"
+                .to_string(),
+        );
+    }
+    if command == "app" {
+        let action = args.get(1)?.as_str();
+        if !action.starts_with('-') && !matches!(action, "open" | "hide" | "show" | "isolate") {
+            return Some(
+                "start with desktopctl window list, then use a returned window_id with desktopctl menu list --active-window <window_id> or desktopctl screen tokenize --active-window <window_id>"
+                    .to_string(),
+            );
+        }
+        return None;
+    }
+    const COMMANDS: [&str; 12] = [
+        "app",
+        "disable",
+        "window",
+        "screen",
+        "menu",
+        "pointer",
+        "keyboard",
+        "clipboard",
+        "debug",
+        "request",
+        "replay",
+        "help",
+    ];
+    if !command.starts_with('-') && !COMMANDS.contains(&command) {
+        let app_name = command.replace('"', "\\\"");
+        return Some(format!(
+            "{command} is not a desktopctl command; if it is an application, run desktopctl app open \"{app_name}\" --wait, then desktopctl menu list --active-window"
+        ));
+    }
+    None
 }
 
 fn parse_app(m: &ArgMatches) -> Result<Command, AppError> {
@@ -676,7 +747,7 @@ fn clap_app() -> ClapCommand {
 
 fn menu_subcommand() -> ClapCommand {
     ClapCommand::new("menu")
-        .about("Enumerate and invoke macOS application menus")
+        .about("Discover and invoke macOS application features and shortcuts")
         .after_long_help(
             "Examples:\n\
 - desktopctl menu list --active-window\n\
@@ -726,7 +797,7 @@ fn disable_subcommand() -> ClapCommand {
 
 fn app_subcommand() -> ClapCommand {
     ClapCommand::new("app")
-        .about("Manage application visibility and launch")
+        .about("Open and control applications; application names are arguments")
         .after_long_help(
             "Examples:\n\
 - desktopctl app open \"Calculator\" --wait\n\
@@ -734,6 +805,10 @@ fn app_subcommand() -> ClapCommand {
 - desktopctl app show \"Calculator\"\n\
 - desktopctl app isolate \"Finder\"\n\
 - desktopctl menu list --active-window\n\
+\n\
+Explore an application:\n\
+1. desktopctl app open \"News\" --wait\n\
+2. desktopctl menu list --active-window\n\
 \n\
 Policy:\n\
 - app access policy applies to `app open`; opening a blocked app is denied by target app name",

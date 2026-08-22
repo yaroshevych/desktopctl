@@ -129,6 +129,16 @@ pub(crate) fn render_markdown_error(request_id: &str, err: &AppError) -> String 
     if let Some(debug_ref) = err.debug_ref.as_deref().filter(|v| !v.trim().is_empty()) {
         push_kv_line(&mut lines, "debug_ref", debug_ref);
     }
+    if let Some(hint) = err
+        .details
+        .as_ref()
+        .and_then(|details| details.get("hint"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_kv_line(&mut lines, "hint", hint);
+    }
     lines.join("\n")
 }
 
@@ -337,10 +347,14 @@ fn menu_list_usage_hints(response: &ResponseEnvelope) -> Vec<String> {
         .map(|id| format!(" --active-window {id}"))
         .unwrap_or_default();
     vec![
-        format!("invoke a returned menu ID with desktopctl menu click --id <menu_id>{suffix}"),
+        format!(
+            "returned menu IDs identify commands; use desktopctl menu click --id <menu_id>{suffix} only when you intend to invoke one"
+        ),
         format!(
             "shortcuts shown in parentheses can be sent with desktopctl keyboard press <shortcut>{suffix}"
         ),
+        "listed menus describe application commands; use screen tokenize only for visible content and controls"
+            .to_string(),
     ]
 }
 
@@ -753,6 +767,11 @@ fn render_menu_markdown(value: &serde_json::Value) -> String {
     {
         push_kv_line(&mut lines, "hint", hint);
     }
+    push_kv_line(
+        &mut lines,
+        "disabled",
+        "command is exposed by the app but unavailable in the current UI state",
+    );
     push_section(&mut lines, "Menu Bar");
     let items = result
         .get("items")
@@ -845,7 +864,7 @@ fn render_menu_node(
             .replace('\n', " ")
             .replace('\r', " ");
         lines.push(format!(
-            "{}({omitted} more items; use `desktopctl menu list --all --active-window {window_id}`)",
+            "{}({omitted} items omitted by DesktopCtl; rerun with `desktopctl menu list --all --active-window {window_id}` to include them)",
             "  ".repeat(depth + 1)
         ));
     }
@@ -1567,7 +1586,10 @@ mod tests {
         menu_discovery_hint_message, menu_list_usage_hints, render_markdown_response,
         render_response,
     };
-    use desktop_core::protocol::{Command, ObserveOptions, PointerButton, ResponseEnvelope};
+    use desktop_core::{
+        error::AppError,
+        protocol::{Command, ObserveOptions, PointerButton, ResponseEnvelope},
+    };
     use serde_json::json;
 
     #[test]
@@ -1613,9 +1635,12 @@ mod tests {
         assert!(markdown.contains("**Halves** #menu_window_move_resize_halves"));
         assert!(!markdown.contains("Halves [disabled]"));
         assert!(markdown.contains(
-            "(6 more items; use `desktopctl menu list --all --active-window ghostty_1`)"
+            "- disabled: command is exposed by the app but unavailable in the current UI state"
         ));
-        assert!(!markdown.contains("more items #"));
+        assert!(markdown.contains(
+            "(6 items omitted by DesktopCtl; rerun with `desktopctl menu list --all --active-window ghostty_1` to include them)"
+        ));
+        assert!(!markdown.contains("omitted by DesktopCtl #"));
     }
 
     #[test]
@@ -1767,8 +1792,9 @@ mod tests {
         assert_eq!(
             menu_list_usage_hints(&response),
             vec![
-                "invoke a returned menu ID with desktopctl menu click --id <menu_id> --active-window notes_859606",
+                "returned menu IDs identify commands; use desktopctl menu click --id <menu_id> --active-window notes_859606 only when you intend to invoke one",
                 "shortcuts shown in parentheses can be sent with desktopctl keyboard press <shortcut> --active-window notes_859606",
+                "listed menus describe application commands; use screen tokenize only for visible content and controls",
             ]
         );
     }
@@ -1787,6 +1813,14 @@ mod tests {
             menu_click_shortcut_hint(&response).as_deref(),
             Some("next time use desktopctl keyboard press cmd+y --active-window safari_e51aeb")
         );
+    }
+
+    #[test]
+    fn local_markdown_errors_render_usage_hint() {
+        let error = AppError::invalid_argument("bad command")
+            .with_details(json!({ "hint": "start with desktopctl window list" }));
+        let markdown = super::render_markdown_error("r1", &error);
+        assert!(markdown.contains("- hint: start with desktopctl window list"));
     }
 
     #[test]

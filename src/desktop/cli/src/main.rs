@@ -154,9 +154,7 @@ fn split_cli_options(args: &[String]) -> Result<(CliOptions, Vec<String>), AppEr
             "--jitter" => {
                 i += 1;
                 let v = args.get(i).ok_or_else(|| {
-                    AppError::invalid_argument(
-                        "--jitter requires a range (e.g. --jitter 50-200)",
-                    )
+                    AppError::invalid_argument("--jitter requires a range (e.g. --jitter 50-200)")
                 })?;
                 let (lo, hi) = parse_jitter_range(v)?;
                 human.get_or_insert_with(HumanOptions::default).jitter_ms = [lo, hi];
@@ -204,7 +202,7 @@ fn is_app_open_context(filtered: &[String]) -> bool {
 fn print_error(request_id: &str, err: &AppError, output_mode: OutputMode) {
     match output_mode {
         OutputMode::Json => {
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "ok": false,
                 "request_id": request_id,
                 "error": {
@@ -215,6 +213,14 @@ fn print_error(request_id: &str, err: &AppError, output_mode: OutputMode) {
                     "debug_ref": err.debug_ref,
                 }
             });
+            if let Some(hint) = err
+                .details
+                .as_ref()
+                .and_then(|details| details.get("hint"))
+                .and_then(serde_json::Value::as_str)
+            {
+                payload["hint"] = serde_json::Value::String(hint.to_string());
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
