@@ -161,8 +161,6 @@ run: build
 clean:
   pkill -f desktopctld || true
   rm -f /tmp/desktopctl.sock
-  rm -f /private/tmp/desktopctld.trace.log /private/tmp/desktopctl.cli.trace.log
-  rm -rf /private/tmp/desktopctl-captures/*
   rm -rf {{dist_dir}}
 
 clean-all:

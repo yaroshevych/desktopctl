@@ -250,8 +250,10 @@ pub(crate) fn default_capture_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    std::env::temp_dir()
-        .join("desktopctl-captures")
+    desktop_core::paths::AppPaths::resolve()
+        .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
+        .ensure_cache_subdir("captures")
+        .expect("failed to create DesktopCtl capture cache")
         .join(format!("capture-{ts}.png"))
 }
 
@@ -345,5 +347,9 @@ pub(crate) fn default_capture_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/desktopctl-captures/capture-{ts}.png"))
+    desktop_core::paths::AppPaths::resolve()
+        .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
+        .ensure_cache_subdir("captures")
+        .expect("failed to create DesktopCtl capture cache")
+        .join(format!("capture-{ts}.png"))
 }

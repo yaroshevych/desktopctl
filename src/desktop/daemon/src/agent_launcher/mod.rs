@@ -47,13 +47,12 @@ mod controller {
     }
 
     pub fn initialize() -> Result<(), desktop_core::error::AppError> {
-        let (store, warning) = match AgentSessionStore::default_path() {
-            Some(path) => AgentSessionStore::load_or_empty_at(path, unix_now_ms()),
-            None => AgentSessionStore::load_or_empty_at(
-                PathBuf::from("/tmp/desktopctl-agent-sessions.json"),
-                unix_now_ms(),
-            ),
-        };
+        let path = AgentSessionStore::default_path().ok_or_else(|| {
+            desktop_core::error::AppError::backend_unavailable(
+                "unable to resolve DesktopCtl workspace directory",
+            )
+        })?;
+        let (store, warning) = AgentSessionStore::load_or_empty_at(path, unix_now_ms());
         if let Some(warning) = warning {
             trace::log(format!("agent_launcher:store_warning {warning}"));
         }

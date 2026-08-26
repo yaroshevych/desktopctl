@@ -12,6 +12,8 @@ pub(crate) fn help_notes() -> &'static str {
 - desktopctl request response 12345\n\
 \n\
 Notes and hints:\n\
+- data root precedence: DESKTOPCTL_HOME, then XDG_DATA_HOME/desktopctl, then $HOME/.local/share/desktopctl\n\
+- config is stored in <data-root>/config.toml; sessions, logs, and cache use its workspaces/, logs/, and cache/ subdirectories\n\
 - use desktopctl menu list --active-window to discover app commands and keyboard shortcuts\n\
 - tokenize response includes request_id in JSON output; reuse it with `desktopctl request response <request_id>`\n\
 - for modal dialogs, get IDs via `desktopctl window list`; pass dialog id to act inside dialog, or parent id to act on main window\n\

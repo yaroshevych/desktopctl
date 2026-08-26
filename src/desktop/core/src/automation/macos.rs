@@ -2,6 +2,7 @@ use std::{
     ffi::{CStr, CString, c_char, c_int, c_void},
     fs::OpenOptions,
     io::Write,
+    path::PathBuf,
     process::Command,
     sync::OnceLock,
     thread,
@@ -1475,8 +1476,15 @@ fn trace_mouse(message: impl AsRef<str>) {
     let path = std::env::var("DESKTOPCTL_TRACE_PATH")
         .ok()
         .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| "/tmp/desktopctld.trace.log".to_string());
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(line.as_bytes());
+        .map(PathBuf::from)
+        .or_else(|| {
+            let paths = crate::paths::AppPaths::resolve().ok()?;
+            paths.ensure_logs_dir().ok()?;
+            Some(paths.daemon_log_file())
+        });
+    if let Some(path) = path {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 }

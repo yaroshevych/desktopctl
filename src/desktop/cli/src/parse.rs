@@ -1,5 +1,5 @@
 use clap::{
-    builder::PossibleValuesParser, Arg, ArgAction, ArgMatches, Command as ClapCommand, ValueHint,
+    Arg, ArgAction, ArgMatches, Command as ClapCommand, ValueHint, builder::PossibleValuesParser,
 };
 use desktop_core::{
     error::AppError,
@@ -1175,7 +1175,7 @@ fn replay_subcommand() -> ClapCommand {
         .after_long_help(
             "Examples:\n\
 - desktopctl replay record --duration 5000\n\
-- desktopctl replay load /tmp/desktopctl-replay/session-123",
+- desktopctl replay load ~/.local/share/desktopctl/logs/replays/session-123",
         )
         .subcommand(
             ClapCommand::new("record")

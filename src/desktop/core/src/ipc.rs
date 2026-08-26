@@ -26,8 +26,6 @@ const SOCKET_FILE_NAME: &str = "desktopctl.sock";
 #[cfg(windows)]
 const DEFAULT_WINDOWS_PIPE_NAME: &str = "desktopctl";
 #[cfg(windows)]
-const WINDOWS_AUTH_DIR_NAME: &str = "desktopctl";
-#[cfg(windows)]
 const WINDOWS_AUTH_FILE_NAME: &str = "ipc-token";
 #[cfg(windows)]
 const AUTH_PREFIX: &str = "AUTH ";
@@ -347,16 +345,9 @@ fn windows_auth_token_path() -> PathBuf {
             return PathBuf::from(path);
         }
     }
-    let local_app_data = env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("USERPROFILE")
-                .map(PathBuf::from)
-                .map(|base| base.join("AppData").join("Local"))
-        })
-        .unwrap_or_else(env::temp_dir);
-    local_app_data
-        .join(WINDOWS_AUTH_DIR_NAME)
+    crate::paths::AppPaths::resolve()
+        .and_then(|paths| paths.ensure_state_dir())
+        .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
         .join(WINDOWS_AUTH_FILE_NAME)
 }
 

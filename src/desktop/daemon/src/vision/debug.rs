@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use desktop_core::error::AppError;
 use serde_json::json;
@@ -29,10 +29,11 @@ pub fn write_debug_snapshot() -> Result<serde_json::Value, AppError> {
             .ok_or_else(|| AppError::internal("no captured frame available for debug output"))?
     };
 
-    let base_dir = PathBuf::from("/tmp/desktopctl-debug");
-    fs::create_dir_all(&base_dir).map_err(|err| {
-        AppError::backend_unavailable(format!("failed to create debug dir: {err}"))
-    })?;
+    let base_dir = desktop_core::paths::AppPaths::resolve()
+        .and_then(|paths| paths.ensure_cache_subdir("debug"))
+        .map_err(|err| {
+            AppError::backend_unavailable(format!("failed to create debug dir: {err}"))
+        })?;
     let png_path = base_dir.join(format!("snapshot-{}.png", snapshot.snapshot_id));
     let json_path = base_dir.join(format!("snapshot-{}.json", snapshot.snapshot_id));
 

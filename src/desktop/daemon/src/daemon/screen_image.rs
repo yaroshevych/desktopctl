@@ -34,10 +34,14 @@ pub(super) fn write_capture_overlay(
         .as_ref()
         .map(|path| overlay_path_for_capture(path))
         .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "capture-{}.overlay.png",
-                capture.snapshot.snapshot_id
-            ))
+            desktop_core::paths::AppPaths::resolve()
+                .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
+                .ensure_cache_subdir("overlays")
+                .expect("failed to create DesktopCtl overlay cache")
+                .join(format!(
+                    "capture-{}.overlay.png",
+                    capture.snapshot.snapshot_id
+                ))
         });
     image
         .save_with_format(&overlay_path, ImageFormat::Png)

@@ -278,7 +278,11 @@ fn temp_input_path(prefix: &str, ext: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("desktopctl-{prefix}-{ts}.{ext}"))
+    desktop_core::paths::AppPaths::resolve()
+        .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
+        .ensure_cache_subdir("ocr")
+        .expect("failed to create DesktopCtl OCR cache")
+        .join(format!("{prefix}-{ts}.{ext}"))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

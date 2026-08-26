@@ -68,12 +68,9 @@ fn default_interval_seconds() -> u64 {
 }
 
 fn default_output_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join("DesktopCtl Journal");
-    }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("DesktopCtl Journal")
+    desktop_core::paths::AppPaths::resolve()
+        .map(|paths| paths.logs_dir().join("journal"))
+        .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
 }
 
 #[allow(dead_code)]
@@ -101,54 +98,21 @@ pub fn load_current_from_disk() -> LoadOutcome {
     outcome
 }
 
-pub fn config_path() -> Option<PathBuf> {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-        let trimmed = PathBuf::from(base);
-        if !trimmed.as_os_str().is_empty() {
-            return Some(trimmed.join("desktopctl").join("journal.json"));
-        }
-    }
-
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/desktopctl/journal.json"))
-}
-
 pub fn load_with_diagnostics() -> LoadOutcome {
-    let Some(path) = config_path() else {
-        let warning = "unable to resolve journal config path; using defaults".to_string();
-        return LoadOutcome {
-            config: JournalConfig::default(),
-            warning: Some(warning),
-        };
-    };
-
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) => {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                let warning = format!("failed reading {}: {err}; using defaults", path.display());
-                return LoadOutcome {
-                    config: JournalConfig::default(),
-                    warning: Some(warning),
-                };
-            }
-            return LoadOutcome {
-                config: JournalConfig::default(),
-                warning: None,
-            };
-        }
-    };
-
-    match serde_json::from_str::<JournalConfig>(&raw) {
-        Ok(mut config) => {
+    match crate::storage::load_journal() {
+        Ok(Some(mut config)) => {
             normalize_config(&mut config);
             LoadOutcome {
                 config,
                 warning: None,
             }
         }
-        Err(err) => {
-            let warning = format!("invalid JSON in {}: {err}; using defaults", path.display());
+        Ok(None) => LoadOutcome {
+            config: JournalConfig::default(),
+            warning: None,
+        },
+        Err(error) => {
+            let warning = format!("{error}; using defaults");
             LoadOutcome {
                 config: JournalConfig::default(),
                 warning: Some(warning),
@@ -158,21 +122,9 @@ pub fn load_with_diagnostics() -> LoadOutcome {
 }
 
 pub fn save(config: &JournalConfig) -> Result<(), String> {
-    let Some(path) = config_path() else {
-        return Err("unable to resolve journal config path".to_string());
-    };
-    let Some(parent) = path.parent() else {
-        return Err("journal config path has no parent directory".to_string());
-    };
-    fs::create_dir_all(parent)
-        .map_err(|err| format!("create config directory {} failed: {err}", parent.display()))?;
-
     let mut normalized = config.clone();
     normalize_config(&mut normalized);
-    let encoded = serde_json::to_vec_pretty(&normalized)
-        .map_err(|err| format!("serialize journal config failed: {err}"))?;
-    fs::write(&path, encoded)
-        .map_err(|err| format!("write journal config {} failed: {err}", path.display()))
+    crate::storage::save_journal(&normalized)
 }
 
 pub fn apply(config: JournalConfig) -> Result<(), String> {
@@ -251,7 +203,12 @@ fn set_active(active: bool) {
 }
 
 fn write_journal_entry(output_dir: &Path) -> Result<(), AppError> {
-    fs::create_dir_all(output_dir).map_err(|err| {
+    let create_result = desktop_core::paths::AppPaths::resolve()
+        .ok()
+        .filter(|paths| output_dir.starts_with(paths.root()))
+        .map(|_| desktop_core::paths::ensure_private_dir(output_dir))
+        .unwrap_or_else(|| fs::create_dir_all(output_dir));
+    create_result.map_err(|err| {
         AppError::internal(format!(
             "create journal output directory {} failed: {err}",
             output_dir.display()

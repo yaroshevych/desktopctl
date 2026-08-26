@@ -157,9 +157,14 @@ pub(super) fn screenshot(request_id: &str, out_path: Option<String>) -> Result<V
         ))
     })?;
 
-    let path = out_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(format!("/tmp/desktopctl-request-{request_id}.png")));
+    let path = match out_path {
+        Some(path) => PathBuf::from(path),
+        None => desktop_core::paths::AppPaths::resolve()
+            .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
+            .ensure_cache_subdir("requests")
+            .expect("failed to create DesktopCtl request cache")
+            .join(format!("{request_id}.png")),
+    };
     fs::write(&path, png).map_err(|err| {
         AppError::backend_unavailable(format!("failed to write screenshot: {err}"))
     })?;

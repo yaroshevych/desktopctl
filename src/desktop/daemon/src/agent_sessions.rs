@@ -196,35 +196,13 @@ pub struct AgentSessionStore {
 }
 
 impl AgentSessionStore {
-    /// Resolve the normal per-user data directory.  The override makes tests
-    /// hermetic and is also useful for a portable/development installation.
+    /// Resolve the unified per-user workspace directory.
     pub fn data_dir() -> Option<PathBuf> {
-        if let Some(override_dir) = std::env::var_os("DESKTOPCTL_AGENT_DATA_DIR") {
-            let path = PathBuf::from(override_dir);
-            if !path.as_os_str().is_empty() {
-                return Some(path);
-            }
-        }
-
-        let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        #[cfg(target_os = "macos")]
-        {
-            return Some(home.join("Library/Application Support/DesktopCtl"));
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-                let path = PathBuf::from(xdg);
-                if !path.as_os_str().is_empty() {
-                    return Some(path.join("desktopctl"));
-                }
-            }
-            Some(home.join(".local/share/desktopctl"))
-        }
+        Self::default_path()?.parent().map(Path::to_path_buf)
     }
 
     pub fn default_path() -> Option<PathBuf> {
-        Self::data_dir().map(|dir| dir.join(STORE_FILE_NAME))
+        crate::storage::agent_sessions_path().ok()
     }
 
     /// Load the default store and recover sessions left running by a crashed
@@ -310,8 +288,12 @@ impl AgentSessionStore {
                 "session store path has no parent directory".into(),
             ));
         };
-        fs::create_dir_all(parent)?;
-        set_private_permissions(parent)?;
+        if Self::default_path().as_deref() == Some(self.path.as_path()) {
+            desktop_core::paths::AppPaths::resolve()?.ensure_workspaces_dir()?;
+        } else {
+            fs::create_dir_all(parent)?;
+            set_private_permissions(parent)?;
+        }
 
         let payload = PersistedSessions {
             version: STORE_VERSION,

@@ -52,7 +52,13 @@ pub fn start_recording(duration_ms: u64) -> Result<Value, AppError> {
     let now_ms = now_millis();
     let base_dir = std::env::var("DESKTOPCTL_RECORD_BASE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/desktopctl-recordings"));
+        .or_else(|_| {
+            desktop_core::paths::AppPaths::resolve()
+                .and_then(|paths| paths.ensure_logs_subdir("replays"))
+        })
+        .map_err(|err| {
+            AppError::backend_unavailable(format!("failed to resolve replay directory: {err}"))
+        })?;
     let session_dir = base_dir.join(format!("session-{now_ms}-{}", std::process::id()));
     let frames_dir = session_dir.join("frames");
     fs::create_dir_all(&frames_dir).map_err(|err| {

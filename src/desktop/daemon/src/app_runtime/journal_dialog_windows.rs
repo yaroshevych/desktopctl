@@ -16,8 +16,10 @@ pub fn show() {
 fn show_blocking() -> Result<(), String> {
     let cfg = journal::load_current_from_disk().config;
     let script = render_script(&cfg);
-    let mut path = std::env::temp_dir();
-    path.push("desktopctl-journal-dialog.ps1");
+    let path = desktop_core::paths::AppPaths::resolve()
+        .and_then(|paths| paths.ensure_cache_subdir("dialogs"))
+        .map_err(|err| format!("resolve dialog cache directory failed: {err}"))?
+        .join("journal-dialog.ps1");
     let mut file = std::fs::File::create(&path)
         .map_err(|err| format!("create {} failed: {err}", path.display()))?;
     file.write_all(script.as_bytes())

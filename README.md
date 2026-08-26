@@ -24,6 +24,39 @@ DesktopCtl is split into two binaries:
 - `DesktopCtl.app` (`desktopctld`): daemon that owns perception, state, execution, and verification
 - `desktopctl`: stateless CLI surface for actions and queries over local IPC
 
+## Filesystem layout
+
+DesktopCtl uses the same Linux-style application directory on every platform:
+
+```text
+${DESKTOPCTL_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/desktopctl}/
+├── config.toml
+├── state/
+├── logs/
+├── cache/
+└── workspaces/
+```
+
+Path precedence is `DESKTOPCTL_HOME`, then `XDG_DATA_HOME/desktopctl`, then
+`$HOME/.local/share/desktopctl`. Directories are created only when their
+contents are needed. Configuration lives in `config.toml`, persistent runtime
+metadata in `state/`, launcher sessions in `workspaces/`, logs and journal
+output in `logs/`, and disposable screenshots/OCR/debug output in `cache/`.
+Unix runtime sockets remain in the private temporary runtime directory.
+
+Exact-path overrides remain available for specialized use:
+`DESKTOPCTL_SOCKET_PATH`, `DESKTOPCTL_IPC_TOKEN_PATH`, `DESKTOPCTL_TRACE_PATH`,
+`DESKTOPCTL_CLI_TRACE_PATH`, and `DESKTOPCTL_RECORD_BASE`. These override only
+their named artifact; `DESKTOPCTL_HOME` controls the application root.
+
+On first startup, DesktopCtl safely copies valid legacy JSON configuration and
+launcher sessions from `$XDG_CONFIG_HOME/desktopctl`,
+`$HOME/.config/desktopctl`, `$HOME/Library/Application Support/DesktopCtl`, and
+the former XDG data root into the new layout. Existing destinations are never
+overwritten, conflicting legacy sources are left untouched, and migration
+errors are reported without deleting old files. `XDG_CONFIG_HOME` participates
+only in legacy migration; it does not control the new layout.
+
 Repository layout:
 
 - `src/desktop/core` - shared protocol and types

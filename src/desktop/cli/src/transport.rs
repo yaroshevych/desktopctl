@@ -258,9 +258,16 @@ pub(crate) fn trace_log(message: impl AsRef<str>) {
     let path = std::env::var("DESKTOPCTL_CLI_TRACE_PATH")
         .ok()
         .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| "/tmp/desktopctl.cli.trace.log".to_string());
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(line.as_bytes());
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let paths = desktop_core::paths::AppPaths::resolve().ok()?;
+            paths.ensure_logs_dir().ok()?;
+            Some(paths.logs_dir().join("desktopctl-cli.log"))
+        });
+    if let Some(path) = path {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 }
 

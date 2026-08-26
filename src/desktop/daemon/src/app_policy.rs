@@ -1,7 +1,5 @@
 use std::{
     collections::HashSet,
-    fs,
-    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -103,50 +101,12 @@ pub fn set_agent_access_disabled(disabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn config_path() -> Option<PathBuf> {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-        let trimmed = PathBuf::from(base);
-        if !trimmed.as_os_str().is_empty() {
-            return Some(trimmed.join("desktopctl").join("config.json"));
-        }
-    }
-
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/desktopctl/config.json"))
-}
-
 pub fn load_with_diagnostics() -> LoadOutcome {
-    let Some(path) = config_path() else {
-        let warning = "unable to resolve app policy config path; using defaults".to_string();
-        eprintln!("app policy: {warning}");
-        return LoadOutcome {
-            config: AppPolicyConfig::default(),
-            warning: Some(warning),
-        };
-    };
-
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) => {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                let warning = format!("failed reading {}: {err}; using defaults", path.display());
-                eprintln!("app policy: {warning}");
-                return LoadOutcome {
-                    config: AppPolicyConfig::default(),
-                    warning: Some(warning),
-                };
-            }
-            return LoadOutcome {
-                config: AppPolicyConfig::default(),
-                warning: None,
-            };
-        }
-    };
-
-    let mut cfg: AppPolicyConfig = match serde_json::from_str(&raw) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            let warning = format!("invalid JSON in {}: {err}; using defaults", path.display());
+    let mut cfg = match crate::storage::load_app_policy() {
+        Ok(Some(config)) => config,
+        Ok(None) => AppPolicyConfig::default(),
+        Err(error) => {
+            let warning = format!("{error}; using defaults");
             eprintln!("app policy: {warning}");
             return LoadOutcome {
                 config: AppPolicyConfig::default(),
@@ -163,26 +123,9 @@ pub fn load_with_diagnostics() -> LoadOutcome {
 }
 
 pub fn save(cfg: &AppPolicyConfig) -> Result<(), String> {
-    let Some(path) = config_path() else {
-        return Err("unable to resolve config path".to_string());
-    };
-    ensure_parent_dir(&path)?;
-
     let mut normalized = cfg.clone();
     normalized.apps = normalize_apps(&normalized.apps);
-
-    let encoded = serde_json::to_vec_pretty(&normalized)
-        .map_err(|err| format!("serialize config failed: {err}"))?;
-    fs::write(&path, encoded)
-        .map_err(|err| format!("write config {} failed: {err}", path.display()))
-}
-
-fn ensure_parent_dir(path: &Path) -> Result<(), String> {
-    let Some(parent) = path.parent() else {
-        return Err("config path has no parent directory".to_string());
-    };
-    fs::create_dir_all(parent)
-        .map_err(|err| format!("create config directory {} failed: {err}", parent.display()))
+    crate::storage::save_app_policy(&normalized)
 }
 
 pub fn normalize_apps_csv(csv: &str) -> Vec<String> {

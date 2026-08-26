@@ -61,15 +61,17 @@ idle/overlay icon when the last request finishes.
 Launcher metadata is stored atomically as JSON at:
 
 ```text
-~/Library/Application Support/DesktopCtl/agent-sessions.json
+${DESKTOPCTL_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/desktopctl}/workspaces/agent-sessions.json
 ```
 
-`DESKTOPCTL_AGENT_DATA_DIR` overrides the directory for tests. The document
-contains a schema version and a list of DesktopCtl sessions: UUID, adapter and
-Pi-native session identity, title, short transcript, target-window metadata,
-timestamps, status, and unread/visited state. A malformed file is quarantined
-or ignored with a diagnostic. Sessions left running by a process crash become
-failed during startup recovery.
+`DESKTOPCTL_HOME` overrides the complete DesktopCtl data root. Otherwise
+`XDG_DATA_HOME/desktopctl` is used when set, followed by
+`$HOME/.local/share/desktopctl`. The document contains a schema version and a
+list of DesktopCtl sessions: UUID, adapter and Pi-native session identity,
+title, short transcript, target-window metadata, timestamps, status, and
+unread/visited state. A malformed file is left untouched and ignored with a
+diagnostic. Sessions left running by a process crash become failed during
+startup recovery.
 
 ## Testing
 

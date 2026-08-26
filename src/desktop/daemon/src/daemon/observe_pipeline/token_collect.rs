@@ -1,7 +1,5 @@
-use super::*;
-use std::path::PathBuf;
-
 use super::token_delta::{observe_ocr_token_id, round_nonnegative_i64};
+use super::*;
 use image::{ImageFormat, RgbaImage};
 
 pub(super) fn observe_tokens_for_regions(
@@ -283,11 +281,15 @@ fn dump_observe_region_screenshot(
     if !save_enabled {
         return;
     }
-    let dir = PathBuf::from("/tmp/desktopctl-observe-crops");
-    if let Err(err) = fs::create_dir_all(&dir) {
-        trace::log(format!("observe:dump mkdir_failed err={err}"));
-        return;
-    }
+    let dir = match desktop_core::paths::AppPaths::resolve()
+        .and_then(|paths| paths.ensure_cache_subdir("observe-crops"))
+    {
+        Ok(path) => path,
+        Err(err) => {
+            trace::log(format!("observe:dump mkdir_failed err={err}"));
+            return;
+        }
+    };
     let file_name = format!(
         "snap{}_r{}_core_{}_{}_{}_{}_pad_{}_{}_{}_{}.png",
         snapshot_id,

@@ -313,7 +313,11 @@ pub(crate) fn default_capture_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/desktopctl-captures/capture-{ts}.png"))
+    desktop_core::paths::AppPaths::resolve()
+        .expect("DesktopCtl home requires DESKTOPCTL_HOME or HOME")
+        .ensure_cache_subdir("captures")
+        .expect("failed to create DesktopCtl capture cache")
+        .join(format!("capture-{ts}.png"))
 }
 
 fn screencapturekit_screenshot_api_available() -> bool {
@@ -584,10 +588,10 @@ mod tests {
     use super::{default_capture_path, infer_window_capture_scale};
 
     #[test]
-    fn default_capture_path_points_to_tmp_png() {
+    fn default_capture_path_points_to_cache_png() {
         let path = default_capture_path();
         let path_s = path.display().to_string();
-        assert!(path_s.starts_with("/tmp/desktopctl-captures/capture-"));
+        assert!(path_s.contains("/desktopctl/cache/captures/capture-"));
         assert!(path_s.ends_with(".png"));
     }
 

@@ -4,8 +4,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const DEFAULT_TRACE_PATH: &str = "/tmp/desktopctld.trace.log";
-
 pub fn is_enabled() -> bool {
     let trace_enabled = std::env::var("DESKTOPCTL_TRACE")
         .ok()
@@ -37,9 +35,16 @@ pub fn log(message: impl AsRef<str>) {
     let path = std::env::var("DESKTOPCTL_TRACE_PATH")
         .ok()
         .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_TRACE_PATH.to_string());
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let paths = desktop_core::paths::AppPaths::resolve().ok()?;
+            paths.ensure_logs_dir().ok()?;
+            Some(paths.daemon_log_file())
+        });
 
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(line.as_bytes());
+    if let Some(path) = path {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 }
