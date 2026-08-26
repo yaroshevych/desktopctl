@@ -959,6 +959,31 @@ fn open_row(index: usize) {
 }
 
 fn move_selection(delta: isize) {
+    let expand_to = UI.with(|cell| {
+        let ui = cell.borrow();
+        let recent_count = ui.snapshot.recent.len();
+        (delta > 0
+            && !ui.show_all
+            && ui.snapshot.all.len() > recent_count
+            && ui.selected == recent_count.checked_sub(1))
+        .then_some(recent_count)
+    });
+    if let Some(index) = expand_to {
+        UI.with(|cell| cell.borrow_mut().show_all = true);
+        render_on_main();
+        UI.with(|cell| {
+            let mut ui = cell.borrow_mut();
+            ui.selected = Some(index);
+            for (idx, row) in ui.rows.iter().enumerate() {
+                row.highlight(idx == index);
+                if idx == index {
+                    row.scrollRectToVisible(row.bounds());
+                }
+            }
+        });
+        return;
+    }
+
     UI.with(|cell| {
         let mut ui = cell.borrow_mut();
         if !matches!(ui.snapshot.screen, LauncherScreen::Launcher) {
