@@ -1,5 +1,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod agent_launcher;
+mod agent_runner;
+mod agent_sessions;
 mod app_policy;
 mod app_runtime;
 mod clipboard;

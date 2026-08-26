@@ -673,6 +673,16 @@ pub(crate) fn execute_resident_command(command: Command) -> Result<Value, AppErr
     execute_with_context(command, true, &RequestContext::default())
 }
 
+/// Binds the non-DesktopCtl window that is active before launcher activation.
+///
+/// Keeping this seam in the daemon ensures the launcher uses the same opaque
+/// window identity and target-selection rules as CLI requests.
+#[cfg(target_os = "macos")]
+pub(crate) fn bind_active_window_for_agent_launcher()
+-> Result<platform::windowing::WindowInfo, AppError> {
+    window_context::resolve_active_window_target()
+}
+
 #[cfg(test)]
 fn execute(command: Command) -> Result<Value, AppError> {
     execute_resident_command(command)

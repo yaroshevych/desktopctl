@@ -14,7 +14,7 @@ use desktop_core::{
 };
 
 use super::{about, settings_dialog};
-use crate::{daemon, journal, overlay, platform::permissions, trace};
+use crate::{agent_launcher, daemon, journal, overlay, platform::permissions, trace};
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -82,6 +82,7 @@ pub(crate) fn run() -> Result<(), AppError> {
 
     daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
     journal::start_from_disk();
+    agent_launcher::initialize()?;
 
     if journal::current().enabled && !permissions::screen_recording_granted() {
         notify_journal_needs_screen_recording();
@@ -94,6 +95,7 @@ pub(crate) fn run() -> Result<(), AppError> {
         None,
     );
     let settings_item = MenuItem::new("Settings…", true, None);
+    let agent_launcher_item = MenuItem::new("Agent Launcher…", true, None);
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
@@ -101,6 +103,8 @@ pub(crate) fn run() -> Result<(), AppError> {
     menu.append(&toggle_cli_gui_ops)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&settings_item)
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&agent_launcher_item)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     if overlay_enabled {
         menu.append(&PredefinedMenuItem::separator())
@@ -118,6 +122,7 @@ pub(crate) fn run() -> Result<(), AppError> {
     let toggle_cli_gui_ops_id = toggle_cli_gui_ops.id().clone();
     let toggle_overlay_id = toggle_overlay.id().clone();
     let settings_id = settings_item.id().clone();
+    let agent_launcher_id = agent_launcher_item.id().clone();
     let about_id = about.id().clone();
     let quit_id = quit.id().clone();
     MENU_STATE.with(|cell| {
@@ -133,6 +138,10 @@ pub(crate) fn run() -> Result<(), AppError> {
         }
         if event.id == settings_id {
             settings_dialog::show(None);
+            return;
+        }
+        if event.id == agent_launcher_id {
+            agent_launcher::toggle();
             return;
         }
         if event.id == toggle_cli_gui_ops_id {
