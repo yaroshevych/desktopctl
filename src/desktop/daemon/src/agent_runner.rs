@@ -149,10 +149,16 @@ impl PiRunner {
                 args.push(OsString::from(id));
             }
         }
+        if request.target_window.is_some() {
+            args.push(OsString::from("--append-system-prompt"));
+            args.push(OsString::from(
+                "The user's desktop target is the current topmost non-DesktopCtl window. Use desktopctl commands with --active-window when inspecting or acting on it.",
+            ));
+        }
         // `--` protects prompts beginning with a dash while keeping user text
         // an argv element rather than shell source.
         args.push(OsString::from("--"));
-        args.push(OsString::from(prompt_with_target(request)));
+        args.push(OsString::from(&request.prompt));
         args
     }
 
@@ -300,28 +306,6 @@ fn read_pipe<R: Read>(mut pipe: R) -> Result<String, AgentRunnerError> {
     pipe.read_to_end(&mut bytes)
         .map_err(|source| AgentRunnerError::Io { source })?;
     String::from_utf8(bytes).map_err(|source| AgentRunnerError::Utf8 { source })
-}
-
-fn prompt_with_target(request: &AgentRequest) -> String {
-    let Some(target) = request.target_window.as_ref() else {
-        return request.prompt.clone();
-    };
-    let app = target.app.as_deref().unwrap_or("the target application");
-    let title = target.title.as_deref().unwrap_or("the target window");
-    let desktopctl = desktopctl_executable_hint();
-    format!(
-        "{}\n\n[DesktopCtl target-window context]\nThe user's target is the {} window titled {:?}. Its DesktopCtl active-window id is {:?}. The launcher is not the target. Use the DesktopCtl executable at {:?}. When inspecting or acting on the target, pass `--active-window {}` to DesktopCtl commands; do not inspect the launcher window.",
-        request.prompt, app, title, target.id, desktopctl, target.id
-    )
-}
-
-fn desktopctl_executable_hint() -> String {
-    env::current_exe()
-        .ok()
-        .and_then(|executable| executable.parent().map(|parent| parent.join("desktopctl")))
-        .filter(|candidate| candidate.is_file())
-        .map(|candidate| candidate.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "desktopctl".to_string())
 }
 
 /// Resolve Pi without relying on the interactive shell's PATH.  The explicit
@@ -633,17 +617,15 @@ mod tests {
                 .any(|pair| pair == [OsString::from("--session-id"), OsString::from("native-id")])
         );
         assert!(args.iter().any(|arg| arg == &OsString::from("--")));
+        assert_eq!(args.last(), Some(&OsString::from("- summarize this")));
+        let context_index = args
+            .iter()
+            .position(|arg| arg == "--append-system-prompt")
+            .expect("system prompt flag");
         assert!(
-            args.last()
-                .unwrap()
+            args[context_index + 1]
                 .to_string_lossy()
-                .contains("mail_abc123")
-        );
-        assert!(
-            args.last()
-                .unwrap()
-                .to_string_lossy()
-                .contains("--active-window mail_abc123")
+                .contains("current topmost non-DesktopCtl window")
         );
     }
 

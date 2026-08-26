@@ -241,6 +241,7 @@ end run"#;
                 .cancellations
                 .insert(session_id.clone(), cancellation.clone());
         }
+        crate::app_runtime::set_agent_running(true);
         thread::spawn(move || {
             let mut request = AgentRequest::new(prompt);
             request.session = native_session.filter(|session| {
@@ -262,6 +263,7 @@ end run"#;
         let mut notice = None;
         if let Some(mut state) = lock_state() {
             state.cancellations.remove(session_id);
+            crate::app_runtime::set_agent_running(!state.cancellations.is_empty());
             match result {
                 Ok(result) => {
                     let native_path = result

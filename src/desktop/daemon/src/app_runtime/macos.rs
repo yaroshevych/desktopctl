@@ -19,6 +19,8 @@ use crate::{agent_launcher, daemon, journal, overlay, platform::permissions, tra
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
 static OVERLAY_LIVE_SEQ: AtomicU64 = AtomicU64::new(1);
+static AGENT_ICON_RUNNING: AtomicBool = AtomicBool::new(false);
+static AGENT_ICON_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn cli_gui_toggle_menu_label(disabled: bool) -> &'static str {
     if disabled {
@@ -38,6 +40,7 @@ thread_local! {
 
 static ICON_IDLE: OnceLock<tray_icon::Icon> = OnceLock::new();
 static ICON_ACTIVE: OnceLock<tray_icon::Icon> = OnceLock::new();
+static ICON_AGENT_FRAMES: OnceLock<Vec<tray_icon::Icon>> = OnceLock::new();
 
 #[derive(Clone)]
 struct MenuState {
@@ -51,6 +54,55 @@ fn on_gui_ops_state_changed(disabled: bool) {
                 state
                     .toggle_cli_gui_ops
                     .set_text(cli_gui_toggle_menu_label(disabled));
+            }
+        });
+    });
+}
+
+pub(crate) fn set_agent_running(running: bool) {
+    let generation = AGENT_ICON_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    AGENT_ICON_RUNNING.store(running, Ordering::SeqCst);
+    if !running {
+        restore_tray_icon();
+        return;
+    }
+    thread::spawn(move || {
+        let mut frame = 0usize;
+        while AGENT_ICON_RUNNING.load(Ordering::SeqCst)
+            && AGENT_ICON_GENERATION.load(Ordering::SeqCst) == generation
+        {
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                let icon = ICON_AGENT_FRAMES
+                    .get()
+                    .and_then(|frames| frames.get(frame % frames.len().max(1)))
+                    .cloned();
+                if let Some(icon) = icon {
+                    TRAY.with(|cell| {
+                        if let Some(tray) = cell.borrow().as_ref() {
+                            let _ = tray.set_icon_with_as_template(Some(icon), true);
+                        }
+                    });
+                }
+            });
+            frame = frame.wrapping_add(1);
+            thread::sleep(Duration::from_millis(120));
+        }
+        if AGENT_ICON_GENERATION.load(Ordering::SeqCst) == generation {
+            restore_tray_icon();
+        }
+    });
+}
+
+fn restore_tray_icon() {
+    dispatch2::DispatchQueue::main().exec_async(|| {
+        let icon = if overlay::is_active() {
+            ICON_ACTIVE.get().cloned()
+        } else {
+            ICON_IDLE.get().cloned()
+        };
+        TRAY.with(|cell| {
+            if let Some(tray) = cell.borrow().as_ref() {
+                let _ = tray.set_icon_with_as_template(icon, true);
             }
         });
     });
@@ -100,11 +152,13 @@ pub(crate) fn run() -> Result<(), AppError> {
     let about = MenuItem::new("About", true, None);
     let quit = MenuItem::new("Exit", true, None);
     let overlay_enabled = std::env::var("DESKTOPCTL_OVERLAY_MENU").is_ok();
+    menu.append(&agent_launcher_item)
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&PredefinedMenuItem::separator())
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&toggle_cli_gui_ops)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&settings_item)
-        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
-    menu.append(&agent_launcher_item)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     if overlay_enabled {
         menu.append(&PredefinedMenuItem::separator())
@@ -218,6 +272,7 @@ pub(crate) fn run() -> Result<(), AppError> {
     });
     let _ = ICON_IDLE.set(idle.clone());
     let _ = ICON_ACTIVE.set(active);
+    let _ = ICON_AGENT_FRAMES.set(icon_agent_frames().unwrap_or_default());
 
     let tray = TrayIconBuilder::new()
         .with_tooltip("DesktopCtl")
@@ -298,11 +353,37 @@ fn icon_active() -> Result<tray_icon::Icon, AppError> {
     render_sf_icon(W, &[("viewfinder", full), ("camera.aperture", aperture)])
 }
 
+fn icon_agent_frames() -> Result<Vec<tray_icon::Icon>, AppError> {
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    const W: isize = 36;
+    let rect = NSRect {
+        origin: NSPoint { x: 2.0, y: 2.0 },
+        size: NSSize::new(32.0, 32.0),
+    };
+    (0..12)
+        .map(|phase| {
+            render_sf_icon_rotated(
+                W,
+                &[("arrow.triangle.2.circlepath", rect)],
+                phase as f64 * 30.0,
+            )
+        })
+        .collect()
+}
+
 /// Renders the given SF symbols at the specified rects into a single W×W RGBA icon.
 /// Symbols are drawn in order (painter's algorithm: first = bottom).
 fn render_sf_icon(
     w: isize,
     symbols: &[(&str, objc2_foundation::NSRect)],
+) -> Result<tray_icon::Icon, AppError> {
+    render_sf_icon_rotated(w, symbols, 0.0)
+}
+
+fn render_sf_icon_rotated(
+    w: isize,
+    symbols: &[(&str, objc2_foundation::NSRect)],
+    angle_degrees: f64,
 ) -> Result<tray_icon::Icon, AppError> {
     use objc2::{class, msg_send, runtime::AnyObject};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -344,6 +425,15 @@ fn render_sf_icon(
 
         let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
         let _: () = msg_send![class!(NSGraphicsContext), setCurrentContext: ctx];
+
+        if angle_degrees != 0.0 {
+            let transform: *mut AnyObject = msg_send![class!(NSAffineTransform), transform];
+            let half = w as f64 / 2.0;
+            let _: () = msg_send![transform, translateXBy: half, yBy: half];
+            let _: () = msg_send![transform, rotateByDegrees: angle_degrees];
+            let _: () = msg_send![transform, translateXBy: -half, yBy: -half];
+            let _: () = msg_send![transform, concat];
+        }
 
         // Black on transparent - template flag inverts to white on dark menu bars.
         let black: *mut AnyObject = msg_send![class!(NSColor), blackColor];

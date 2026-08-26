@@ -19,6 +19,8 @@ mod windows;
 pub(crate) use linux::run;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::run;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::set_agent_running;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(crate) use unsupported::run;
 #[cfg(target_os = "windows")]
