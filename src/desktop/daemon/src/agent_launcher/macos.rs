@@ -134,7 +134,7 @@ pub enum LauncherAction {
     FollowUp { session_id: String, prompt: String },
     OpenSession { session_id: String },
     CancelSession { session_id: String },
-    OpenInTerminal { session_id: String },
+    OpenInGhostty { session_id: String },
 }
 
 pub type LauncherActionHandler = Arc<dyn Fn(LauncherAction) + Send + Sync + 'static>;
@@ -214,11 +214,11 @@ define_class!(
             }
         }
 
-        #[unsafe(method(openInTerminal:))]
-        fn open_in_terminal(&self, _sender: Option<&AnyObject>) {
+        #[unsafe(method(openInGhostty:))]
+        fn open_in_ghostty(&self, _sender: Option<&AnyObject>) {
             let session_id = UI.with(|cell| cell.borrow().session_id.clone());
             if let (Some(callbacks), Some(session_id)) = (CALLBACKS.get(), session_id) {
-                (callbacks.on_action)(LauncherAction::OpenInTerminal { session_id });
+                (callbacks.on_action)(LauncherAction::OpenInGhostty { session_id });
             }
         }
     }
@@ -775,11 +775,11 @@ fn render_session(
                 NSSize::new(132.0, 26.0),
             ),
         );
-        terminal.setTitle(&NSString::from_str("Open in Terminal"));
+        terminal.setTitle(&NSString::from_str("Open in Ghostty"));
         terminal.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
         unsafe {
             terminal.setTarget(Some(ui.panel.as_ref().unwrap()));
-            terminal.setAction(Some(sel!(openInTerminal:)));
+            terminal.setAction(Some(sel!(openInGhostty:)));
         }
         content.addSubview(&terminal);
         ui.terminal = Some(terminal);

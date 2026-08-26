@@ -25,13 +25,14 @@ the request's cancellation token; the runner kills and reaps the Pi child, then
 persists the session as cancelled.
 
 After Pi has produced a native session identity, the session view also offers
-`Open in Terminal`. DesktopCtl activates Apple Terminal and starts interactive
-Pi with `--session <path|id>` from the original Pi working directory. The
-executable, directory, and session arguments are POSIX-quoted. macOS may ask the
-user to allow DesktopCtl to control Terminal the first time this is used.
+`Open in Ghostty`. DesktopCtl activates Ghostty, creates a new window (never a
+tab), and starts interactive Pi with `--session <path|id>` from the original Pi
+working directory. The executable and session arguments are POSIX-quoted. macOS
+may ask the user to allow DesktopCtl to control Ghostty the first time this is
+used.
 When that session is opened in the launcher again, DesktopCtl reads Pi's native
 JSONL session, follows its active branch, and refreshes the short transcript
-with Terminal-added user messages and final assistant answers. Thinking, tool
+with Ghostty-added user messages and final assistant answers. Thinking, tool
 calls, tool results, and incomplete or aborted assistant messages stay hidden.
 
 Escape from a session returns to the launcher list. Escape from the launcher

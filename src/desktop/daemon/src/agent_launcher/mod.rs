@@ -119,7 +119,7 @@ mod controller {
             LauncherAction::FollowUp { session_id, prompt } => follow_up(session_id, prompt),
             LauncherAction::OpenSession { session_id } => open_session(session_id),
             LauncherAction::CancelSession { session_id } => cancel(&session_id),
-            LauncherAction::OpenInTerminal { session_id } => open_in_terminal(session_id),
+            LauncherAction::OpenInGhostty { session_id } => open_in_ghostty(session_id),
         }
     }
 
@@ -245,7 +245,7 @@ mod controller {
         });
     }
 
-    fn open_in_terminal(session_id: String) {
+    fn open_in_ghostty(session_id: String) {
         let session = lock_state().and_then(|state| state.store.get(&session_id).cloned());
         let Some(session) = session else {
             return;
@@ -270,28 +270,28 @@ mod controller {
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| PathBuf::from("/"));
                 let command = format!(
-                    "cd {} && exec {} --session {}",
-                    posix_quote(&cwd.to_string_lossy()),
+                    "exec {} --session {}",
                     posix_quote(&pi.to_string_lossy()),
                     posix_quote(&native_session),
                 );
                 let script = r#"on run argv
 set commandText to item 1 of argv
-tell application "Terminal"
+set cwdText to item 2 of argv
+tell application "Ghostty"
     activate
-    do script commandText
+    make new window with configuration {command:commandText, initial working directory:cwdText, wait after command:true}
 end tell
 end run"#;
                 let output = std::process::Command::new("/usr/bin/osascript")
-                    .args(["-e", script, "--", &command])
+                    .args(["-e", script, "--", &command, &cwd.to_string_lossy()])
                     .output()
-                    .map_err(|error| format!("failed to open Terminal: {error}"))?;
+                    .map_err(|error| format!("failed to open Ghostty: {error}"))?;
                 if output.status.success() {
                     Ok(())
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     Err(format!(
-                        "Terminal could not open the Pi session: {}",
+                        "Ghostty could not open the Pi session: {}",
                         stderr.trim()
                     ))
                 }
