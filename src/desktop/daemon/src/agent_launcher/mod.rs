@@ -11,7 +11,10 @@ mod controller {
     };
 
     use crate::{
-        agent_runner::{AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow},
+        agent_runner::{
+            AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
+            discover_pi_executable,
+        },
         agent_sessions::{
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessageRole,
             TargetWindowMetadata, truncate_one_line, unix_now_ms,
@@ -95,6 +98,7 @@ mod controller {
             LauncherAction::FollowUp { session_id, prompt } => follow_up(session_id, prompt),
             LauncherAction::OpenSession { session_id } => open_session(session_id),
             LauncherAction::CancelSession { session_id } => cancel(&session_id),
+            LauncherAction::OpenInTerminal { session_id } => open_in_terminal(session_id),
         }
     }
 
@@ -136,6 +140,7 @@ mod controller {
             let native = Some(AgentSessionRef {
                 id: session.native_session_id,
                 path: session.native_session_path.map(PathBuf::from),
+                cwd: session.native_session_cwd.map(PathBuf::from),
             });
             run_pi(
                 session_id,
@@ -157,6 +162,70 @@ mod controller {
             state.open_session = Some(session_id);
         }
         refresh();
+    }
+
+    fn open_in_terminal(session_id: String) {
+        let session = lock_state().and_then(|state| state.store.get(&session_id).cloned());
+        let Some(session) = session else {
+            return;
+        };
+        if session.status == AgentSessionStatus::Running {
+            return;
+        }
+        let native_session = session
+            .native_session_path
+            .clone()
+            .or(session.native_session_id.clone());
+        let Some(native_session) = native_session else {
+            return;
+        };
+        thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let pi = discover_pi_executable().map_err(|error| error.to_string())?;
+                let cwd = session
+                    .native_session_cwd
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                let command = format!(
+                    "cd {} && exec {} --session {}",
+                    posix_quote(&cwd.to_string_lossy()),
+                    posix_quote(&pi.to_string_lossy()),
+                    posix_quote(&native_session),
+                );
+                let script = r#"on run argv
+set commandText to item 1 of argv
+tell application "Terminal"
+    activate
+    do script commandText
+end tell
+end run"#;
+                let output = std::process::Command::new("/usr/bin/osascript")
+                    .args(["-e", script, "--", &command])
+                    .output()
+                    .map_err(|error| format!("failed to open Terminal: {error}"))?;
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(format!(
+                        "Terminal could not open the Pi session: {}",
+                        stderr.trim()
+                    ))
+                }
+            })();
+            if let Err(error) = result {
+                super::macos::show_completion(CompletionNotice {
+                    title: session.title,
+                    answer_preview: truncate_one_line(&error, 120),
+                });
+            }
+        });
+    }
+
+    fn posix_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 
     fn run_pi(
@@ -200,11 +269,17 @@ mod controller {
                         .path
                         .as_ref()
                         .map(|path| path.to_string_lossy().to_string());
-                    if let Err(error) =
-                        state
-                            .store
-                            .bind_native_session(session_id, result.session.id, native_path)
-                    {
+                    let native_cwd = result
+                        .session
+                        .cwd
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string());
+                    if let Err(error) = state.store.bind_native_session(
+                        session_id,
+                        result.session.id,
+                        native_path,
+                        native_cwd,
+                    ) {
                         trace::log(format!("agent_launcher:native_session_error {error}"));
                     }
                     if let Err(error) = state.store.complete_request(
@@ -319,6 +394,8 @@ mod controller {
                 AgentSessionStatus::Failed => SessionStatus::Failed,
                 AgentSessionStatus::Cancelled => SessionStatus::Cancelled,
             },
+            terminal_available: session.status != AgentSessionStatus::Running
+                && (session.native_session_path.is_some() || session.native_session_id.is_some()),
             messages: session
                 .messages
                 .iter()
@@ -350,6 +427,17 @@ mod controller {
             app: target.app.clone(),
             title: target.title.clone(),
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::posix_quote;
+
+        #[test]
+        fn terminal_arguments_are_posix_quoted() {
+            assert_eq!(posix_quote("simple"), "'simple'");
+            assert_eq!(posix_quote("a b'c"), "'a b'\\''c'");
+        }
     }
 }
 

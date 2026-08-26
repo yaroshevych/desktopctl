@@ -101,6 +101,8 @@ pub struct AgentSession {
     pub native_session_id: Option<String>,
     #[serde(default)]
     pub native_session_path: Option<String>,
+    #[serde(default)]
+    pub native_session_cwd: Option<String>,
     pub title: String,
     pub messages: Vec<SessionMessage>,
     #[serde(default)]
@@ -360,6 +362,7 @@ impl AgentSessionStore {
             agent: "pi".to_string(),
             native_session_id: None,
             native_session_path: None,
+            native_session_cwd: None,
             title: derive_title(&prompt),
             messages: vec![SessionMessage::user(prompt, now_ms)],
             target_window,
@@ -410,12 +413,14 @@ impl AgentSessionStore {
         session_id: &str,
         native_session_id: Option<String>,
         native_session_path: Option<String>,
+        native_session_cwd: Option<String>,
     ) -> Result<(), SessionStoreError> {
         let session = self
             .get_mut(session_id)
             .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?;
         session.native_session_id = native_session_id;
         session.native_session_path = native_session_path;
+        session.native_session_cwd = native_session_cwd;
         self.save()
     }
 
@@ -665,6 +670,14 @@ mod tests {
             .create_running("  Summarise\n this email ", Some(target.clone()), 100)
             .expect("create");
         store
+            .bind_native_session(
+                &id,
+                Some("pi-session".into()),
+                None,
+                Some("/Users/test/project".into()),
+            )
+            .expect("bind native session");
+        store
             .complete_request(&id, &request, "A concise answer", 200)
             .expect("complete");
 
@@ -676,6 +689,11 @@ mod tests {
         assert_eq!(session.status, AgentSessionStatus::Completed);
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.final_answer(), Some("A concise answer"));
+        assert_eq!(session.native_session_id.as_deref(), Some("pi-session"));
+        assert_eq!(
+            session.native_session_cwd.as_deref(),
+            Some("/Users/test/project")
+        );
         assert!(session.unread);
         clean(&path);
     }

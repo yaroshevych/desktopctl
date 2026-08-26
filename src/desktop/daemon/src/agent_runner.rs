@@ -43,6 +43,7 @@ impl AgentRequest {
 pub struct AgentSessionRef {
     pub id: Option<String>,
     pub path: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
 }
 
 impl AgentSessionRef {
@@ -50,6 +51,7 @@ impl AgentSessionRef {
         Self {
             id: Some(id.into()),
             path: None,
+            cwd: None,
         }
     }
 
@@ -57,6 +59,7 @@ impl AgentSessionRef {
         Self {
             id: None,
             path: Some(path.into()),
+            cwd: None,
         }
     }
 
@@ -399,6 +402,7 @@ fn is_executable_file(path: &Path) -> bool {
 pub fn parse_pi_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
     let mut session_id = None;
     let mut session_path = None;
+    let mut session_cwd = None;
     let mut final_answer = None;
     let mut fallback_answer = None;
     let mut saw_event = false;
@@ -426,6 +430,11 @@ pub fn parse_pi_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
             &["sessionFile", "session_file", "sessionPath", "session_path"],
         ) {
             session_path = Some(PathBuf::from(path));
+        }
+        if event.get("type").and_then(Value::as_str) == Some("session") {
+            if let Some(cwd) = event.get("cwd").and_then(Value::as_str) {
+                session_cwd = Some(PathBuf::from(cwd));
+            }
         }
 
         match event.get("type").and_then(Value::as_str) {
@@ -474,6 +483,7 @@ pub fn parse_pi_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
         session: AgentSessionRef {
             id: session_id,
             path: session_path,
+            cwd: session_cwd,
         },
         final_answer,
     })
@@ -575,11 +585,12 @@ mod tests {
     #[test]
     fn parses_final_assistant_text_and_session_header() {
         let output = concat!(
-            "{\"type\":\"session\",\"version\":3,\"id\":\"pi-123\",\"timestamp\":\"now\"}\n",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"pi-123\",\"timestamp\":\"now\",\"cwd\":\"/project\"}\n",
             "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"hidden\"},{\"type\":\"text\",\"text\":\"Hello\"}],\"stopReason\":\"stop\"}}\n"
         );
         let result = parse_pi_output(output).expect("valid output");
         assert_eq!(result.session.id.as_deref(), Some("pi-123"));
+        assert_eq!(result.session.cwd.as_deref(), Some(Path::new("/project")));
         assert_eq!(result.final_answer, "Hello");
     }
 
@@ -642,6 +653,7 @@ mod tests {
         request.session = Some(AgentSessionRef {
             id: Some("id".into()),
             path: Some(PathBuf::from("/tmp/native.jsonl")),
+            cwd: None,
         });
         let args = PiRunner::args_for(&request);
         assert!(args.iter().any(|arg| arg == &OsString::from("--session")));

@@ -24,6 +24,12 @@ While a session is running, its view shows a native activity spinner and a
 the request's cancellation token; the runner kills and reaps the Pi child, then
 persists the session as cancelled.
 
+After Pi has produced a native session identity, the session view also offers
+`Open in Terminal`. DesktopCtl activates Apple Terminal and starts interactive
+Pi with `--session <path|id>` from the original Pi working directory. The
+executable, directory, and session arguments are POSIX-quoted. macOS may ask the
+user to allow DesktopCtl to control Terminal the first time this is used.
+
 ## Pi invocation
 
 The runner locates Pi from `DESKTOPCTL_PI_PATH`, the process `PATH`, and common

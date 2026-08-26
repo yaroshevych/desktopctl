@@ -88,6 +88,7 @@ pub enum LauncherScreen {
         id: String,
         title: String,
         status: SessionStatus,
+        terminal_available: bool,
         messages: Vec<TranscriptMessage>,
     },
 }
@@ -121,6 +122,7 @@ pub enum LauncherAction {
     FollowUp { session_id: String, prompt: String },
     OpenSession { session_id: String },
     CancelSession { session_id: String },
+    OpenInTerminal { session_id: String },
 }
 
 pub type LauncherActionHandler = Arc<dyn Fn(LauncherAction) + Send + Sync + 'static>;
@@ -193,6 +195,14 @@ define_class!(
                 (callbacks.on_action)(LauncherAction::CancelSession { session_id });
             }
         }
+
+        #[unsafe(method(openInTerminal:))]
+        fn open_in_terminal(&self, _sender: Option<&AnyObject>) {
+            let session_id = UI.with(|cell| cell.borrow().session_id.clone());
+            if let (Some(callbacks), Some(session_id)) = (CALLBACKS.get(), session_id) {
+                (callbacks.on_action)(LauncherAction::OpenInTerminal { session_id });
+            }
+        }
     }
 
     // SAFETY: NSWindowDelegate has no additional invariants for these methods.
@@ -216,6 +226,7 @@ struct UiState {
     activity: Option<Retained<NSProgressIndicator>>,
     status_label: Option<Retained<NSTextField>>,
     stop: Option<Retained<NSButton>>,
+    terminal: Option<Retained<NSButton>>,
     snapshot: LauncherSnapshot,
     selected: Option<usize>,
     session_id: Option<String>,
@@ -235,6 +246,7 @@ impl Default for UiState {
             activity: None,
             status_label: None,
             stop: None,
+            terminal: None,
             snapshot: LauncherSnapshot::default(),
             selected: None,
             session_id: None,
@@ -423,8 +435,17 @@ fn render_on_main() {
                 id,
                 title,
                 status,
+                terminal_available,
                 messages,
-            } => render_session(&mut ui, &content, &id, &title, status, &messages),
+            } => render_session(
+                &mut ui,
+                &content,
+                &id,
+                &title,
+                status,
+                terminal_available,
+                &messages,
+            ),
         }
     });
 }
@@ -452,6 +473,9 @@ fn clear_dynamic_views(ui: &mut UiState) {
     }
     if let Some(stop) = ui.stop.take() {
         stop.removeFromSuperview();
+    }
+    if let Some(terminal) = ui.terminal.take() {
+        terminal.removeFromSuperview();
     }
 }
 
@@ -496,6 +520,7 @@ fn render_session(
     id: &str,
     title: &str,
     status: SessionStatus,
+    terminal_available: bool,
     messages: &[TranscriptMessage],
 ) {
     if let Some(input) = ui.input.as_ref() {
@@ -518,6 +543,23 @@ fn render_session(
     }
     content.addSubview(&back);
     ui.back = Some(back);
+    if terminal_available {
+        let terminal = NSButton::initWithFrame(
+            NSButton::alloc(MainThreadMarker::new().unwrap()),
+            NSRect::new(
+                NSPoint::new(116.0, PANEL_HEIGHT - 46.0),
+                NSSize::new(132.0, 26.0),
+            ),
+        );
+        terminal.setTitle(&NSString::from_str("Open in Terminal"));
+        terminal.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+        unsafe {
+            terminal.setTarget(Some(ui.panel.as_ref().unwrap()));
+            terminal.setAction(Some(sel!(openInTerminal:)));
+        }
+        content.addSubview(&terminal);
+        ui.terminal = Some(terminal);
+    }
     if status == SessionStatus::Running {
         let activity = NSProgressIndicator::initWithFrame(
             NSProgressIndicator::alloc(MainThreadMarker::new().unwrap()),
@@ -693,6 +735,7 @@ fn open_row(index: usize) {
             id: row.id.clone(),
             title: row.title,
             status: row.status,
+            terminal_available: false,
             messages: Vec::new(),
         };
         ui.selected = None;
