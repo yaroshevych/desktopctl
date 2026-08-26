@@ -356,18 +356,18 @@ fn icon_active() -> Result<tray_icon::Icon, AppError> {
 fn icon_agent_frames() -> Result<Vec<tray_icon::Icon>, AppError> {
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     const W: isize = 36;
+    let scale = 0.90_f64;
+    let size = NSSize::new(W as f64 * scale, W as f64 * scale);
+    let offset = ((W as f64 - size.width) / 2.0).round();
     let rect = NSRect {
-        origin: NSPoint { x: 2.0, y: 2.0 },
-        size: NSSize::new(32.0, 32.0),
+        origin: NSPoint {
+            x: offset,
+            y: offset,
+        },
+        size,
     };
     (0..12)
-        .map(|phase| {
-            render_sf_icon_rotated(
-                W,
-                &[("arrow.triangle.2.circlepath", rect)],
-                phase as f64 * 30.0,
-            )
-        })
+        .map(|phase| render_sf_icon_rotated(W, &[("camera.aperture", rect)], phase as f64 * 30.0))
         .collect()
 }
 

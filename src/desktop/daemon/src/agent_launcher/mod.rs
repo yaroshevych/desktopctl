@@ -13,11 +13,11 @@ mod controller {
     use crate::{
         agent_runner::{
             AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
-            discover_pi_executable,
+            discover_pi_executable, load_native_transcript,
         },
         agent_sessions::{
-            AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessageRole,
-            TargetWindowMetadata, truncate_one_line, unix_now_ms,
+            AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
+            SessionMessageRole, TargetWindowMetadata, truncate_one_line, unix_now_ms,
         },
         daemon, trace,
     };
@@ -159,9 +159,62 @@ mod controller {
                 trace::log(format!("agent_launcher:visit_error {error}"));
                 return;
             }
-            state.open_session = Some(session_id);
+            state.open_session = Some(session_id.clone());
         }
         refresh();
+        sync_native_session(session_id);
+    }
+
+    fn sync_native_session(session_id: String) {
+        let native = lock_state().and_then(|state| {
+            let session = state.store.get(&session_id)?;
+            if session.native_session_id.is_none() && session.native_session_path.is_none() {
+                return None;
+            }
+            Some(AgentSessionRef {
+                id: session.native_session_id.clone(),
+                path: session.native_session_path.as_deref().map(PathBuf::from),
+                cwd: session.native_session_cwd.as_deref().map(PathBuf::from),
+            })
+        });
+        let Some(native) = native else {
+            return;
+        };
+        thread::spawn(move || match load_native_transcript(&native) {
+            Ok((path, messages)) => {
+                let messages = messages
+                    .into_iter()
+                    .map(|message| SessionMessage {
+                        role: if message.user {
+                            SessionMessageRole::User
+                        } else {
+                            SessionMessageRole::Assistant
+                        },
+                        text: message.text,
+                        created_at_ms: message.timestamp_ms,
+                    })
+                    .collect();
+                let changed = if let Some(mut state) = lock_state() {
+                    match state.store.sync_native_transcript(
+                        &session_id,
+                        messages,
+                        Some(path.to_string_lossy().into_owned()),
+                    ) {
+                        Ok(changed) => changed,
+                        Err(error) => {
+                            trace::log(format!("agent_launcher:native_sync_error {error}"));
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                if changed {
+                    refresh();
+                }
+            }
+            Err(error) => trace::log(format!("agent_launcher:native_read_error {error}")),
+        });
     }
 
     fn open_in_terminal(session_id: String) {

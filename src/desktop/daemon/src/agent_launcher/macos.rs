@@ -708,7 +708,20 @@ fn handle_key_event(event: &NSEvent) -> bool {
     }
     match event.keyCode() {
         KEY_ESCAPE => {
-            hide_on_main();
+            let in_session = UI.with(|cell| {
+                matches!(
+                    cell.borrow().snapshot.screen,
+                    LauncherScreen::Session { .. }
+                )
+            });
+            if in_session {
+                show_launcher_on_main();
+                if let Some(callbacks) = CALLBACKS.get() {
+                    (callbacks.on_action)(LauncherAction::ReturnToLauncher);
+                }
+            } else {
+                hide_on_main();
+            }
             true
         }
         KEY_RETURN | KEY_ENTER => {

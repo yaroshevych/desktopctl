@@ -29,6 +29,13 @@ After Pi has produced a native session identity, the session view also offers
 Pi with `--session <path|id>` from the original Pi working directory. The
 executable, directory, and session arguments are POSIX-quoted. macOS may ask the
 user to allow DesktopCtl to control Terminal the first time this is used.
+When that session is opened in the launcher again, DesktopCtl reads Pi's native
+JSONL session, follows its active branch, and refreshes the short transcript
+with Terminal-added user messages and final assistant answers. Thinking, tool
+calls, tool results, and incomplete or aborted assistant messages stay hidden.
+
+Escape from a session returns to the launcher list. Escape from the launcher
+list closes the overlay.
 
 ## Pi invocation
 
@@ -46,8 +53,8 @@ system instruction is separate from the user message and contains only the
 captured topmost window's concise `--active-window <id>` selector.
 
 `Agent Launcher…` is the first menu-bar menu item. While one or more Pi requests
-are running, the tray icon animates through rotated native-symbol frames and
-returns to the normal idle/overlay icon when the last request finishes.
+are running, DesktopCtl's aperture tray icon rotates and returns to the normal
+idle/overlay icon when the last request finishes.
 
 ## Persistence
 

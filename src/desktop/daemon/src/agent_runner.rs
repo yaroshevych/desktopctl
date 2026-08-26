@@ -7,10 +7,11 @@
 #![allow(dead_code)] // Adapter API includes cancellation/configuration seams used by future UI.
 
 use std::{
+    collections::HashMap,
     env,
     ffi::OsString,
-    fmt,
-    io::{self, Read},
+    fmt, fs,
+    io::{self, BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
@@ -83,6 +84,159 @@ pub struct TargetWindow {
 pub struct AgentResult {
     pub session: AgentSessionRef,
     pub final_answer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTranscriptMessage {
+    pub user: bool,
+    pub text: String,
+    pub timestamp_ms: u64,
+}
+
+pub fn load_native_transcript(
+    session: &AgentSessionRef,
+) -> Result<(PathBuf, Vec<NativeTranscriptMessage>), AgentRunnerError> {
+    let path = resolve_native_session_path(session)?;
+    let file = fs::File::open(&path).map_err(|source| AgentRunnerError::Io { source })?;
+    let mut entries = Vec::new();
+    for (line_number, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|source| AgentRunnerError::Io { source })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|source| {
+            AgentRunnerError::Parse(format!(
+                "invalid Pi session JSON on line {}: {source}",
+                line_number + 1
+            ))
+        })?;
+        if let Some(id) = value.get("id").and_then(Value::as_str) {
+            entries.push((
+                id.to_string(),
+                value
+                    .get("parentId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                value,
+            ));
+        }
+    }
+    let Some((leaf, _, _)) = entries.last() else {
+        return Ok((path, Vec::new()));
+    };
+    let by_id: HashMap<&str, &(String, Option<String>, Value)> = entries
+        .iter()
+        .map(|entry| (entry.0.as_str(), entry))
+        .collect();
+    let mut branch = Vec::new();
+    let mut cursor = Some(leaf.as_str());
+    while let Some(id) = cursor {
+        let Some(entry) = by_id.get(id) else {
+            break;
+        };
+        branch.push(*entry);
+        cursor = entry.1.as_deref();
+    }
+    branch.reverse();
+    let messages = branch
+        .into_iter()
+        .filter_map(|(_, _, entry)| native_message(entry))
+        .collect();
+    Ok((path, messages))
+}
+
+fn native_message(entry: &Value) -> Option<NativeTranscriptMessage> {
+    if entry.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let message = entry.get("message")?;
+    let role = message.get("role")?.as_str()?;
+    if role != "user" && role != "assistant" {
+        return None;
+    }
+    if role == "assistant" {
+        match message.get("stopReason").and_then(Value::as_str) {
+            Some("stop" | "length") => {}
+            _ => return None,
+        }
+    }
+    let mut text = extract_message_text(message)?;
+    if role == "user" {
+        text = strip_legacy_desktopctl_context(&text).to_string();
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(NativeTranscriptMessage {
+        user: role == "user",
+        text,
+        timestamp_ms: message
+            .get("timestamp")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    })
+}
+
+fn strip_legacy_desktopctl_context(text: &str) -> &str {
+    text.split_once("\n\n[DesktopCtl target-window context]\n")
+        .map(|(prompt, _)| prompt)
+        .unwrap_or(text)
+}
+
+fn resolve_native_session_path(session: &AgentSessionRef) -> Result<PathBuf, AgentRunnerError> {
+    if let Some(path) = session.path.as_ref().filter(|path| path.is_file()) {
+        return Ok(path.clone());
+    }
+    let id = session
+        .id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| AgentRunnerError::Process("Pi session has no native identity".into()))?;
+    let root = env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("PI_CODING_AGENT_DIR")
+                .map(PathBuf::from)
+                .map(|dir| dir.join("sessions"))
+        })
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".pi/agent/sessions"))
+        })
+        .ok_or_else(|| AgentRunnerError::Process("unable to locate Pi session directory".into()))?;
+    for directory in fs::read_dir(&root).map_err(|source| AgentRunnerError::Io { source })? {
+        let directory = directory.map_err(|source| AgentRunnerError::Io { source })?;
+        if !directory.path().is_dir() {
+            continue;
+        }
+        for file in
+            fs::read_dir(directory.path()).map_err(|source| AgentRunnerError::Io { source })?
+        {
+            let file = file.map_err(|source| AgentRunnerError::Io { source })?;
+            let path = file.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(file) = fs::File::open(&path) else {
+                continue;
+            };
+            let mut first_line = String::new();
+            if BufReader::new(file).read_line(&mut first_line).is_ok()
+                && serde_json::from_str::<Value>(&first_line)
+                    .ok()
+                    .and_then(|header| header.get("id").and_then(Value::as_str).map(str::to_string))
+                    .as_deref()
+                    == Some(id)
+            {
+                return Ok(path);
+            }
+        }
+    }
+    Err(AgentRunnerError::Process(format!(
+        "Pi session {id} was not found under {}",
+        root.display()
+    )))
 }
 
 /// A small abstraction so another CLI adapter can be added without changing
@@ -683,5 +837,43 @@ mod tests {
         let error = PiRunner::with_executable(&path).executable().unwrap_err();
         let _ = fs::remove_file(path);
         assert!(matches!(error, AgentRunnerError::MissingExecutable { .. }));
+    }
+
+    #[test]
+    fn native_transcript_follows_active_branch_and_hides_internal_content() {
+        let path = env::temp_dir().join(format!(
+            "desktopctl-pi-session-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let jsonl = concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"pi-native\",\"cwd\":\"/tmp\"}\n",
+            "{\"type\":\"model_change\",\"id\":\"model\",\"parentId\":null}\n",
+            "{\"type\":\"message\",\"id\":\"user\",\"parentId\":\"model\",\"message\":{\"role\":\"user\",\"content\":\"question\\n\\n[DesktopCtl target-window context]\\nlegacy details\",\"timestamp\":10}}\n",
+            "{\"type\":\"message\",\"id\":\"tool-use\",\"parentId\":\"user\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"hidden\"},{\"type\":\"toolCall\",\"name\":\"bash\"}],\"stopReason\":\"toolUse\",\"timestamp\":11}}\n",
+            "{\"type\":\"message\",\"id\":\"tool-result\",\"parentId\":\"tool-use\",\"message\":{\"role\":\"toolResult\",\"content\":\"hidden\",\"timestamp\":12}}\n",
+            "{\"type\":\"message\",\"id\":\"answer\",\"parentId\":\"tool-result\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}],\"stopReason\":\"stop\",\"timestamp\":13}}\n"
+        );
+        fs::write(&path, jsonl).expect("write native session");
+
+        let (_, messages) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        let _ = fs::remove_file(path);
+        assert_eq!(
+            messages,
+            vec![
+                NativeTranscriptMessage {
+                    user: true,
+                    text: "question".into(),
+                    timestamp_ms: 10,
+                },
+                NativeTranscriptMessage {
+                    user: false,
+                    text: "final answer".into(),
+                    timestamp_ms: 13,
+                },
+            ]
+        );
     }
 }

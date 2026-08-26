@@ -499,6 +499,46 @@ impl AgentSessionStore {
         self.save()
     }
 
+    pub fn sync_native_transcript(
+        &mut self,
+        session_id: &str,
+        messages: Vec<SessionMessage>,
+        native_session_path: Option<String>,
+    ) -> Result<bool, SessionStoreError> {
+        if messages.is_empty() {
+            return Ok(false);
+        }
+        let session = self
+            .get_mut(session_id)
+            .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?;
+        // A native-file refresh is a snapshot taken on a worker thread. Never
+        // let a stale snapshot overwrite a prompt just appended for an active
+        // launcher request; the next open will sync after that run completes.
+        if session.status == AgentSessionStatus::Running || session.active_request_id.is_some() {
+            return Ok(false);
+        }
+        let changed = session.messages != messages
+            || (native_session_path.is_some()
+                && session.native_session_path != native_session_path);
+        if !changed {
+            return Ok(false);
+        }
+        if let Some(last_timestamp) = messages
+            .iter()
+            .map(|message| message.created_at_ms)
+            .filter(|timestamp| *timestamp > 0)
+            .max()
+        {
+            session.updated_at_ms = session.updated_at_ms.max(last_timestamp);
+        }
+        session.messages = messages;
+        if native_session_path.is_some() {
+            session.native_session_path = native_session_path;
+        }
+        self.save()?;
+        Ok(true)
+    }
+
     /// Recover requests that were running when the process disappeared.  This
     /// is intentionally explicit and deterministic for tests; `load_at` calls
     /// it automatically during normal startup.
@@ -796,6 +836,87 @@ mod tests {
         assert_eq!(session.updated_at_ms, 200);
         let reloaded = AgentSessionStore::load_at(&path, 300).expect("reload");
         assert_eq!(reloaded.get(&id).unwrap().updated_at_ms, 200);
+        clean(&path);
+    }
+
+    #[test]
+    fn native_transcript_sync_replaces_short_transcript_and_persists_path() {
+        let path = test_path("native-sync").join("sessions.json");
+        clean(&path);
+        let mut store = AgentSessionStore::new(&path);
+        let (id, request) = store.create_running("launcher prompt", None, 1).unwrap();
+        store
+            .complete_request(&id, &request, "launcher answer", 2)
+            .unwrap();
+        let messages = vec![
+            SessionMessage {
+                role: SessionMessageRole::User,
+                text: "launcher prompt".into(),
+                created_at_ms: 10,
+            },
+            SessionMessage {
+                role: SessionMessageRole::Assistant,
+                text: "launcher answer".into(),
+                created_at_ms: 11,
+            },
+            SessionMessage {
+                role: SessionMessageRole::User,
+                text: "terminal follow-up".into(),
+                created_at_ms: 12,
+            },
+            SessionMessage {
+                role: SessionMessageRole::Assistant,
+                text: "terminal answer".into(),
+                created_at_ms: 13,
+            },
+        ];
+
+        assert!(
+            store
+                .sync_native_transcript(&id, messages.clone(), Some("/tmp/pi.jsonl".into()))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .sync_native_transcript(&id, messages.clone(), Some("/tmp/pi.jsonl".into()))
+                .unwrap()
+        );
+        let loaded = AgentSessionStore::load_at(&path, 20).unwrap();
+        let session = loaded.get(&id).unwrap();
+        assert_eq!(session.messages, messages);
+        assert_eq!(
+            session.native_session_path.as_deref(),
+            Some("/tmp/pi.jsonl")
+        );
+        assert_eq!(session.updated_at_ms, 13);
+        clean(&path);
+    }
+
+    #[test]
+    fn native_transcript_sync_does_not_overwrite_an_active_follow_up() {
+        let path = test_path("native-sync-running").join("sessions.json");
+        clean(&path);
+        let mut store = AgentSessionStore::new(&path);
+        let (id, request) = store.create_running("first", None, 1).unwrap();
+        store
+            .complete_request(&id, &request, "first answer", 2)
+            .unwrap();
+        let _follow_up = store.begin_request(&id, "new follow-up", 3).unwrap();
+        let stale_messages = vec![SessionMessage {
+            role: SessionMessageRole::User,
+            text: "first".into(),
+            created_at_ms: 1,
+        }];
+
+        assert!(
+            !store
+                .sync_native_transcript(&id, stale_messages, None)
+                .unwrap()
+        );
+        assert_eq!(
+            store.get(&id).unwrap().messages.last().unwrap().text,
+            "new follow-up"
+        );
         clean(&path);
     }
 }
