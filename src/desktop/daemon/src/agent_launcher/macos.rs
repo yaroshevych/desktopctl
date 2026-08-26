@@ -651,7 +651,9 @@ fn submit_active() {
             .or_else(|| Some(LauncherAction::NewRequest { prompt: text }))
     });
     if let Some(action) = action {
-        hide_on_main();
+        if matches!(action, LauncherAction::NewRequest { .. }) {
+            hide_on_main();
+        }
         if let Some(callbacks) = CALLBACKS.get() {
             (callbacks.on_action)(action);
         }
