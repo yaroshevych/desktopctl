@@ -27,9 +27,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSColor, NSEvent, NSFont, NSPanel, NSProgressIndicator,
-    NSProgressIndicatorStyle, NSScrollView, NSTextAlignment, NSTextField, NSTextView, NSView,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSButton, NSColor, NSEvent, NSFont, NSPanel,
+    NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView, NSTextAlignment, NSTextField,
+    NSTextView, NSView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -385,6 +385,9 @@ fn show_on_main() {
             return;
         };
         position_panel(panel);
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
         panel.makeKeyAndOrderFront(None);
         if let Some(composer) = ui.composer.as_ref() {
             panel.makeFirstResponder(Some(composer));

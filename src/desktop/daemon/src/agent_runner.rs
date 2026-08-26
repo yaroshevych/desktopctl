@@ -149,11 +149,12 @@ impl PiRunner {
                 args.push(OsString::from(id));
             }
         }
-        if request.target_window.is_some() {
+        if let Some(target) = request.target_window.as_ref() {
             args.push(OsString::from("--append-system-prompt"));
-            args.push(OsString::from(
-                "The user's desktop target is the current topmost non-DesktopCtl window. Use desktopctl commands with --active-window when inspecting or acting on it.",
-            ));
+            args.push(OsString::from(format!(
+                "For desktop actions, use desktopctl --active-window {}.",
+                target.id
+            )));
         }
         // `--` protects prompts beginning with a dash while keeping user text
         // an argv element rather than shell source.
@@ -625,7 +626,7 @@ mod tests {
         assert!(
             args[context_index + 1]
                 .to_string_lossy()
-                .contains("current topmost non-DesktopCtl window")
+                .contains("--active-window mail_abc123")
         );
     }
 

@@ -42,8 +42,8 @@ shell is involved and user input is not interpolated into a command string. The
 runner reads JSON Lines, records the native session identifier from the session
 header, and displays only text blocks from the final assistant `message_end`.
 Follow-ups pass the persisted native session identifier back to Pi. The appended
-system instruction is separate from the user message and only tells Pi to use
-the current topmost non-DesktopCtl window with `--active-window`.
+system instruction is separate from the user message and contains only the
+captured topmost window's concise `--active-window <id>` selector.
 
 `Agent Launcher…` is the first menu-bar menu item. While one or more Pi requests
 are running, the tray icon animates through rotated native-symbol frames and
@@ -78,4 +78,4 @@ just -f src/desktop/Justfile release-gates
 For a manual smoke test, focus an email or other app, press `Option-Space`, enter
 `summarise this`, and close the panel while Pi runs. Confirm the completion HUD,
 reopen the launcher, open the unread session, and send a follow-up. Pi's desktop
-operations should use the current topmost non-DesktopCtl window.
+operations should use the captured topmost non-DesktopCtl window.
