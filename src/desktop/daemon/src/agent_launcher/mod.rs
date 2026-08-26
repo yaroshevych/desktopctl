@@ -5,7 +5,7 @@ mod macos;
 mod controller {
     use std::{
         collections::HashMap,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{Arc, Mutex, OnceLock, atomic::AtomicBool},
         thread,
     };
@@ -269,7 +269,7 @@ mod controller {
                     .map(PathBuf::from)
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| PathBuf::from("/"));
-                let command = ghostty_command(&pi.to_string_lossy(), &native_session);
+                let command = ghostty_command(&pi, &native_session);
                 let script = r#"on run argv
 set commandText to item 1 of argv
 set cwdText to item 2 of argv
@@ -305,10 +305,20 @@ end run"#;
         format!("'{}'", value.replace('\'', "'\\''"))
     }
 
-    fn ghostty_command(pi: &str, native_session: &str) -> String {
+    fn ghostty_command(pi: &Path, native_session: &str) -> String {
+        let mut paths = pi
+            .parent()
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(current_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current_path));
+        }
+        let path = std::env::join_paths(paths).unwrap_or_else(|_| "/usr/bin:/bin".into());
         format!(
-            "{} --session {}",
-            posix_quote(pi),
+            "/usr/bin/env {} {} --session {}",
+            posix_quote(&format!("PATH={}", path.to_string_lossy())),
+            posix_quote(&pi.to_string_lossy()),
             posix_quote(native_session)
         )
     }
@@ -542,10 +552,15 @@ end run"#;
 
         #[test]
         fn ghostty_command_does_not_include_exec() {
-            assert_eq!(
-                ghostty_command("/opt/homebrew/bin/pi", "/tmp/session file.jsonl"),
-                "'/opt/homebrew/bin/pi' --session '/tmp/session file.jsonl'"
+            let command = ghostty_command(
+                std::path::Path::new("/opt/homebrew/bin/pi"),
+                "/tmp/session file.jsonl",
             );
+            assert!(command.starts_with("/usr/bin/env 'PATH=/opt/homebrew/bin:"));
+            assert!(command.ends_with(
+                "' '/opt/homebrew/bin/pi' --session '/tmp/session file.jsonl'"
+            ));
+            assert!(!command.contains(" exec "));
         }
     }
 }
