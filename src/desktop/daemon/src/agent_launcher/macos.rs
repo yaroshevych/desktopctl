@@ -17,19 +17,22 @@ use std::{
     ffi::c_void,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, OnceLock},
+    thread,
+    time::Duration,
 };
 
 use dispatch2::DispatchQueue;
 use objc2::{
-    MainThreadOnly, class, define_class, msg_send,
+    MainThreadOnly, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, Bool},
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSButton, NSColor, NSEvent, NSFont, NSPanel,
-    NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView, NSTextAlignment, NSTextField,
-    NSTextView, NSView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSAnimationContext, NSApplication, NSBackingStoreType, NSButton, NSColor, NSEvent,
+    NSFloatingWindowLevel, NSFont, NSPanel, NSProgressIndicator, NSProgressIndicatorStyle,
+    NSScrollView, NSTextAlignment, NSTextField, NSTextView, NSView, NSWindowCollectionBehavior,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -39,6 +42,10 @@ use desktop_core::error::AppError;
 
 const PANEL_WIDTH: f64 = 680.0;
 const PANEL_HEIGHT: f64 = 360.0;
+const COMPLETION_WIDTH: f64 = 520.0;
+const COMPLETION_HEIGHT: f64 = 48.0;
+const COMPLETION_FADE_SECONDS: f64 = 0.2;
+const COMPLETION_VISIBLE_MILLIS: u64 = 1_600;
 const INPUT_HEIGHT: f64 = 38.0;
 const ROW_HEIGHT: f64 = 42.0;
 const KEY_ESCAPE: u16 = 53;
@@ -227,6 +234,9 @@ struct UiState {
     status_label: Option<Retained<NSTextField>>,
     stop: Option<Retained<NSButton>>,
     terminal: Option<Retained<NSButton>>,
+    completion_panel: Option<Retained<NSPanel>>,
+    completion_label: Option<Retained<NSTextField>>,
+    completion_generation: u64,
     snapshot: LauncherSnapshot,
     selected: Option<usize>,
     session_id: Option<String>,
@@ -247,6 +257,9 @@ impl Default for UiState {
             status_label: None,
             stop: None,
             terminal: None,
+            completion_panel: None,
+            completion_label: None,
+            completion_generation: 0,
             snapshot: LauncherSnapshot::default(),
             selected: None,
             session_id: None,
@@ -297,23 +310,7 @@ pub fn show_completion(notice: CompletionNotice) {
         if is_visible() {
             return;
         }
-        unsafe {
-            let notification: *mut AnyObject = msg_send![class!(NSUserNotification), new];
-            if notification.is_null() {
-                return;
-            }
-            let title = NSString::from_str(&format!("DesktopCtl: {}", notice.title));
-            let body = NSString::from_str(&notice.answer_preview);
-            let _: () = msg_send![notification, setTitle: &*title];
-            let _: () = msg_send![notification, setInformativeText: &*body];
-            let center: *mut AnyObject = msg_send![
-                class!(NSUserNotificationCenter),
-                defaultUserNotificationCenter
-            ];
-            if !center.is_null() {
-                let _: () = msg_send![center, deliverNotification: notification];
-            }
-        }
+        show_completion_on_main(notice);
     });
 }
 
@@ -348,6 +345,127 @@ fn create_panel(mtm: MainThreadMarker) -> Result<(), AppError> {
         ui.panel = Some(panel); ui.content = Some(content); ui.input = Some(input);
         Ok(())
     })
+}
+
+fn show_completion_on_main(notice: CompletionNotice) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let generation = UI.with(|cell| {
+        let mut ui = cell.borrow_mut();
+        if ui.completion_panel.is_none() {
+            let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+                NSPanel::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(COMPLETION_WIDTH, COMPLETION_HEIGHT),
+                ),
+                NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+                NSBackingStoreType::Buffered,
+                false,
+            );
+            unsafe {
+                panel.setReleasedWhenClosed(false);
+            }
+            panel.setFloatingPanel(true);
+            panel.setBecomesKeyOnlyIfNeeded(true);
+            panel.setHidesOnDeactivate(false);
+            panel.setHasShadow(true);
+            panel.setOpaque(false);
+            panel.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+            panel.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::Stationary,
+            );
+            panel.setIgnoresMouseEvents(true);
+            panel.setLevel(NSFloatingWindowLevel);
+
+            let label = text_field(
+                mtm,
+                "",
+                NSRect::new(
+                    NSPoint::new(16.0, 8.0),
+                    NSSize::new(COMPLETION_WIDTH - 32.0, 32.0),
+                ),
+                false,
+            );
+            label.setSelectable(false);
+            label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+            panel.setContentView(Some(&label));
+            ui.completion_label = Some(label);
+            ui.completion_panel = Some(panel);
+        }
+
+        ui.completion_generation = ui.completion_generation.wrapping_add(1);
+        let generation = ui.completion_generation;
+        let panel = ui.completion_panel.as_ref().unwrap();
+        let preview = if notice.answer_preview.trim().is_empty() {
+            notice.title
+        } else {
+            notice.answer_preview
+        };
+        ui.completion_label
+            .as_ref()
+            .unwrap()
+            .setStringValue(&NSString::from_str(&one_line(&preview, 120)));
+        position_completion(panel);
+        panel.setAlphaValue(0.0);
+        panel.orderFrontRegardless();
+        animate_alpha(panel, 1.0);
+        generation
+    });
+
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(COMPLETION_VISIBLE_MILLIS));
+        DispatchQueue::main().exec_async(move || {
+            UI.with(|cell| {
+                let ui = cell.borrow();
+                if ui.completion_generation == generation {
+                    if let Some(panel) = ui.completion_panel.as_ref() {
+                        animate_alpha(panel, 0.0);
+                    }
+                }
+            });
+        });
+        thread::sleep(Duration::from_millis(
+            (COMPLETION_FADE_SECONDS * 1_000.0) as u64,
+        ));
+        DispatchQueue::main().exec_async(move || {
+            UI.with(|cell| {
+                let ui = cell.borrow();
+                if ui.completion_generation == generation {
+                    if let Some(panel) = ui.completion_panel.as_ref() {
+                        panel.orderOut(None);
+                    }
+                }
+            });
+        });
+    });
+}
+
+fn animate_alpha(panel: &NSPanel, alpha: f64) {
+    NSAnimationContext::beginGrouping();
+    NSAnimationContext::currentContext().setDuration(COMPLETION_FADE_SECONDS);
+    unsafe {
+        let animator: *mut AnyObject = msg_send![panel, animator];
+        let _: () = msg_send![animator, setAlphaValue: alpha];
+    }
+    NSAnimationContext::endGrouping();
+}
+
+fn position_completion(panel: &NSPanel) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(screen) = objc2_app_kit::NSScreen::mainScreen(mtm) else {
+        return;
+    };
+    let frame = screen.visibleFrame();
+    panel.setFrameOrigin(NSPoint::new(
+        frame.origin.x + (frame.size.width - COMPLETION_WIDTH) / 2.0,
+        frame.origin.y + frame.size.height - COMPLETION_HEIGHT - 72.0,
+    ));
 }
 
 fn text_field(
