@@ -30,6 +30,7 @@ mod controller {
     struct State {
         store: AgentSessionStore,
         pending_target: Option<TargetWindowMetadata>,
+        restore_target: Option<crate::platform::windowing::WindowInfo>,
         open_session: Option<String>,
         cancellations: HashMap<String, Arc<AtomicBool>>,
     }
@@ -58,6 +59,7 @@ mod controller {
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
             pending_target: None,
+            restore_target: None,
             open_session: None,
             cancellations: HashMap::new(),
         })));
@@ -74,11 +76,11 @@ mod controller {
             return;
         }
         let target = daemon::bind_active_window_for_agent_launcher()
-            .map(target_metadata)
             .map_err(|error| trace::log(format!("agent_launcher:target_bind_warning {error}")))
             .ok();
         if let Some(mut state) = lock_state() {
-            state.pending_target = target;
+            state.pending_target = target.clone().map(target_metadata);
+            state.restore_target = target;
             state.open_session = None;
         }
         refresh();
@@ -88,6 +90,7 @@ mod controller {
     fn handle_action(action: LauncherAction) {
         match action {
             LauncherAction::ToggleRequested => toggle(),
+            LauncherAction::Dismissed => restore_focus(),
             LauncherAction::ReturnToLauncher => {
                 if let Some(mut state) = lock_state() {
                     state.open_session = None;
@@ -99,6 +102,17 @@ mod controller {
             LauncherAction::OpenSession { session_id } => open_session(session_id),
             LauncherAction::CancelSession { session_id } => cancel(&session_id),
             LauncherAction::OpenInTerminal { session_id } => open_in_terminal(session_id),
+        }
+    }
+
+    fn restore_focus() {
+        let target = lock_state().and_then(|mut state| state.restore_target.take());
+        if let Some(target) = target {
+            thread::spawn(move || {
+                if let Err(error) = crate::platform::apps::focus_window(&target) {
+                    trace::log(format!("agent_launcher:focus_restore_warning {error}"));
+                }
+            });
         }
     }
 

@@ -124,6 +124,7 @@ pub struct CompletionNotice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LauncherAction {
     ToggleRequested,
+    Dismissed,
     ReturnToLauncher,
     NewRequest { prompt: String },
     FollowUp { session_id: String, prompt: String },
@@ -521,7 +522,11 @@ fn hide_on_main() {
         if let Some(panel) = cell.borrow().panel.as_ref() {
             panel.orderOut(None);
         }
-        VISIBLE.store(false, Ordering::SeqCst);
+        if VISIBLE.swap(false, Ordering::SeqCst) {
+            if let Some(callbacks) = CALLBACKS.get() {
+                (callbacks.on_action)(LauncherAction::Dismissed);
+            }
+        }
     });
 }
 
