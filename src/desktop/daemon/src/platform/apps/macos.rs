@@ -1,8 +1,20 @@
 use std::process::Command as ProcessCommand;
 
 use desktop_core::error::AppError;
+use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 
 use crate::platform::windowing::WindowInfo;
+
+/// Requests activation in-process so launcher dismissal does not wait for an
+/// `osascript` child process to start. The previously key window remains the
+/// application's key window while DesktopCtl's panel is active.
+pub fn activate_window_immediately(window: &WindowInfo) -> bool {
+    let Ok(pid) = i32::try_from(window.pid) else {
+        return false;
+    };
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.activateWithOptions(NSApplicationActivationOptions::empty()))
+}
 
 fn escape_applescript_string(value: &str) -> String {
     value

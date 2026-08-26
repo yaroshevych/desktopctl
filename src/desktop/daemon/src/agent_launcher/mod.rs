@@ -108,11 +108,13 @@ mod controller {
     fn restore_focus() {
         let target = lock_state().and_then(|mut state| state.restore_target.take());
         if let Some(target) = target {
-            thread::spawn(move || {
-                if let Err(error) = crate::platform::apps::focus_window(&target) {
-                    trace::log(format!("agent_launcher:focus_restore_warning {error}"));
-                }
-            });
+            if !crate::platform::apps::activate_window_immediately(&target) {
+                thread::spawn(move || {
+                    if let Err(error) = crate::platform::apps::focus_window(&target) {
+                        trace::log(format!("agent_launcher:focus_restore_warning {error}"));
+                    }
+                });
+            }
         }
     }
 
