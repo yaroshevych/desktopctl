@@ -235,6 +235,13 @@ pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     Ok(element_bounds(&window))
 }
 
+pub fn focused_window_bounds_for_pid(pid: i64) -> Option<Bounds> {
+    let pid = i32::try_from(pid).ok()?;
+    let app = AXUIElement::application(pid);
+    let window = app.focused_window().or_else(|_| app.main_window()).ok()?;
+    element_bounds(&window)
+}
+
 const BATCH_ATTRS: &[&str] = &[
     kAXRoleAttribute,
     kAXChildrenAttribute,

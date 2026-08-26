@@ -30,7 +30,8 @@ mod controller {
     struct State {
         store: AgentSessionStore,
         pending_target: Option<TargetWindowMetadata>,
-        restore_target: Option<crate::platform::windowing::WindowInfo>,
+        restore_pid: Option<i64>,
+        launch_generation: u64,
         open_session: Option<String>,
         cancellations: HashMap<String, Arc<AtomicBool>>,
     }
@@ -59,7 +60,8 @@ mod controller {
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
             pending_target: None,
-            restore_target: None,
+            restore_pid: None,
+            launch_generation: 0,
             open_session: None,
             cancellations: HashMap::new(),
         })));
@@ -75,16 +77,33 @@ mod controller {
             super::macos::hide();
             return;
         }
-        let target = daemon::bind_active_window_for_agent_launcher()
-            .map_err(|error| trace::log(format!("agent_launcher:target_bind_warning {error}")))
-            .ok();
-        if let Some(mut state) = lock_state() {
-            state.pending_target = target.clone().map(target_metadata);
-            state.restore_target = target;
+        let target_hint = daemon::capture_active_window_for_agent_launcher();
+        let generation = if let Some(mut state) = lock_state() {
+            state.launch_generation = state.launch_generation.wrapping_add(1);
+            state.pending_target = None;
+            state.restore_pid = target_hint;
             state.open_session = None;
-        }
+            state.launch_generation
+        } else {
+            return;
+        };
         refresh();
         super::macos::show();
+
+        let Some(pid) = target_hint else {
+            return;
+        };
+        thread::spawn(move || {
+            let target = daemon::resolve_agent_launcher_target(pid)
+                .map(target_metadata)
+                .map_err(|error| trace::log(format!("agent_launcher:target_bind_warning {error}")))
+                .ok();
+            if let Some(mut state) = lock_state() {
+                if state.launch_generation == generation {
+                    state.pending_target = target;
+                }
+            }
+        });
     }
 
     fn handle_action(action: LauncherAction) {
@@ -106,15 +125,9 @@ mod controller {
     }
 
     fn restore_focus() {
-        let target = lock_state().and_then(|mut state| state.restore_target.take());
-        if let Some(target) = target {
-            if !crate::platform::apps::activate_window_immediately(&target) {
-                thread::spawn(move || {
-                    if let Err(error) = crate::platform::apps::focus_window(&target) {
-                        trace::log(format!("agent_launcher:focus_restore_warning {error}"));
-                    }
-                });
-            }
+        let pid = lock_state().and_then(|mut state| state.restore_pid.take());
+        if let Some(pid) = pid {
+            let _ = crate::platform::apps::activate_pid_immediately(pid);
         }
     }
 

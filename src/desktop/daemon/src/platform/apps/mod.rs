@@ -11,8 +11,7 @@ mod windows;
 pub use linux::{focus_window, hide_application, isolate_application, show_application};
 #[cfg(target_os = "macos")]
 pub use macos::{
-    activate_window_immediately, focus_window, hide_application, isolate_application,
-    show_application,
+    activate_pid_immediately, focus_window, hide_application, isolate_application, show_application,
 };
 #[cfg(target_os = "windows")]
 pub use windows::{focus_window, hide_application, isolate_application, show_application};

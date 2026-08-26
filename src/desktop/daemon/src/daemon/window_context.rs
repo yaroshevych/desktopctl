@@ -170,6 +170,28 @@ pub(super) fn resolve_active_window_target() -> Result<platform::windowing::Wind
     })
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_window_target_for_pid(
+    pid: i64,
+    target_bounds: Option<&desktop_core::protocol::Bounds>,
+) -> Result<platform::windowing::WindowInfo, AppError> {
+    let mut windows = platform::windowing::list_windows_for_pid(pid)?;
+    enrich_window_refs(&mut windows);
+    windows
+        .into_iter()
+        .filter(is_targetable_window)
+        .max_by(|a, b| {
+            let sa = active_window_candidate_score(a, target_bounds);
+            let sb = active_window_candidate_score(b, target_bounds);
+            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .ok_or_else(|| {
+            AppError::target_not_found(
+                "frontmost window not found; ensure a standard app window is focused",
+            )
+        })
+}
+
 fn active_window_candidate_score(
     window: &platform::windowing::WindowInfo,
     target_bounds: Option<&desktop_core::protocol::Bounds>,

@@ -8,8 +8,8 @@ use crate::platform::windowing::WindowInfo;
 /// Requests activation in-process so launcher dismissal does not wait for an
 /// `osascript` child process to start. The previously key window remains the
 /// application's key window while DesktopCtl's panel is active.
-pub fn activate_window_immediately(window: &WindowInfo) -> bool {
-    let Ok(pid) = i32::try_from(window.pid) else {
+pub fn activate_pid_immediately(pid: i64) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
