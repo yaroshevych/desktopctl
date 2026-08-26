@@ -104,6 +104,7 @@ pub enum LauncherScreen {
 pub struct LauncherSnapshot {
     pub screen: LauncherScreen,
     pub recent: Vec<SessionSummary>,
+    pub all: Vec<SessionSummary>,
 }
 
 impl Default for LauncherSnapshot {
@@ -111,6 +112,7 @@ impl Default for LauncherSnapshot {
         Self {
             screen: LauncherScreen::Launcher,
             recent: Vec::new(),
+            all: Vec::new(),
         }
     }
 }
@@ -188,6 +190,12 @@ define_class!(
             open_row(tag.max(0) as usize);
         }
 
+        #[unsafe(method(showMore:))]
+        fn show_more(&self, _sender: Option<&AnyObject>) {
+            UI.with(|cell| cell.borrow_mut().show_all = true);
+            render_on_main();
+        }
+
         #[unsafe(method(back:))]
         fn back(&self, _sender: Option<&AnyObject>) {
             show_launcher_on_main();
@@ -230,6 +238,9 @@ struct UiState {
     transcript: Option<Retained<NSTextView>>,
     transcript_scroll: Option<Retained<NSScrollView>>,
     rows: Vec<Retained<NSButton>>,
+    launcher_scroll: Option<Retained<NSScrollView>>,
+    show_more: Option<Retained<NSButton>>,
+    show_all: bool,
     back: Option<Retained<NSButton>>,
     activity: Option<Retained<NSProgressIndicator>>,
     status_label: Option<Retained<NSTextField>>,
@@ -253,6 +264,9 @@ impl Default for UiState {
             transcript: None,
             transcript_scroll: None,
             rows: Vec::new(),
+            launcher_scroll: None,
+            show_more: None,
+            show_all: false,
             back: None,
             activity: None,
             status_label: None,
@@ -498,6 +512,9 @@ fn show_on_main() {
         if cell.borrow().panel.is_none() {
             return;
         }
+        if !is_visible() {
+            cell.borrow_mut().show_all = false;
+        }
         render_on_main();
         let ui = cell.borrow();
         let Some(panel) = ui.panel.as_ref() else {
@@ -577,6 +594,12 @@ fn clear_dynamic_views(ui: &mut UiState) {
     for row in ui.rows.drain(..) {
         row.removeFromSuperview();
     }
+    if let Some(scroll) = ui.launcher_scroll.take() {
+        scroll.removeFromSuperview();
+    }
+    if let Some(button) = ui.show_more.take() {
+        button.removeFromSuperview();
+    }
     ui.transcript.take();
     if let Some(scroll) = ui.transcript_scroll.take() {
         scroll.removeFromSuperview();
@@ -608,8 +631,23 @@ fn render_launcher(ui: &mut UiState, content: &NSView) {
     }
     ui.selected = None;
     ui.session_id = None;
-    for (index, session) in ui.snapshot.recent.iter().take(6).enumerate() {
-        let y = PANEL_HEIGHT - 104.0 - index as f64 * ROW_HEIGHT;
+    let sessions = if ui.show_all {
+        &ui.snapshot.all
+    } else {
+        &ui.snapshot.recent
+    };
+    let list_bottom = if ui.show_all { 18.0 } else { 52.0 };
+    let list_height = PANEL_HEIGHT - 92.0 - list_bottom;
+    let document_height = (sessions.len() as f64 * ROW_HEIGHT).max(list_height);
+    let document = NSView::initWithFrame(
+        NSView::alloc(MainThreadMarker::new().unwrap()),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(PANEL_WIDTH - 36.0, document_height),
+        ),
+    );
+    for (index, session) in sessions.iter().enumerate() {
+        let y = document_height - (index as f64 + 1.0) * ROW_HEIGHT;
         let title = format!(
             "{}  ·  {}  {}",
             if session.unread { "●" } else { "○" },
@@ -618,7 +656,7 @@ fn render_launcher(ui: &mut UiState, content: &NSView) {
         );
         let button = NSButton::initWithFrame(
             NSButton::alloc(MainThreadMarker::new().unwrap()),
-            NSRect::new(NSPoint::new(18.0, y), NSSize::new(PANEL_WIDTH - 36.0, 34.0)),
+            NSRect::new(NSPoint::new(0.0, y), NSSize::new(PANEL_WIDTH - 36.0, 34.0)),
         );
         button.setTitle(&NSString::from_str(&format!(
             "{title}\n{}",
@@ -632,8 +670,38 @@ fn render_launcher(ui: &mut UiState, content: &NSView) {
             button.setTarget(Some(ui.panel.as_ref().unwrap()));
             button.setAction(Some(sel!(openRow:)));
         }
-        content.addSubview(&button);
+        document.addSubview(&button);
         ui.rows.push(button);
+    }
+    let scroll = NSScrollView::initWithFrame(
+        NSScrollView::alloc(MainThreadMarker::new().unwrap()),
+        NSRect::new(
+            NSPoint::new(18.0, list_bottom),
+            NSSize::new(PANEL_WIDTH - 36.0, list_height),
+        ),
+    );
+    scroll.setHasVerticalScroller(true);
+    scroll.setDrawsBackground(false);
+    scroll.setDocumentView(Some(&document));
+    content.addSubview(&scroll);
+    let clip = scroll.contentView();
+    clip.scrollToPoint(NSPoint::new(0.0, (document_height - list_height).max(0.0)));
+    scroll.reflectScrolledClipView(&clip);
+    ui.launcher_scroll = Some(scroll);
+
+    if !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len() {
+        let show_more = NSButton::initWithFrame(
+            NSButton::alloc(MainThreadMarker::new().unwrap()),
+            NSRect::new(NSPoint::new(18.0, 14.0), NSSize::new(110.0, 28.0)),
+        );
+        show_more.setTitle(&NSString::from_str("Show more"));
+        show_more.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+        unsafe {
+            show_more.setTarget(Some(ui.panel.as_ref().unwrap()));
+            show_more.setAction(Some(sel!(showMore:)));
+        }
+        content.addSubview(&show_more);
+        ui.show_more = Some(show_more);
     }
 }
 
@@ -866,7 +934,12 @@ fn handle_key_event(event: &NSEvent) -> bool {
 fn open_row(index: usize) {
     let id = UI.with(|cell| {
         let mut ui = cell.borrow_mut();
-        let row = ui.snapshot.recent.get(index)?.clone();
+        let row = if ui.show_all {
+            ui.snapshot.all.get(index)?
+        } else {
+            ui.snapshot.recent.get(index)?
+        }
+        .clone();
         ui.snapshot.screen = LauncherScreen::Session {
             id: row.id.clone(),
             title: row.title,
@@ -891,7 +964,11 @@ fn move_selection(delta: isize) {
         if !matches!(ui.snapshot.screen, LauncherScreen::Launcher) {
             return;
         }
-        let count = ui.snapshot.recent.len().min(6);
+        let count = if ui.show_all {
+            ui.snapshot.all.len()
+        } else {
+            ui.snapshot.recent.len()
+        };
         if count == 0 {
             return;
         }
@@ -902,6 +979,9 @@ fn move_selection(delta: isize) {
         ui.selected = Some((old + delta).rem_euclid(count as isize) as usize);
         for (idx, row) in ui.rows.iter().enumerate() {
             row.highlight(ui.selected == Some(idx));
+            if ui.selected == Some(idx) {
+                row.scrollRectToVisible(row.bounds());
+            }
         }
     });
 }

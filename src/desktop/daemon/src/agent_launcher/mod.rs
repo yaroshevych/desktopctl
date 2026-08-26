@@ -425,14 +425,23 @@ end run"#;
     }
 
     fn snapshot(state: &State) -> LauncherSnapshot {
+        const RECENT_WINDOW_MS: u64 = 30 * 60 * 1_000;
+        let cutoff = unix_now_ms().saturating_sub(RECENT_WINDOW_MS);
         let pinned = state
             .store
             .latest_completed_unvisited()
             .map(|session| session.id.clone());
+        let all: Vec<SessionSummary> = state
+            .store
+            .recent(usize::MAX)
+            .into_iter()
+            .map(summary)
+            .collect();
         let mut recent: Vec<SessionSummary> = state
             .store
-            .recent_default()
+            .recent(usize::MAX)
             .into_iter()
+            .filter(|session| session.updated_at_ms >= cutoff)
             .map(summary)
             .collect();
         if let Some(pinned) = pinned {
@@ -447,7 +456,11 @@ end run"#;
             .and_then(|id| state.store.get(id))
             .map(session_screen)
             .unwrap_or(LauncherScreen::Launcher);
-        LauncherSnapshot { screen, recent }
+        LauncherSnapshot {
+            screen,
+            recent,
+            all,
+        }
     }
 
     fn summary(session: &AgentSession) -> SessionSummary {
