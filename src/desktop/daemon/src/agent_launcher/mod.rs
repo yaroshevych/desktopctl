@@ -269,11 +269,7 @@ mod controller {
                     .map(PathBuf::from)
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| PathBuf::from("/"));
-                let command = format!(
-                    "exec {} --session {}",
-                    posix_quote(&pi.to_string_lossy()),
-                    posix_quote(&native_session),
-                );
+                let command = ghostty_command(&pi.to_string_lossy(), &native_session);
                 let script = r#"on run argv
 set commandText to item 1 of argv
 set cwdText to item 2 of argv
@@ -307,6 +303,14 @@ end run"#;
 
     fn posix_quote(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    fn ghostty_command(pi: &str, native_session: &str) -> String {
+        format!(
+            "{} --session {}",
+            posix_quote(pi),
+            posix_quote(native_session)
+        )
     }
 
     fn run_pi(
@@ -528,12 +532,20 @@ end run"#;
 
     #[cfg(test)]
     mod tests {
-        use super::posix_quote;
+        use super::{ghostty_command, posix_quote};
 
         #[test]
-        fn terminal_arguments_are_posix_quoted() {
+        fn ghostty_arguments_are_posix_quoted() {
             assert_eq!(posix_quote("simple"), "'simple'");
             assert_eq!(posix_quote("a b'c"), "'a b'\\''c'");
+        }
+
+        #[test]
+        fn ghostty_command_does_not_include_exec() {
+            assert_eq!(
+                ghostty_command("/opt/homebrew/bin/pi", "/tmp/session file.jsonl"),
+                "'/opt/homebrew/bin/pi' --session '/tmp/session file.jsonl'"
+            );
         }
     }
 }
