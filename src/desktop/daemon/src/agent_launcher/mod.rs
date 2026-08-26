@@ -275,8 +275,16 @@ set commandText to item 1 of argv
 set cwdText to item 2 of argv
 tell application "Ghostty"
     activate
-    make new window with configuration {command:commandText, initial working directory:cwdText, wait after command:true}
+    set previousWindowCount to count windows
+    try
+        make new window with configuration {command:commandText, initial working directory:cwdText, wait after command:true}
+    on error errorMessage number errorNumber
+        if (count windows) is previousWindowCount then
+            error errorMessage number errorNumber
+        end if
+    end try
 end tell
+return "ok"
 end run"#;
                 let output = std::process::Command::new("/usr/bin/osascript")
                     .args(["-e", script, "--", &command, &cwd.to_string_lossy()])
