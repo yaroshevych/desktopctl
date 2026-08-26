@@ -41,7 +41,9 @@ use objc2_foundation::{
 use desktop_core::error::AppError;
 
 const PANEL_WIDTH: f64 = 680.0;
-const PANEL_HEIGHT: f64 = 360.0;
+const SESSION_PANEL_HEIGHT: f64 = 360.0;
+const MAX_HISTORY_PANEL_HEIGHT: f64 = 500.0;
+const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 80.0;
 const COMPLETION_WIDTH: f64 = 520.0;
 const COMPLETION_HEIGHT: f64 = 48.0;
 const COMPLETION_FADE_SECONDS: f64 = 0.2;
@@ -335,7 +337,7 @@ fn create_panel(mtm: MainThreadMarker) -> Result<(), AppError> {
         if ui.panel.is_some() { return Ok(()); }
         let panel = unsafe {
             let allocated = LauncherPanel::alloc(mtm).set_ivars(LauncherPanelIvars);
-            msg_send![super(allocated), initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_WIDTH, PANEL_HEIGHT)), styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel, backing: NSBackingStoreType::Buffered, defer: false]
+            msg_send![super(allocated), initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_WIDTH, MIN_LAUNCHER_PANEL_HEIGHT)), styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel, backing: NSBackingStoreType::Buffered, defer: false]
         };
         let panel: Retained<LauncherPanel> = panel;
         unsafe { panel.setReleasedWhenClosed(false); }
@@ -348,10 +350,10 @@ fn create_panel(mtm: MainThreadMarker) -> Result<(), AppError> {
         panel.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary | NSWindowCollectionBehavior::Stationary);
         panel.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*panel)));
 
-        let content = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_WIDTH, PANEL_HEIGHT)));
+        let content = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_WIDTH, MIN_LAUNCHER_PANEL_HEIGHT)));
         content.setWantsLayer(true);
         panel.setContentView(Some(&content));
-        let input = text_field(mtm, "Ask DesktopCtl…", NSRect::new(NSPoint::new(18.0, PANEL_HEIGHT - 58.0), NSSize::new(PANEL_WIDTH - 36.0, INPUT_HEIGHT)), true);
+        let input = text_field(mtm, "Ask DesktopCtl…", NSRect::new(NSPoint::new(18.0, MIN_LAUNCHER_PANEL_HEIGHT - 58.0), NSSize::new(PANEL_WIDTH - 36.0, INPUT_HEIGHT)), true);
         unsafe {
             input.setTarget(Some(&*panel));
             input.setAction(Some(sel!(submit:)));
@@ -558,7 +560,7 @@ fn position_panel(panel: &NSPanel) {
     let frame = screen.visibleFrame();
     panel.setFrameOrigin(NSPoint::new(
         frame.origin.x + (frame.size.width - PANEL_WIDTH) / 2.0,
-        frame.origin.y + frame.size.height - PANEL_HEIGHT - 72.0,
+        frame.origin.y + frame.size.height - panel.frame().size.height - 72.0,
     ));
 }
 
@@ -568,6 +570,11 @@ fn render_on_main() {
         let Some(content) = ui.content.as_ref().cloned() else {
             return;
         };
+        let height = match ui.snapshot.screen {
+            LauncherScreen::Launcher => launcher_panel_height(&ui),
+            LauncherScreen::Session { .. } => SESSION_PANEL_HEIGHT,
+        };
+        resize_panel(&ui, &content, height);
         clear_dynamic_views(&mut ui);
         match ui.snapshot.screen.clone() {
             LauncherScreen::Launcher => render_launcher(&mut ui, &content),
@@ -588,6 +595,30 @@ fn render_on_main() {
             ),
         }
     });
+}
+
+fn launcher_panel_height(ui: &UiState) -> f64 {
+    let session_count = if ui.show_all {
+        ui.snapshot.all.len()
+    } else {
+        ui.snapshot.recent.len()
+    };
+    let has_more = !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len();
+    let bottom = if has_more { 48.0 } else { 14.0 };
+    (66.0 + bottom + session_count as f64 * ROW_HEIGHT)
+        .clamp(MIN_LAUNCHER_PANEL_HEIGHT, MAX_HISTORY_PANEL_HEIGHT)
+}
+
+fn resize_panel(ui: &UiState, content: &NSView, height: f64) {
+    let Some(panel) = ui.panel.as_ref() else {
+        return;
+    };
+    panel.setContentSize(NSSize::new(PANEL_WIDTH, height));
+    content.setFrameSize(NSSize::new(PANEL_WIDTH, height));
+    if let Some(input) = ui.input.as_ref() {
+        input.setFrameOrigin(NSPoint::new(18.0, height - 58.0));
+    }
+    position_panel(panel);
 }
 
 fn clear_dynamic_views(ui: &mut UiState) {
@@ -636,8 +667,10 @@ fn render_launcher(ui: &mut UiState, content: &NSView) {
     } else {
         &ui.snapshot.recent
     };
-    let list_bottom = if ui.show_all { 18.0 } else { 52.0 };
-    let list_height = PANEL_HEIGHT - 92.0 - list_bottom;
+    let panel_height = content.frame().size.height;
+    let has_more = !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len();
+    let list_bottom = if has_more { 48.0 } else { 14.0 };
+    let list_height = (panel_height - 66.0 - list_bottom).max(0.0);
     let document_height = (sessions.len() as f64 * ROW_HEIGHT).max(list_height);
     let document = NSView::initWithFrame(
         NSView::alloc(MainThreadMarker::new().unwrap()),
@@ -689,10 +722,10 @@ fn render_launcher(ui: &mut UiState, content: &NSView) {
     scroll.reflectScrolledClipView(&clip);
     ui.launcher_scroll = Some(scroll);
 
-    if !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len() {
+    if has_more {
         let show_more = NSButton::initWithFrame(
             NSButton::alloc(MainThreadMarker::new().unwrap()),
-            NSRect::new(NSPoint::new(18.0, 14.0), NSSize::new(110.0, 28.0)),
+            NSRect::new(NSPoint::new(18.0, 10.0), NSSize::new(110.0, 28.0)),
         );
         show_more.setTitle(&NSString::from_str("Show more"));
         show_more.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
@@ -721,7 +754,7 @@ fn render_session(
     let back = NSButton::initWithFrame(
         NSButton::alloc(MainThreadMarker::new().unwrap()),
         NSRect::new(
-            NSPoint::new(18.0, PANEL_HEIGHT - 44.0),
+            NSPoint::new(18.0, SESSION_PANEL_HEIGHT - 44.0),
             NSSize::new(100.0, 26.0),
         ),
     );
@@ -738,7 +771,7 @@ fn render_session(
         let terminal = NSButton::initWithFrame(
             NSButton::alloc(MainThreadMarker::new().unwrap()),
             NSRect::new(
-                NSPoint::new(116.0, PANEL_HEIGHT - 46.0),
+                NSPoint::new(116.0, SESSION_PANEL_HEIGHT - 46.0),
                 NSSize::new(132.0, 26.0),
             ),
         );
@@ -755,7 +788,7 @@ fn render_session(
         let activity = NSProgressIndicator::initWithFrame(
             NSProgressIndicator::alloc(MainThreadMarker::new().unwrap()),
             NSRect::new(
-                NSPoint::new(PANEL_WIDTH - 194.0, PANEL_HEIGHT - 42.0),
+                NSPoint::new(PANEL_WIDTH - 194.0, SESSION_PANEL_HEIGHT - 42.0),
                 NSSize::new(18.0, 18.0),
             ),
         );
@@ -769,7 +802,7 @@ fn render_session(
             MainThreadMarker::new().unwrap(),
             "",
             NSRect::new(
-                NSPoint::new(PANEL_WIDTH - 170.0, PANEL_HEIGHT - 44.0),
+                NSPoint::new(PANEL_WIDTH - 170.0, SESSION_PANEL_HEIGHT - 44.0),
                 NSSize::new(100.0, 22.0),
             ),
             false,
@@ -781,7 +814,7 @@ fn render_session(
         let stop = NSButton::initWithFrame(
             NSButton::alloc(MainThreadMarker::new().unwrap()),
             NSRect::new(
-                NSPoint::new(PANEL_WIDTH - 70.0, PANEL_HEIGHT - 46.0),
+                NSPoint::new(PANEL_WIDTH - 70.0, SESSION_PANEL_HEIGHT - 46.0),
                 NSSize::new(54.0, 26.0),
             ),
         );
@@ -798,7 +831,7 @@ fn render_session(
         NSTextView::alloc(MainThreadMarker::new().unwrap()),
         NSRect::new(
             NSPoint::new(18.0, 62.0),
-            NSSize::new(PANEL_WIDTH - 36.0, PANEL_HEIGHT - 116.0),
+            NSSize::new(PANEL_WIDTH - 36.0, SESSION_PANEL_HEIGHT - 116.0),
         ),
     );
     transcript.setEditable(false);
@@ -816,7 +849,7 @@ fn render_session(
         NSScrollView::alloc(MainThreadMarker::new().unwrap()),
         NSRect::new(
             NSPoint::new(18.0, 62.0),
-            NSSize::new(PANEL_WIDTH - 36.0, PANEL_HEIGHT - 116.0),
+            NSSize::new(PANEL_WIDTH - 36.0, SESSION_PANEL_HEIGHT - 116.0),
         ),
     );
     scroll.setHasVerticalScroller(true);

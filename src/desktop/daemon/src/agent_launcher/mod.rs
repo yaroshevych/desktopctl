@@ -442,6 +442,7 @@ end run"#;
             .recent(usize::MAX)
             .into_iter()
             .filter(|session| session.updated_at_ms >= cutoff)
+            .take(3)
             .map(summary)
             .collect();
         if let Some(pinned) = pinned {
