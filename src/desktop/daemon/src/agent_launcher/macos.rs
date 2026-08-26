@@ -27,9 +27,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSButton, NSColor, NSEvent, NSFont, NSPanel, NSScrollView,
-    NSTextAlignment, NSTextField, NSTextView, NSView, NSWindowCollectionBehavior, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSButton, NSColor, NSEvent, NSFont, NSPanel,
+    NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView, NSTextAlignment, NSTextField,
+    NSTextView, NSView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -87,6 +87,7 @@ pub enum LauncherScreen {
     Session {
         id: String,
         title: String,
+        status: SessionStatus,
         messages: Vec<TranscriptMessage>,
     },
 }
@@ -119,6 +120,7 @@ pub enum LauncherAction {
     NewRequest { prompt: String },
     FollowUp { session_id: String, prompt: String },
     OpenSession { session_id: String },
+    CancelSession { session_id: String },
 }
 
 pub type LauncherActionHandler = Arc<dyn Fn(LauncherAction) + Send + Sync + 'static>;
@@ -183,6 +185,14 @@ define_class!(
                 (callbacks.on_action)(LauncherAction::ReturnToLauncher);
             }
         }
+
+        #[unsafe(method(cancelSession:))]
+        fn cancel_session(&self, _sender: Option<&AnyObject>) {
+            let session_id = UI.with(|cell| cell.borrow().session_id.clone());
+            if let (Some(callbacks), Some(session_id)) = (CALLBACKS.get(), session_id) {
+                (callbacks.on_action)(LauncherAction::CancelSession { session_id });
+            }
+        }
     }
 
     // SAFETY: NSWindowDelegate has no additional invariants for these methods.
@@ -203,6 +213,9 @@ struct UiState {
     transcript_scroll: Option<Retained<NSScrollView>>,
     rows: Vec<Retained<NSButton>>,
     back: Option<Retained<NSButton>>,
+    activity: Option<Retained<NSProgressIndicator>>,
+    status_label: Option<Retained<NSTextField>>,
+    stop: Option<Retained<NSButton>>,
     snapshot: LauncherSnapshot,
     selected: Option<usize>,
     session_id: Option<String>,
@@ -219,6 +232,9 @@ impl Default for UiState {
             transcript_scroll: None,
             rows: Vec::new(),
             back: None,
+            activity: None,
+            status_label: None,
+            stop: None,
             snapshot: LauncherSnapshot::default(),
             selected: None,
             session_id: None,
@@ -406,8 +422,9 @@ fn render_on_main() {
             LauncherScreen::Session {
                 id,
                 title,
+                status,
                 messages,
-            } => render_session(&mut ui, &content, &id, &title, &messages),
+            } => render_session(&mut ui, &content, &id, &title, status, &messages),
         }
     });
 }
@@ -425,6 +442,16 @@ fn clear_dynamic_views(ui: &mut UiState) {
     }
     if let Some(back) = ui.back.take() {
         back.removeFromSuperview();
+    }
+    if let Some(activity) = ui.activity.take() {
+        unsafe { activity.stopAnimation(None) };
+        activity.removeFromSuperview();
+    }
+    if let Some(label) = ui.status_label.take() {
+        label.removeFromSuperview();
+    }
+    if let Some(stop) = ui.stop.take() {
+        stop.removeFromSuperview();
     }
 }
 
@@ -468,6 +495,7 @@ fn render_session(
     content: &NSView,
     id: &str,
     title: &str,
+    status: SessionStatus,
     messages: &[TranscriptMessage],
 ) {
     if let Some(input) = ui.input.as_ref() {
@@ -490,6 +518,49 @@ fn render_session(
     }
     content.addSubview(&back);
     ui.back = Some(back);
+    if status == SessionStatus::Running {
+        let activity = NSProgressIndicator::initWithFrame(
+            NSProgressIndicator::alloc(MainThreadMarker::new().unwrap()),
+            NSRect::new(
+                NSPoint::new(PANEL_WIDTH - 194.0, PANEL_HEIGHT - 42.0),
+                NSSize::new(18.0, 18.0),
+            ),
+        );
+        activity.setStyle(NSProgressIndicatorStyle::Spinning);
+        activity.setIndeterminate(true);
+        unsafe { activity.startAnimation(None) };
+        content.addSubview(&activity);
+        ui.activity = Some(activity);
+
+        let label = text_field(
+            MainThreadMarker::new().unwrap(),
+            "",
+            NSRect::new(
+                NSPoint::new(PANEL_WIDTH - 170.0, PANEL_HEIGHT - 44.0),
+                NSSize::new(100.0, 22.0),
+            ),
+            false,
+        );
+        label.setStringValue(&NSString::from_str("Pi is working…"));
+        content.addSubview(&label);
+        ui.status_label = Some(label);
+
+        let stop = NSButton::initWithFrame(
+            NSButton::alloc(MainThreadMarker::new().unwrap()),
+            NSRect::new(
+                NSPoint::new(PANEL_WIDTH - 70.0, PANEL_HEIGHT - 46.0),
+                NSSize::new(54.0, 26.0),
+            ),
+        );
+        stop.setTitle(&NSString::from_str("Stop"));
+        stop.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+        unsafe {
+            stop.setTarget(Some(ui.panel.as_ref().unwrap()));
+            stop.setAction(Some(sel!(cancelSession:)));
+        }
+        content.addSubview(&stop);
+        ui.stop = Some(stop);
+    }
     let transcript = NSTextView::initWithFrame(
         NSTextView::alloc(MainThreadMarker::new().unwrap()),
         NSRect::new(
@@ -525,13 +596,18 @@ fn render_session(
     ui.transcript_scroll = Some(scroll);
     let composer = text_field(
         MainThreadMarker::new().unwrap(),
-        "Follow up…",
+        if status == SessionStatus::Running {
+            "Wait for Pi to finish…"
+        } else {
+            "Follow up…"
+        },
         NSRect::new(
             NSPoint::new(18.0, 18.0),
             NSSize::new(PANEL_WIDTH - 36.0, 34.0),
         ),
         true,
     );
+    composer.setEditable(status != SessionStatus::Running);
     unsafe {
         composer.setTarget(Some(ui.panel.as_ref().unwrap()));
         composer.setAction(Some(sel!(submit:)));
@@ -614,6 +690,7 @@ fn open_row(index: usize) {
         ui.snapshot.screen = LauncherScreen::Session {
             id: row.id.clone(),
             title: row.title,
+            status: row.status,
             messages: Vec::new(),
         };
         ui.selected = None;

@@ -19,6 +19,11 @@ terminal process.
   happen on worker threads and completion is dispatched back to AppKit's main
   thread. One run per DesktopCtl session is permitted at a time.
 
+While a session is running, its view shows a native activity spinner and a
+`Stop` button. The composer remains disabled until Pi finishes. Stopping sets
+the request's cancellation token; the runner kills and reaps the Pi child, then
+persists the session as cancelled.
+
 ## Pi invocation
 
 The runner locates Pi from `DESKTOPCTL_PI_PATH`, the process `PATH`, and common

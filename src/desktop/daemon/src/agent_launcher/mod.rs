@@ -94,6 +94,7 @@ mod controller {
             LauncherAction::NewRequest { prompt } => start_new(prompt),
             LauncherAction::FollowUp { session_id, prompt } => follow_up(session_id, prompt),
             LauncherAction::OpenSession { session_id } => open_session(session_id),
+            LauncherAction::CancelSession { session_id } => cancel(&session_id),
         }
     }
 
@@ -312,6 +313,12 @@ mod controller {
         LauncherScreen::Session {
             id: session.id.clone(),
             title: session.title.clone(),
+            status: match session.status {
+                AgentSessionStatus::Running => SessionStatus::Running,
+                AgentSessionStatus::Completed => SessionStatus::Completed,
+                AgentSessionStatus::Failed => SessionStatus::Failed,
+                AgentSessionStatus::Cancelled => SessionStatus::Cancelled,
+            },
             messages: session
                 .messages
                 .iter()
