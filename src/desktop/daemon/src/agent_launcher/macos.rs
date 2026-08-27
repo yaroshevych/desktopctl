@@ -23,16 +23,16 @@ use std::{
 
 use dispatch2::DispatchQueue;
 use objc2::{
-    MainThreadOnly, define_class, msg_send,
+    define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, Bool},
-    sel,
+    sel, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAnimationContext, NSApplication, NSBackingStoreType, NSButton, NSColor, NSEvent,
-    NSFloatingWindowLevel, NSFont, NSPanel, NSProgressIndicator, NSProgressIndicatorStyle,
-    NSScrollView, NSTextAlignment, NSTextField, NSTextView, NSView, NSWindowCollectionBehavior,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSAnimationContext, NSApplication, NSBackingStoreType, NSButton, NSButtonType, NSColor,
+    NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSFloatingWindowLevel, NSFont, NSPanel,
+    NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView, NSTextAlignment, NSTextField,
+    NSTextView, NSView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -130,11 +130,24 @@ pub enum LauncherAction {
     ToggleRequested,
     Dismissed,
     ReturnToLauncher,
-    NewRequest { prompt: String },
-    FollowUp { session_id: String, prompt: String },
-    OpenSession { session_id: String },
-    CancelSession { session_id: String },
-    OpenInGhostty { session_id: String },
+    NewRequest {
+        prompt: String,
+        share_context: bool,
+    },
+    FollowUp {
+        session_id: String,
+        prompt: String,
+        share_context: bool,
+    },
+    OpenSession {
+        session_id: String,
+    },
+    CancelSession {
+        session_id: String,
+    },
+    OpenInGhostty {
+        session_id: String,
+    },
 }
 
 pub type LauncherActionHandler = Arc<dyn Fn(LauncherAction) + Send + Sync + 'static>;
@@ -242,6 +255,8 @@ struct UiState {
     rows: Vec<Retained<NSButton>>,
     launcher_scroll: Option<Retained<NSScrollView>>,
     show_more: Option<Retained<NSButton>>,
+    share_context: Option<Retained<NSButton>>,
+    share_context_enabled: bool,
     show_all: bool,
     back: Option<Retained<NSButton>>,
     activity: Option<Retained<NSProgressIndicator>>,
@@ -268,6 +283,8 @@ impl Default for UiState {
             rows: Vec::new(),
             launcher_scroll: None,
             show_more: None,
+            share_context: None,
+            share_context_enabled: true,
             show_all: false,
             back: None,
             activity: None,
@@ -616,8 +633,7 @@ fn launcher_panel_height(ui: &UiState) -> f64 {
     } else {
         ui.snapshot.recent.len()
     };
-    let has_more = !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len();
-    let bottom = if has_more { 48.0 } else { 14.0 };
+    let bottom = 48.0;
     (66.0 + bottom + session_count as f64 * ROW_HEIGHT)
         .clamp(MIN_LAUNCHER_PANEL_HEIGHT, MAX_HISTORY_PANEL_HEIGHT)
 }
@@ -642,6 +658,9 @@ fn clear_dynamic_views(ui: &mut UiState) {
         scroll.removeFromSuperview();
     }
     if let Some(button) = ui.show_more.take() {
+        button.removeFromSuperview();
+    }
+    if let Some(button) = ui.share_context.take() {
         button.removeFromSuperview();
     }
     ui.transcript.take();
@@ -682,7 +701,7 @@ fn render_launcher(ui: &mut UiState, content: &NSView) {
     };
     let panel_height = content.frame().size.height;
     let has_more = !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len();
-    let list_bottom = if has_more { 48.0 } else { 14.0 };
+    let list_bottom = 48.0;
     let list_height = (panel_height - 66.0 - list_bottom).max(0.0);
     let document_height = (sessions.len() as f64 * ROW_HEIGHT).max(list_height);
     let document = NSView::initWithFrame(
@@ -749,6 +768,23 @@ fn render_launcher(ui: &mut UiState, content: &NSView) {
         content.addSubview(&show_more);
         ui.show_more = Some(show_more);
     }
+    let share_context = NSButton::initWithFrame(
+        NSButton::alloc(MainThreadMarker::new().unwrap()),
+        NSRect::new(
+            NSPoint::new(PANEL_WIDTH - 190.0, 10.0),
+            NSSize::new(172.0, 28.0),
+        ),
+    );
+    share_context.setTitle(&NSString::from_str("Share window context"));
+    share_context.setButtonType(NSButtonType::Switch);
+    share_context.setState(if ui.share_context_enabled {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    share_context.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    content.addSubview(&share_context);
+    ui.share_context = Some(share_context);
 }
 
 fn render_session(
@@ -909,25 +945,41 @@ fn submit_active() {
         return;
     }
     let action = UI.with(|cell| {
-        let ui = cell.borrow();
-        let field = if ui.session_id.is_some() {
-            ui.composer.as_ref()
-        } else {
-            ui.input.as_ref()
-        }?;
-        let text = field.stringValue().to_string();
-        let text = text.trim().to_string();
+        let mut ui = cell.borrow_mut();
+        let text = {
+            let field = if ui.session_id.is_some() {
+                ui.composer.as_ref()
+            } else {
+                ui.input.as_ref()
+            }?;
+            let text = field.stringValue().to_string().trim().to_string();
+            if !text.is_empty() {
+                field.setStringValue(&NSString::new());
+            }
+            text
+        };
         if text.is_empty() {
             return None;
         }
-        field.setStringValue(&NSString::new());
+        let share_context = ui
+            .share_context
+            .as_ref()
+            .map(|button| button.state() == NSControlStateValueOn)
+            .unwrap_or(ui.share_context_enabled);
+        ui.share_context_enabled = share_context;
         ui.session_id
             .as_ref()
             .map(|id| LauncherAction::FollowUp {
                 session_id: id.clone(),
                 prompt: text.clone(),
+                share_context,
             })
-            .or_else(|| Some(LauncherAction::NewRequest { prompt: text }))
+            .or_else(|| {
+                Some(LauncherAction::NewRequest {
+                    prompt: text,
+                    share_context,
+                })
+            })
     });
     if let Some(action) = action {
         if matches!(action, LauncherAction::NewRequest { .. }) {
@@ -1043,10 +1095,10 @@ fn move_selection(delta: isize) {
         if count == 0 {
             return;
         }
-        let old = ui
-            .selected
-            .map(|value| value as isize)
-            .unwrap_or_else(|| if delta < 0 { 0 } else { -1 });
+        let old =
+            ui.selected
+                .map(|value| value as isize)
+                .unwrap_or_else(|| if delta < 0 { 0 } else { -1 });
         ui.selected = Some((old + delta).rem_euclid(count as isize) as usize);
         for (idx, row) in ui.rows.iter().enumerate() {
             row.highlight(ui.selected == Some(idx));

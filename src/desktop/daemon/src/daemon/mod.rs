@@ -686,6 +686,12 @@ pub(crate) fn resolve_agent_launcher_target(
     window_context::resolve_window_target_for_pid(pid, bounds.as_ref())
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn list_windows_for_agent_launcher()
+-> Result<Vec<platform::windowing::WindowInfo>, AppError> {
+    window_target::list_windows()
+}
+
 #[cfg(test)]
 fn execute(command: Command) -> Result<Value, AppError> {
     execute_resident_command(command)

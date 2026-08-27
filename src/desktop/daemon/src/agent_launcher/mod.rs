@@ -6,18 +6,21 @@ mod controller {
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex, OnceLock, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Condvar, Mutex, OnceLock},
         thread,
     };
 
+    use desktop_core::error::ErrorCode;
+    use serde_json::json;
+
     use crate::{
         agent_runner::{
-            AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
-            discover_pi_executable, load_native_transcript,
+            discover_pi_executable, load_native_transcript, AgentRequest, AgentRunner,
+            AgentSessionRef, PiRunner, TargetWindow,
         },
         agent_sessions::{
-            AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
-            SessionMessageRole, TargetWindowMetadata, truncate_one_line, unix_now_ms,
+            truncate_one_line, unix_now_ms, AgentSession, AgentSessionStatus, AgentSessionStore,
+            SessionMessage, SessionMessageRole, TargetWindowMetadata,
         },
         daemon, trace,
     };
@@ -34,7 +37,16 @@ mod controller {
         launch_generation: u64,
         open_session: Option<String>,
         cancellations: HashMap<String, Arc<AtomicBool>>,
+        pending_preparation: Option<PreparationHandle>,
     }
+
+    #[derive(Clone, Debug)]
+    struct PreparedTarget {
+        target: TargetWindowMetadata,
+        context: Result<String, String>,
+    }
+
+    type PreparationHandle = Arc<(Mutex<Option<Result<PreparedTarget, String>>>, Condvar)>;
 
     static STATE: OnceLock<Arc<Mutex<State>>> = OnceLock::new();
 
@@ -63,6 +75,7 @@ mod controller {
             launch_generation: 0,
             open_session: None,
             cancellations: HashMap::new(),
+            pending_preparation: None,
         })));
         super::macos::initialize(LauncherCallbacks {
             on_action: Arc::new(handle_action),
@@ -82,6 +95,7 @@ mod controller {
             state.pending_target = None;
             state.restore_pid = target_hint;
             state.open_session = None;
+            state.pending_preparation = Some(Arc::new((Mutex::new(None), Condvar::new())));
             state.launch_generation
         } else {
             return;
@@ -89,20 +103,54 @@ mod controller {
         refresh();
         super::macos::show();
 
+        let preparation = preparation_handle_for_generation(generation);
         let Some(pid) = target_hint else {
+            if let Some(preparation) = preparation_handle_for_generation(generation) {
+                complete_preparation(
+                    &preparation,
+                    Err("target resolution failed: no frontmost application PID".into()),
+                );
+            }
             return;
         };
         thread::spawn(move || {
             let target = daemon::resolve_agent_launcher_target(pid)
                 .map(target_metadata)
-                .map_err(|error| trace::log(format!("agent_launcher:target_bind_warning {error}")))
-                .ok();
-            if let Some(mut state) = lock_state() {
-                if state.launch_generation == generation {
-                    state.pending_target = target;
+                .map_err(|error| format!("target resolution failed: {error}"));
+            let prepared = target.clone().map(|target| PreparedTarget {
+                context: window_context_for_target(&target),
+                target,
+            });
+            if let Ok(prepared) = &prepared {
+                if let Err(error) = &prepared.context {
+                    trace::log(format!("agent_launcher:prefetch_context_warning {error}"));
                 }
             }
+            if let Some(mut state) = lock_state() {
+                if state.launch_generation == generation {
+                    state.pending_target = target.clone().ok();
+                }
+            }
+            if let Some(preparation) = preparation {
+                let (lock, wake) = &*preparation;
+                *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prepared);
+                wake.notify_all();
+            }
         });
+    }
+
+    fn preparation_handle_for_generation(generation: u64) -> Option<PreparationHandle> {
+        lock_state().and_then(|state| {
+            (state.launch_generation == generation)
+                .then(|| state.pending_preparation.clone())
+                .flatten()
+        })
+    }
+
+    fn complete_preparation(handle: &PreparationHandle, result: Result<PreparedTarget, String>) {
+        let (lock, wake) = &**handle;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+        wake.notify_all();
     }
 
     fn handle_action(action: LauncherAction) {
@@ -115,8 +163,15 @@ mod controller {
                 }
                 refresh();
             }
-            LauncherAction::NewRequest { prompt } => start_new(prompt),
-            LauncherAction::FollowUp { session_id, prompt } => follow_up(session_id, prompt),
+            LauncherAction::NewRequest {
+                prompt,
+                share_context,
+            } => start_new(prompt, share_context),
+            LauncherAction::FollowUp {
+                session_id,
+                prompt,
+                share_context,
+            } => follow_up(session_id, prompt, share_context),
             LauncherAction::OpenSession { session_id } => open_session(session_id),
             LauncherAction::CancelSession { session_id } => cancel(&session_id),
             LauncherAction::OpenInGhostty { session_id } => open_in_ghostty(session_id),
@@ -130,7 +185,7 @@ mod controller {
         }
     }
 
-    fn start_new(prompt: String) {
+    fn start_new(prompt: String, share_context: bool) {
         let created = lock_state().and_then(|mut state| {
             let target = state.pending_target.take();
             match state
@@ -146,11 +201,20 @@ mod controller {
         });
         if let Some((session_id, request_id, target)) = created {
             refresh();
-            run_pi(session_id, request_id, prompt, None, target);
+            let preparation = lock_state().and_then(|state| state.pending_preparation.clone());
+            run_pi(
+                session_id,
+                request_id,
+                prompt,
+                None,
+                target,
+                share_context,
+                preparation,
+            );
         }
     }
 
-    fn follow_up(session_id: String, prompt: String) {
+    fn follow_up(session_id: String, prompt: String, share_context: bool) {
         let request = lock_state().and_then(|mut state| {
             let session = state.store.get(&session_id)?.clone();
             match state
@@ -176,6 +240,8 @@ mod controller {
                 prompt,
                 native,
                 session.target_window,
+                share_context,
+                None,
             );
             refresh();
         }
@@ -337,6 +403,8 @@ end run"#;
         prompt: String,
         native_session: Option<AgentSessionRef>,
         target: Option<TargetWindowMetadata>,
+        share_context: bool,
+        preparation: Option<PreparationHandle>,
     ) {
         let cancellation = Arc::new(AtomicBool::new(false));
         if let Some(mut state) = lock_state() {
@@ -346,16 +414,192 @@ end run"#;
         }
         crate::app_runtime::set_agent_running(true);
         thread::spawn(move || {
+            let prepared = preparation.and_then(|handle| wait_for_preparation(&handle));
+            let target = target.or_else(|| prepared.as_ref().map(|value| value.target.clone()));
+            if let Some(target) = target.as_ref() {
+                if let Some(mut state) = lock_state() {
+                    if let Err(error) = state.store.set_target_window(&session_id, target.clone()) {
+                        trace::log(format!("agent_launcher:target_persist_error {error}"));
+                    }
+                }
+            }
             let mut request = AgentRequest::new(prompt);
             request.session = native_session.filter(|session| {
                 session.id.as_deref().is_some_and(|id| !id.is_empty()) || session.path.is_some()
             });
             request.target_window = target.as_ref().and_then(runner_target);
-            let result = PiRunner::new()
-                .spawn(request)
-                .and_then(|mut process| process.wait_with_cancellation(&cancellation));
+            let result = if share_context {
+                match target
+                    .as_ref()
+                    .ok_or_else(|| {
+                        crate::agent_runner::AgentRunnerError::Process(
+                            "target resolution failed: no target window".into(),
+                        )
+                    })
+                    .and_then(|target| {
+                        let context = match prepared {
+                            Some(value) => match target_window_is_current(target) {
+                                Ok(true) => value.context,
+                                Ok(false) => window_context_for_target(target),
+                                Err(error) => Err(error),
+                            },
+                            None => window_context_for_target(target),
+                        };
+                        context.map_err(crate::agent_runner::AgentRunnerError::Process)
+                    }) {
+                    Ok(context) => {
+                        request.window_context = Some(context);
+                        PiRunner::new()
+                            .spawn(request)
+                            .and_then(|mut process| process.wait_with_cancellation(&cancellation))
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                PiRunner::new()
+                    .spawn(request)
+                    .and_then(|mut process| process.wait_with_cancellation(&cancellation))
+            };
             finish_run(&session_id, &request_id, result);
         });
+    }
+
+    fn wait_for_preparation(handle: &PreparationHandle) -> Option<PreparedTarget> {
+        let (lock, wake) = &**handle;
+        let mut result = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while result.is_none() {
+            result = wake
+                .wait(result)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        result.take()?.ok()
+    }
+
+    fn native_window_id_from_id(id: &str) -> Option<u32> {
+        id.rsplit(':').next()?.parse::<u32>().ok()
+    }
+
+    fn window_context_for_target(target: &TargetWindowMetadata) -> Result<String, String> {
+        let windows = daemon::list_windows_for_agent_launcher().map_err(|error| {
+            if matches!(
+                error.code,
+                ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
+            ) {
+                format!(
+                    "missing screen recording/accessibility permission: {}",
+                    error.message
+                )
+            } else {
+                format!("window enumeration failed: {}", error.message)
+            }
+        })?;
+        let target_window = windows
+            .iter()
+            .find(|window| target_matches_window(target, window))
+            .ok_or_else(|| {
+                format!(
+                    "target window not found: {}",
+                    target
+                        .window_ref
+                        .as_deref()
+                        .or(target.native_id.as_deref())
+                        .unwrap_or("unknown")
+                )
+            })?;
+
+        let native_window_id = native_window_id_from_id(&target_window.id);
+        let tokenized = {
+            let meta = crate::vision::pipeline::TokenizeWindowMeta {
+                id: target_window.id.clone(),
+                title: target_window.title.clone(),
+                app: Some(target_window.app.clone()),
+                bounds: target_window.bounds.clone(),
+                pid: i32::try_from(target_window.pid).ok(),
+                native_window_id,
+                capture_bounds: native_window_id.map(|_| target_window.bounds.clone()),
+                include_offscreen_ax: true,
+            };
+            match crate::vision::pipeline::tokenize_window(meta) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return Err(
+                        if matches!(
+                            error.code,
+                            ErrorCode::PermissionDenied
+                                | ErrorCode::AccessibilityPermissionRequired
+                        ) {
+                            format!(
+                                "missing screen recording/accessibility permission: {}",
+                                error.message
+                            )
+                        } else {
+                            format!("target tokenization failed: {}", error.message)
+                        },
+                    );
+                }
+            }
+        };
+
+        let visible_windows: Vec<_> = windows
+            .iter()
+            .filter(|window| {
+                window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
+            })
+            .take(24)
+            .map(crate::platform::windowing::WindowInfo::as_json)
+            .collect();
+        let os_version = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .map_err(|error| format!("OS version lookup failed: {error}"))
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                } else {
+                    Err("OS version lookup failed: sw_vers returned a non-zero status".to_string())
+                }
+            })?;
+        let context = json!({
+            "purpose": "Initial DesktopCtl environment context. This is a snapshot and may become stale.",
+            "os": { "name": "macOS", "version": os_version },
+            "target_window": target,
+            "visible_windows": visible_windows,
+            "tokenized_target_window": tokenized,
+        });
+        serde_json::to_string_pretty(&context)
+            .map(|body| format!("Initial environment context ( JSON ):\n{body}"))
+            .map_err(|error| format!("failed to serialize window context: {error}"))
+    }
+
+    fn target_matches_window(
+        target: &TargetWindowMetadata,
+        window: &crate::platform::windowing::WindowInfo,
+    ) -> bool {
+        target
+            .window_ref
+            .as_deref()
+            .is_some_and(|id| window.window_ref.as_deref() == Some(id))
+            || target
+                .native_id
+                .as_deref()
+                .is_some_and(|id| window.id == id)
+    }
+
+    fn target_window_is_current(target: &TargetWindowMetadata) -> Result<bool, String> {
+        let windows = daemon::list_windows_for_agent_launcher().map_err(|error| {
+            if matches!(
+                error.code,
+                ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
+            ) {
+                format!(
+                    "missing screen recording/accessibility permission: {}",
+                    error.message
+                )
+            } else {
+                format!("window enumeration failed: {}", error.message)
+            }
+        })?;
+        Ok(windows.iter().any(|window| target_matches_window(target, window)))
     }
 
     fn finish_run(
@@ -550,7 +794,12 @@ end run"#;
 
     #[cfg(test)]
     mod tests {
-        use super::{ghostty_command, posix_quote};
+        use super::{
+            ghostty_command, native_window_id_from_id, posix_quote, target_matches_window,
+        };
+        use crate::agent_sessions::TargetWindowMetadata;
+        use crate::platform::windowing::WindowInfo;
+        use desktop_core::protocol::Bounds;
 
         #[test]
         fn ghostty_arguments_are_posix_quoted() {
@@ -565,10 +814,46 @@ end run"#;
                 "/tmp/session file.jsonl",
             );
             assert!(command.starts_with("/usr/bin/env 'PATH=/opt/homebrew/bin:"));
-            assert!(command.ends_with(
-                "' '/opt/homebrew/bin/pi' --session '/tmp/session file.jsonl'"
-            ));
+            assert!(
+                command.ends_with("' '/opt/homebrew/bin/pi' --session '/tmp/session file.jsonl'")
+            );
             assert!(!command.contains(" exec "));
+        }
+
+        #[test]
+        fn native_window_id_uses_cg_window_id_suffix() {
+            assert_eq!(native_window_id_from_id("123:456"), Some(456));
+            assert_eq!(native_window_id_from_id("mail_cef8c8"), None);
+        }
+
+        #[test]
+        fn target_lookup_matches_public_window_reference() {
+            let window = WindowInfo {
+                id: "123:456".into(),
+                window_ref: Some("mail_cef8c8".into()),
+                parent_id: None,
+                pid: 123,
+                index: 1,
+                app: "Mail".into(),
+                title: "Inbox".into(),
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                },
+                frontmost: false,
+                visible: true,
+                modal: None,
+            };
+            let target = TargetWindowMetadata {
+                window_ref: Some("mail_cef8c8".into()),
+                native_id: Some("123:456".into()),
+                pid: Some(123),
+                app: Some("Mail".into()),
+                title: Some("Inbox".into()),
+            };
+            assert!(target_matches_window(&target, &window));
         }
     }
 }

@@ -27,6 +27,7 @@ pub struct AgentRequest {
     pub prompt: String,
     pub session: Option<AgentSessionRef>,
     pub target_window: Option<TargetWindow>,
+    pub window_context: Option<String>,
 }
 
 impl AgentRequest {
@@ -35,6 +36,7 @@ impl AgentRequest {
             prompt: prompt.into(),
             session: None,
             target_window: None,
+            window_context: None,
         }
     }
 }
@@ -306,6 +308,10 @@ impl PiRunner {
         if let Some(target) = request.target_window.as_ref() {
             args.push(OsString::from("--append-system-prompt"));
             args.push(OsString::from(Self::target_window_instruction(target)));
+        }
+        if let Some(context) = request.window_context.as_deref() {
+            args.push(OsString::from("--append-system-prompt"));
+            args.push(OsString::from(context));
         }
         // `--` protects prompts beginning with a dash while keeping user text
         // an argv element rather than shell source.
@@ -791,6 +797,25 @@ mod tests {
                 .to_string_lossy()
                 .contains("never before the subcommand")
         );
+    }
+
+    #[test]
+    fn args_include_window_context_when_present() {
+        let mut request = AgentRequest::new("summarize");
+        request.target_window = Some(TargetWindow {
+            id: "mail_cef8c8".into(),
+            app: Some("Mail".into()),
+            title: Some("Inbox".into()),
+        });
+        request.window_context = Some("Initial environment context ( JSON ): {\"os\":{}}".into());
+        let args = PiRunner::args_for(&request);
+        let prompt_flags = args
+            .iter()
+            .filter(|arg| *arg == "--append-system-prompt")
+            .count();
+        assert_eq!(prompt_flags, 2);
+        assert!(args.iter().any(|arg| arg.to_string_lossy().contains("Initial environment context")));
+        assert_eq!(args.last(), Some(&OsString::from("summarize")));
     }
 
     #[test]

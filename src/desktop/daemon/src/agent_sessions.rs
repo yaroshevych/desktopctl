@@ -390,6 +390,21 @@ impl AgentSessionStore {
         Ok(request_id)
     }
 
+    pub fn set_target_window(
+        &mut self,
+        session_id: &str,
+        target_window: TargetWindowMetadata,
+    ) -> Result<(), SessionStoreError> {
+        let session = self
+            .get_mut(session_id)
+            .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?;
+        if session.target_window.is_none() {
+            session.target_window = Some(target_window);
+            self.save()?;
+        }
+        Ok(())
+    }
+
     pub fn bind_native_session(
         &mut self,
         session_id: &str,
