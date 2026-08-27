@@ -152,10 +152,11 @@ release-all tag target="main" repo="yaroshevych/desktopctl":
   fi
   echo "Release ready: https://github.com/{{repo}}/releases/tag/{{tag}}"
 
-run: build
+run:
   pkill -f "{{macos_dir}}/desktopctl-dialogs" || true
   pkill -f "{{macos_dir}}/desktopctld" || true
   rm -f /tmp/desktopctl.sock
+  just -f {{workspace_dir}}/Justfile build
   open -n {{app_dir}}
 
 clean:
