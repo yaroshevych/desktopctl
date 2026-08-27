@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::platform::input::new_backend;
 #[cfg(windows)]
 use desktop_core::ipc::pipe_name;
 #[cfg(unix)]
@@ -24,7 +25,6 @@ use desktop_core::{
         ResponseEnvelope,
     },
 };
-use crate::platform::input::new_backend;
 #[cfg(unix)]
 use interprocess::local_socket::{GenericFilePath, ToFsName};
 #[cfg(windows)]
@@ -816,7 +816,13 @@ fn execute_with_context(
             observe,
             active_window,
             active_window_id,
-        } => commands::input::key_type(text, observe, active_window, active_window_id, request_context),
+        } => commands::input::key_type(
+            text,
+            observe,
+            active_window,
+            active_window_id,
+            request_context,
+        ),
         Command::KeyHotkey {
             hotkey,
             observe,
@@ -848,6 +854,7 @@ fn execute_with_context(
             screenshot_path,
             journal,
             list_all_windows,
+            all,
             active_window,
             active_window_id,
             region,
@@ -857,6 +864,7 @@ fn execute_with_context(
             screenshot_path,
             journal,
             list_all_windows,
+            all,
             active_window,
             active_window_id,
             region,
@@ -1265,6 +1273,7 @@ mod tests {
                     source: "accessibility_ax:AXButton".to_string(),
                 }],
             }],
+            truncated: false,
         };
 
         let texts = super::tokenize_payload_texts_for_click(&payload);
@@ -1318,6 +1327,7 @@ mod tests {
                     source: "accessibility_ax:AXButton".to_string(),
                 }],
             }],
+            truncated: false,
         };
 
         let elements = super::tokenize_payload_elements_for_click(&payload);
@@ -1367,6 +1377,7 @@ mod tests {
                     source: "vision_ocr".to_string(),
                 }],
             }],
+            truncated: false,
         };
         let value = serde_json::to_value(&payload).expect("serialize payload");
         assert!(value.get("tokens").is_none(), "tokens field must be absent");

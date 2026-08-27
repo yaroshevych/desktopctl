@@ -7,9 +7,10 @@ use crate::platform;
 const AX_RETRY_ATTEMPTS: usize = 3;
 const AX_RETRY_DELAY_MS: u64 = 20;
 
-pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, desktop_core::error::AppError>
-{
-    collect_with_retry(platform::ax::collect_frontmost_window_elements)
+pub fn collect_frontmost_window_elements(
+    include_offscreen: bool,
+) -> Result<Vec<AxElement>, desktop_core::error::AppError> {
+    collect_with_retry(|| platform::ax::collect_frontmost_window_elements(include_offscreen))
 }
 
 pub fn collect_window_elements(
@@ -17,6 +18,7 @@ pub fn collect_window_elements(
     native_window_id: u32,
     target_window_bounds: Option<&desktop_core::protocol::Bounds>,
     target_window_title: Option<&str>,
+    include_offscreen: bool,
 ) -> Result<Vec<AxElement>, desktop_core::error::AppError> {
     collect_with_retry(|| {
         platform::ax::collect_window_elements(
@@ -24,6 +26,7 @@ pub fn collect_window_elements(
             native_window_id,
             target_window_bounds,
             target_window_title,
+            include_offscreen,
         )
     })
 }

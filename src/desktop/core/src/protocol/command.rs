@@ -235,6 +235,8 @@ pub enum Command {
         #[serde(default)]
         list_all_windows: bool,
         #[serde(default)]
+        all: bool,
+        #[serde(default)]
         active_window: bool,
         #[serde(default)]
         active_window_id: Option<String>,

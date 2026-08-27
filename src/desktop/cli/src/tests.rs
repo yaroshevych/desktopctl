@@ -1,14 +1,14 @@
 use super::{
-    parse::render_help_if_requested, parse_command, send_request_with_hooks, split_cli_options,
-    OutputMode,
+    OutputMode, parse::render_help_if_requested, parse_command, send_request_with_hooks,
+    split_cli_options,
 };
 use desktop_core::{
     error::{AppError, ErrorCode},
     protocol::{Command, PointerButton, RequestEnvelope, ResponseEnvelope},
 };
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 #[test]
@@ -484,6 +484,7 @@ fn parses_screen_tokenize_with_overlay() {
             screenshot_path,
             journal,
             list_all_windows,
+            all,
             active_window,
             active_window_id,
             region,
@@ -493,6 +494,7 @@ fn parses_screen_tokenize_with_overlay() {
             assert!(screenshot_path.is_none());
             assert!(!journal);
             assert!(!list_all_windows);
+            assert!(!all);
             assert!(!active_window);
             assert!(active_window_id.is_none());
             assert!(region.is_none());
@@ -517,6 +519,7 @@ fn parses_screen_tokenize_with_window() {
             screenshot_path,
             journal,
             list_all_windows,
+            all,
             active_window,
             active_window_id,
             region,
@@ -526,6 +529,7 @@ fn parses_screen_tokenize_with_window() {
             assert!(screenshot_path.is_none());
             assert!(!journal);
             assert!(!list_all_windows);
+            assert!(!all);
             assert!(!active_window);
             assert!(active_window_id.is_none());
             assert!(region.is_none());
@@ -551,6 +555,7 @@ fn parses_screen_tokenize_with_active_window_id() {
             screenshot_path,
             journal,
             list_all_windows,
+            all,
             region,
             overlay_out_path,
         } => {
@@ -563,6 +568,7 @@ fn parses_screen_tokenize_with_active_window_id() {
             assert!(screenshot_path.is_none());
             assert!(!journal);
             assert!(!list_all_windows);
+            assert!(!all);
             assert!(region.is_none());
             assert!(overlay_out_path.is_none());
         }
@@ -585,6 +591,7 @@ fn parses_screen_tokenize_with_active_window() {
             screenshot_path,
             journal,
             list_all_windows,
+            all,
             active_window,
             active_window_id,
             region,
@@ -594,6 +601,7 @@ fn parses_screen_tokenize_with_active_window() {
             assert!(screenshot_path.is_none());
             assert!(!journal);
             assert!(!list_all_windows);
+            assert!(!all);
             assert!(active_window);
             assert!(active_window_id.is_none());
             assert!(region.is_none());
@@ -625,6 +633,55 @@ fn parses_screen_tokenize_with_region() {
         }
         other => panic!("unexpected command: {other:?}"),
     }
+}
+
+#[test]
+fn parses_screen_tokenize_with_all() {
+    let args = vec![
+        "screen".to_string(),
+        "tokenize".to_string(),
+        "--all".to_string(),
+    ];
+    let command = parse_command(&args).expect("screen tokenize --all should parse");
+    match command {
+        Command::ScreenTokenize { all, .. } => assert!(all),
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_screen_tokenize_all_with_screenshot() {
+    let args = vec![
+        "screen".to_string(),
+        "tokenize".to_string(),
+        "--all".to_string(),
+        "--screenshot".to_string(),
+        "/tmp/shot.png".to_string(),
+    ];
+    let err = parse_command(&args).expect_err("--all requires a live AX window");
+    assert!(
+        err.message
+            .contains("--all cannot be combined with --screenshot")
+    );
+}
+
+#[test]
+fn rejects_screen_tokenize_all_with_region() {
+    let args = vec![
+        "screen".to_string(),
+        "tokenize".to_string(),
+        "--all".to_string(),
+        "--region".to_string(),
+        "0".to_string(),
+        "0".to_string(),
+        "100".to_string(),
+        "100".to_string(),
+    ];
+    let err = parse_command(&args).expect_err("--all cannot use a region");
+    assert!(
+        err.message
+            .contains("--all cannot be combined with --region")
+    );
 }
 
 #[test]
@@ -1208,18 +1265,20 @@ fn parses_menu_list_with_active_window() {
             ..
         }
     ));
-    assert!(parse_command(
-        &[
-            "menu",
-            "click",
-            "--id",
-            "menu_file_open",
-            "--system",
-            "--active-window"
-        ]
-        .map(str::to_string),
-    )
-    .is_err());
+    assert!(
+        parse_command(
+            &[
+                "menu",
+                "click",
+                "--id",
+                "menu_file_open",
+                "--system",
+                "--active-window"
+            ]
+            .map(str::to_string),
+        )
+        .is_err()
+    );
 }
 
 #[test]

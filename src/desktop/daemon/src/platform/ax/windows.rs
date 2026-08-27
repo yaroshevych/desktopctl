@@ -18,6 +18,7 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub truncated: bool,
 }
 
 const MAX_UIA_DEPTH: usize = 8;
@@ -27,7 +28,9 @@ thread_local! {
     static UIA_CONTEXT: RefCell<Option<UIAutomation>> = const { RefCell::new(None) };
 }
 
-pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
+pub fn collect_frontmost_window_elements(
+    _include_offscreen: bool,
+) -> Result<Vec<AxElement>, AppError> {
     let hwnd = frontmost_hwnd();
     if hwnd == 0 {
         return Ok(Vec::new());
@@ -85,6 +88,7 @@ pub fn collect_window_elements(
     _native_window_id: u32,
     _target_window_bounds: Option<&Bounds>,
     _target_window_title: Option<&str>,
+    _include_offscreen: bool,
 ) -> Result<Vec<AxElement>, AppError> {
     Ok(Vec::new())
 }
@@ -147,6 +151,7 @@ fn to_ax_element(element: &UIElement) -> Option<AxElement> {
         bounds,
         ax_identifier: map_identifier_for_element(element),
         checked: map_toggle_state_for_element(element, control_type),
+        truncated: false,
     })
 }
 
@@ -166,6 +171,7 @@ fn to_ax_fallback_element(element: &UIElement) -> Option<AxElement> {
         bounds,
         ax_identifier: map_identifier_for_element(element),
         checked: control_type.and_then(|ty| map_toggle_state_for_element(element, ty)),
+        truncated: false,
     })
 }
 
@@ -343,6 +349,7 @@ mod tests {
             bounds,
             ax_identifier: Some("uia-save-button".to_string()),
             checked: None,
+            truncated: false,
         }
     }
 

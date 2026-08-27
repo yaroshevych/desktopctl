@@ -46,6 +46,23 @@ pub struct TokenizeWindowMeta {
     pub pid: Option<i32>,
     pub native_window_id: Option<u32>,
     pub capture_bounds: Option<Bounds>,
+    pub include_offscreen_ax: bool,
+}
+
+pub fn was_all_tokenized_recently(meta: &TokenizeWindowMeta) -> Result<bool, AppError> {
+    if !target_key_is_stable(meta) {
+        return Ok(false);
+    }
+    let key = tokenize_target_key(meta);
+    with_state(|state| state.was_all_tokenized_recently(&key))
+}
+
+pub fn known_offscreen_id(meta: &TokenizeWindowMeta, id: &str) -> Result<bool, AppError> {
+    if !target_key_is_stable(meta) {
+        return Ok(false);
+    }
+    let key = tokenize_target_key(meta);
+    with_state(|state| state.known_offscreen_id(&key, id))
 }
 
 const CAPTURE_BUDGET_MS: u128 = 80;
@@ -340,6 +357,17 @@ pub fn latest_frame_png() -> Result<Option<Arc<[u8]>>, AppError> {
 }
 
 pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayload, AppError> {
+    tokenize_window_internal(window_meta, true)
+}
+
+pub fn collect_ax_elements_fresh(window_meta: &TokenizeWindowMeta) -> Vec<super::ax::AxElement> {
+    detect_ax_elements(Some(window_meta))
+}
+
+fn tokenize_window_internal(
+    window_meta: TokenizeWindowMeta,
+    allow_cache: bool,
+) -> Result<TokenizePayload, AppError> {
     trace::log("pipeline:tokenize:window_mode");
     let tokenize_started = Instant::now();
     let cache_key = tokenize_cache_key(&window_meta);
@@ -386,11 +414,13 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
     let thumb = thumbnail_from_rgba(&captured.image, 96, 54);
     let fingerprint = frame_fingerprint(&captured.image);
 
-    if let Some(cached_payload) =
-        with_state(|state| state.cached_tokenize_payload_if_fingerprint(&cache_key, fingerprint))?
-    {
-        trace::log("pipeline:tokenize:window_fastpath cache_hit fingerprint_equal");
-        return Ok((*cached_payload).clone());
+    if allow_cache && !window_meta.include_offscreen_ax {
+        if let Some(cached_payload) = with_state(|state| {
+            state.cached_tokenize_payload_if_fingerprint(&cache_key, fingerprint)
+        })? {
+            trace::log("pipeline:tokenize:window_fastpath cache_hit fingerprint_equal");
+            return Ok((*cached_payload).clone());
+        }
     }
     trace::log("pipeline:tokenize:window_fastpath cache_miss");
 
@@ -458,13 +488,16 @@ pub fn tokenize_window(window_meta: TokenizeWindowMeta) -> Result<TokenizePayloa
         capture.snapshot,
         &capture.image,
         capture.image_path.as_deref(),
-        Some(window_meta),
+        Some(window_meta.clone()),
         Some(ax_elements),
     )?;
     let payload_arc = std::sync::Arc::new(payload);
-    with_state(|state| {
-        state.update_tokenize_cache(cache_key, fingerprint, std::sync::Arc::clone(&payload_arc))
-    })?;
+    remember_all_tokenization(&window_meta, &payload_arc)?;
+    if allow_cache && !window_meta.include_offscreen_ax {
+        with_state(|state| {
+            state.update_tokenize_cache(cache_key, fingerprint, std::sync::Arc::clone(&payload_arc))
+        })?;
+    }
     let payload = std::sync::Arc::try_unwrap(payload_arc).unwrap_or_else(|arc| (*arc).clone());
     let total_elapsed = tokenize_started.elapsed().as_millis();
     if total_elapsed > TOKENIZE_BUDGET_MS {
@@ -491,7 +524,7 @@ fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
         .map(format_bounds_for_cache_key)
         .unwrap_or_else(|| "-".to_string());
     format!(
-        "{}|{}|{}|pid={}|bounds={}|capture_bounds={}|native={:?}",
+        "{}|{}|{}|pid={}|bounds={}|capture_bounds={}|native={:?}|all={}",
         meta.id,
         meta.title,
         meta.app.as_deref().unwrap_or_default(),
@@ -500,8 +533,52 @@ fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
             .unwrap_or_else(|| "-".to_string()),
         format_bounds_for_cache_key(&meta.bounds),
         capture_bounds,
-        meta.native_window_id
+        meta.native_window_id,
+        meta.include_offscreen_ax
     )
+}
+
+fn tokenize_target_key(meta: &TokenizeWindowMeta) -> String {
+    format!(
+        "{}|pid={}|native={:?}|bounds={}",
+        meta.id,
+        meta.pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        meta.native_window_id,
+        format_bounds_for_cache_key(&meta.bounds)
+    )
+}
+
+fn remember_all_tokenization(
+    meta: &TokenizeWindowMeta,
+    payload: &TokenizePayload,
+) -> Result<(), AppError> {
+    if !meta.include_offscreen_ax {
+        return Ok(());
+    }
+    if !target_key_is_stable(meta) {
+        return Ok(());
+    }
+    let offscreen_ids = payload
+        .windows
+        .iter()
+        .flat_map(|window| window.elements.iter())
+        .filter(|element| element.source.starts_with("accessibility_ax:"))
+        .filter(|element| {
+            let [x, y, width, height] = element.bbox;
+            !(x < meta.bounds.width
+                && 0.0 < x + width
+                && y < meta.bounds.height
+                && 0.0 < y + height)
+        })
+        .map(|element| element.id.clone())
+        .collect();
+    with_state(|state| state.remember_all_tokenization(tokenize_target_key(meta), offscreen_ids))
+}
+
+fn target_key_is_stable(meta: &TokenizeWindowMeta) -> bool {
+    meta.id != "frontmost:1" || meta.pid.is_some() || meta.native_window_id.is_some()
 }
 
 fn format_bounds_for_cache_key(bounds: &Bounds) -> String {
@@ -631,6 +708,9 @@ fn tokenize_from_snapshot(
         .collect();
     let snapshot_id = snapshot.snapshot_id;
     let timestamp = snapshot.timestamp.clone();
+    let truncated = ax_elements
+        .as_ref()
+        .is_some_and(|elements| elements.iter().any(|element| element.truncated));
     let (image_meta, windows) =
         build_window_elements(&snapshot, rgba, image_path, window_meta, ax_elements)?;
     let token_count = raw_tokens.len();
@@ -644,6 +724,7 @@ fn tokenize_from_snapshot(
         timestamp,
         image: Some(image_meta),
         windows,
+        truncated,
     })
 }
 
@@ -683,6 +764,9 @@ fn build_window_elements(
                 Some(element)
             })
             .collect();
+        if meta.include_offscreen_ax {
+            append_offscreen_ax_elements(&mut elements, &ax_elements, &meta.bounds);
+        }
     }
     trace::log(format!(
         "pipeline:tokenize:ax_metrics seen={} added={} replaced={} dropped_bounds={} text_filled={}",
@@ -737,6 +821,78 @@ fn build_window_elements(
     Ok((image_meta, vec![window]))
 }
 
+fn append_offscreen_ax_elements(
+    elements: &mut Vec<TokenizeElement>,
+    ax_elements: &[super::ax::AxElement],
+    window_bounds: &Bounds,
+) {
+    let mut offscreen_id_counts = std::collections::HashMap::new();
+    let offscreen_ids = ax_elements
+        .iter()
+        .map(|ax| {
+            let actionable = ax
+                .text
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|text| !text.is_empty())
+                || ax.checked.is_some();
+            actionable.then(|| {
+                super::ax_merge::stable_offscreen_id_for_ax(
+                    ax,
+                    &ax.bounds,
+                    &mut offscreen_id_counts,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    for (index, ax) in ax_elements.iter().enumerate() {
+        if rectangles_intersect(&ax.bounds, window_bounds) {
+            continue;
+        }
+        let text = ax
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if text.is_none() && ax.checked.is_none() {
+            continue;
+        }
+        let actionable = ax
+            .text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|text| !text.is_empty())
+            || ax.checked.is_some();
+        if !actionable {
+            continue;
+        }
+        let Some(id) = offscreen_ids[index].clone() else {
+            continue;
+        };
+        elements.push(TokenizeElement {
+            id,
+            kind: String::new(),
+            bbox: [
+                ax.bounds.x - window_bounds.x,
+                ax.bounds.y - window_bounds.y,
+                ax.bounds.width,
+                ax.bounds.height,
+            ],
+            has_border: None,
+            text: text.map(str::to_string),
+            text_truncated: None,
+            confidence: None,
+            scrollable: matches!(ax.role.as_str(), "AXScrollArea" | "AXScrollBar").then_some(true),
+            checked: ax.checked,
+            source: format!("accessibility_ax:{}", ax.role),
+        });
+    }
+}
+
+fn rectangles_intersect(a: &Bounds, b: &Bounds) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+}
+
 fn detect_vision_elements(
     snapshot: &SnapshotPayload,
     rgba: &image::RgbaImage,
@@ -769,6 +925,7 @@ fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax
                 native_window_id,
                 meta.capture_bounds.as_ref().or(Some(&meta.bounds)),
                 Some(&meta.title),
+                meta.include_offscreen_ax,
             )
         }
         #[cfg(target_os = "linux")]
@@ -784,6 +941,7 @@ fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax
                 0,
                 meta.capture_bounds.as_ref().or(Some(&meta.bounds)),
                 Some(&meta.title),
+                meta.include_offscreen_ax,
             )
         }
         #[cfg(not(target_os = "linux"))]
@@ -805,7 +963,7 @@ fn detect_ax_elements(window_meta: Option<&TokenizeWindowMeta>) -> Vec<super::ax
             ));
             return Vec::new();
         }
-        _ => super::ax::collect_frontmost_window_elements(),
+        _ => super::ax::collect_frontmost_window_elements(meta.include_offscreen_ax),
     };
     match result {
         Ok(items) => {
@@ -1177,8 +1335,9 @@ mod tests {
     use image::{Rgba, RgbaImage};
 
     use super::{
-        TokenizeWindowMeta, build_window_elements, detect_ax_elements, tokenize_cache_key,
-        window_capture_crop_rect, window_crop_rect, write_tokenize_overlay,
+        TokenizeWindowMeta, append_offscreen_ax_elements, build_window_elements,
+        detect_ax_elements, tokenize_cache_key, tokenize_target_key, window_capture_crop_rect,
+        window_crop_rect, write_tokenize_overlay,
     };
 
     fn golden_fixture_path(name: &str) -> PathBuf {
@@ -1287,6 +1446,7 @@ mod tests {
         };
 
         let window_meta = TokenizeWindowMeta {
+            include_offscreen_ax: false,
             id: "pid:7".to_string(),
             title: "Sample".to_string(),
             app: Some("TestApp".to_string()),
@@ -1364,6 +1524,7 @@ mod tests {
             }],
         };
         let window_meta = TokenizeWindowMeta {
+            include_offscreen_ax: false,
             id: "abc:1".to_string(),
             title: "Determinism".to_string(),
             app: Some("Determinism".to_string()),
@@ -1468,6 +1629,7 @@ mod tests {
                     },
                 ],
             }],
+            truncated: false,
         };
 
         write_tokenize_overlay(&payload, &overlay_path).expect("write overlay");
@@ -1540,6 +1702,7 @@ mod tests {
                     },
                 ],
             }],
+            truncated: false,
         };
 
         write_tokenize_overlay(&payload, &overlay_path).expect("write overlay");
@@ -1558,6 +1721,7 @@ mod tests {
     #[test]
     fn tokenize_cache_key_separates_background_ax_targets() {
         let first = TokenizeWindowMeta {
+            include_offscreen_ax: false,
             id: "native:1".to_string(),
             title: "Window".to_string(),
             app: Some("App".to_string()),
@@ -1602,11 +1766,70 @@ mod tests {
             tokenize_cache_key(&first),
             tokenize_cache_key(&different_capture_bounds)
         );
+
+        let mut all_ax = first.clone();
+        all_ax.include_offscreen_ax = true;
+        assert_ne!(tokenize_cache_key(&first), tokenize_cache_key(&all_ax));
+    }
+
+    #[test]
+    fn append_offscreen_ax_elements_preserves_text_and_logical_bounds() {
+        let window_bounds = Bounds {
+            x: 100.0,
+            y: 200.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let ax_elements = vec![super::super::ax::AxElement {
+            role: "AXStaticText".to_string(),
+            text: Some("below the fold".to_string()),
+            bounds: Bounds {
+                x: 120.0,
+                y: 700.0,
+                width: 180.0,
+                height: 24.0,
+            },
+            ax_identifier: None,
+            checked: None,
+            truncated: false,
+        }];
+        let mut elements = Vec::new();
+
+        append_offscreen_ax_elements(&mut elements, &ax_elements, &window_bounds);
+
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].text.as_deref(), Some("below the fold"));
+        assert_eq!(elements[0].bbox, [20.0, 500.0, 180.0, 24.0]);
+        assert_eq!(elements[0].source, "accessibility_ax:AXStaticText");
+    }
+
+    #[test]
+    fn target_key_separates_frontmost_windows_by_bounds() {
+        let first = TokenizeWindowMeta {
+            id: "frontmost:1".to_string(),
+            title: "active_window".to_string(),
+            app: None,
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 300.0,
+            },
+            pid: None,
+            native_window_id: None,
+            capture_bounds: None,
+            include_offscreen_ax: true,
+        };
+        let mut second = first.clone();
+        second.bounds.x = 10.0;
+
+        assert_ne!(tokenize_target_key(&first), tokenize_target_key(&second));
     }
 
     #[test]
     fn detect_ax_elements_skips_underspecified_target_pid() {
         let window_meta = TokenizeWindowMeta {
+            include_offscreen_ax: false,
             id: "target-without-native-id".to_string(),
             title: "Window".to_string(),
             app: Some("App".to_string()),

@@ -49,6 +49,7 @@ pub(super) fn click_text_target(
         let (native_window_id, capture_bounds) =
             background_capture_for_explicit_target(explicit_target.as_ref())?;
         let window_meta = vision::pipeline::TokenizeWindowMeta {
+            include_offscreen_ax: false,
             id,
             title,
             app,
@@ -175,7 +176,7 @@ pub(super) fn try_click_text_active_window_ax(
     query: &str,
     button: PointerButton,
 ) -> Result<Option<Value>, AppError> {
-    let ax_elements = match platform::ax::collect_frontmost_window_elements() {
+    let ax_elements = match platform::ax::collect_frontmost_window_elements(false) {
         Ok(items) => items,
         Err(err) => {
             trace::log(format!("ui_click_text:active_window_ax_warn {err}"));
@@ -264,11 +265,6 @@ pub(super) fn click_element_id_target(
     if needle.is_empty() {
         return Err(AppError::invalid_argument("empty element id selector"));
     }
-    if explicit_target.is_none() && is_ax_element_id(needle) {
-        if let Some(result) = try_click_ax_element_id_target(needle, button)? {
-            return Ok((result, None));
-        }
-    }
     let bounds = explicit_target
         .as_ref()
         .map(|target| target.bounds.clone())
@@ -291,7 +287,8 @@ pub(super) fn click_element_id_target(
         .unwrap_or_else(|| "frontmost:1".to_string());
     let (native_window_id, capture_bounds) =
         background_capture_for_explicit_target(explicit_target.as_ref())?;
-    let window_meta = vision::pipeline::TokenizeWindowMeta {
+    let mut window_meta = vision::pipeline::TokenizeWindowMeta {
+        include_offscreen_ax: false,
         id,
         title,
         app,
@@ -304,14 +301,38 @@ pub(super) fn click_element_id_target(
         native_window_id,
         capture_bounds,
     };
-    let payload = vision::pipeline::tokenize_window(window_meta)?;
+    let payload = vision::pipeline::tokenize_window(window_meta.clone())?;
     let pre_click_tokens = observe_seed_tokens_from_tokenize_payload(&payload);
     let candidates = tokenize_payload_elements_for_click(&payload);
     let total_candidates = candidates.len();
-    let matches: Vec<TokenizeClickElementCandidate> = candidates
+    let mut matches: Vec<TokenizeClickElementCandidate> = candidates
         .into_iter()
         .filter(|element| element.id == needle)
         .collect();
+    let fresh_ax_matches = ax_candidates_for_window(&window_meta)
+        .into_iter()
+        .filter(|element| element.id == needle)
+        .collect::<Vec<_>>();
+    if fresh_ax_matches.is_empty() {
+        matches.retain(|element| !element.source.starts_with("accessibility_ax:"));
+    } else {
+        matches = fresh_ax_matches;
+    }
+    if matches.is_empty() {
+        let known_offscreen = vision::pipeline::known_offscreen_id(&window_meta, needle)?;
+        let previously_tokenized_all = vision::pipeline::was_all_tokenized_recently(&window_meta)?;
+        trace::log(format!(
+            "pointer_click_id:offscreen_lookup id=\"{}\" known_id={} marked_all={}",
+            compact_for_log(needle),
+            known_offscreen,
+            previously_tokenized_all
+        ));
+        window_meta.include_offscreen_ax = true;
+        matches = ax_candidates_for_window(&window_meta)
+            .into_iter()
+            .filter(|element| element.id == needle)
+            .collect();
+    }
     trace::log(format!(
         "pointer_click_id:candidates id=\"{}\" total={} matched={}",
         compact_for_log(needle),
@@ -329,6 +350,11 @@ pub(super) fn click_element_id_target(
         )));
     }
     let target = &matches[0];
+    if !target_center_inside_window(&target.bounds, &window_meta.bounds) {
+        return Err(AppError::invalid_argument(format!(
+            "element id \"{needle}\" is off-screen; scroll it into view before clicking"
+        )));
+    }
     trace::log(format!(
         "pointer_click_id:selected id=\"{}\" source={} bounds=({:.1}, {:.1}, {:.1}, {:.1}) text=\"{}\"",
         compact_for_log(&target.id),
@@ -352,14 +378,73 @@ pub(super) fn click_element_id_target(
     ))
 }
 
-pub(super) fn is_ax_element_id(id: &str) -> bool {
-    id.starts_with("axid_") || id.starts_with("axp_")
-}
-
 pub(super) fn center_point(bounds: &desktop_core::protocol::Bounds) -> Point {
     let x = (bounds.x + bounds.width * 0.5).round().max(0.0) as u32;
     let y = (bounds.y + bounds.height * 0.5).round().max(0.0) as u32;
     Point::new(x, y)
+}
+
+fn target_center_inside_window(
+    target: &desktop_core::protocol::Bounds,
+    window: &desktop_core::protocol::Bounds,
+) -> bool {
+    let center_x = target.x + target.width * 0.5;
+    let center_y = target.y + target.height * 0.5;
+    center_x >= window.x
+        && center_x <= window.x + window.width
+        && center_y >= window.y
+        && center_y <= window.y + window.height
+}
+
+fn ax_candidates_for_window(
+    window_meta: &vision::pipeline::TokenizeWindowMeta,
+) -> Vec<TokenizeClickElementCandidate> {
+    let ax_elements = vision::pipeline::collect_ax_elements_fresh(window_meta);
+    let mut visible_id_counts = std::collections::HashMap::new();
+    let mut offscreen_id_counts = std::collections::HashMap::new();
+    let mut candidates = Vec::new();
+    for ax in &ax_elements {
+        let actionable = ax
+            .text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|text| !text.is_empty())
+            || ax.checked.is_some();
+        if !actionable {
+            continue;
+        }
+        let offscreen_id =
+            vision::ax_merge::stable_offscreen_id_for_ax(ax, &ax.bounds, &mut offscreen_id_counts);
+        let visible = rectangles_intersect(&ax.bounds, &window_meta.bounds);
+        let id = if !visible {
+            offscreen_id.clone()
+        } else {
+            vision::ax_merge::stable_id_for_ax(ax, &ax.bounds, &mut visible_id_counts)
+        };
+        let candidate = TokenizeClickElementCandidate {
+            id,
+            text: ax.text.clone(),
+            bounds: ax.bounds.clone(),
+            source: format!("accessibility_ax:{}", ax.role),
+        };
+        candidates.push(candidate);
+        if visible {
+            candidates.push(TokenizeClickElementCandidate {
+                id: offscreen_id,
+                text: ax.text.clone(),
+                bounds: ax.bounds.clone(),
+                source: format!("accessibility_ax:{}", ax.role),
+            });
+        }
+    }
+    candidates
+}
+
+fn rectangles_intersect(
+    a: &desktop_core::protocol::Bounds,
+    b: &desktop_core::protocol::Bounds,
+) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
 pub(super) fn resolve_element_id_target(
@@ -384,12 +469,6 @@ pub(super) fn resolve_element_id_target(
     let needle = id.trim();
     if needle.is_empty() {
         return Err(AppError::invalid_argument("empty element id selector"));
-    }
-
-    if explicit_target.is_none()
-        && let Some(target) = resolve_ax_element_id_target(needle)?
-    {
-        return Ok(target);
     }
 
     let resolved_target = if active_window {
@@ -422,7 +501,8 @@ pub(super) fn resolve_element_id_target(
     } else {
         (None, None)
     };
-    let window_meta = vision::pipeline::TokenizeWindowMeta {
+    let mut window_meta = vision::pipeline::TokenizeWindowMeta {
+        include_offscreen_ax: false,
         id,
         title,
         app,
@@ -435,13 +515,37 @@ pub(super) fn resolve_element_id_target(
         native_window_id,
         capture_bounds,
     };
-    let payload = vision::pipeline::tokenize_window(window_meta)?;
+    let payload = vision::pipeline::tokenize_window(window_meta.clone())?;
     let candidates = tokenize_payload_elements_for_click(&payload);
     let total_candidates = candidates.len();
-    let matches: Vec<TokenizeClickElementCandidate> = candidates
+    let mut matches: Vec<TokenizeClickElementCandidate> = candidates
         .into_iter()
         .filter(|element| element.id == needle)
         .collect();
+    let fresh_ax_matches = ax_candidates_for_window(&window_meta)
+        .into_iter()
+        .filter(|element| element.id == needle)
+        .collect::<Vec<_>>();
+    if fresh_ax_matches.is_empty() {
+        matches.retain(|element| !element.source.starts_with("accessibility_ax:"));
+    } else {
+        matches = fresh_ax_matches;
+    }
+    if matches.is_empty() {
+        let known_offscreen = vision::pipeline::known_offscreen_id(&window_meta, needle)?;
+        let previously_tokenized_all = vision::pipeline::was_all_tokenized_recently(&window_meta)?;
+        trace::log(format!(
+            "element_id_lookup:offscreen_lookup id=\"{}\" known_id={} marked_all={}",
+            compact_for_log(needle),
+            known_offscreen,
+            previously_tokenized_all
+        ));
+        window_meta.include_offscreen_ax = true;
+        matches = ax_candidates_for_window(&window_meta)
+            .into_iter()
+            .filter(|element| element.id == needle)
+            .collect();
+    }
     trace::log(format!(
         "element_id_lookup:candidates id=\"{}\" total={} matched={}",
         compact_for_log(needle),
@@ -458,7 +562,13 @@ pub(super) fn resolve_element_id_target(
             "multiple elements matched id \"{needle}\""
         )));
     }
-    Ok(matches[0].clone())
+    let target = matches[0].clone();
+    if !target_center_inside_window(&target.bounds, &window_meta.bounds) {
+        return Err(AppError::invalid_argument(format!(
+            "element id \"{needle}\" is off-screen; scroll it into view before using it as a scroll target"
+        )));
+    }
+    Ok(target)
 }
 
 fn background_capture_for_explicit_target(
@@ -476,10 +586,12 @@ fn background_capture_for_explicit_target(
     ))
 }
 
+#[allow(dead_code)]
 pub(super) fn resolve_ax_element_id_target(
     needle: &str,
+    include_offscreen: bool,
 ) -> Result<Option<TokenizeClickElementCandidate>, AppError> {
-    let ax_elements = match platform::ax::collect_frontmost_window_elements() {
+    let ax_elements = match platform::ax::collect_frontmost_window_elements(include_offscreen) {
         Ok(items) => items,
         Err(err) => {
             trace::log(format!("element_id_lookup:ax_warn {err}"));
@@ -542,11 +654,13 @@ pub(super) fn resolve_ax_element_id_target(
     Ok(Some(matches[0].clone()))
 }
 
+#[allow(dead_code)]
 pub(super) fn try_click_ax_element_id_target(
     needle: &str,
     button: PointerButton,
+    include_offscreen: bool,
 ) -> Result<Option<Value>, AppError> {
-    let ax_elements = match platform::ax::collect_frontmost_window_elements() {
+    let ax_elements = match platform::ax::collect_frontmost_window_elements(include_offscreen) {
         Ok(items) => items,
         Err(err) => {
             trace::log(format!("pointer_click_id:ax_direct_warn {err}"));
@@ -638,6 +752,7 @@ pub(super) fn tokenize_click_text_candidate(
     })?;
     let app = request_frontmost_app(request_context);
     let window_meta = vision::pipeline::TokenizeWindowMeta {
+        include_offscreen_ax: false,
         id: "frontmost:1".to_string(),
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
         app,

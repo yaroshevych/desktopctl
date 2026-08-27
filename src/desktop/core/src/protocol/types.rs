@@ -56,6 +56,8 @@ pub struct TokenizePayload {
     pub image: Option<TokenizeImage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<TokenizeWindow>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

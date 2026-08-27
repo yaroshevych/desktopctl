@@ -10,6 +10,7 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub truncated: bool,
 }
 
 use crate::trace;
@@ -49,7 +50,9 @@ unsafe extern "C" {
     fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> i32;
 }
 
-pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
+pub fn collect_frontmost_window_elements(
+    include_offscreen: bool,
+) -> Result<Vec<AxElement>, AppError> {
     let system = AXUIElement::system_wide();
     let focused_app_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(
         kAXFocusedApplicationAttribute,
@@ -66,7 +69,7 @@ pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
         .or_else(|_| app.main_window())
         .map_err(ax_err)?;
 
-    collect_window_tree_elements(&window)
+    collect_window_tree_elements(&window, include_offscreen)
 }
 
 pub fn collect_window_elements(
@@ -74,6 +77,7 @@ pub fn collect_window_elements(
     native_window_id: u32,
     target_window_bounds: Option<&Bounds>,
     target_window_title: Option<&str>,
+    include_offscreen: bool,
 ) -> Result<Vec<AxElement>, AppError> {
     let app = AXUIElement::application(pid);
     let windows = app.windows().map_err(ax_err)?;
@@ -87,7 +91,7 @@ pub fn collect_window_elements(
             trace::log(format!(
                 "ax:background_window_match source=native pid={pid} window_id={native_window_id}"
             ));
-            return collect_window_tree_elements(&window);
+            return collect_window_tree_elements(&window, include_offscreen);
         }
 
         if let (Some(target), Some(bounds)) = (target_window_bounds, element_bounds(&window)) {
@@ -117,7 +121,7 @@ pub fn collect_window_elements(
             "ax:background_window_match source=bounds_title pid={pid} window_id={native_window_id} iou={score:.3} title=\"{}\"",
             compact_for_log(&title, 80)
         ));
-        return collect_window_tree_elements(&window);
+        return collect_window_tree_elements(&window, include_offscreen);
     }
 
     Err(AppError::target_not_found(format!(
@@ -125,7 +129,14 @@ pub fn collect_window_elements(
     )))
 }
 
-fn collect_window_tree_elements(window: &AXUIElement) -> Result<Vec<AxElement>, AppError> {
+const ALL_MAX_NODES: usize = 2_000;
+const ALL_MAX_DEPTH: usize = 64;
+const ALL_MAX_TEXT_BYTES: usize = 512 * 1024;
+
+fn collect_window_tree_elements(
+    window: &AXUIElement,
+    include_offscreen: bool,
+) -> Result<Vec<AxElement>, AppError> {
     let mut elements = Vec::new();
     let Some(batch) = fetch_batch(&window) else {
         return Ok(elements);
@@ -135,12 +146,65 @@ fn collect_window_tree_elements(window: &AXUIElement) -> Result<Vec<AxElement>, 
         .and_then(|v| v.as_ref())
         .and_then(cf_to_string);
     let viewport = batch_bounds(&batch);
+    let mut text_budget = ALL_MAX_TEXT_BYTES;
+    let mut truncated = false;
     if let Some(role) = role.as_ref() {
-        emit_element_from_batch(&window, role, &batch, viewport.as_ref(), &mut elements);
+        emit_element_from_batch(
+            &window,
+            role,
+            &batch,
+            viewport.as_ref(),
+            include_offscreen,
+            &mut text_budget,
+            &mut truncated,
+            &mut elements,
+        );
     }
     if let Some(children_value) = batch.get(IDX_CHILDREN).and_then(|v| v.as_ref()) {
-        for child in cf_to_children(children_value) {
-            collect_elements_recursive(&child, viewport.as_ref(), &mut elements);
+        let mut visited = 1usize;
+        for_each_child(children_value, |child| {
+            collect_elements_recursive(
+                &child,
+                viewport.as_ref(),
+                include_offscreen,
+                1,
+                &mut visited,
+                &mut truncated,
+                &mut text_budget,
+                &mut elements,
+            );
+            if include_offscreen && visited >= ALL_MAX_NODES {
+                truncated = true;
+                false
+            } else {
+                true
+            }
+        });
+        if truncated {
+            trace::log(format!(
+                "ax:all_truncated max_nodes={ALL_MAX_NODES} max_depth={ALL_MAX_DEPTH} max_text_bytes={ALL_MAX_TEXT_BYTES}"
+            ));
+        }
+    }
+    if truncated {
+        if elements.is_empty() {
+            elements.push(AxElement {
+                role: "AXTraversalTruncated".to_string(),
+                text: None,
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                ax_identifier: None,
+                checked: None,
+                truncated: true,
+            });
+        } else {
+            for element in &mut elements {
+                element.truncated = true;
+            }
         }
     }
     Ok(elements)
@@ -196,6 +260,7 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
         bounds,
         ax_identifier,
         checked,
+        truncated: false,
     }))
 }
 
@@ -315,28 +380,40 @@ fn cf_to_string(value: &CFType) -> Option<String> {
     cf_type_text(value)
 }
 
-fn cf_to_children(value: &CFType) -> Vec<AXUIElement> {
+fn for_each_child(value: &CFType, mut f: impl FnMut(AXUIElement) -> bool) {
     if !value.instance_of::<CFArray<CFType>>() {
-        return Vec::new();
+        return;
     }
     let arr = unsafe { CFArray::<CFType>::wrap_under_get_rule(value.as_CFTypeRef() as CFArrayRef) };
-    let mut out = Vec::with_capacity(arr.len().max(0) as usize);
     for i in 0..arr.len() {
         if let Some(item) = arr.get(i) {
             if item.instance_of::<AXUIElement>() {
                 let child = unsafe { AXUIElement::wrap_under_get_rule(item.as_CFTypeRef() as _) };
-                out.push(child);
+                if !f(child) {
+                    break;
+                }
             }
         }
     }
-    out
 }
 
 fn collect_elements_recursive(
     element: &AXUIElement,
     viewport: Option<&Bounds>,
+    include_offscreen: bool,
+    depth: usize,
+    visited: &mut usize,
+    truncated: &mut bool,
+    text_budget: &mut usize,
     out: &mut Vec<AxElement>,
 ) {
+    if include_offscreen
+        && (*visited >= ALL_MAX_NODES || depth > ALL_MAX_DEPTH || *text_budget == 0)
+    {
+        *truncated = true;
+        return;
+    }
+    *visited += 1;
     let Some(batch) = fetch_batch(element) else {
         return;
     };
@@ -350,18 +427,42 @@ fn collect_elements_recursive(
     };
 
     let bounds = batch_bounds(&batch);
-    if let (Some(b), Some(vp)) = (bounds.as_ref(), viewport) {
+    if !include_offscreen && let (Some(b), Some(vp)) = (bounds.as_ref(), viewport) {
         if !bounds_intersect(b, vp) {
             return;
         }
     }
 
-    emit_element_from_batch(element, &role, &batch, bounds.as_ref(), out);
+    emit_element_from_batch(
+        element,
+        &role,
+        &batch,
+        bounds.as_ref(),
+        include_offscreen,
+        &mut *text_budget,
+        &mut *truncated,
+        out,
+    );
 
     if let Some(children_value) = batch.get(IDX_CHILDREN).and_then(|v| v.as_ref()) {
-        for child in cf_to_children(children_value) {
-            collect_elements_recursive(&child, viewport, out);
-        }
+        for_each_child(children_value, |child| {
+            collect_elements_recursive(
+                &child,
+                viewport,
+                include_offscreen,
+                depth + 1,
+                visited,
+                truncated,
+                text_budget,
+                out,
+            );
+            if include_offscreen && *visited >= ALL_MAX_NODES {
+                *truncated = true;
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
@@ -370,6 +471,9 @@ fn emit_element_from_batch(
     role: &str,
     batch: &[Option<CFType>],
     bounds: Option<&Bounds>,
+    include_offscreen: bool,
+    text_budget: &mut usize,
+    truncated: &mut bool,
     out: &mut Vec<AxElement>,
 ) {
     let interactive = is_interactive_role(role);
@@ -384,7 +488,12 @@ fn emit_element_from_batch(
         return;
     };
     if interactive {
-        let text = batch_interactive_label(batch, role).or_else(|| element_label(element, role));
+        let text = limit_ax_text(
+            batch_interactive_label(batch, role).or_else(|| element_label(element, role)),
+            include_offscreen,
+            text_budget,
+            truncated,
+        );
         let ax_identifier = if should_collect_identifier(role) {
             batch_text_at(batch, IDX_IDENTIFIER).or_else(|| element_identifier(element))
         } else {
@@ -398,9 +507,15 @@ fn emit_element_from_batch(
             bounds: bounds.clone(),
             ax_identifier,
             checked,
+            truncated: false,
         });
     } else {
-        let text = batch_text_bearing_label(batch, role);
+        let text = limit_ax_text(
+            batch_text_bearing_label(batch, role),
+            include_offscreen,
+            text_budget,
+            truncated,
+        );
         if text
             .as_deref()
             .map(str::trim)
@@ -412,9 +527,36 @@ fn emit_element_from_batch(
                 bounds: bounds.clone(),
                 ax_identifier: None,
                 checked: None,
+                truncated: false,
             });
         }
     }
+}
+
+fn limit_ax_text(
+    mut text: Option<String>,
+    enabled: bool,
+    remaining: &mut usize,
+    truncated: &mut bool,
+) -> Option<String> {
+    if !enabled {
+        return text;
+    }
+    let Some(value) = text.as_mut() else {
+        return text;
+    };
+    if value.len() <= *remaining {
+        *remaining -= value.len();
+        return text;
+    }
+    *truncated = true;
+    let mut boundary = (*remaining).min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    *remaining = 0;
+    text
 }
 
 fn bounds_intersect(a: &Bounds, b: &Bounds) -> bool {
@@ -455,14 +597,15 @@ fn batch_bounds(batch: &[Option<CFType>]) -> Option<Bounds> {
     let size = batch.get(IDX_SIZE).and_then(|v| v.as_ref())?;
     let (x, y) = decode_point(pos)?;
     let (w, h) = decode_size(size)?;
-    if w <= 1.0 || h <= 1.0 {
+    if !x.is_finite() || !y.is_finite() || !w.is_finite() || !h.is_finite() || w <= 1.0 || h <= 1.0
+    {
         return None;
     }
     Some(Bounds {
-        x: x.max(0.0),
-        y: y.max(0.0),
-        width: w.max(0.0),
-        height: h.max(0.0),
+        x,
+        y,
+        width: w,
+        height: h,
     })
 }
 
@@ -1057,14 +1200,25 @@ fn element_bounds(element: &AXUIElement) -> Option<Bounds> {
 
     let (x, y) = decode_point(&pos)?;
     let (w, h) = decode_size(&size)?;
-    if w <= 1.0 || h <= 1.0 {
+    const MAX_AX_COORDINATE: f64 = 100_000.0;
+    if !x.is_finite()
+        || !y.is_finite()
+        || !w.is_finite()
+        || !h.is_finite()
+        || x.abs() > MAX_AX_COORDINATE
+        || y.abs() > MAX_AX_COORDINATE
+        || w <= 1.0
+        || h <= 1.0
+        || w > MAX_AX_COORDINATE
+        || h > MAX_AX_COORDINATE
+    {
         return None;
     }
     Some(Bounds {
-        x: x.max(0.0),
-        y: y.max(0.0),
-        width: w.max(0.0),
-        height: h.max(0.0),
+        x,
+        y,
+        width: w,
+        height: h,
     })
 }
 

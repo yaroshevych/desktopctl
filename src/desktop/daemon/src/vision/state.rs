@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use desktop_core::{
@@ -14,6 +15,10 @@ use super::{diff::GrayThumbnail, types::CapturedFrame};
 const MAX_EVENTS: usize = 512;
 const MAX_FRAMES: usize = 64;
 const TOKENIZE_CACHE_CAPACITY: usize = 4;
+const ALL_WINDOW_CACHE_CAPACITY: usize = 32;
+const ALL_WINDOW_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const OFFSCREEN_ID_CACHE_CAPACITY: usize = 512;
+const OFFSCREEN_ID_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone)]
 pub struct VisionEvent {
@@ -36,6 +41,8 @@ pub struct VisionState {
     latest_frame_png: Option<Arc<[u8]>>,
     latest_thumbnail: Option<GrayThumbnail>,
     tokenize_cache: VecDeque<(String, u64, Arc<TokenizePayload>)>,
+    all_tokenized_windows: VecDeque<(String, Instant)>,
+    offscreen_ids: VecDeque<(String, String, Instant)>,
     events: VecDeque<VisionEvent>,
     frames: VecDeque<PathBuf>,
     token_map: HashMap<u32, TokenEntry>,
@@ -51,6 +58,8 @@ impl VisionState {
             latest_frame_png: None,
             latest_thumbnail: None,
             tokenize_cache: VecDeque::new(),
+            all_tokenized_windows: VecDeque::new(),
+            offscreen_ids: VecDeque::new(),
             events: VecDeque::new(),
             frames: VecDeque::new(),
             token_map: HashMap::new(),
@@ -106,6 +115,51 @@ impl VisionState {
         while self.tokenize_cache.len() > TOKENIZE_CACHE_CAPACITY {
             self.tokenize_cache.pop_front();
         }
+    }
+
+    pub fn remember_all_tokenization(&mut self, window_key: String, offscreen_ids: Vec<String>) {
+        let now = Instant::now();
+        self.prune_all_tokenization(now);
+        self.all_tokenized_windows
+            .retain(|(key, _)| key != &window_key);
+        self.all_tokenized_windows
+            .push_back((window_key.clone(), now));
+        while self.all_tokenized_windows.len() > ALL_WINDOW_CACHE_CAPACITY {
+            if let Some((evicted_key, _)) = self.all_tokenized_windows.pop_front() {
+                self.offscreen_ids.retain(|(key, _, _)| key != &evicted_key);
+            }
+        }
+
+        self.offscreen_ids.retain(|(key, _, _)| key != &window_key);
+        for id in offscreen_ids {
+            self.offscreen_ids.push_back((window_key.clone(), id, now));
+        }
+        while self.offscreen_ids.len() > OFFSCREEN_ID_CACHE_CAPACITY {
+            self.offscreen_ids.pop_front();
+        }
+    }
+
+    pub fn was_all_tokenized_recently(&mut self, window_key: &str) -> bool {
+        let now = Instant::now();
+        self.prune_all_tokenization(now);
+        self.all_tokenized_windows
+            .iter()
+            .any(|(key, _)| key == window_key)
+    }
+
+    pub fn known_offscreen_id(&mut self, window_key: &str, id: &str) -> bool {
+        let now = Instant::now();
+        self.prune_all_tokenization(now);
+        self.offscreen_ids
+            .iter()
+            .any(|(key, cached_id, _)| key == window_key && cached_id == id)
+    }
+
+    fn prune_all_tokenization(&mut self, now: Instant) {
+        self.all_tokenized_windows
+            .retain(|(_, created)| now.duration_since(*created) <= ALL_WINDOW_CACHE_TTL);
+        self.offscreen_ids
+            .retain(|(_, _, created)| now.duration_since(*created) <= OFFSCREEN_ID_CACHE_TTL);
     }
 
     pub fn token_map(&self) -> &HashMap<u32, TokenEntry> {
@@ -223,6 +277,7 @@ mod tests {
             timestamp: format!("ts-{snapshot_id}"),
             image: None,
             windows: Vec::new(),
+            truncated: false,
         })
     }
 
@@ -386,6 +441,35 @@ mod tests {
                 .cached_tokenize_payload_if_fingerprint("window:dictionary", 42)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn all_tokenization_remembers_window_and_offscreen_ids() {
+        let mut state = VisionState::new();
+        state.remember_all_tokenization(
+            "window:notes|pid=7|native=42".to_string(),
+            vec!["axid_more".to_string()],
+        );
+
+        assert!(state.was_all_tokenized_recently("window:notes|pid=7|native=42"));
+        assert!(state.known_offscreen_id("window:notes|pid=7|native=42", "axid_more"));
+        assert!(!state.known_offscreen_id("window:other|pid=7|native=42", "axid_more"));
+    }
+
+    #[test]
+    fn all_tokenization_eviction_removes_window_ids() {
+        let mut state = VisionState::new();
+        for index in 0..=super::ALL_WINDOW_CACHE_CAPACITY {
+            state.remember_all_tokenization(
+                format!("window:{index}"),
+                vec![format!("axid_{index}")],
+            );
+        }
+
+        assert!(!state.was_all_tokenized_recently("window:0"));
+        assert!(!state.known_offscreen_id("window:0", "axid_0"));
+        assert!(state.was_all_tokenized_recently("window:32"));
+        assert!(state.known_offscreen_id("window:32", "axid_32"));
     }
 
     #[test]

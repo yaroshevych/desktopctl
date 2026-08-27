@@ -174,7 +174,7 @@ fn collect_ax_elements_with_timeout() -> (bool, Vec<platform::ax::AxElement>) {
 
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(platform::ax::collect_frontmost_window_elements());
+        let _ = tx.send(platform::ax::collect_frontmost_window_elements(false));
     });
     match rx.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(items)) => (true, items),
@@ -364,6 +364,7 @@ mod tests {
             bounds: b,
             ax_identifier: None,
             checked: None,
+            truncated: false,
         }
     }
 

@@ -226,6 +226,7 @@ fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
             let screenshot_path = sub.get_one::<String>("screenshot").cloned();
             let journal = sub.get_flag("journal");
             let list_all_windows = sub.get_flag("list_windows");
+            let all = sub.get_flag("all");
             if window_query.is_some() && screenshot_path.is_some() {
                 return Err(AppError::invalid_argument(
                     "--window-query cannot be combined with --screenshot for screen tokenize",
@@ -241,15 +242,27 @@ fn parse_screen(m: &ArgMatches) -> Result<Command, AppError> {
                     "--active-window cannot be combined with --screenshot for screen tokenize",
                 ));
             }
+            if all && screenshot_path.is_some() {
+                return Err(AppError::invalid_argument(
+                    "--all cannot be combined with --screenshot for screen tokenize",
+                ));
+            }
+            let region = parse_region(sub)?;
+            if all && region.is_some() {
+                return Err(AppError::invalid_argument(
+                    "--all cannot be combined with --region for screen tokenize",
+                ));
+            }
             Ok(Command::ScreenTokenize {
                 overlay_out_path: sub.get_one::<String>("overlay").cloned(),
                 window_query,
                 screenshot_path,
                 journal,
                 list_all_windows,
+                all,
                 active_window,
                 active_window_id,
-                region: parse_region(sub)?,
+                region,
             })
         }
         "find" => Ok(Command::ScreenFindText {
@@ -927,6 +940,12 @@ fn screen_subcommand() -> ClapCommand {
                         .long("list-windows")
                         .action(ArgAction::SetTrue)
                         .help("Include a list of all visible windows in markdown output"),
+                )
+                .arg(
+                    Arg::new("all")
+                        .long("all")
+                        .action(ArgAction::SetTrue)
+                        .help("Include off-screen accessibility content (bounded)"),
                 )
                 .arg(
                     Arg::new("window_query")

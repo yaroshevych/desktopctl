@@ -125,9 +125,11 @@ Menu support uses macOS Accessibility only. Custom/non-native menus may expose i
 desktopctl screen screenshot [--out <path>] [--overlay] [--region <x> <y> <width> <height>]
 
 # tokenize current screen/window into structured OCR + UI elements
-desktopctl screen tokenize [--overlay <path>] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>]
+desktopctl screen tokenize [--overlay <path>] [--window-query <text>] [--screenshot <path>] [--region <x> <y> <width> <height>] [--all]
 # tokenize response window `id` is an opaque window id; pass it back via --active-window <id> to enforce target window
 # element ids are semantic and predictable (examples: button_7, button_add, text_settings)
+# --all includes off-screen content exposed by the live AX tree; it is bounded to 2,000 nodes,
+# depth 64, and 512 KiB of AX text, and cannot be combined with --screenshot or --region
 
 # find text on screen via OCR
 desktopctl screen find --text <text> [--all]

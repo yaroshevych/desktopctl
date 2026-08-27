@@ -215,6 +215,7 @@ fn write_journal_entry(output_dir: &Path) -> Result<(), AppError> {
         ))
     })?;
     let result = daemon::execute_resident_command(Command::ScreenTokenize {
+        all: false,
         overlay_out_path: None,
         window_query: None,
         screenshot_path: None,

@@ -10,9 +10,12 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub truncated: bool,
 }
 
-pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
+pub fn collect_frontmost_window_elements(
+    _include_offscreen: bool,
+) -> Result<Vec<AxElement>, AppError> {
     Ok(Vec::new())
 }
 
@@ -21,6 +24,7 @@ pub fn collect_window_elements(
     _native_window_id: u32,
     _target_window_bounds: Option<&Bounds>,
     _target_window_title: Option<&str>,
+    _include_offscreen: bool,
 ) -> Result<Vec<AxElement>, AppError> {
     Ok(Vec::new())
 }

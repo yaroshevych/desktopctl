@@ -109,7 +109,8 @@ pub(crate) fn render_markdown_response(
 ) -> String {
     let rendered = render_response(command, response, passthrough_stored_response);
     if matches!(command, Command::ScreenTokenize { .. }) {
-        return render_tokenize_markdown(&rendered);
+        let include_all_hint = matches!(command, Command::ScreenTokenize { all: true, .. });
+        return render_tokenize_markdown(&rendered, include_all_hint);
     }
     if matches!(command, Command::MenuList { .. }) {
         return render_menu_markdown(&rendered);
@@ -538,7 +539,7 @@ fn is_response_envelope_shape(value: &serde_json::Value) -> bool {
         && (obj.contains_key("result") || obj.contains_key("error"))
 }
 
-fn render_tokenize_markdown(value: &serde_json::Value) -> String {
+fn render_tokenize_markdown(value: &serde_json::Value, include_all_hint: bool) -> String {
     let ok = value
         .get("ok")
         .and_then(serde_json::Value::as_bool)
@@ -552,6 +553,11 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         .unwrap_or("unknown");
     let hint = value.get("hint").and_then(serde_json::Value::as_str);
     let result = value.get("result");
+    let truncated = include_all_hint
+        && result
+            .and_then(|v| v.get("truncated"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
     let windows = result
         .and_then(|v| v.get("windows"))
         .and_then(serde_json::Value::as_array)
@@ -563,6 +569,46 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let has_offscreen_elements = include_all_hint
+        && windows.iter().any(|window| {
+            let Some(bounds) = window.get("bounds") else {
+                return false;
+            };
+            let width = bounds
+                .get("width")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let height = bounds
+                .get("height")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            window
+                .get("elements")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|elements| {
+                    elements.iter().any(|element| {
+                        let source = element
+                            .get("source")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        let Some(bbox) = element.get("bbox").and_then(serde_json::Value::as_array)
+                        else {
+                            return false;
+                        };
+                        if !source.starts_with("accessibility_ax:") || bbox.len() != 4 {
+                            return false;
+                        }
+                        let x = bbox[0].as_f64().unwrap_or(0.0);
+                        let y = bbox[1].as_f64().unwrap_or(0.0);
+                        let element_width = bbox[2].as_f64().unwrap_or(0.0);
+                        let element_height = bbox[3].as_f64().unwrap_or(0.0);
+                        !(x < width
+                            && 0.0 < x + element_width
+                            && y < height
+                            && 0.0 < y + element_height)
+                    })
+                })
+        });
     let top_app = windows
         .first()
         .and_then(|w| w.get("app"))
@@ -605,7 +651,19 @@ fn render_tokenize_markdown(value: &serde_json::Value) -> String {
     if let Some(id) = top_window_id {
         push_kv_line(&mut lines, "window_id", id);
     }
-    if let Some(hint_text) = hint.filter(|v| !v.trim().is_empty()) {
+    if truncated {
+        push_kv_line(
+            &mut lines,
+            "warning",
+            "--all result was truncated by AX traversal limits; some elements may be missing",
+        );
+    } else if has_offscreen_elements {
+        push_kv_line(
+            &mut lines,
+            "hint",
+            "off-screen element IDs came from --all; use pointer scroll deltas with the cursor in the target scroll area, then re-run screen tokenize --all",
+        );
+    } else if let Some(hint_text) = hint.filter(|v| !v.trim().is_empty()) {
         push_kv_line(&mut lines, "hint", hint_text);
     }
     if windows.is_empty() {
@@ -1751,6 +1809,7 @@ mod tests {
     #[test]
     fn screen_tokenize_suggests_menu_discovery() {
         let command = Command::ScreenTokenize {
+            all: false,
             overlay_out_path: None,
             window_query: None,
             screenshot_path: None,
@@ -1781,6 +1840,42 @@ mod tests {
             ]
             .contains(&hint)
         );
+    }
+
+    #[test]
+    fn screen_tokenize_all_markdown_hints_how_to_act_on_offscreen_ids() {
+        let command = Command::ScreenTokenize {
+            all: true,
+            overlay_out_path: None,
+            window_query: None,
+            screenshot_path: None,
+            journal: false,
+            list_all_windows: false,
+            active_window: true,
+            active_window_id: Some("notes_859606".to_string()),
+            region: None,
+        };
+        let response = ResponseEnvelope::success(
+            "r1",
+            json!({
+                "windows": [{
+                    "id": "notes_859606",
+                    "title": "Notes",
+                    "bounds": {"x": 0, "y": 0, "width": 400, "height": 300},
+                    "elements": [{
+                        "id": "axid_offscreen",
+                        "bbox": [20, 500, 180, 24],
+                        "text": "below the fold",
+                        "source": "accessibility_ax:AXStaticText"
+                    }]
+                }]
+            }),
+        );
+
+        let markdown = render_markdown_response(&command, &response, false);
+        assert!(markdown.contains(
+            "off-screen element IDs came from --all; use pointer scroll deltas with the cursor in the target scroll area, then re-run screen tokenize --all"
+        ));
     }
 
     #[test]
@@ -1942,6 +2037,7 @@ mod tests {
     #[test]
     fn tokenize_markdown_omits_positions_and_keeps_ids() {
         let command = Command::ScreenTokenize {
+            all: false,
             overlay_out_path: None,
             window_query: None,
             screenshot_path: None,
@@ -2003,6 +2099,7 @@ mod tests {
     #[test]
     fn tokenize_markdown_merges_overlapping_element_and_ocr_entries() {
         let command = Command::ScreenTokenize {
+            all: false,
             overlay_out_path: None,
             window_query: None,
             screenshot_path: None,
@@ -2037,6 +2134,7 @@ mod tests {
     #[test]
     fn journal_tokenize_redacts_ids_and_request_metadata() {
         let command = Command::ScreenTokenize {
+            all: false,
             overlay_out_path: None,
             window_query: None,
             screenshot_path: None,
@@ -2098,6 +2196,7 @@ mod tests {
     #[test]
     fn tokenize_markdown_includes_all_windows_section_when_present() {
         let command = Command::ScreenTokenize {
+            all: false,
             overlay_out_path: None,
             window_query: None,
             screenshot_path: None,

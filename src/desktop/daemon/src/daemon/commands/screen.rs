@@ -105,6 +105,7 @@ fn tokenize_meta_for_window(
     window: &platform::windowing::WindowInfo,
     bounds: Bounds,
     require_background_capture: bool,
+    include_offscreen_ax: bool,
 ) -> Result<vision::pipeline::TokenizeWindowMeta, AppError> {
     let background_capture = should_use_background_capture(window, require_background_capture);
     let native_window_id = background_capture
@@ -126,6 +127,7 @@ fn tokenize_meta_for_window(
         pid,
         native_window_id,
         capture_bounds: native_window_id.map(|_| window.bounds.clone()),
+        include_offscreen_ax,
     })
 }
 
@@ -258,6 +260,7 @@ pub(crate) fn tokenize(
     screenshot_path: Option<String>,
     journal: bool,
     list_all_windows: bool,
+    all: bool,
     active_window: bool,
     active_window_id: Option<String>,
     region: Option<Bounds>,
@@ -274,6 +277,11 @@ pub(crate) fn tokenize(
         }};
     }
     let screenshot_mode = screenshot_path.is_some();
+    if all && region.is_some() {
+        return Err(AppError::invalid_argument(
+            "--all cannot be combined with --region for screen tokenize",
+        ));
+    }
     let mut bound_hint_active_window_id: Option<String> = None;
     let mut hint_snapshot_prefetch_rx: Option<
         mpsc::Receiver<Option<super::super::TokenizeHintSnapshot>>,
@@ -296,6 +304,11 @@ pub(crate) fn tokenize(
         if list_all_windows {
             return Err(AppError::invalid_argument(
                 "--list-windows cannot be combined with --screenshot for screen tokenize",
+            ));
+        }
+        if all {
+            return Err(AppError::invalid_argument(
+                "--all cannot be combined with --screenshot for screen tokenize",
             ));
         }
         let screenshot = PathBuf::from(path_raw);
@@ -403,7 +416,7 @@ pub(crate) fn tokenize(
                         region.as_ref(),
                     ) {
                         trace::log("active_window_id_match:prefetched_windows_hit");
-                        match tokenize_meta_for_window(prefetched, bounds.clone(), true) {
+                        match tokenize_meta_for_window(prefetched, bounds.clone(), true, all) {
                             Ok(meta) => {
                                 speculative_bounds = Some(bounds);
                                 speculative_handle = Some(std::thread::spawn(move || {
@@ -437,7 +450,7 @@ pub(crate) fn tokenize(
                 stage_done!("active_window_region_resolve");
 
                 let strict_meta =
-                    tokenize_meta_for_window(&strict_window, strict_bounds.clone(), true)?;
+                    tokenize_meta_for_window(&strict_window, strict_bounds.clone(), true, all)?;
                 let run_strict = || vision::pipeline::tokenize_window(strict_meta.clone());
 
                 let payload = if let (Some(handle), Some(bounds)) =
@@ -480,6 +493,7 @@ pub(crate) fn tokenize(
                                                 &post_window,
                                                 post_bounds,
                                                 true,
+                                                all,
                                             )?;
                                             vision::pipeline::tokenize_window(meta)?
                                         }
@@ -535,7 +549,7 @@ pub(crate) fn tokenize(
                     });
                     hint_snapshot_prefetch_rx = Some(reply_rx);
                 }
-                let meta = tokenize_meta_for_window(&resolved, bounds, false)?;
+                let meta = tokenize_meta_for_window(&resolved, bounds, false, all)?;
                 let payload = vision::pipeline::tokenize_window(meta)?;
                 (resolved, payload)
             };
@@ -581,10 +595,11 @@ pub(crate) fn tokenize(
         } else if window_query.is_none() {
             let overlay_window_bounds = overlay_bridge::tracked_window_bounds();
             stage_done!("frontmost_bounds_probe");
-            if let Some(bounds) = overlay_window_bounds {
+            if !all && let Some(bounds) = overlay_window_bounds {
                 let bounds = super::super::resolve_tokenize_region_bounds(bounds, region.as_ref())?;
                 stage_done!("frontmost_region_resolve");
                 let window_meta = vision::pipeline::TokenizeWindowMeta {
+                    include_offscreen_ax: all,
                     id: "frontmost:1".to_string(),
                     title: "active_window".to_string(),
                     app: None,
@@ -596,7 +611,7 @@ pub(crate) fn tokenize(
                 let payload = vision::pipeline::tokenize_window(window_meta)?;
                 stage_done!("frontmost_tokenize");
                 payload
-            } else if let Some(bounds) = window_target::frontmost_window_bounds() {
+            } else if !all && let Some(bounds) = window_target::frontmost_window_bounds() {
                 stage_done!("frontmost_bounds_lookup");
                 let bounds = super::super::resolve_tokenize_region_bounds(bounds, region.as_ref())?;
                 stage_done!("frontmost_region_resolve");
@@ -604,6 +619,7 @@ pub(crate) fn tokenize(
                 stage_done!("frontmost_app_lookup");
                 let title = app.clone().unwrap_or_else(|| "active_window".to_string());
                 let window_meta = vision::pipeline::TokenizeWindowMeta {
+                    include_offscreen_ax: all,
                     id: "frontmost:1".to_string(),
                     title,
                     app,
@@ -627,7 +643,7 @@ pub(crate) fn tokenize(
                     region.as_ref(),
                 )?;
                 stage_done!("window_region_resolve");
-                let window_meta = tokenize_meta_for_window(&target, bounds, false)?;
+                let window_meta = tokenize_meta_for_window(&target, bounds, false, all)?;
                 let mut payload = vision::pipeline::tokenize_window(window_meta)?;
                 stage_done!("window_tokenize");
                 if let Some(first) = payload.windows.first_mut() {
@@ -649,7 +665,7 @@ pub(crate) fn tokenize(
                 region.as_ref(),
             )?;
             stage_done!("window_region_resolve");
-            let window_meta = tokenize_meta_for_window(&target, bounds, true)?;
+            let window_meta = tokenize_meta_for_window(&target, bounds, true, all)?;
             let mut payload = vision::pipeline::tokenize_window(window_meta)?;
             stage_done!("window_tokenize");
             if let Some(first) = payload.windows.first_mut() {

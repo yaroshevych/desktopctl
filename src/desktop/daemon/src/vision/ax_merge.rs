@@ -33,8 +33,10 @@ pub fn merge_elements(
         if should_skip_ax_element(&ax.role, merged_text.as_deref()) {
             continue;
         }
-        let ax_primary_id = primary_id_for_ax(ax)
-            .or_else(|| Some(fallback_id_for_ax(ax, &local, &mut fallback_id_counts)));
+        if merged_text.is_none() && ax.checked.is_none() {
+            continue;
+        }
+        let ax_primary_id = Some(stable_id_for_ax(ax, &ax.bounds, &mut fallback_id_counts));
         if filled_from_ocr {
             metrics.ax_text_filled += 1;
         }
@@ -129,6 +131,32 @@ pub(crate) fn primary_id_for_ax(ax: &AxElement) -> Option<String> {
         return Some(format!("axid_{identifier}"));
     }
     None
+}
+
+pub(crate) fn stable_id_for_ax(
+    ax: &AxElement,
+    bounds: &Bounds,
+    counts: &mut HashMap<String, usize>,
+) -> String {
+    let base = primary_id_for_ax(ax).unwrap_or_else(|| fallback_id_for_ax(ax, bounds, counts));
+    if primary_id_for_ax(ax).is_some() {
+        let next = counts
+            .entry(base.clone())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        if *next > 1 {
+            return format!("{base}_{next}");
+        }
+    }
+    base
+}
+
+pub(crate) fn stable_offscreen_id_for_ax(
+    ax: &AxElement,
+    bounds: &Bounds,
+    counts: &mut HashMap<String, usize>,
+) -> String {
+    format!("axoff_{}", stable_id_for_ax(ax, bounds, counts))
 }
 
 fn fallback_id_for_ax(
@@ -434,6 +462,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            truncated: false,
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -484,6 +513,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            truncated: false,
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -527,6 +557,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            truncated: false,
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -566,6 +597,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            truncated: false,
         }];
         let coord_map = CoordMap::new(
             Bounds {
@@ -600,6 +632,7 @@ mod tests {
             },
             ax_identifier: Some("SaveButtonMain".to_string()),
             checked: None,
+            truncated: false,
         };
         let id = primary_id_for_ax(&ax).expect("id");
         assert_eq!(id, "axid_savebuttonmain");

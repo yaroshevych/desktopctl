@@ -106,6 +106,7 @@ fn remap_observe_ocr_ids_to_tokenize_ids(
     };
     let app = window_target::frontmost_app_name();
     let window_meta = vision::pipeline::TokenizeWindowMeta {
+        include_offscreen_ax: false,
         id: "frontmost:1".to_string(),
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
         app,

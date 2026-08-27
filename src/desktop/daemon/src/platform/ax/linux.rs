@@ -34,6 +34,7 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub truncated: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,16 +83,20 @@ mod imp {
     struct Walk<'a> {
         conn: &'a Connection,
         deadline: Instant,
+        max_depth: u32,
         nodes: usize,
+        truncated: bool,
         out: Vec<AxElement>,
     }
 
     impl<'a> Walk<'a> {
-        fn new(conn: &'a Connection) -> Self {
+        fn new(conn: &'a Connection, include_offscreen: bool) -> Self {
             Self {
                 conn,
                 deadline: Instant::now() + TIME_BUDGET,
+                max_depth: if include_offscreen { 64 } else { MAX_DEPTH },
                 nodes: 0,
+                truncated: false,
                 out: Vec::new(),
             }
         }
@@ -290,6 +295,7 @@ mod imp {
             bounds: bounds_of(conn, obj),
             ax_identifier: identifier_of(obj, &acc),
             checked: toggle_state(state, role),
+            truncated: false,
         };
         Some((element, state))
     }
@@ -297,7 +303,8 @@ mod imp {
     /// Recursively collect a subtree into `walk.out`, honouring depth/node/time
     /// caps. Defunct or unreadable nodes are skipped silently.
     fn collect_subtree(walk: &mut Walk<'_>, obj: &ObjectRef, depth: u32) {
-        if depth > MAX_DEPTH || walk.exhausted() {
+        if depth > walk.max_depth || walk.exhausted() {
+            walk.truncated = true;
             return;
         }
         walk.nodes += 1;
@@ -443,7 +450,9 @@ mod imp {
 
     // -- public-facing operations ------------------------------------------
 
-    pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
+    pub fn collect_frontmost_window_elements(
+        include_offscreen: bool,
+    ) -> Result<Vec<AxElement>, AppError> {
         let conn = connect()?;
         let bus = conn.connection();
         let Some((_app, win)) = active_window(bus) else {
@@ -454,8 +463,18 @@ mod imp {
             "linux_ax:frontmost:active_window name=\"{}\"",
             object_name(bus, &win)
         ));
-        let mut walk = Walk::new(bus);
+        let mut walk = Walk::new(bus, include_offscreen);
         collect_subtree(&mut walk, &win, 0);
+        if include_offscreen && walk.truncated {
+            walk.out.push(AxElement {
+                role: "AXTraversalTruncated".to_string(),
+                text: None,
+                bounds: Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+                ax_identifier: None,
+                checked: None,
+                truncated: true,
+            });
+        }
         log_collection("frontmost", &walk.out);
         Ok(walk.out)
     }
@@ -465,6 +484,7 @@ mod imp {
         _native_window_id: u32,
         _target_window_bounds: Option<&Bounds>,
         target_window_title: Option<&str>,
+        include_offscreen: bool,
     ) -> Result<Vec<AxElement>, AppError> {
         let conn = connect()?;
         let bus = conn.connection();
@@ -508,8 +528,18 @@ mod imp {
             object_name(bus, &win)
         ));
 
-        let mut walk = Walk::new(bus);
+        let mut walk = Walk::new(bus, include_offscreen);
         collect_subtree(&mut walk, &win, 0);
+        if include_offscreen && walk.truncated {
+            walk.out.push(AxElement {
+                role: "AXTraversalTruncated".to_string(),
+                text: None,
+                bounds: Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+                ax_identifier: None,
+                checked: None,
+                truncated: true,
+            });
+        }
         log_collection("window", &walk.out);
         Ok(walk.out)
     }
@@ -544,8 +574,10 @@ mod imp {
 // Public API (re-exported by ax/mod.rs).
 // ---------------------------------------------------------------------------
 
-pub fn collect_frontmost_window_elements() -> Result<Vec<AxElement>, AppError> {
-    imp::collect_frontmost_window_elements()
+pub fn collect_frontmost_window_elements(
+    _include_offscreen: bool,
+) -> Result<Vec<AxElement>, AppError> {
+    imp::collect_frontmost_window_elements(_include_offscreen)
 }
 
 pub fn collect_window_elements(
@@ -553,12 +585,14 @@ pub fn collect_window_elements(
     native_window_id: u32,
     target_window_bounds: Option<&Bounds>,
     target_window_title: Option<&str>,
+    _include_offscreen: bool,
 ) -> Result<Vec<AxElement>, AppError> {
     imp::collect_window_elements(
         pid,
         native_window_id,
         target_window_bounds,
         target_window_title,
+        _include_offscreen,
     )
 }
 

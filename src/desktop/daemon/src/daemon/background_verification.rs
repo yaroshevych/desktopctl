@@ -239,6 +239,7 @@ fn capture_fingerprint(target: &BackgroundInputTarget) -> Result<CaptureFingerpr
 fn semantic_fingerprint(target: &BackgroundInputTarget) -> Result<SemanticFingerprint, AppError> {
     let bounds = target_bounds(target);
     let payload = vision::pipeline::tokenize_window(TokenizeWindowMeta {
+        include_offscreen_ax: false,
         id: target.window_id.to_string(),
         title: String::new(),
         app: None,

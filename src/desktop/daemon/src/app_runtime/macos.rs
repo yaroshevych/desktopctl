@@ -503,6 +503,7 @@ fn start_overlay_live_loop() {
             let request = RequestEnvelope::new(
                 request_id,
                 Command::ScreenTokenize {
+                    all: false,
                     overlay_out_path: None,
                     window_query: None,
                     screenshot_path: None,
