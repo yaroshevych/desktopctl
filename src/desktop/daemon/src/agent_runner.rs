@@ -305,16 +305,20 @@ impl PiRunner {
         }
         if let Some(target) = request.target_window.as_ref() {
             args.push(OsString::from("--append-system-prompt"));
-            args.push(OsString::from(format!(
-                "For desktop actions, use desktopctl --active-window {}.",
-                target.id
-            )));
+            args.push(OsString::from(Self::target_window_instruction(target)));
         }
         // `--` protects prompts beginning with a dash while keeping user text
         // an argv element rather than shell source.
         args.push(OsString::from("--"));
         args.push(OsString::from(&request.prompt));
         args
+    }
+
+    fn target_window_instruction(target: &TargetWindow) -> String {
+        format!(
+            "The launcher has already bound the target window as {id}. For every desktopctl command that supports a window target, put `--active-window {id}` after the subcommand and its arguments, never before the subcommand. To read the window, start with `desktopctl screen tokenize --active-window {id}`. Example action: `desktopctl pointer click --id <element_id> --active-window {id}`. Do not probe `desktopctl --active-window ... --help`; that syntax is invalid. Use the bound window for this request even if another app becomes frontmost.",
+            id = target.id
+        )
     }
 
     fn command_for(&self, request: &AgentRequest) -> Result<Command, AgentRunnerError> {
@@ -780,7 +784,12 @@ mod tests {
         assert!(
             args[context_index + 1]
                 .to_string_lossy()
-                .contains("--active-window mail_abc123")
+                .contains("screen tokenize --active-window mail_abc123")
+        );
+        assert!(
+            args[context_index + 1]
+                .to_string_lossy()
+                .contains("never before the subcommand")
         );
     }
 
