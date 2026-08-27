@@ -540,6 +540,11 @@ fn is_response_envelope_shape(value: &serde_json::Value) -> bool {
 }
 
 fn render_tokenize_markdown(value: &serde_json::Value, include_all_hint: bool) -> String {
+    desktop_core::tokenize_markdown::render_tokenize_markdown(value, include_all_hint)
+}
+
+#[allow(dead_code)]
+fn render_tokenize_markdown_legacy(value: &serde_json::Value, include_all_hint: bool) -> String {
     let ok = value
         .get("ok")
         .and_then(serde_json::Value::as_bool)

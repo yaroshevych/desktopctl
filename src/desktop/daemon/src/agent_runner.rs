@@ -322,7 +322,7 @@ impl PiRunner {
 
     fn target_window_instruction(target: &TargetWindow) -> String {
         format!(
-            "The launcher has already bound the target window as {id}. For every desktopctl command that supports a window target, put `--active-window {id}` after the subcommand and its arguments, never before the subcommand. To read the window, start with `desktopctl screen tokenize --active-window {id}`. Example action: `desktopctl pointer click --id <element_id> --active-window {id}`. Do not probe `desktopctl --active-window ... --help`; that syntax is invalid. Use the bound window for this request even if another app becomes frontmost.",
+            "The launcher has already bound the target window as {id}. For every desktopctl command that supports a window target, put `--active-window {id}` after the subcommand and its arguments, never before the subcommand. When a detailed tokenized context file is provided, read that file first to inspect the window; do not call `desktopctl screen tokenize` just to rediscover the supplied snapshot. Use `desktopctl screen tokenize --active-window {id}` only when the file is unavailable or a fresh capture is explicitly needed. Example action: `desktopctl pointer click --id <element_id> --active-window {id}`. Do not probe `desktopctl --active-window ... --help`; that syntax is invalid. Use the bound window for this request even if another app becomes frontmost.",
             id = target.id
         )
     }
