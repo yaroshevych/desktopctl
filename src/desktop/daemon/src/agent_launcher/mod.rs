@@ -5,8 +5,9 @@ mod macos;
 mod controller {
     use std::{
         collections::HashMap,
+        fs,
         path::{Path, PathBuf},
-        sync::{atomic::AtomicBool, Arc, Condvar, Mutex, OnceLock},
+        sync::{Arc, Condvar, Mutex, OnceLock, atomic::AtomicBool},
         thread,
     };
 
@@ -15,12 +16,12 @@ mod controller {
 
     use crate::{
         agent_runner::{
-            discover_pi_executable, load_native_transcript, AgentRequest, AgentRunner,
-            AgentSessionRef, PiRunner, TargetWindow,
+            AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
+            discover_pi_executable, load_native_transcript,
         },
         agent_sessions::{
-            truncate_one_line, unix_now_ms, AgentSession, AgentSessionStatus, AgentSessionStore,
-            SessionMessage, SessionMessageRole, TargetWindowMetadata,
+            AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
+            SessionMessageRole, TargetWindowMetadata, truncate_one_line, unix_now_ms,
         },
         daemon, trace,
     };
@@ -95,7 +96,8 @@ mod controller {
             state.pending_target = None;
             state.restore_pid = target_hint;
             state.open_session = None;
-            state.pending_preparation = Some(Arc::new((Mutex::new(None), Condvar::new())));
+            state.pending_preparation = target_hint
+                .map(|_| Arc::new((Mutex::new(None), Condvar::new())));
             state.launch_generation
         } else {
             return;
@@ -202,6 +204,14 @@ mod controller {
         if let Some((session_id, request_id, target)) = created {
             refresh();
             let preparation = lock_state().and_then(|state| state.pending_preparation.clone());
+            let workspace = match session_workspace(&session_id) {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    trace::log(format!("agent_launcher:workspace_error {error}"));
+                    fail_request(&session_id, &request_id, error);
+                    return;
+                }
+            };
             run_pi(
                 session_id,
                 request_id,
@@ -210,6 +220,7 @@ mod controller {
                 target,
                 share_context,
                 preparation,
+                workspace,
             );
         }
     }
@@ -229,6 +240,14 @@ mod controller {
             }
         });
         if let Some((request_id, session)) = request {
+            let workspace = match session_workspace(&session.id) {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    trace::log(format!("agent_launcher:workspace_error {error}"));
+                    fail_request(&session.id, &request_id, error);
+                    return;
+                }
+            };
             let native = Some(AgentSessionRef {
                 id: session.native_session_id,
                 path: session.native_session_path.map(PathBuf::from),
@@ -242,6 +261,7 @@ mod controller {
                 session.target_window,
                 share_context,
                 None,
+                workspace,
             );
             refresh();
         }
@@ -329,12 +349,7 @@ mod controller {
         thread::spawn(move || {
             let result = (|| -> Result<(), String> {
                 let pi = discover_pi_executable().map_err(|error| error.to_string())?;
-                let cwd = session
-                    .native_session_cwd
-                    .as_deref()
-                    .map(PathBuf::from)
-                    .or_else(|| std::env::current_dir().ok())
-                    .unwrap_or_else(|| PathBuf::from("/"));
+                let cwd = session_workspace(&session.id)?;
                 let command = ghostty_command(&pi, &native_session);
                 let script = r#"on run argv
 set commandText to item 1 of argv
@@ -405,6 +420,7 @@ end run"#;
         target: Option<TargetWindowMetadata>,
         share_context: bool,
         preparation: Option<PreparationHandle>,
+        workspace: PathBuf,
     ) {
         let cancellation = Arc::new(AtomicBool::new(false));
         if let Some(mut state) = lock_state() {
@@ -450,6 +466,7 @@ end run"#;
                     Ok(context) => {
                         request.window_context = Some(context);
                         PiRunner::new()
+                            .with_current_dir(workspace.clone())
                             .spawn(request)
                             .and_then(|mut process| process.wait_with_cancellation(&cancellation))
                     }
@@ -457,11 +474,63 @@ end run"#;
                 }
             } else {
                 PiRunner::new()
+                    .with_current_dir(workspace.clone())
                     .spawn(request)
                     .and_then(|mut process| process.wait_with_cancellation(&cancellation))
             };
-            finish_run(&session_id, &request_id, result);
+            finish_run(&session_id, &request_id, &workspace, result);
         });
+    }
+
+    fn session_workspace(session_id: &str) -> Result<PathBuf, String> {
+        desktop_core::paths::AppPaths::resolve()
+            .map_err(|error| format!("unable to resolve DesktopCtl data root: {error}"))?
+            .ensure_agent_workspace_dir(session_id)
+            .map_err(|error| {
+                format!("unable to create workspace for session {session_id}: {error}")
+            })
+    }
+
+    fn fail_request(session_id: &str, request_id: &str, error: String) {
+        if let Some(mut state) = lock_state() {
+            if let Err(store_error) =
+                state
+                    .store
+                    .fail_request(session_id, request_id, &error, unix_now_ms())
+            {
+                trace::log(format!(
+                    "agent_launcher:workspace_failure_persist_error {store_error}"
+                ));
+            }
+        }
+        refresh();
+    }
+
+    fn native_session_path_is_safe(path: &Path, workspace: &Path) -> Result<(), String> {
+        if !path.is_absolute() {
+            return Err(format!(
+                "Pi returned a relative native session path: {}",
+                path.display()
+            ));
+        }
+        let workspace = fs::canonicalize(workspace)
+            .map_err(|error| format!("unable to resolve agent workspace: {error}"))?;
+        if path.starts_with(&workspace) {
+            return Err(format!(
+                "Pi native session path is inside the agent workspace: {}",
+                path.display()
+            ));
+        }
+        let path = fs::canonicalize(path).map_err(|error| {
+            format!(
+                "unable to verify Pi native session path {}: {error}",
+                path.display()
+            )
+        })?;
+        if path.starts_with(&workspace) {
+            return Err("Pi native session path resolves inside the agent workspace".into());
+        }
+        Ok(())
     }
 
     fn wait_for_preparation(handle: &PreparationHandle) -> Option<PreparedTarget> {
@@ -599,12 +668,15 @@ end run"#;
                 format!("window enumeration failed: {}", error.message)
             }
         })?;
-        Ok(windows.iter().any(|window| target_matches_window(target, window)))
+        Ok(windows
+            .iter()
+            .any(|window| target_matches_window(target, window)))
     }
 
     fn finish_run(
         session_id: &str,
         request_id: &str,
+        workspace: &Path,
         result: Result<crate::agent_runner::AgentResult, crate::agent_runner::AgentRunnerError>,
     ) {
         let mut notice = None;
@@ -623,26 +695,53 @@ end run"#;
                         .cwd
                         .as_ref()
                         .map(|path| path.to_string_lossy().to_string());
-                    if let Err(error) = state.store.bind_native_session(
-                        session_id,
-                        result.session.id,
-                        native_path,
-                        native_cwd,
-                    ) {
-                        trace::log(format!("agent_launcher:native_session_error {error}"));
-                    }
-                    if let Err(error) = state.store.complete_request(
-                        session_id,
-                        request_id,
-                        &result.final_answer,
-                        unix_now_ms(),
-                    ) {
-                        trace::log(format!("agent_launcher:complete_error {error}"));
-                    } else if let Some(session) = state.store.get(session_id) {
-                        notice = Some(CompletionNotice {
-                            title: session.title.clone(),
-                            answer_preview: truncate_one_line(&result.final_answer, 120),
-                        });
+                    let native_path_error = result
+                        .session
+                        .path
+                        .as_deref()
+                        .map(|path| native_session_path_is_safe(path, workspace))
+                        .transpose()
+                        .err();
+                    if let Some(error) = native_path_error {
+                        let message = format!("unsafe Pi native session path: {error}");
+                        if let Err(store_error) = state.store.fail_request(
+                            session_id,
+                            request_id,
+                            &message,
+                            unix_now_ms(),
+                        ) {
+                            trace::log(format!(
+                                "agent_launcher:native_session_failure_persist_error {store_error}"
+                            ));
+                        }
+                        if let Some(session) = state.store.get(session_id) {
+                            notice = Some(CompletionNotice {
+                                title: session.title.clone(),
+                                answer_preview: truncate_one_line(&message, 120),
+                            });
+                        }
+                    } else {
+                        if let Err(error) = state.store.bind_native_session(
+                            session_id,
+                            result.session.id,
+                            native_path,
+                            native_cwd,
+                        ) {
+                            trace::log(format!("agent_launcher:native_session_error {error}"));
+                        }
+                        if let Err(error) = state.store.complete_request(
+                            session_id,
+                            request_id,
+                            &result.final_answer,
+                            unix_now_ms(),
+                        ) {
+                            trace::log(format!("agent_launcher:complete_error {error}"));
+                        } else if let Some(session) = state.store.get(session_id) {
+                            notice = Some(CompletionNotice {
+                                title: session.title.clone(),
+                                answer_preview: truncate_one_line(&result.final_answer, 120),
+                            });
+                        }
                     }
                 }
                 Err(crate::agent_runner::AgentRunnerError::Cancelled) => {
@@ -795,11 +894,17 @@ end run"#;
     #[cfg(test)]
     mod tests {
         use super::{
-            ghostty_command, native_window_id_from_id, posix_quote, target_matches_window,
+            ghostty_command, native_session_path_is_safe, native_window_id_from_id, posix_quote,
+            target_matches_window,
         };
         use crate::agent_sessions::TargetWindowMetadata;
         use crate::platform::windowing::WindowInfo;
         use desktop_core::protocol::Bounds;
+        use std::{
+            fs,
+            path::Path,
+            time::{SystemTime, UNIX_EPOCH},
+        };
 
         #[test]
         fn ghostty_arguments_are_posix_quoted() {
@@ -854,6 +959,30 @@ end run"#;
                 title: Some("Inbox".into()),
             };
             assert!(target_matches_window(&target, &window));
+        }
+
+        #[test]
+        fn native_session_path_must_be_outside_workspace() {
+            let root = std::env::temp_dir().join(format!(
+                "desktopctl-native-session-path-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let workspace = root.join("workspace");
+            let outside = root.join("native.jsonl");
+            fs::create_dir_all(&workspace).unwrap();
+            fs::write(&outside, b"{}").unwrap();
+            let inside = workspace.join("native.jsonl");
+            fs::write(&inside, b"{}").unwrap();
+
+            assert!(native_session_path_is_safe(&outside, &workspace).is_ok());
+            assert!(native_session_path_is_safe(&inside, &workspace).is_err());
+            assert!(native_session_path_is_safe(Path::new("relative.jsonl"), &workspace).is_err());
+
+            let _ = fs::remove_dir_all(root);
         }
     }
 }

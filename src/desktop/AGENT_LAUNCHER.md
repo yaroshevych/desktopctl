@@ -15,6 +15,9 @@ terminal process.
 - `agent_sessions` contains the persisted UI model and state transitions. It
   stores only user prompts and final assistant text. Pi's session remains the
   authoritative full transcript.
+- Each launcher session gets a private filesystem workspace at
+  `<data-root>/workspaces/<session-guid>/`. Pi runs with that directory as its
+  working directory, and `Open in Ghostty` reuses it.
 - `agent_runner` defines the adapter boundary and implements `PiRunner`. Runs
   happen on worker threads and completion is dispatched back to AppKit's main
   thread. One run per DesktopCtl session is permitted at a time.
@@ -73,6 +76,15 @@ title, short transcript, target-window metadata, timestamps, status, and
 unread/visited state. A malformed file is left untouched and ignored with a
 diagnostic. Sessions left running by a process crash become failed during
 startup recovery.
+
+The per-session directories next to this file are agent-visible working
+directories; they are separate from Pi's native session database. If a
+workspace is removed, the next follow-up or Ghostty launch recreates the empty
+directory before proceeding.
+
+`PiRunner` remains a reusable adapter and permits callers to omit a working
+directory. Launcher paths must always use `with_current_dir` with the session
+workspace; the launcher owns that invariant.
 
 ## Testing
 

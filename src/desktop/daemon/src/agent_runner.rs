@@ -874,6 +874,28 @@ mod tests {
     }
 
     #[test]
+    fn configured_runner_applies_current_dir_to_command() {
+        let directory = env::temp_dir().join(format!(
+            "desktopctl-pi-runner-cwd-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).expect("create cwd");
+
+        let runner = PiRunner::with_executable(env::current_exe().expect("test executable"))
+            .with_current_dir(&directory);
+        let command = runner
+            .command_for(&AgentRequest::new("summarize"))
+            .expect("build command");
+        assert_eq!(command.get_current_dir(), Some(directory.as_path()));
+
+        let _ = fs::remove_dir(directory);
+    }
+
+    #[test]
     fn native_transcript_follows_active_branch_and_hides_internal_content() {
         let path = env::temp_dir().join(format!(
             "desktopctl-pi-session-test-{}.jsonl",

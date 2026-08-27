@@ -5,6 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use uuid::Uuid;
+
 pub const APP_DIR_NAME: &str = "desktopctl";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +82,30 @@ impl AppPaths {
         self.root.join("workspaces")
     }
 
+    /// Filesystem workspace assigned to one DesktopCtl agent session.
+    pub fn agent_workspace_dir(&self, session_id: &str) -> io::Result<PathBuf> {
+        let id = Uuid::parse_str(session_id).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid agent session ID {session_id:?}: {error}"),
+            )
+        })?;
+        if id.to_string() != session_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("agent session ID is not a canonical UUID: {session_id:?}"),
+            ));
+        }
+        Ok(self.workspaces_dir().join(session_id))
+    }
+
+    pub fn ensure_agent_workspace_dir(&self, session_id: &str) -> io::Result<PathBuf> {
+        self.ensure_workspaces_dir()?;
+        let path = self.agent_workspace_dir(session_id)?;
+        ensure_private_dir_without_symlink(&path)?;
+        Ok(path)
+    }
+
     pub fn agent_sessions_file(&self) -> PathBuf {
         self.workspaces_dir().join("agent-sessions.json")
     }
@@ -117,7 +143,10 @@ impl AppPaths {
     }
 
     pub fn ensure_workspaces_dir(&self) -> io::Result<PathBuf> {
-        self.ensure_subdir(self.workspaces_dir())
+        self.ensure_root()?;
+        let path = self.workspaces_dir();
+        ensure_private_dir_without_symlink(&path)?;
+        Ok(path)
     }
 
     fn ensure_subdir(&self, path: PathBuf) -> io::Result<PathBuf> {
@@ -133,6 +162,33 @@ fn nonempty(value: Option<OsString>) -> Option<OsString> {
 
 pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
+    set_private_dir_permissions(path)
+}
+
+fn ensure_private_dir_without_symlink(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::create_dir(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        },
+        Err(error) => return Err(error),
+    }
+
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing symlinked workspace directory: {}", path.display()),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("workspace path is not a directory: {}", path.display()),
+        ));
+    }
     set_private_dir_permissions(path)
 }
 
@@ -233,6 +289,58 @@ mod tests {
         assert_eq!(
             fs::metadata(cache).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_workspace_requires_canonical_uuid() {
+        let paths = AppPaths {
+            root: PathBuf::from("/tmp/desktopctl-paths-test"),
+        };
+        assert_eq!(
+            paths
+                .agent_workspace_dir("../../outside")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            paths
+                .agent_workspace_dir("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap(),
+            PathBuf::from(
+                "/tmp/desktopctl-paths-test/workspaces/550e8400-e29b-41d4-a716-446655440000"
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_workspace_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!(
+            "desktopctl-paths-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = AppPaths { root: root.clone() };
+        paths.ensure_workspaces_dir().unwrap();
+        let outside = root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        symlink(&outside, paths.agent_workspace_dir(session_id).unwrap()).unwrap();
+
+        assert_eq!(
+            paths
+                .ensure_agent_workspace_dir(session_id)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
         );
         let _ = fs::remove_dir_all(root);
     }
