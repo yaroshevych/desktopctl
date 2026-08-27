@@ -444,40 +444,32 @@ end run"#;
                 session.id.as_deref().is_some_and(|id| !id.is_empty()) || session.path.is_some()
             });
             request.target_window = target.as_ref().and_then(runner_target);
-            let result = if share_context {
-                match target
-                    .as_ref()
-                    .ok_or_else(|| {
-                        crate::agent_runner::AgentRunnerError::Process(
-                            "target resolution failed: no target window".into(),
-                        )
-                    })
-                    .and_then(|target| {
-                        let context = match prepared {
-                            Some(value) => match target_window_is_current(target) {
-                                Ok(true) => value.context,
-                                Ok(false) => window_context_for_target(target),
-                                Err(error) => Err(error),
-                            },
-                            None => window_context_for_target(target),
-                        };
-                        context.map_err(crate::agent_runner::AgentRunnerError::Process)
-                    }) {
-                    Ok(context) => {
-                        request.window_context = Some(context);
-                        PiRunner::new()
-                            .with_current_dir(workspace.clone())
-                            .spawn(request)
-                            .and_then(|mut process| process.wait_with_cancellation(&cancellation))
+            if share_context {
+                if let Some(target) = target.as_ref() {
+                    let context = match prepared {
+                        Some(value) => match target_window_is_current(target) {
+                            Ok(true) => value.context,
+                            Ok(false) => window_context_for_target(target),
+                            Err(error) => Err(error),
+                        },
+                        None => window_context_for_target(target),
+                    };
+                    match context {
+                        Ok(context) => request.window_context = Some(context),
+                        Err(error) => trace::log(format!(
+                            "agent_launcher:context_unavailable; continuing_without_context {error}"
+                        )),
                     }
-                    Err(error) => Err(error),
+                } else {
+                    trace::log(
+                        "agent_launcher:target_unavailable; continuing_without_target_context",
+                    );
                 }
-            } else {
-                PiRunner::new()
-                    .with_current_dir(workspace.clone())
-                    .spawn(request)
-                    .and_then(|mut process| process.wait_with_cancellation(&cancellation))
-            };
+            }
+            let result = PiRunner::new()
+                .with_current_dir(workspace.clone())
+                .spawn(request)
+                .and_then(|mut process| process.wait_with_cancellation(&cancellation));
             finish_run(&session_id, &request_id, &workspace, result);
         });
     }
