@@ -595,6 +595,19 @@ fn render_on_main() {
             ),
         }
     });
+    focus_session_input_on_main();
+}
+
+fn focus_session_input_on_main() {
+    UI.with(|cell| {
+        let ui = cell.borrow();
+        if !matches!(ui.snapshot.screen, LauncherScreen::Session { .. }) {
+            return;
+        }
+        if let (Some(panel), Some(composer)) = (ui.panel.as_ref(), ui.composer.as_ref()) {
+            panel.makeFirstResponder(Some(composer));
+        }
+    });
 }
 
 fn launcher_panel_height(ui: &UiState) -> f64 {
