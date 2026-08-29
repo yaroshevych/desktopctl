@@ -155,6 +155,7 @@ release-all tag target="main" repo="yaroshevych/desktopctl":
 
 run:
   pkill -f "{{macos_dir}}/desktopctl-dialogs" || true
+  pkill -f "{{macos_dir}}/desktopctl-app" || true
   pkill -f "{{macos_dir}}/desktopctld" || true
   rm -f /tmp/desktopctl.sock
   just -f {{workspace_dir}}/Justfile build
@@ -178,7 +179,7 @@ stable-runtime-refresh build_first="1":
   mkdir -p {{stable_runtime_dir}}
   cp -R {{app_dir}} {{stable_app_dir}}
   ln -sfn ./DesktopCtl.app/Contents/MacOS/desktopctl {{stable_legacy_cli_path}}
-  chmod +x {{stable_cli_path}} {{stable_app_dir}}/Contents/MacOS/desktopctld
+  chmod +x {{stable_cli_path}} {{stable_app_dir}}/Contents/MacOS/desktopctl-app {{stable_app_dir}}/Contents/MacOS/desktopctld
   codesign --force --sign - {{stable_cli_path}} >/dev/null 2>&1 || true
   codesign --force --deep --sign - {{stable_app_dir}} >/dev/null 2>&1 || true
   echo "Stable runtime refreshed:"

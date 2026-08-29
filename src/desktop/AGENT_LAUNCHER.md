@@ -1,6 +1,6 @@
 # Agent launcher
 
-DesktopCtl's macOS menu-bar process owns a compact agent launcher. `Option-Space`
+DesktopCtl's normal macOS app process owns a compact agent launcher. `Option-Space`
 is registered with Carbon's global-hotkey API, which does not add an
 Accessibility permission requirement. The AppKit panel is created in the
 existing accessory application and joins all Spaces; it is not a helper app or
@@ -8,8 +8,8 @@ terminal process.
 
 ## Architecture
 
-- `agent_launcher` owns the adapter-neutral session controller and the macOS
-  AppKit panel. Before the panel becomes key it asks the resident daemon to bind
+- `app/src/launcher` owns the adapter-neutral session controller and the macOS
+  AppKit panel. Before the panel becomes key it asks the resident service over IPC to bind
   the active non-DesktopCtl window using the same opaque window-reference logic
   used by `desktopctl --active-window`.
 - `agent_sessions` contains the persisted UI model and state transitions. It
