@@ -128,6 +128,7 @@ pub fn save(cfg: &AppPolicyConfig) -> Result<(), String> {
     crate::storage::save_app_policy(&normalized)
 }
 
+#[cfg(test)]
 pub fn normalize_apps_csv(csv: &str) -> Vec<String> {
     let apps: Vec<String> = csv
         .split(',')
@@ -136,10 +137,6 @@ pub fn normalize_apps_csv(csv: &str) -> Vec<String> {
         .map(ToString::to_string)
         .collect();
     normalize_apps(&apps)
-}
-
-pub fn apps_to_csv(apps: &[String]) -> String {
-    apps.join(", ")
 }
 
 pub fn is_app_allowed(cfg: &AppPolicyConfig, frontmost_app: &str) -> bool {

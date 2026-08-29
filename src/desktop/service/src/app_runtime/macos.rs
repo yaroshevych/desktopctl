@@ -13,8 +13,9 @@ use desktop_core::{
     protocol::{Command, RequestEnvelope, ResponseEnvelope, now_millis},
 };
 
-use super::{about, settings_dialog};
+use super::about;
 use desktop_app::launcher::controller as agent_launcher;
+use desktop_app::runtime::settings_dialog;
 
 use crate::{daemon, journal, overlay, platform::permissions, trace};
 

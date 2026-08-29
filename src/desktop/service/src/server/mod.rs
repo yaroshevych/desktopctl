@@ -659,6 +659,8 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
             | Command::ServiceStatus
             | Command::ActiveWindowDescribe
             | Command::AgentAccessSet { .. }
+            | Command::SettingsGet
+            | Command::SettingsUpdate { .. }
             | Command::DisableGui
             | Command::PermissionsCheck
             | Command::RequestShow { .. }
@@ -698,6 +700,36 @@ fn active_window_description() -> Result<Value, AppError> {
         target,
     })
     .map_err(|error| AppError::internal(format!("encode active window failed: {error}")))
+}
+
+fn settings_get() -> Result<Value, AppError> {
+    let journal = crate::journal::load_current_from_disk().config;
+    let policy = crate::app_policy::load_with_diagnostics();
+    Ok(json!({
+        "journal": journal,
+        "app_policy": policy.config,
+        "app_policy_warning": policy.warning,
+    }))
+}
+
+fn settings_update(journal: Option<Value>, app_policy: Option<Value>) -> Result<Value, AppError> {
+    if let Some(value) = journal {
+        let config: crate::journal::JournalConfig =
+            serde_json::from_value(value).map_err(|error| {
+                AppError::invalid_argument(format!("invalid journal settings: {error}"))
+            })?;
+        crate::journal::apply(config).map_err(AppError::internal)?;
+    }
+    if let Some(value) = app_policy {
+        let mut config: crate::app_policy::AppPolicyConfig = serde_json::from_value(value)
+            .map_err(|error| {
+                AppError::invalid_argument(format!("invalid app policy settings: {error}"))
+            })?;
+        config.agent_access_disabled = crate::app_policy::current().agent_access_disabled;
+        crate::app_policy::save(&config).map_err(AppError::internal)?;
+        crate::app_policy::set_current(&config);
+    }
+    Ok(json!({ "saved": true }))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -779,6 +811,11 @@ fn execute_with_context(
             }
             Ok(json!({ "enabled": enabled }))
         }
+        Command::SettingsGet => settings_get(),
+        Command::SettingsUpdate {
+            journal,
+            app_policy,
+        } => settings_update(journal, app_policy),
         Command::DisableGui => {
             set_gui_ops_disabled(true);
             Ok(json!({}))

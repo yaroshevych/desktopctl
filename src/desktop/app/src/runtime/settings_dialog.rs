@@ -9,26 +9,45 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    app_policy::{self, AppPolicyConfig, PolicyMode},
-    journal::{self, JournalConfig},
-    platform::permissions,
-};
+use crate::service_client::ServiceClient;
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PolicyMode {
+    AllowAll,
+    AllowOnlySelected,
+    AllowAllExcept,
+}
+
+#[derive(Deserialize, Serialize)]
 struct JournalInput {
     enabled: bool,
     interval_seconds: u64,
     output_dir: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct AppPolicyInput {
     policy_mode: PolicyMode,
     apps: Vec<String>,
     allow_full_screen_capture: bool,
     clipboard_allowed: bool,
     warning: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StoredAppPolicy {
+    policy_mode: PolicyMode,
+    apps: Vec<String>,
+    allow_full_screen_capture: bool,
+    clipboard_allowed: bool,
+}
+
+#[derive(Deserialize)]
+struct StoredSettings {
+    journal: JournalInput,
+    app_policy: StoredAppPolicy,
+    app_policy_warning: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -116,27 +135,46 @@ pub fn show(initial_tab: Option<&'static str>) {
             return;
         };
 
-        let journal_cfg = journal::load_current_from_disk().config;
-        let policy_load = app_policy::load_with_diagnostics();
-        let policy_cfg = policy_load.config;
+        let client = ServiceClient;
+        let stored: StoredSettings = match client.settings().and_then(|value| {
+            serde_json::from_value(value).map_err(|error| {
+                desktop_core::error::AppError::internal(format!(
+                    "decode settings response failed: {error}"
+                ))
+            })
+        }) {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("settings dialog: load service settings: {error}");
+                return;
+            }
+        };
+        let permissions: desktop_core::protocol::PermissionsPayload =
+            match client.send_typed(desktop_core::protocol::Command::PermissionsCheck) {
+                Ok(permissions) => permissions,
+                Err(error) => {
+                    eprintln!("settings dialog: load permissions: {error}");
+                    return;
+                }
+            };
 
         let input = SettingsInput {
             journal: JournalInput {
-                enabled: journal_cfg.enabled,
-                interval_seconds: journal_cfg.interval_seconds,
-                output_dir: journal_cfg.output_dir.display().to_string(),
+                enabled: stored.journal.enabled,
+                interval_seconds: stored.journal.interval_seconds,
+                output_dir: stored.journal.output_dir,
             },
             app_policy: AppPolicyInput {
-                policy_mode: policy_cfg.policy_mode,
-                apps: policy_cfg.apps,
-                allow_full_screen_capture: policy_cfg.allow_full_screen_capture,
-                clipboard_allowed: policy_cfg.clipboard_allowed,
-                warning: policy_load.warning,
+                policy_mode: stored.app_policy.policy_mode,
+                apps: stored.app_policy.apps,
+                allow_full_screen_capture: stored.app_policy.allow_full_screen_capture,
+                clipboard_allowed: stored.app_policy.clipboard_allowed,
+                warning: stored.app_policy_warning,
             },
             setup_access: SetupAccessInput {
                 cli_installed: cli_in_path(),
-                accessibility_granted: permissions::accessibility_granted(),
-                screen_recording_granted: permissions::screen_recording_granted(),
+                accessibility_granted: permissions.accessibility.granted,
+                screen_recording_granted: permissions.screen_recording.granted,
                 cli_source: discover_cli_binary().map(|p| p.display().to_string()),
                 candidate_cli_dirs: candidate_cli_dirs()
                     .into_iter()
@@ -198,31 +236,25 @@ pub fn show(initial_tab: Option<&'static str>) {
             }
         };
 
-        if output.journal.saved {
-            let new_cfg = JournalConfig {
-                enabled: output.journal.enabled,
-                interval_seconds: output.journal.interval_seconds.max(1),
-                output_dir: PathBuf::from(output.journal.output_dir),
-            };
-            if let Err(e) = journal::apply(new_cfg) {
-                eprintln!("settings dialog: apply journal config: {e}");
-            }
-        }
-
-        if output.app_policy.saved {
-            let apps_csv = app_policy::apps_to_csv(&output.app_policy.apps);
-            let new_cfg = AppPolicyConfig {
-                policy_mode: output.app_policy.policy_mode,
-                apps: app_policy::normalize_apps_csv(&apps_csv),
-                allow_full_screen_capture: output.app_policy.allow_full_screen_capture,
-                agent_access_disabled: app_policy::current().agent_access_disabled,
-                clipboard_allowed: output.app_policy.clipboard_allowed,
-            };
-            if let Err(e) = app_policy::save(&new_cfg) {
-                eprintln!("settings dialog: save policy config: {e}");
-                return;
-            }
-            app_policy::set_current(&new_cfg);
+        let journal = output.journal.saved.then(|| {
+            serde_json::json!({
+                "enabled": output.journal.enabled,
+                "interval_seconds": output.journal.interval_seconds.max(1),
+                "output_dir": output.journal.output_dir,
+            })
+        });
+        let app_policy = output.app_policy.saved.then(|| {
+            serde_json::json!({
+                "policy_mode": output.app_policy.policy_mode,
+                "apps": output.app_policy.apps,
+                "allow_full_screen_capture": output.app_policy.allow_full_screen_capture,
+                "clipboard_allowed": output.app_policy.clipboard_allowed,
+            })
+        });
+        if (journal.is_some() || app_policy.is_some())
+            && let Err(error) = client.update_settings(journal, app_policy)
+        {
+            eprintln!("settings dialog: save service settings: {error}");
         }
     });
 }

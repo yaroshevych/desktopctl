@@ -39,6 +39,22 @@ impl ServiceClient {
             .ok_or_else(|| AppError::internal("agent access response missing enabled state"))
     }
 
+    pub fn settings(&self) -> Result<Value, AppError> {
+        self.send(Command::SettingsGet)
+    }
+
+    pub fn update_settings(
+        &self,
+        journal: Option<Value>,
+        app_policy: Option<Value>,
+    ) -> Result<(), AppError> {
+        self.send(Command::SettingsUpdate {
+            journal,
+            app_policy,
+        })
+        .map(|_| ())
+    }
+
     pub fn send_typed<T>(&self, command: Command) -> Result<T, AppError>
     where
         T: DeserializeOwned,

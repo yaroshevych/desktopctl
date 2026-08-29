@@ -63,6 +63,13 @@ pub enum Command {
     AgentAccessSet {
         enabled: bool,
     },
+    SettingsGet,
+    SettingsUpdate {
+        #[serde(default)]
+        journal: Option<serde_json::Value>,
+        #[serde(default)]
+        app_policy: Option<serde_json::Value>,
+    },
     DisableGui,
     AppHide {
         name: String,
@@ -319,6 +326,8 @@ impl Command {
             Command::ServiceStatus => "service_status",
             Command::ActiveWindowDescribe => "active_window_describe",
             Command::AgentAccessSet { .. } => "agent_access_set",
+            Command::SettingsGet => "settings_get",
+            Command::SettingsUpdate { .. } => "settings_update",
             Command::DisableGui => "disable",
             Command::AppHide { .. } => "app_hide",
             Command::AppShow { .. } => "app_show",
