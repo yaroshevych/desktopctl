@@ -6,6 +6,7 @@ mod app_policy;
 mod app_runtime;
 mod automation;
 mod clipboard;
+#[path = "server/mod.rs"]
 mod daemon;
 mod journal;
 mod overlay;
