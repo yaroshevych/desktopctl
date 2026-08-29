@@ -657,6 +657,7 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
         command,
         Command::Ping
             | Command::ServiceStatus
+            | Command::ActiveWindowDescribe
             | Command::DisableGui
             | Command::PermissionsCheck
             | Command::RequestShow { .. }
@@ -671,6 +672,39 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
 
 pub(crate) fn execute_resident_command(command: Command) -> Result<Value, AppError> {
     execute_with_context(command, true, &RequestContext::default())
+}
+
+#[cfg(target_os = "macos")]
+fn active_window_description() -> Result<Value, AppError> {
+    use desktop_core::protocol::{ActiveWindowPayload, WindowSummary};
+
+    let frontmost_pid = capture_active_window_for_agent_launcher();
+    let target = frontmost_pid
+        .map(resolve_agent_launcher_target)
+        .transpose()?
+        .map(|window| WindowSummary {
+            id: window.id,
+            window_ref: window.window_ref,
+            pid: window.pid,
+            app: window.app,
+            title: window.title,
+            bounds: window.bounds,
+            frontmost: window.frontmost,
+            visible: window.visible,
+        });
+    serde_json::to_value(ActiveWindowPayload {
+        frontmost_pid,
+        target,
+    })
+    .map_err(|error| AppError::internal(format!("encode active window failed: {error}")))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn active_window_description() -> Result<Value, AppError> {
+    Err(AppError::new(
+        desktop_core::error::ErrorCode::UnsupportedPlatform,
+        "active window description is currently supported only on macOS",
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -740,6 +774,7 @@ fn execute_with_context(
             })
             .map_err(|error| AppError::internal(format!("encode service status failed: {error}")))
         }
+        Command::ActiveWindowDescribe => active_window_description(),
         Command::DisableGui => {
             set_gui_ops_disabled(true);
             Ok(json!({}))

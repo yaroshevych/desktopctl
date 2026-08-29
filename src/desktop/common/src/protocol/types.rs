@@ -13,6 +13,27 @@ pub struct ServiceStatusPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSummary {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_ref: Option<String>,
+    pub pid: i64,
+    pub app: String,
+    pub title: String,
+    pub bounds: Bounds,
+    pub frontmost: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWindowPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontmost_pid: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<WindowSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bounds {
     #[serde(serialize_with = "serialize_compact_f64")]
     pub x: f64,

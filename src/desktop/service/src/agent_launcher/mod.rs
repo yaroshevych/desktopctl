@@ -94,14 +94,27 @@ mod controller {
             launcher_ui::hide();
             return;
         }
-        let target_hint = daemon::capture_active_window_for_agent_launcher();
+        let active_window = desktop_app::service_client::ServiceClient
+            .active_window()
+            .map_err(|error| {
+                trace::log(format!("agent_launcher:active_window_error {error}"));
+                error
+            })
+            .ok();
+        let target_hint = active_window
+            .as_ref()
+            .and_then(|description| description.frontmost_pid);
+        let resolved_target = active_window
+            .and_then(|description| description.target)
+            .map(target_metadata);
         let generation = if let Some(mut state) = lock_state() {
             state.launch_generation = state.launch_generation.wrapping_add(1);
-            state.pending_target = None;
+            state.pending_target = resolved_target.clone();
             state.restore_pid = target_hint;
             state.open_session = None;
-            state.pending_preparation =
-                target_hint.map(|_| Arc::new((Mutex::new(None), Condvar::new())));
+            state.pending_preparation = resolved_target
+                .as_ref()
+                .map(|_| Arc::new((Mutex::new(None), Condvar::new())));
             state.launch_generation
         } else {
             return;
@@ -110,22 +123,19 @@ mod controller {
         launcher_ui::show();
 
         let preparation = preparation_handle_for_generation(generation);
-        let Some(pid) = target_hint else {
+        let Some(target) = resolved_target else {
             if let Some(preparation) = preparation_handle_for_generation(generation) {
                 complete_preparation(
                     &preparation,
-                    Err("target resolution failed: no frontmost application PID".into()),
+                    Err("target resolution failed: no active window".into()),
                 );
             }
             return;
         };
         thread::spawn(move || {
-            let target = daemon::resolve_agent_launcher_target(pid)
-                .map(target_metadata)
-                .map_err(|error| format!("target resolution failed: {error}"));
-            let prepared = target.clone().map(|target| PreparedTarget {
+            let prepared = Ok(PreparedTarget {
                 context: window_context_for_target(&target),
-                target,
+                target: target.clone(),
             });
             if let Ok(prepared) = &prepared {
                 if let Err(error) = &prepared.context {
@@ -134,7 +144,7 @@ mod controller {
             }
             if let Some(mut state) = lock_state() {
                 if state.launch_generation == generation {
-                    state.pending_target = target.clone().ok();
+                    state.pending_target = Some(target);
                 }
             }
             if let Some(preparation) = preparation {
@@ -975,7 +985,7 @@ end run"#;
         }
     }
 
-    fn target_metadata(window: crate::platform::windowing::WindowInfo) -> TargetWindowMetadata {
+    fn target_metadata(window: desktop_core::protocol::WindowSummary) -> TargetWindowMetadata {
         TargetWindowMetadata {
             window_ref: window.window_ref,
             native_id: Some(window.id),

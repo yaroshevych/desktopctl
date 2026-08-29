@@ -7,8 +7,8 @@ pub use command::{Command, HumanOptions, PointerButton, RequestEnvelope, Request
 pub use observe::{ObserveOptions, ObserveUntil};
 pub use response::{ErrorPayload, ErrorResponse, ResponseEnvelope, SuccessResponse};
 pub use types::{
-    API_VERSION, Bounds, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, PermissionState,
-    PermissionsPayload, ServiceStatusPayload, SnapshotDisplay, SnapshotPayload, SnapshotText,
-    ToggleState, TokenEntry, TokenizeElement, TokenizeImage, TokenizePayload, TokenizeWindow,
-    now_millis,
+    API_VERSION, ActiveWindowPayload, Bounds, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    PermissionState, PermissionsPayload, ServiceStatusPayload, SnapshotDisplay, SnapshotPayload,
+    SnapshotText, ToggleState, TokenEntry, TokenizeElement, TokenizeImage, TokenizePayload,
+    TokenizeWindow, WindowSummary, now_millis,
 };

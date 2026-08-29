@@ -1,7 +1,9 @@
 use desktop_core::{
     error::AppError,
     ipc,
-    protocol::{Command, RequestEnvelope, ResponseEnvelope, ServiceStatusPayload},
+    protocol::{
+        ActiveWindowPayload, Command, RequestEnvelope, ResponseEnvelope, ServiceStatusPayload,
+    },
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -17,6 +19,10 @@ impl ServiceClient {
 
     pub fn status(&self) -> Result<ServiceStatusPayload, AppError> {
         self.send_typed(Command::ServiceStatus)
+    }
+
+    pub fn active_window(&self) -> Result<ActiveWindowPayload, AppError> {
+        self.send_typed(Command::ActiveWindowDescribe)
     }
 
     pub fn send_typed<T>(&self, command: Command) -> Result<T, AppError>

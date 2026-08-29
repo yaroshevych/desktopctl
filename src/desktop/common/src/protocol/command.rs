@@ -59,6 +59,7 @@ pub struct RequestOptions {
 pub enum Command {
     Ping,
     ServiceStatus,
+    ActiveWindowDescribe,
     DisableGui,
     AppHide {
         name: String,
@@ -313,6 +314,7 @@ impl Command {
         match self {
             Command::Ping => "ping",
             Command::ServiceStatus => "service_status",
+            Command::ActiveWindowDescribe => "active_window_describe",
             Command::DisableGui => "disable",
             Command::AppHide { .. } => "app_hide",
             Command::AppShow { .. } => "app_show",
@@ -366,5 +368,18 @@ mod tests {
         let value = serde_json::to_value(Command::ServiceStatus).expect("serialize command");
         assert_eq!(value, serde_json::json!({ "cmd": "service_status" }));
         assert_eq!(Command::ServiceStatus.name(), "service_status");
+    }
+
+    #[test]
+    fn active_window_describe_has_stable_wire_name() {
+        let value = serde_json::to_value(Command::ActiveWindowDescribe).expect("serialize command");
+        assert_eq!(
+            value,
+            serde_json::json!({ "cmd": "active_window_describe" })
+        );
+        assert_eq!(
+            Command::ActiveWindowDescribe.name(),
+            "active_window_describe"
+        );
     }
 }
