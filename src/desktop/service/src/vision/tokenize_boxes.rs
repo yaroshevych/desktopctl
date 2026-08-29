@@ -7,7 +7,7 @@ mod background_fill_detector;
 mod sobel_box_detector;
 
 // Threshold rationale and tuning notes:
-// src/desktop/daemon/src/vision/CONTROL_DETECTION.md
+// src/desktop/service/src/vision/CONTROL_DETECTION.md
 
 pub(super) fn debug_enabled() -> bool {
     std::env::var("TOKENIZE_DEBUG").is_ok() || std::env::var("TOKENIZE_CONTROLS_DEBUG").is_ok()

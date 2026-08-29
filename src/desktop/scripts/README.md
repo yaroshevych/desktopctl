@@ -21,7 +21,7 @@ uv sync --extra grounding
 ```bash
 cd src/desktop/scripts
 uv run dev/generate_settings_window_data.py \
-  ../daemon/tests/fixtures/settings-screenshots \
+  ../service/tests/fixtures/settings-screenshots \
   --write-overlays \
   --write-crops \
   --write-sips-crops
@@ -34,7 +34,7 @@ To force a specific detector:
 
 ```bash
 uv run dev/generate_settings_window_data.py \
-  ../daemon/tests/fixtures/settings-screenshots/dark-abstract-overlap.png \
+  ../service/tests/fixtures/settings-screenshots/dark-abstract-overlap.png \
   --detector grounding-dino \
   --device cpu \
   --stdout

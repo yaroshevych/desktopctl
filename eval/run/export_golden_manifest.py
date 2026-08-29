@@ -5,7 +5,7 @@ a manifest.json suitable for the Rust golden_labels integration test.
 Connects to the LS postgres DB, fetches all tasks + completions from project 6,
 converts percent-based rectanglelabels to pixel [x, y, w, h] bboxes, resolves
 absolute image paths, and writes:
-  src/desktop/daemon/tests/fixtures/golden/manifest.json
+  src/desktop/service/tests/fixtures/golden/manifest.json
 
 Usage:
     uv run run/export_golden_manifest.py
@@ -27,7 +27,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent.parent / "datasets")))
-MANIFEST_PATH = REPO_ROOT / "src/desktop/daemon/tests/fixtures/golden/manifest.json"
+MANIFEST_PATH = REPO_ROOT / "src/desktop/service/tests/fixtures/golden/manifest.json"
 
 
 def ls_url_to_path(url: str, data_dir: Path) -> Path:

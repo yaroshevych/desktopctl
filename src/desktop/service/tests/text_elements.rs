@@ -37,7 +37,7 @@ fn repo_root() -> PathBuf {
 
 fn fixture_path(file: &str) -> PathBuf {
     repo_root()
-        .join("src/desktop/daemon/tests/fixtures/golden")
+        .join("src/desktop/service/tests/fixtures/golden")
         .join(file)
 }
 

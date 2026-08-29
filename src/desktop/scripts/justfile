@@ -1,7 +1,7 @@
 generate-settings-window-data:
     uv run dev/generate_settings_window_data.py \
-        ../daemon/tests/fixtures/settings-screenshots/ \
-        --output-dir ../daemon/tests/fixtures/settings-screenshots/out \
+        ../service/tests/fixtures/settings-screenshots/ \
+        --output-dir ../service/tests/fixtures/settings-screenshots/out \
         --detector grounding-dino \
         --device cpu \
         --write-overlays \

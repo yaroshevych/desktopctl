@@ -60,7 +60,7 @@ only in legacy migration; it does not control the new layout.
 Repository layout:
 
 - `src/desktop/core` - shared protocol and types
-- `src/desktop/daemon` - daemon runtime
+- `src/desktop/service` - automation service runtime (`desktopctld`)
 - `src/desktop/cli` - CLI client
 
 ## Current Scope

@@ -5,7 +5,7 @@ fixture for the Rust `text_field_button_labels` integration test.
 Connects to the LS postgres DB, fetches tasks from the golden-set project,
 filters to text_field/button annotations, runs macOS Vision OCR to fill in
 text labels, and writes:
-  src/desktop/daemon/tests/fixtures/golden/controls.json
+  src/desktop/service/tests/fixtures/golden/controls.json
 
 Usage:
     uv run run/export_controls.py
@@ -28,7 +28,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent.parent / "datasets")))
-FIXTURE_DIR = REPO_ROOT / "src/desktop/daemon/tests/fixtures/golden"
+FIXTURE_DIR = REPO_ROOT / "src/desktop/service/tests/fixtures/golden"
 OUTPUT_PATH = FIXTURE_DIR / "controls.json"
 
 GOLDEN_FIXTURE_FILES = {p.name for p in FIXTURE_DIR.glob("*.png")}

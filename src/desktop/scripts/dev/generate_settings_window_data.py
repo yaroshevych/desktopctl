@@ -13,7 +13,7 @@ Expected output JSON shape:
 
 Typical usage:
   python3 src/desktop/scripts/dev/generate_settings_window_data.py \
-    src/desktop/daemon/tests/fixtures/settings-screenshots \
+    src/desktop/service/tests/fixtures/settings-screenshots \
     --write-overlays \
     --write-crops
 """
