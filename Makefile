@@ -26,7 +26,7 @@ install:
 	cp $(DESKTOP_DIR)/target/release/desktopctld $(MACOS_DIR)/desktopctld
 	cp $(DESKTOP_DIR)/target/release/desktopctl-cli $(CLI_PATH)
 	ln -sfn ./DesktopCtl.app/Contents/MacOS/desktopctl $(DIST_DIR)/desktopctl
-	cp $(DESKTOP_DIR)/daemon/packaging/macos/Info.plist $(CONTENTS_DIR)/Info.plist
+	cp $(DESKTOP_DIR)/packaging/macos/app/Info.plist $(CONTENTS_DIR)/Info.plist
 	printf 'APPL????' > $(CONTENTS_DIR)/PkgInfo
 	swift $(DESKTOP_DIR)/scripts/gen_icns.swift $(CONTENTS_DIR)/Resources/AppIcon.icns
 	swiftc -O \

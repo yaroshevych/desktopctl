@@ -23,7 +23,7 @@ build:
   cp {{workspace_dir}}/target/release/desktopctld {{macos_dir}}/desktopctld
   cp {{workspace_dir}}/target/release/desktopctl-cli {{cli_path}}
   ln -sfn ./DesktopCtl.app/Contents/MacOS/desktopctl {{legacy_cli_path}}
-  cp {{workspace_dir}}/service/packaging/macos/Info.plist {{contents_dir}}/Info.plist
+  cp {{workspace_dir}}/packaging/macos/app/Info.plist {{contents_dir}}/Info.plist
   printf 'APPL????' > {{contents_dir}}/PkgInfo
   swift {{workspace_dir}}/scripts/gen_icns.swift {{contents_dir}}/Resources/AppIcon.icns
   just -f {{workspace_dir}}/Justfile build-swift-dialogs
