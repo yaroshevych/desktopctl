@@ -197,7 +197,7 @@ mod controller {
     fn restore_focus() {
         let pid = lock_state().and_then(|mut state| state.restore_pid.take());
         if let Some(pid) = pid {
-            let _ = crate::platform::apps::activate_pid_immediately(pid);
+            let _ = desktop_app::runtime::macos::activate_pid_immediately(pid);
         }
     }
 
