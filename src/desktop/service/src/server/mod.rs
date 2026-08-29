@@ -658,6 +658,7 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
         Command::Ping
             | Command::ServiceStatus
             | Command::ActiveWindowDescribe
+            | Command::AgentAccessSet { .. }
             | Command::DisableGui
             | Command::PermissionsCheck
             | Command::RequestShow { .. }
@@ -765,10 +766,19 @@ fn execute_with_context(
                     "permissions".to_string(),
                     "windowing".to_string(),
                 ],
+                agent_access_enabled: !gui_ops_disabled(),
+                overlay_running: crate::overlay::is_active(),
             })
             .map_err(|error| AppError::internal(format!("encode service status failed: {error}")))
         }
         Command::ActiveWindowDescribe => active_window_description(),
+        Command::AgentAccessSet { enabled } => {
+            set_gui_ops_disabled(!enabled);
+            if !enabled && crate::overlay::is_active() {
+                crate::overlay::stop_overlay()?;
+            }
+            Ok(json!({ "enabled": enabled }))
+        }
         Command::DisableGui => {
             set_gui_ops_disabled(true);
             Ok(json!({}))

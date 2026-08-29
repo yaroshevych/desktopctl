@@ -60,6 +60,9 @@ pub enum Command {
     Ping,
     ServiceStatus,
     ActiveWindowDescribe,
+    AgentAccessSet {
+        enabled: bool,
+    },
     DisableGui,
     AppHide {
         name: String,
@@ -315,6 +318,7 @@ impl Command {
             Command::Ping => "ping",
             Command::ServiceStatus => "service_status",
             Command::ActiveWindowDescribe => "active_window_describe",
+            Command::AgentAccessSet { .. } => "agent_access_set",
             Command::DisableGui => "disable",
             Command::AppHide { .. } => "app_hide",
             Command::AppShow { .. } => "app_show",

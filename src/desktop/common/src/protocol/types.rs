@@ -10,6 +10,10 @@ pub struct ServiceStatusPayload {
     pub protocol_min: u32,
     pub protocol_max: u32,
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub agent_access_enabled: bool,
+    #[serde(default)]
+    pub overlay_running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -31,6 +31,14 @@ impl ServiceClient {
             .map(|payload| payload.windows)
     }
 
+    pub fn set_agent_access(&self, enabled: bool) -> Result<bool, AppError> {
+        let value = self.send(Command::AgentAccessSet { enabled })?;
+        value
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| AppError::internal("agent access response missing enabled state"))
+    }
+
     pub fn send_typed<T>(&self, command: Command) -> Result<T, AppError>
     where
         T: DeserializeOwned,
