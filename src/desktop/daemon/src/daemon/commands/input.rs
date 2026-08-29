@@ -1,11 +1,14 @@
 use desktop_core::{
-    automation::{BackgroundInputTarget, Point, new_background_input_backend},
     error::AppError,
     protocol::{ObserveOptions, PointerButton},
 };
 use serde_json::{Value, json};
 
-use crate::{platform::input::new_backend, trace};
+use crate::{
+    automation::{BackgroundInputTarget, Point, new_background_input_backend},
+    platform::input::new_backend,
+    trace,
+};
 
 struct BackgroundInputAttempt {
     handled: bool,

@@ -11,13 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::platform::input::new_backend;
+use crate::{automation::Point, platform::input::new_backend};
 #[cfg(windows)]
 use desktop_core::ipc::pipe_name;
 #[cfg(unix)]
 use desktop_core::ipc::socket_path;
 use desktop_core::{
-    automation::Point,
     error::AppError,
     ipc::{read_framed_json, write_framed_json},
     protocol::{
@@ -108,7 +107,7 @@ impl BackgroundInputModeGuard {
     fn set(enabled: bool) -> Self {
         let previous = BACKGROUND_INPUT_ENABLED.swap(enabled, Ordering::SeqCst);
         #[cfg(target_os = "macos")]
-        desktop_core::automation::set_nsevent_background_mouse_events(enabled);
+        crate::automation::set_nsevent_background_mouse_events(enabled);
         Self { previous }
     }
 }
@@ -117,7 +116,7 @@ impl Drop for BackgroundInputModeGuard {
     fn drop(&mut self) {
         BACKGROUND_INPUT_ENABLED.store(self.previous, Ordering::SeqCst);
         #[cfg(target_os = "macos")]
-        desktop_core::automation::set_nsevent_background_mouse_events(self.previous);
+        crate::automation::set_nsevent_background_mouse_events(self.previous);
     }
 }
 
@@ -274,7 +273,7 @@ pub fn run_blocking(config: DaemonConfig) -> Result<(), AppError> {
 fn apply_runtime_config(config: DaemonConfig) {
     BACKGROUND_INPUT_ENABLED.store(config.background_input, Ordering::SeqCst);
     #[cfg(target_os = "macos")]
-    desktop_core::automation::set_nsevent_background_mouse_events(config.background_input);
+    crate::automation::set_nsevent_background_mouse_events(config.background_input);
 }
 
 pub fn gui_ops_disabled() -> bool {

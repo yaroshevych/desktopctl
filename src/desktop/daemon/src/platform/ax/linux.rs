@@ -469,7 +469,12 @@ mod imp {
             walk.out.push(AxElement {
                 role: "AXTraversalTruncated".to_string(),
                 text: None,
-                bounds: Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
                 ax_identifier: None,
                 checked: None,
                 truncated: true,
@@ -534,7 +539,12 @@ mod imp {
             walk.out.push(AxElement {
                 role: "AXTraversalTruncated".to_string(),
                 text: None,
-                bounds: Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+                bounds: Bounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
                 ax_identifier: None,
                 checked: None,
                 truncated: true,

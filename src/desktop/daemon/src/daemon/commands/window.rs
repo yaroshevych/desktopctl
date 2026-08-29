@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "linux"))]
-use desktop_core::automation::new_backend;
+use crate::automation::new_backend;
 use desktop_core::error::AppError;
 use serde_json::{Value, json};
 

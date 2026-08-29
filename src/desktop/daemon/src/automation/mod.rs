@@ -3,8 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use crate::error::AppError;
-use crate::protocol::Bounds;
+use desktop_core::{error::AppError, protocol::Bounds};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Point {
@@ -49,6 +48,7 @@ pub struct BackgroundInputTarget {
 }
 
 pub trait BackgroundInputBackend {
+    #[allow(dead_code)]
     fn preflight(&self, target: &BackgroundInputTarget) -> Result<(), AppError>;
     fn left_click(&self, target: &BackgroundInputTarget, point: Point) -> Result<(), AppError>;
     fn left_drag(

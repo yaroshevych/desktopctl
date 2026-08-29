@@ -814,7 +814,10 @@ mod tests {
             .filter(|arg| *arg == "--append-system-prompt")
             .count();
         assert_eq!(prompt_flags, 2);
-        assert!(args.iter().any(|arg| arg.to_string_lossy().contains("Initial environment context")));
+        assert!(args.iter().any(|arg| {
+            arg.to_string_lossy()
+                .contains("Initial environment context")
+        }));
         assert_eq!(args.last(), Some(&OsString::from("summarize")));
     }
 

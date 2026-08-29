@@ -1,6 +1,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use desktop_core::{automation::{Automation, Point}, error::AppError};
+use desktop_core::error::AppError;
+
+use crate::automation::{Automation, Point};
 
 // ── RNG (xorshift64, no external crate) ─────────────────────────────────────
 
@@ -51,7 +53,11 @@ pub(super) fn bezier_path(from: Point, to: Point) -> Vec<Point> {
     // Unit perpendicular vector for random lateral deviation
     let perp_x = -(dy as f64) / dist;
     let perp_y = dx as f64 / dist;
-    let sign = if xorshift(&mut rng) & 1 == 0 { 1.0f64 } else { -1.0 };
+    let sign = if xorshift(&mut rng) & 1 == 0 {
+        1.0f64
+    } else {
+        -1.0
+    };
     let offset = dist * (0.05 + rng_range(&mut rng, 0, 20) as f64 / 100.0);
 
     // Two control points placed asymmetrically along the path

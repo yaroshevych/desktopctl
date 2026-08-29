@@ -31,7 +31,7 @@ use core_graphics::{
 };
 use foreign_types::ForeignType;
 
-use crate::error::AppError;
+use desktop_core::error::AppError;
 
 use super::{Automation, BackgroundInputBackend, BackgroundInputTarget, Point};
 
@@ -1310,7 +1310,7 @@ fn keycode_for_char(key: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::Bounds;
+    use desktop_core::protocol::Bounds;
 
     use super::{
         BackgroundInputTarget, BackgroundMousePoint, Point, ProcessSerialNumber,
@@ -1478,7 +1478,7 @@ fn trace_mouse(message: impl AsRef<str>) {
         .filter(|p| !p.trim().is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-            let paths = crate::paths::AppPaths::resolve().ok()?;
+            let paths = desktop_core::paths::AppPaths::resolve().ok()?;
             paths.ensure_logs_dir().ok()?;
             Some(paths.daemon_log_file())
         });

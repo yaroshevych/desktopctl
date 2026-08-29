@@ -734,12 +734,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "desktop-core"
+name = "desktop-common"
 version = "0.2.0"
 dependencies = [
- "cocoa",
- "core-graphics",
- "foreign-types",
  "interprocess",
  "serde",
  "serde_json",
@@ -753,7 +750,7 @@ name = "desktopctl"
 version = "0.2.0"
 dependencies = [
  "clap",
- "desktop-core",
+ "desktop-common",
  "serde_json",
  "uuid",
  "windows-sys 0.61.2",
@@ -768,10 +765,12 @@ dependencies = [
  "ashpd",
  "atspi",
  "block2",
+ "cocoa",
  "core-foundation 0.10.1",
  "core-graphics",
- "desktop-core",
+ "desktop-common",
  "dispatch2",
+ "foreign-types",
  "futures-lite",
  "image",
  "interprocess",

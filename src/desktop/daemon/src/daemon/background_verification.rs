@@ -4,11 +4,12 @@ use std::{
     time::Duration,
 };
 
-use desktop_core::{automation::BackgroundInputTarget, error::AppError, protocol::Bounds};
+use desktop_core::{error::AppError, protocol::Bounds};
 use image::RgbaImage;
 use serde_json::{Value, json};
 
 use crate::{
+    automation::BackgroundInputTarget,
     trace,
     vision::{self, pipeline::TokenizeWindowMeta},
 };

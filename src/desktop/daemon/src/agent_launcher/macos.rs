@@ -23,10 +23,10 @@ use std::{
 
 use dispatch2::DispatchQueue;
 use objc2::{
-    define_class, msg_send,
+    MainThreadOnly, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, Bool},
-    sel, MainThreadOnly,
+    sel,
 };
 use objc2_app_kit::{
     NSAnimationContext, NSApplication, NSBackingStoreType, NSButton, NSButtonType, NSColor,
@@ -1095,10 +1095,10 @@ fn move_selection(delta: isize) {
         if count == 0 {
             return;
         }
-        let old =
-            ui.selected
-                .map(|value| value as isize)
-                .unwrap_or_else(|| if delta < 0 { 0 } else { -1 });
+        let old = ui
+            .selected
+            .map(|value| value as isize)
+            .unwrap_or_else(|| if delta < 0 { 0 } else { -1 });
         ui.selected = Some((old + delta).rem_euclid(count as isize) as usize);
         for (idx, row) in ui.rows.iter().enumerate() {
             row.highlight(ui.selected == Some(idx));

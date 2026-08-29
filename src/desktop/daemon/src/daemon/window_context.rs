@@ -269,8 +269,8 @@ pub(super) fn explicit_background_capture_window_id(
 
 pub(super) fn background_input_target_for_window(
     window: &platform::windowing::WindowInfo,
-) -> Result<desktop_core::automation::BackgroundInputTarget, AppError> {
-    Ok(desktop_core::automation::BackgroundInputTarget {
+) -> Result<crate::automation::BackgroundInputTarget, AppError> {
+    Ok(crate::automation::BackgroundInputTarget {
         pid: i32::try_from(window.pid).map_err(|_| {
             AppError::backend_unavailable(
                 "background input target pid is out of range; switch to frontmost mode",

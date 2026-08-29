@@ -20,7 +20,7 @@ echo "[tokenize-ci] host_app_hash_before=$before_hash"
 
 echo "[tokenize-ci] running Rust test suites"
 cd "$DESKTOP_DIR"
-cargo test -p desktop-core
+cargo test -p desktop-common
 cargo test -p desktopctl
 cargo test -p desktopctld
 

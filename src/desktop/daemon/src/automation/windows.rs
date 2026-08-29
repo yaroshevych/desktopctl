@@ -1,4 +1,4 @@
-use crate::error::AppError;
+use desktop_core::error::AppError;
 
 use super::{Automation, Point};
 

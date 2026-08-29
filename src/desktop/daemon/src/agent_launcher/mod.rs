@@ -104,8 +104,8 @@ mod controller {
             state.pending_target = None;
             state.restore_pid = target_hint;
             state.open_session = None;
-            state.pending_preparation = target_hint
-                .map(|_| Arc::new((Mutex::new(None), Condvar::new())));
+            state.pending_preparation =
+                target_hint.map(|_| Arc::new((Mutex::new(None), Condvar::new())));
             state.launch_generation
         } else {
             return;
@@ -465,9 +465,8 @@ end run"#;
                     match context {
                         Ok(context) => match write_window_context(&workspace, target, &context) {
                             Ok(file_name) => {
-                                request.window_context = Some(window_context_prompt(
-                                    target, &context, &file_name,
-                                ));
+                                request.window_context =
+                                    Some(window_context_prompt(target, &context, &file_name));
                             }
                             Err(error) => trace::log(format!(
                                 "agent_launcher:context_file_unavailable; continuing_without_context {error}"
@@ -718,7 +717,10 @@ end run"#;
             .iter()
             .filter_map(|window| {
                 let id = window.get("id")?.as_str()?;
-                let app = window.get("app").and_then(serde_json::Value::as_str).unwrap_or("");
+                let app = window
+                    .get("app")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 let title = window
                     .get("title")
                     .and_then(serde_json::Value::as_str)

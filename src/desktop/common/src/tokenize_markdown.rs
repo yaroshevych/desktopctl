@@ -108,7 +108,11 @@ pub fn render_tokenize_markdown(value: &Value, include_all_hint: bool) -> String
             "--all result was truncated by AX traversal limits; some elements may be missing",
         );
     } else if has_offscreen_elements {
-        push_kv(&mut lines, "hint", "off-screen element IDs came from --all; use pointer scroll deltas with the cursor in the target scroll area, then re-run screen tokenize --all");
+        push_kv(
+            &mut lines,
+            "hint",
+            "off-screen element IDs came from --all; use pointer scroll deltas with the cursor in the target scroll area, then re-run screen tokenize --all",
+        );
     } else if let Some(hint) = hint.filter(|v| !v.trim().is_empty()) {
         push_kv(&mut lines, "hint", hint);
     }
@@ -237,7 +241,9 @@ fn render_error(value: &Value) -> String {
         .get("retryable")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    format!("# Screen Tokenize\n\n- request_id: {request_id}\n- code: {code}\n- message: {message}\n- retryable: {retryable}")
+    format!(
+        "# Screen Tokenize\n\n- request_id: {request_id}\n- code: {code}\n- message: {message}\n- retryable: {retryable}"
+    )
 }
 
 #[derive(Clone)]

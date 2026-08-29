@@ -1,13 +1,11 @@
-use desktop_core::{
-    automation::Automation,
-    error::AppError,
-};
+use crate::automation::Automation;
 #[cfg(target_os = "linux")]
-use desktop_core::automation::Point;
+use crate::automation::Point;
+use desktop_core::error::AppError;
 
 #[cfg(not(target_os = "linux"))]
 pub fn new_backend() -> Result<Box<dyn Automation>, AppError> {
-    desktop_core::automation::new_backend()
+    crate::automation::new_backend()
 }
 
 #[cfg(target_os = "linux")]

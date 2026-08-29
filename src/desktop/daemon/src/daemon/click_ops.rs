@@ -897,7 +897,7 @@ fn perform_click_for_target_window(
     {
         let point = Point::new(center_x, center_y);
         let target = background_input_target_for_window(window)?;
-        let backend = desktop_core::automation::new_background_input_backend()?;
+        let backend = crate::automation::new_background_input_backend()?;
         backend.left_click(&target, point)?;
         trace::log(format!(
             "background_input:click_target ok pid={} window_id={} point=({}, {})",

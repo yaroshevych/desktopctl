@@ -8,6 +8,7 @@ mod agent_runner;
 mod agent_sessions;
 mod app_policy;
 mod app_runtime;
+mod automation;
 mod clipboard;
 mod daemon;
 mod journal;
