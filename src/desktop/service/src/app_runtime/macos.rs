@@ -14,7 +14,9 @@ use desktop_core::{
 };
 
 use super::{about, settings_dialog};
-use crate::{agent_launcher, daemon, journal, overlay, platform::permissions, trace};
+use desktop_app::launcher::controller as agent_launcher;
+
+use crate::{daemon, journal, overlay, platform::permissions, trace};
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -134,7 +136,7 @@ pub(crate) fn run() -> Result<(), AppError> {
 
     daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
     journal::start_from_disk();
-    agent_launcher::initialize()?;
+    agent_launcher::initialize(std::sync::Arc::new(set_agent_running))?;
 
     if journal::current().enabled && !permissions::screen_recording_granted() {
         notify_journal_needs_screen_recording();

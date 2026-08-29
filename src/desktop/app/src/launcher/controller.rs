@@ -13,7 +13,7 @@ mod controller {
     use uuid::Uuid;
 
     use crate::trace;
-    use desktop_app::{
+    use crate::{
         agent_runner::{
             AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
             discover_pi_executable, load_native_transcript,
@@ -52,8 +52,10 @@ mod controller {
     }
 
     type PreparationHandle = Arc<(Mutex<Option<Result<PreparedTarget, String>>>, Condvar)>;
+    pub type RunningHandler = Arc<dyn Fn(bool) + Send + Sync + 'static>;
 
     static STATE: OnceLock<Arc<Mutex<State>>> = OnceLock::new();
+    static RUNNING_HANDLER: OnceLock<RunningHandler> = OnceLock::new();
 
     fn lock_state() -> Option<std::sync::MutexGuard<'static, State>> {
         let state = STATE.get()?;
@@ -63,7 +65,16 @@ mod controller {
         })
     }
 
-    pub fn initialize() -> Result<(), desktop_core::error::AppError> {
+    fn set_running(running: bool) {
+        if let Some(handler) = RUNNING_HANDLER.get() {
+            handler(running);
+        }
+    }
+
+    pub fn initialize(
+        running_handler: RunningHandler,
+    ) -> Result<(), desktop_core::error::AppError> {
+        let _ = RUNNING_HANDLER.set(running_handler);
         let path = AgentSessionStore::default_path().ok_or_else(|| {
             desktop_core::error::AppError::backend_unavailable(
                 "unable to resolve DesktopCtl workspace directory",
@@ -94,7 +105,7 @@ mod controller {
             launcher_ui::hide();
             return;
         }
-        let active_window = desktop_app::service_client::ServiceClient
+        let active_window = crate::service_client::ServiceClient
             .active_window()
             .map_err(|error| {
                 trace::log(format!("agent_launcher:active_window_error {error}"));
@@ -197,7 +208,7 @@ mod controller {
     fn restore_focus() {
         let pid = lock_state().and_then(|mut state| state.restore_pid.take());
         if let Some(pid) = pid {
-            let _ = desktop_app::runtime::macos::activate_pid_immediately(pid);
+            let _ = crate::runtime::macos::activate_pid_immediately(pid);
         }
     }
 
@@ -442,7 +453,7 @@ end run"#;
                 .cancellations
                 .insert(session_id.clone(), cancellation.clone());
         }
-        crate::app_runtime::set_agent_running(true);
+        set_running(true);
         thread::spawn(move || {
             let prepared = preparation.and_then(|handle| wait_for_preparation(&handle));
             let target = target.or_else(|| prepared.as_ref().map(|value| value.target.clone()));
@@ -559,7 +570,7 @@ end run"#;
     }
 
     fn window_context_for_target(target: &TargetWindowMetadata) -> Result<WindowContext, String> {
-        let client = desktop_app::service_client::ServiceClient;
+        let client = crate::service_client::ServiceClient;
         let windows = client.windows().map_err(|error| {
             if matches!(
                 error.code,
@@ -762,7 +773,7 @@ end run"#;
     }
 
     fn target_window_is_current(target: &TargetWindowMetadata) -> Result<bool, String> {
-        let windows = desktop_app::service_client::ServiceClient
+        let windows = crate::service_client::ServiceClient
             .windows()
             .map_err(|error| {
                 if matches!(
@@ -786,15 +797,12 @@ end run"#;
         session_id: &str,
         request_id: &str,
         workspace: &Path,
-        result: Result<
-            desktop_app::agent_runner::AgentResult,
-            desktop_app::agent_runner::AgentRunnerError,
-        >,
+        result: Result<crate::agent_runner::AgentResult, crate::agent_runner::AgentRunnerError>,
     ) {
         let mut notice = None;
         if let Some(mut state) = lock_state() {
             state.cancellations.remove(session_id);
-            crate::app_runtime::set_agent_running(!state.cancellations.is_empty());
+            set_running(!state.cancellations.is_empty());
             match result {
                 Ok(result) => {
                     let native_path = result
@@ -856,7 +864,7 @@ end run"#;
                         }
                     }
                 }
-                Err(desktop_app::agent_runner::AgentRunnerError::Cancelled) => {
+                Err(crate::agent_runner::AgentRunnerError::Cancelled) => {
                     let _ = state
                         .store
                         .cancel_request(session_id, request_id, unix_now_ms());
@@ -1008,7 +1016,7 @@ end run"#;
         use super::{
             ghostty_command, native_session_path_is_safe, posix_quote, target_matches_window,
         };
-        use desktop_app::agent_sessions::TargetWindowMetadata;
+        use crate::agent_sessions::TargetWindowMetadata;
         use desktop_core::protocol::{Bounds, WindowSummary};
         use std::{
             fs,
@@ -1089,4 +1097,4 @@ end run"#;
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use controller::{initialize, toggle};
+pub use controller::{RunningHandler, initialize, toggle};
