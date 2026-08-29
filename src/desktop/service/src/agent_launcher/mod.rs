@@ -15,7 +15,7 @@ mod controller {
     use desktop_core::{error::ErrorCode, protocol::TokenizePayload};
     use uuid::Uuid;
 
-    use crate::{
+    use desktop_app::{
         agent_runner::{
             AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
             discover_pi_executable, load_native_transcript,
@@ -24,8 +24,8 @@ mod controller {
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
             SessionMessageRole, TargetWindowMetadata, truncate_one_line, unix_now_ms,
         },
-        daemon, trace,
     };
+    use crate::{daemon, trace};
 
     use super::macos::{
         CompletionNotice, LauncherAction, LauncherCallbacks, LauncherScreen, LauncherSnapshot,
@@ -784,7 +784,10 @@ end run"#;
         session_id: &str,
         request_id: &str,
         workspace: &Path,
-        result: Result<crate::agent_runner::AgentResult, crate::agent_runner::AgentRunnerError>,
+        result: Result<
+            desktop_app::agent_runner::AgentResult,
+            desktop_app::agent_runner::AgentRunnerError,
+        >,
     ) {
         let mut notice = None;
         if let Some(mut state) = lock_state() {
@@ -851,7 +854,7 @@ end run"#;
                         }
                     }
                 }
-                Err(crate::agent_runner::AgentRunnerError::Cancelled) => {
+                Err(desktop_app::agent_runner::AgentRunnerError::Cancelled) => {
                     let _ = state
                         .store
                         .cancel_request(session_id, request_id, unix_now_ms());
@@ -1004,7 +1007,7 @@ end run"#;
             ghostty_command, native_session_path_is_safe, native_window_id_from_id, posix_quote,
             target_matches_window,
         };
-        use crate::agent_sessions::TargetWindowMetadata;
+        use desktop_app::agent_sessions::TargetWindowMetadata;
         use crate::platform::windowing::WindowInfo;
         use desktop_core::protocol::Bounds;
         use std::{

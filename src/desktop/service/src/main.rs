@@ -2,10 +2,6 @@
 
 #[cfg(target_os = "macos")]
 mod agent_launcher;
-#[cfg(target_os = "macos")]
-mod agent_runner;
-#[cfg(target_os = "macos")]
-mod agent_sessions;
 mod app_policy;
 mod app_runtime;
 mod automation;

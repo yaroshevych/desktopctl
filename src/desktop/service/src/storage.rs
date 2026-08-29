@@ -42,12 +42,6 @@ pub fn config_path() -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-pub fn agent_sessions_path() -> Result<PathBuf, String> {
-    AppPaths::resolve()
-        .map(|paths| paths.agent_sessions_file())
-        .map_err(|error| error.to_string())
-}
-
 pub fn load_app_policy() -> Result<Option<AppPolicyConfig>, String> {
     load_config().map(|config| config.map(|config| config.app_policy))
 }

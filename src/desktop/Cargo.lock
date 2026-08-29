@@ -734,6 +734,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "desktop-app"
+version = "0.2.0"
+dependencies = [
+ "desktop-common",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "desktop-common"
 version = "0.2.0"
 dependencies = [
@@ -768,6 +778,7 @@ dependencies = [
  "cocoa",
  "core-foundation 0.10.1",
  "core-graphics",
+ "desktop-app",
  "desktop-common",
  "dispatch2",
  "foreign-types",

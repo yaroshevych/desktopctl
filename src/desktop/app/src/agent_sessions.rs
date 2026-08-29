@@ -202,7 +202,9 @@ impl AgentSessionStore {
     }
 
     pub fn default_path() -> Option<PathBuf> {
-        crate::storage::agent_sessions_path().ok()
+        desktop_core::paths::AppPaths::resolve()
+            .ok()
+            .map(|paths| paths.agent_sessions_file())
     }
 
     /// Load the default store and recover sessions left running by a crashed
