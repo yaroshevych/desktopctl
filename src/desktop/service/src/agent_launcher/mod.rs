@@ -12,6 +12,7 @@ mod controller {
     use desktop_core::{error::ErrorCode, protocol::TokenizePayload};
     use uuid::Uuid;
 
+    use crate::{daemon, trace};
     use desktop_app::{
         agent_runner::{
             AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
@@ -26,7 +27,6 @@ mod controller {
             LauncherScreen, LauncherSnapshot, SessionStatus, SessionSummary, TranscriptMessage,
         },
     };
-    use crate::{daemon, trace};
 
     struct State {
         store: AgentSessionStore,
@@ -1003,8 +1003,8 @@ end run"#;
             ghostty_command, native_session_path_is_safe, native_window_id_from_id, posix_quote,
             target_matches_window,
         };
-        use desktop_app::agent_sessions::TargetWindowMetadata;
         use crate::platform::windowing::WindowInfo;
+        use desktop_app::agent_sessions::TargetWindowMetadata;
         use desktop_core::protocol::Bounds;
         use std::{
             fs,
