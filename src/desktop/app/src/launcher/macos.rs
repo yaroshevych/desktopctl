@@ -15,7 +15,7 @@
 use std::{
     cell::RefCell,
     ffi::c_void,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, OnceLock},
     thread,
     time::Duration,
@@ -38,6 +38,7 @@ use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 
+use super::swift_bridge;
 use desktop_core::error::AppError;
 
 const PANEL_WIDTH: f64 = 680.0;
@@ -56,13 +57,37 @@ const KEY_ENTER: u16 = 76;
 const KEY_UP: u16 = 126;
 const KEY_DOWN: u16 = 125;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionStatus {
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WorkArea {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
+
+fn centered_top_origin(area: WorkArea, width: f64, height: f64, gap: f64) -> (f64, f64) {
+    let x = area.x + ((area.width - width) / 2.0).max(0.0);
+    let y = (area.y + area.height - height - gap).max(area.y);
+    (x, y)
+}
+
+fn point_in_work_area(point: NSPoint, area: NSRect) -> bool {
+    point.x >= area.origin.x
+        && point.x < area.origin.x + area.size.width
+        && point.y >= area.origin.y
+        && point.y < area.origin.y + area.size.height
+}
+
+fn screen_index_for_point(point: NSPoint, frames: &[NSRect]) -> Option<usize> {
+    frames
+        .iter()
+        .position(|frame| point_in_work_area(point, *frame))
+}
+
+pub use super::core::{
+    CompletionNotice, LauncherAction, LauncherScreen, LauncherSnapshot, SessionStatus,
+    SessionSummary, TranscriptMessage,
+};
 
 impl SessionStatus {
     fn label(&self) -> &'static str {
@@ -75,81 +100,6 @@ impl SessionStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionSummary {
-    pub id: String,
-    pub title: String,
-    pub preview: String,
-    pub status: SessionStatus,
-    pub unread: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TranscriptMessage {
-    pub user: bool,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LauncherScreen {
-    Launcher,
-    Session {
-        id: String,
-        title: String,
-        status: SessionStatus,
-        terminal_available: bool,
-        messages: Vec<TranscriptMessage>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LauncherSnapshot {
-    pub screen: LauncherScreen,
-    pub recent: Vec<SessionSummary>,
-    pub all: Vec<SessionSummary>,
-}
-
-impl Default for LauncherSnapshot {
-    fn default() -> Self {
-        Self {
-            screen: LauncherScreen::Launcher,
-            recent: Vec::new(),
-            all: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompletionNotice {
-    pub title: String,
-    pub answer_preview: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LauncherAction {
-    ToggleRequested,
-    Dismissed,
-    ReturnToLauncher,
-    NewRequest {
-        prompt: String,
-        share_context: bool,
-    },
-    FollowUp {
-        session_id: String,
-        prompt: String,
-        share_context: bool,
-    },
-    OpenSession {
-        session_id: String,
-    },
-    CancelSession {
-        session_id: String,
-    },
-    OpenInGhostty {
-        session_id: String,
-    },
-}
-
 pub type LauncherActionHandler = Arc<dyn Fn(LauncherAction) + Send + Sync + 'static>;
 
 #[derive(Clone)]
@@ -159,6 +109,9 @@ pub struct LauncherCallbacks {
 
 static CALLBACKS: OnceLock<LauncherCallbacks> = OnceLock::new();
 static VISIBLE: AtomicBool = AtomicBool::new(false);
+// Desired state updates immediately; main-queue work may lag behind hotkey input.
+static REQUESTED_VISIBLE: AtomicBool = AtomicBool::new(false);
+static NEXT_LIFECYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static HOTKEY_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
@@ -266,6 +219,8 @@ struct UiState {
     completion_panel: Option<Retained<NSPanel>>,
     completion_label: Option<Retained<NSTextField>>,
     completion_generation: u64,
+    anchor_visible_frame: Option<NSRect>,
+    lifecycle_sequence: u64,
     snapshot: LauncherSnapshot,
     selected: Option<usize>,
     session_id: Option<String>,
@@ -294,6 +249,8 @@ impl Default for UiState {
             completion_panel: None,
             completion_label: None,
             completion_generation: 0,
+            anchor_visible_frame: None,
+            lifecycle_sequence: 0,
             snapshot: LauncherSnapshot::default(),
             selected: None,
             session_id: None,
@@ -322,21 +279,54 @@ pub fn is_visible() -> bool {
     VISIBLE.load(Ordering::SeqCst)
 }
 
+/// Return desired visibility, including requests still queued on AppKit main.
+pub fn is_open_requested() -> bool {
+    REQUESTED_VISIBLE.load(Ordering::SeqCst)
+}
+
+fn next_lifecycle_sequence() -> u64 {
+    NEXT_LIFECYCLE_SEQUENCE
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1)
+}
+
 pub fn show() {
-    DispatchQueue::main().exec_async(show_on_main);
+    REQUESTED_VISIBLE.store(true, Ordering::SeqCst);
+    let sequence = next_lifecycle_sequence();
+    DispatchQueue::main().exec_async(move || apply_show(sequence));
 }
 
 pub fn hide() {
-    DispatchQueue::main().exec_async(hide_on_main);
+    REQUESTED_VISIBLE.store(false, Ordering::SeqCst);
+    let sequence = next_lifecycle_sequence();
+    DispatchQueue::main().exec_async(move || apply_hide(sequence));
 }
 
 pub fn refresh(snapshot: LauncherSnapshot) {
     DispatchQueue::main().exec_async(move || {
-        UI.with(|cell| cell.borrow_mut().snapshot = snapshot);
+        let accepted = UI.with(|cell| {
+            let mut ui = cell.borrow_mut();
+            if !accepts_newer_revision(ui.snapshot.revision, snapshot.revision) {
+                return false;
+            }
+            ui.snapshot = snapshot.clone();
+            true
+        });
+        if !accepted {
+            return;
+        }
         if is_visible() {
             render_on_main();
         }
     });
+}
+
+fn accepts_newer_revision(current: u64, incoming: u64) -> bool {
+    incoming > current
+}
+
+fn accepts_lifecycle_sequence(current: u64, incoming: u64) -> bool {
+    incoming > current
 }
 
 pub fn show_completion(notice: CompletionNotice) {
@@ -376,9 +366,100 @@ fn create_panel(mtm: MainThreadMarker) -> Result<(), AppError> {
             input.setAction(Some(sel!(submit:)));
         }
         content.addSubview(&input);
-        ui.panel = Some(panel); ui.content = Some(content); ui.input = Some(input);
+        if swift_bridge::enabled() {
+            input.setHidden(true);
+            if !swift_bridge::mount(
+                (&*content as *const NSView).cast_mut().cast(),
+                swift_action_callback,
+            ) {
+                eprintln!("swift launcher: mount failed; using Rust renderer");
+                input.setHidden(false);
+            }
+        }
+        ui.panel = Some(panel);
+        ui.content = Some(content);
+        ui.input = Some(input);
         Ok(())
     })
+}
+
+unsafe extern "C" fn swift_action_callback(ptr: *const std::ffi::c_char, length: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), length) };
+    let Ok(parsed) = std::panic::catch_unwind(|| parse_swift_action(bytes)) else {
+        return;
+    };
+    let Some((launcher_action, hide_before_dispatch)) = parsed else {
+        return;
+    };
+    // Swift can call back while Rust is updating the hosted view under a UiState
+    // RefCell borrow. Defer all UI/controller work until the callback unwinds.
+    DispatchQueue::main().exec_async(move || {
+        if hide_before_dispatch {
+            hide_on_main();
+        }
+        if let Some(callbacks) = CALLBACKS.get() {
+            (callbacks.on_action)(launcher_action);
+        }
+    });
+}
+
+fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
+    let action = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    let launcher_action = match action.get("type").and_then(|value| value.as_str()) {
+        Some("new_request") => {
+            let prompt = action.get("prompt").and_then(|value| value.as_str())?;
+            let prompt = prompt.trim();
+            if prompt.is_empty() {
+                return None;
+            }
+            LauncherAction::NewRequest {
+                prompt: prompt.to_owned(),
+                share_context: true,
+            }
+        }
+        Some("open_session") => {
+            let session_id = action.get("session_id").and_then(|value| value.as_str())?;
+            LauncherAction::OpenSession {
+                session_id: session_id.to_owned(),
+            }
+        }
+        Some("follow_up") => {
+            let (Some(session_id), Some(prompt)) = (
+                action.get("session_id").and_then(|value| value.as_str()),
+                action.get("prompt").and_then(|value| value.as_str()),
+            ) else {
+                return None;
+            };
+            let prompt = prompt.trim();
+            if prompt.is_empty() {
+                return None;
+            }
+            LauncherAction::FollowUp {
+                session_id: session_id.to_owned(),
+                prompt: prompt.to_owned(),
+                share_context: true,
+            }
+        }
+        Some("cancel_session") => {
+            let session_id = action.get("session_id").and_then(|value| value.as_str())?;
+            LauncherAction::CancelSession {
+                session_id: session_id.to_owned(),
+            }
+        }
+        Some("open_in_ghostty") => {
+            let session_id = action.get("session_id").and_then(|value| value.as_str())?;
+            LauncherAction::OpenInGhostty {
+                session_id: session_id.to_owned(),
+            }
+        }
+        Some("return_to_launcher") => LauncherAction::ReturnToLauncher,
+        _ => return None,
+    };
+    let hide_before_dispatch = matches!(launcher_action, LauncherAction::NewRequest { .. });
+    Some((launcher_action, hide_before_dispatch))
 }
 
 fn show_completion_on_main(notice: CompletionNotice) {
@@ -443,7 +524,7 @@ fn show_completion_on_main(notice: CompletionNotice) {
             .as_ref()
             .unwrap()
             .setStringValue(&NSString::from_str(&one_line(&preview, 120)));
-        position_completion(panel);
+        position_completion(panel, ui.anchor_visible_frame);
         panel.setAlphaValue(0.0);
         panel.orderFrontRegardless();
         animate_alpha(panel, 1.0);
@@ -488,18 +569,50 @@ fn animate_alpha(panel: &NSPanel, alpha: f64) {
     NSAnimationContext::endGrouping();
 }
 
-fn position_completion(panel: &NSPanel) {
+fn active_visible_frame(mtm: MainThreadMarker) -> Option<NSRect> {
+    let point = NSEvent::mouseLocation();
+    let screens = objc2_app_kit::NSScreen::screens(mtm);
+    let frames: Vec<NSRect> = screens.iter().map(|screen| screen.frame()).collect();
+    let index = screen_index_for_point(point, &frames);
+    index
+        .and_then(|index| {
+            screens
+                .iter()
+                .nth(index)
+                .map(|screen| screen.visibleFrame())
+        })
+        .or_else(|| objc2_app_kit::NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()))
+}
+
+fn cached_or_active_visible_frame(mtm: MainThreadMarker, cached: Option<NSRect>) -> Option<NSRect> {
+    let screens = objc2_app_kit::NSScreen::screens(mtm);
+    if let Some(cached) = cached {
+        if screens.iter().any(|screen| screen.visibleFrame() == cached) {
+            return Some(cached);
+        }
+    }
+    active_visible_frame(mtm)
+}
+
+fn position_completion(panel: &NSPanel, cached_frame: Option<NSRect>) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let Some(screen) = objc2_app_kit::NSScreen::mainScreen(mtm) else {
+    let Some(frame) = cached_or_active_visible_frame(mtm, cached_frame) else {
         return;
     };
-    let frame = screen.visibleFrame();
-    panel.setFrameOrigin(NSPoint::new(
-        frame.origin.x + (frame.size.width - COMPLETION_WIDTH) / 2.0,
-        frame.origin.y + frame.size.height - COMPLETION_HEIGHT - 72.0,
-    ));
+    let (x, y) = centered_top_origin(
+        WorkArea {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.size.width,
+            height: frame.size.height,
+        },
+        COMPLETION_WIDTH,
+        COMPLETION_HEIGHT,
+        72.0,
+    );
+    panel.setFrameOrigin(NSPoint::new(x, y));
 }
 
 fn text_field(
@@ -524,8 +637,28 @@ fn text_field(
 }
 
 fn show_on_main() {
+    apply_show(next_lifecycle_sequence());
+}
+
+fn apply_show(sequence: u64) {
     if MainThreadMarker::new().is_none() {
         return;
+    }
+    let accepted = UI.with(|cell| {
+        let mut ui = cell.borrow_mut();
+        if !accepts_lifecycle_sequence(ui.lifecycle_sequence, sequence) {
+            return false;
+        }
+        ui.lifecycle_sequence = sequence;
+        true
+    });
+    if !accepted {
+        return;
+    }
+    REQUESTED_VISIBLE.store(true, Ordering::SeqCst);
+    dismiss_completion_on_main();
+    if let Some(frame) = active_visible_frame(MainThreadMarker::new().unwrap()) {
+        UI.with(|cell| cell.borrow_mut().anchor_visible_frame = Some(frame));
     }
     UI.with(|cell| {
         if cell.borrow().panel.is_none() {
@@ -539,12 +672,14 @@ fn show_on_main() {
         let Some(panel) = ui.panel.as_ref() else {
             return;
         };
-        position_panel(panel);
+        position_panel(panel, ui.anchor_visible_frame);
         let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
         panel.makeKeyAndOrderFront(None);
-        if let Some(composer) = ui.composer.as_ref() {
+        if swift_bridge::enabled() {
+            swift_bridge::focus_prompt();
+        } else if let Some(composer) = ui.composer.as_ref() {
             panel.makeFirstResponder(Some(composer));
         } else if let Some(input) = ui.input.as_ref() {
             panel.makeFirstResponder(Some(input));
@@ -554,6 +689,25 @@ fn show_on_main() {
 }
 
 fn hide_on_main() {
+    apply_hide(next_lifecycle_sequence());
+}
+
+fn apply_hide(sequence: u64) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let accepted = UI.with(|cell| {
+        let mut ui = cell.borrow_mut();
+        if !accepts_lifecycle_sequence(ui.lifecycle_sequence, sequence) {
+            return false;
+        }
+        ui.lifecycle_sequence = sequence;
+        true
+    });
+    if !accepted {
+        return;
+    }
+    REQUESTED_VISIBLE.store(false, Ordering::SeqCst);
     UI.with(|cell| {
         if let Some(panel) = cell.borrow().panel.as_ref() {
             panel.orderOut(None);
@@ -566,19 +720,35 @@ fn hide_on_main() {
     });
 }
 
-fn position_panel(panel: &NSPanel) {
+fn dismiss_completion_on_main() {
+    UI.with(|cell| {
+        let mut ui = cell.borrow_mut();
+        ui.completion_generation = ui.completion_generation.wrapping_add(1);
+        if let Some(panel) = ui.completion_panel.as_ref() {
+            panel.orderOut(None);
+        }
+    });
+}
+
+fn position_panel(panel: &NSPanel, cached_frame: Option<NSRect>) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let screen = objc2_app_kit::NSScreen::mainScreen(mtm);
-    let Some(screen) = screen else {
+    let Some(frame) = cached_or_active_visible_frame(mtm, cached_frame) else {
         return;
     };
-    let frame = screen.visibleFrame();
-    panel.setFrameOrigin(NSPoint::new(
-        frame.origin.x + (frame.size.width - PANEL_WIDTH) / 2.0,
-        frame.origin.y + frame.size.height - panel.frame().size.height - 72.0,
-    ));
+    let (x, y) = centered_top_origin(
+        WorkArea {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.size.width,
+            height: frame.size.height,
+        },
+        PANEL_WIDTH,
+        panel.frame().size.height,
+        72.0,
+    );
+    panel.setFrameOrigin(NSPoint::new(x, y));
 }
 
 fn render_on_main() {
@@ -592,6 +762,10 @@ fn render_on_main() {
             LauncherScreen::Session { .. } => SESSION_PANEL_HEIGHT,
         };
         resize_panel(&ui, &content, height);
+        if swift_bridge::enabled() {
+            swift_bridge::set_snapshot(&ui.snapshot);
+            return;
+        }
         clear_dynamic_views(&mut ui);
         match ui.snapshot.screen.clone() {
             LauncherScreen::Launcher => render_launcher(&mut ui, &content),
@@ -647,7 +821,7 @@ fn resize_panel(ui: &UiState, content: &NSView, height: f64) {
     if let Some(input) = ui.input.as_ref() {
         input.setFrameOrigin(NSPoint::new(18.0, height - 58.0));
     }
-    position_panel(panel);
+    position_panel(panel, ui.anchor_visible_frame);
 }
 
 fn clear_dynamic_views(ui: &mut UiState) {
@@ -1013,15 +1187,15 @@ fn handle_key_event(event: &NSEvent) -> bool {
             }
             true
         }
-        KEY_RETURN | KEY_ENTER => {
+        KEY_RETURN | KEY_ENTER if !swift_bridge::enabled() => {
             submit_active();
             true
         }
-        KEY_UP => {
+        KEY_UP if !swift_bridge::enabled() => {
             move_selection(-1);
             true
         }
-        KEY_DOWN => {
+        KEY_DOWN if !swift_bridge::enabled() => {
             move_selection(1);
             true
         }
@@ -1223,5 +1397,98 @@ fn install_hotkey() -> Result<(), AppError> {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LauncherAction, NSPoint, NSRect, WorkArea, accepts_lifecycle_sequence,
+        accepts_newer_revision, centered_top_origin, parse_swift_action, screen_index_for_point,
+    };
+
+    #[test]
+    fn stale_snapshot_revision_is_rejected() {
+        assert!(accepts_newer_revision(0, 1));
+        assert!(accepts_newer_revision(1, 2));
+        assert!(!accepts_newer_revision(2, 2));
+        assert!(!accepts_newer_revision(2, 1));
+    }
+
+    #[test]
+    fn stale_lifecycle_sequence_is_rejected() {
+        assert!(accepts_lifecycle_sequence(0, 1));
+        assert!(accepts_lifecycle_sequence(1, 2));
+        assert!(!accepts_lifecycle_sequence(2, 2));
+        assert!(!accepts_lifecycle_sequence(2, 1));
+    }
+
+    #[test]
+    fn placement_centers_and_preserves_top_anchor() {
+        let area = WorkArea {
+            x: -1920.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let (_, short_y) = centered_top_origin(area, 680.0, 80.0, 72.0);
+        let (_, tall_y) = centered_top_origin(area, 680.0, 500.0, 72.0);
+        assert_eq!(short_y + 80.0, tall_y + 500.0);
+        assert_eq!(centered_top_origin(area, 680.0, 80.0, 72.0).0, -1300.0);
+    }
+
+    #[test]
+    fn placement_clamps_oversized_panel_to_work_area() {
+        let area = WorkArea {
+            x: 100.0,
+            y: 50.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let (x, y) = centered_top_origin(area, 800.0, 500.0, 72.0);
+        assert_eq!((x, y), (100.0, 50.0));
+    }
+
+    #[test]
+    fn mouse_point_selects_secondary_display_with_negative_origin() {
+        let frames = [
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                objc2_foundation::NSSize::new(1920.0, 1080.0),
+            ),
+            NSRect::new(
+                NSPoint::new(-1440.0, 0.0),
+                objc2_foundation::NSSize::new(1440.0, 900.0),
+            ),
+        ];
+        assert_eq!(
+            screen_index_for_point(NSPoint::new(-700.0, 400.0), &frames),
+            Some(1)
+        );
+        assert_eq!(
+            screen_index_for_point(NSPoint::new(2500.0, 400.0), &frames),
+            None
+        );
+    }
+
+    #[test]
+    fn swift_new_request_is_parsed_for_deferred_hide() {
+        let (action, hide) =
+            parse_swift_action(br#"{"type":"new_request","prompt":" ask this "}"#).unwrap();
+        assert_eq!(
+            action,
+            LauncherAction::NewRequest {
+                prompt: "ask this".into(),
+                share_context: true,
+            }
+        );
+        assert!(hide);
+    }
+
+    #[test]
+    fn malformed_swift_action_is_ignored() {
+        assert!(parse_swift_action(br#"{"type":"new_request","prompt":"  "}"#).is_none());
+        assert!(parse_swift_action(br#"{"type":"unknown"}"#).is_none());
+        assert!(parse_swift_action(b"not-json").is_none());
     }
 }

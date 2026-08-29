@@ -103,3 +103,60 @@ For a manual smoke test, focus an email or other app, press `Option-Space`, ente
 `summarise this`, and close the panel while Pi runs. Confirm the completion HUD,
 reopen the launcher, open the unread session, and send a follow-up. Pi's desktop
 operations should use the captured topmost non-DesktopCtl window.
+
+## SwiftUI launcher spike smoke
+
+Build and launch isolated test state. Direct binary launch preserves env vars;
+`just run`/`open` does not provide a reliable env-var path for this test.
+
+```bash
+just -f src/desktop/Justfile build
+TEST_ROOT="$(mktemp -d -t desktopctl-launcher)"
+DESKTOPCTL_HOME="$TEST_ROOT/data" \
+DESKTOPCTL_SWIFT_LAUNCHER=1 \
+DESKTOPCTL_TRACE=1 \
+DESKTOPCTL_TRACE_PATH="$TEST_ROOT/trace.log" \
+  src/desktop/dist/DesktopCtl.app/Contents/MacOS/desktopctl-app \
+  >"$TEST_ROOT/app.log" 2>&1 &
+APP_PID=$!
+```
+
+Stop after testing: `kill "$APP_PID"`; remove `$TEST_ROOT` when notes are
+captured.
+
+Manual checks:
+
+1. Focus TextEdit or Mail. Press `Option-Space`. Panel appears on active Space;
+   DesktopCtl does not stay focused after `Escape`.
+2. Type normal text. Press `Send`. Confirm panel hides and trace shows the
+   request path. Reopen; recent SwiftUI task rows should show title, preview,
+   status, and unread state. Open one and confirm Rust receives its session ID.
+3. Run once without `DESKTOPCTL_SWIFT_LAUNCHER=1` to compare current Rust
+   selection, `Show more`, session view, follow-up, and completion HUD. SwiftUI
+   session and HUD parity remain later migration slices.
+4. Repeat on another Space and a full-screen app. Check panel placement,
+   dismissal, and prior-app focus restoration.
+5. Select Japanese/Hiragana (or another IME), type marked text, then press
+   `Return`. Record whether marked text stays in composition; do not count a
+   submit during composition as a pass.
+
+Safe measurements:
+
+```bash
+# Live process memory; RSS is KB.
+while kill -0 "$APP_PID" 2>/dev/null; do
+  ps -o pid,rss,vsz,etime,command -p "$APP_PID"
+  sleep 2
+done
+
+# Built bundle size.
+du -sh src/desktop/dist/DesktopCtl.app
+
+# App/controller trace (Unix-ms timestamps).
+tail -f "$TEST_ROOT/trace.log"
+```
+
+Current trace has no hotkey-received or panel-visible markers, so it cannot
+measure hotkey-to-visible latency. Use a stopwatch for that number; add explicit
+markers before automating the measurement. Record cold launch, warm
+`Option-Space` -> visible, first-responder readiness, idle RSS, and visible RSS.

@@ -22,9 +22,12 @@ mod controller {
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
             SessionMessageRole, TargetWindowMetadata, truncate_one_line, unix_now_ms,
         },
-        launcher::macos::{
-            self as launcher_ui, CompletionNotice, LauncherAction, LauncherCallbacks,
-            LauncherScreen, LauncherSnapshot, SessionStatus, SessionSummary, TranscriptMessage,
+        launcher::{
+            core::{
+                CompletionNotice, LauncherAction, LauncherScreen, LauncherSnapshot, SessionStatus,
+                SessionSummary, TranscriptMessage,
+            },
+            macos::{self as launcher_ui, LauncherCallbacks},
         },
     };
 
@@ -36,6 +39,7 @@ mod controller {
         open_session: Option<String>,
         cancellations: HashMap<String, Arc<AtomicBool>>,
         pending_preparation: Option<PreparationHandle>,
+        snapshot_revision: u64,
     }
 
     #[derive(Clone, Debug)]
@@ -92,6 +96,7 @@ mod controller {
             open_session: None,
             cancellations: HashMap::new(),
             pending_preparation: None,
+            snapshot_revision: 0,
         })));
         launcher_ui::initialize(LauncherCallbacks {
             on_action: Arc::new(handle_action),
@@ -101,7 +106,7 @@ mod controller {
     }
 
     pub fn toggle() {
-        if launcher_ui::is_visible() {
+        if launcher_ui::is_open_requested() {
             launcher_ui::hide();
             return;
         }
@@ -885,7 +890,7 @@ end run"#;
             }
         }
         refresh();
-        if !launcher_ui::is_visible() {
+        if !launcher_ui::is_open_requested() {
             if let Some(notice) = notice {
                 launcher_ui::show_completion(notice);
             }
@@ -902,13 +907,16 @@ end run"#;
     }
 
     fn refresh() {
-        let snapshot = lock_state().map(|state| snapshot(&state));
+        let snapshot = lock_state().map(|mut state| {
+            state.snapshot_revision = state.snapshot_revision.wrapping_add(1);
+            snapshot(&state, state.snapshot_revision)
+        });
         if let Some(snapshot) = snapshot {
             launcher_ui::refresh(snapshot);
         }
     }
 
-    fn snapshot(state: &State) -> LauncherSnapshot {
+    fn snapshot(state: &State, revision: u64) -> LauncherSnapshot {
         const RECENT_WINDOW_MS: u64 = 30 * 60 * 1_000;
         let cutoff = unix_now_ms().saturating_sub(RECENT_WINDOW_MS);
         let pinned = state
@@ -942,6 +950,7 @@ end run"#;
             .map(session_screen)
             .unwrap_or(LauncherScreen::Launcher);
         LauncherSnapshot {
+            revision,
             screen,
             recent,
             all,
