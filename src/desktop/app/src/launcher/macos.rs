@@ -645,7 +645,10 @@ fn apply_show(sequence: u64) {
         return;
     }
     let accepted = UI.with(|cell| {
-        let mut ui = cell.borrow_mut();
+        let Ok(mut ui) = cell.try_borrow_mut() else {
+            DispatchQueue::main().exec_async(move || apply_show(sequence));
+            return false;
+        };
         if !accepts_lifecycle_sequence(ui.lifecycle_sequence, sequence) {
             return false;
         }
@@ -660,32 +663,41 @@ fn apply_show(sequence: u64) {
     if let Some(frame) = active_visible_frame(MainThreadMarker::new().unwrap()) {
         UI.with(|cell| cell.borrow_mut().anchor_visible_frame = Some(frame));
     }
-    UI.with(|cell| {
-        if cell.borrow().panel.is_none() {
-            return;
-        }
-        if !is_visible() {
-            cell.borrow_mut().show_all = false;
-        }
-        render_on_main();
+    let has_panel = UI.with(|cell| cell.borrow().panel.is_some());
+    if !has_panel {
+        return;
+    }
+    if !is_visible() {
+        UI.with(|cell| cell.borrow_mut().show_all = false);
+    }
+    render_on_main();
+    let controls = UI.with(|cell| {
         let ui = cell.borrow();
-        let Some(panel) = ui.panel.as_ref() else {
-            return;
-        };
-        position_panel(panel, ui.anchor_visible_frame);
-        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
-        panel.makeKeyAndOrderFront(None);
-        if swift_bridge::enabled() {
-            swift_bridge::focus_prompt();
-        } else if let Some(composer) = ui.composer.as_ref() {
-            panel.makeFirstResponder(Some(composer));
-        } else if let Some(input) = ui.input.as_ref() {
-            panel.makeFirstResponder(Some(input));
-        }
-        VISIBLE.store(true, Ordering::SeqCst);
+        ui.panel.as_ref().cloned().map(|panel| {
+            (
+                panel,
+                ui.composer.as_ref().cloned(),
+                ui.input.as_ref().cloned(),
+                ui.anchor_visible_frame,
+            )
+        })
     });
+    let Some((panel, composer, input, anchor_visible_frame)) = controls else {
+        return;
+    };
+    position_panel(&panel, anchor_visible_frame);
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+    panel.makeKeyAndOrderFront(None);
+    if swift_bridge::enabled() {
+        swift_bridge::focus_prompt();
+    } else if let Some(composer) = composer.as_ref() {
+        panel.makeFirstResponder(Some(composer));
+    } else if let Some(input) = input.as_ref() {
+        panel.makeFirstResponder(Some(input));
+    }
+    VISIBLE.store(true, Ordering::SeqCst);
 }
 
 fn hide_on_main() {
@@ -696,38 +708,46 @@ fn apply_hide(sequence: u64) {
     if MainThreadMarker::new().is_none() {
         return;
     }
-    let accepted = UI.with(|cell| {
-        let mut ui = cell.borrow_mut();
+    let panel = UI.with(|cell| {
+        let Ok(mut ui) = cell.try_borrow_mut() else {
+            DispatchQueue::main().exec_async(move || apply_hide(sequence));
+            return None;
+        };
         if !accepts_lifecycle_sequence(ui.lifecycle_sequence, sequence) {
-            return false;
+            return None;
         }
         ui.lifecycle_sequence = sequence;
-        true
+        Some(ui.panel.as_ref().cloned())
     });
-    if !accepted {
+    let Some(panel) = panel else {
         return;
-    }
+    };
     REQUESTED_VISIBLE.store(false, Ordering::SeqCst);
-    UI.with(|cell| {
-        if let Some(panel) = cell.borrow().panel.as_ref() {
-            panel.orderOut(None);
-        }
-        if VISIBLE.swap(false, Ordering::SeqCst) {
-            if let Some(callbacks) = CALLBACKS.get() {
-                (callbacks.on_action)(LauncherAction::Dismissed);
+    if let Some(panel) = panel.as_ref() {
+        panel.orderOut(None);
+    }
+    if VISIBLE.swap(false, Ordering::SeqCst) {
+        // Let AppKit finish resigning/ordering out before restoring prior app.
+        // Skip stale restoration if launcher reopened meanwhile.
+        DispatchQueue::main().exec_async(|| {
+            if !is_open_requested() {
+                if let Some(callbacks) = CALLBACKS.get() {
+                    (callbacks.on_action)(LauncherAction::Dismissed);
+                }
             }
-        }
-    });
+        });
+    }
 }
 
 fn dismiss_completion_on_main() {
-    UI.with(|cell| {
+    let panel = UI.with(|cell| {
         let mut ui = cell.borrow_mut();
         ui.completion_generation = ui.completion_generation.wrapping_add(1);
-        if let Some(panel) = ui.completion_panel.as_ref() {
-            panel.orderOut(None);
-        }
+        ui.completion_panel.as_ref().cloned()
     });
+    if let Some(panel) = panel.as_ref() {
+        panel.orderOut(None);
+    }
 }
 
 fn position_panel(panel: &NSPanel, cached_frame: Option<NSRect>) {
@@ -1191,12 +1211,20 @@ fn handle_key_event(event: &NSEvent) -> bool {
             submit_active();
             true
         }
-        KEY_UP if !swift_bridge::enabled() => {
-            move_selection(-1);
+        KEY_UP => {
+            if swift_bridge::enabled() {
+                swift_bridge::move_selection(-1);
+            } else {
+                move_selection(-1);
+            }
             true
         }
-        KEY_DOWN if !swift_bridge::enabled() => {
-            move_selection(1);
+        KEY_DOWN => {
+            if swift_bridge::enabled() {
+                swift_bridge::move_selection(1);
+            } else {
+                move_selection(1);
+            }
             true
         }
         _ => false,

@@ -660,6 +660,8 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
         Command::Ping
             | Command::ServiceStatus
             | Command::ActiveWindowDescribe
+            | Command::ActiveAppPid
+            | Command::WindowDescribeForPid { .. }
             | Command::AgentAccessSet { .. }
             | Command::SettingsGet
             | Command::SettingsUpdate { .. }
@@ -806,6 +808,24 @@ fn execute_with_context(
             .map_err(|error| AppError::internal(format!("encode service status failed: {error}")))
         }
         Command::ActiveWindowDescribe => active_window_description(),
+        Command::ActiveAppPid => serde_json::to_value(capture_active_window_for_agent_launcher())
+            .map_err(|error| AppError::internal(format!("encode active app PID failed: {error}"))),
+        Command::WindowDescribeForPid { pid } => {
+            use desktop_core::protocol::WindowSummary;
+
+            let window = resolve_agent_launcher_target(pid)?;
+            serde_json::to_value(WindowSummary {
+                id: window.id,
+                window_ref: window.window_ref,
+                pid: window.pid,
+                app: window.app,
+                title: window.title,
+                bounds: window.bounds,
+                frontmost: window.frontmost,
+                visible: window.visible,
+            })
+            .map_err(|error| AppError::internal(format!("encode window failed: {error}")))
+        }
         Command::AgentAccessSet { enabled } => {
             set_gui_ops_disabled(!enabled);
             if !enabled && crate::overlay::is_active() {

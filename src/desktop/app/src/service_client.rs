@@ -26,6 +26,14 @@ impl ServiceClient {
         self.send_typed(Command::ActiveWindowDescribe)
     }
 
+    pub fn active_app_pid(&self) -> Result<Option<i64>, AppError> {
+        self.send_typed(Command::ActiveAppPid)
+    }
+
+    pub fn window_for_pid(&self, pid: i64) -> Result<WindowSummary, AppError> {
+        self.send_typed(Command::WindowDescribeForPid { pid })
+    }
+
     pub fn windows(&self) -> Result<Vec<WindowSummary>, AppError> {
         self.send_typed::<WindowListPayload>(Command::WindowList)
             .map(|payload| payload.windows)

@@ -110,27 +110,21 @@ mod controller {
             launcher_ui::hide();
             return;
         }
-        let active_window = crate::service_client::ServiceClient
-            .active_window()
+        let target_hint = crate::service_client::ServiceClient
+            .active_app_pid()
             .map_err(|error| {
-                trace::log(format!("agent_launcher:active_window_error {error}"));
+                trace::log(format!("agent_launcher:active_app_pid_error {error}"));
                 error
             })
-            .ok();
-        let target_hint = active_window
-            .as_ref()
-            .and_then(|description| description.frontmost_pid);
-        let resolved_target = active_window
-            .and_then(|description| description.target)
-            .map(target_metadata);
+            .ok()
+            .flatten();
         let generation = if let Some(mut state) = lock_state() {
             state.launch_generation = state.launch_generation.wrapping_add(1);
-            state.pending_target = resolved_target.clone();
+            state.pending_target = None;
             state.restore_pid = target_hint;
             state.open_session = None;
-            state.pending_preparation = resolved_target
-                .as_ref()
-                .map(|_| Arc::new((Mutex::new(None), Condvar::new())));
+            state.pending_preparation =
+                target_hint.map(|_| Arc::new((Mutex::new(None), Condvar::new())));
             state.launch_generation
         } else {
             return;
@@ -138,21 +132,19 @@ mod controller {
         refresh();
         launcher_ui::show();
 
-        let preparation = preparation_handle_for_generation(generation);
-        let Some(target) = resolved_target else {
-            if let Some(preparation) = preparation_handle_for_generation(generation) {
-                complete_preparation(
-                    &preparation,
-                    Err("target resolution failed: no active window".into()),
-                );
-            }
+        let Some(pid) = target_hint else {
             return;
         };
+        let preparation = preparation_handle_for_generation(generation);
         thread::spawn(move || {
-            let prepared = Ok(PreparedTarget {
-                context: window_context_for_target(&target),
-                target: target.clone(),
-            });
+            let prepared = crate::service_client::ServiceClient
+                .window_for_pid(pid)
+                .map(target_metadata)
+                .map(|target| PreparedTarget {
+                    context: window_context_for_target(&target),
+                    target,
+                })
+                .map_err(|error| error.to_string());
             if let Ok(prepared) = &prepared {
                 if let Err(error) = &prepared.context {
                     trace::log(format!("agent_launcher:prefetch_context_warning {error}"));
@@ -160,7 +152,10 @@ mod controller {
             }
             if let Some(mut state) = lock_state() {
                 if state.launch_generation == generation {
-                    state.pending_target = Some(target);
+                    state.pending_target = prepared
+                        .as_ref()
+                        .ok()
+                        .map(|prepared| prepared.target.clone());
                 }
             }
             if let Some(preparation) = preparation {
@@ -177,12 +172,6 @@ mod controller {
                 .then(|| state.pending_preparation.clone())
                 .flatten()
         })
-    }
-
-    fn complete_preparation(handle: &PreparationHandle, result: Result<PreparedTarget, String>) {
-        let (lock, wake) = &**handle;
-        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
-        wake.notify_all();
     }
 
     fn handle_action(action: LauncherAction) {

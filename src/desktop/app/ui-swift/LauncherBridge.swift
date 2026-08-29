@@ -28,6 +28,7 @@ private final class LauncherModel: ObservableObject {
     @Published private(set) var renderState = LauncherRenderState()
     @Published var prompt = ""
     @Published var focusGeneration = 0
+    @Published var selectedTaskID: String?
     var callback: LauncherActionCallback?
 
     func applySnapshot(_ data: Data) {
@@ -63,9 +64,19 @@ private final class LauncherModel: ObservableObject {
             )
         }
         renderState = next
+        if let selectedTaskID,
+           !next.tasks.contains(where: { $0.id == selectedTaskID }) {
+            self.selectedTaskID = nil
+        }
     }
 
     func sendPrompt() {
+        if renderState.screen != "Session",
+           let selectedTaskID,
+           let selected = renderState.tasks.first(where: { $0.id == selectedTaskID }) {
+            open(selected)
+            return
+        }
         let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         if renderState.screen == "Session", !renderState.sessionID.isEmpty {
@@ -77,7 +88,27 @@ private final class LauncherModel: ObservableObject {
     }
 
     func open(_ task: LauncherTask) {
+        selectedTaskID = task.id
         emit(["type": "open_session", "session_id": task.id])
+    }
+
+    func moveSelection(_ delta: Int) {
+        guard renderState.screen != "Session", !renderState.tasks.isEmpty else { return }
+        guard let selectedTaskID,
+              let current = renderState.tasks.firstIndex(where: { $0.id == selectedTaskID })
+        else {
+            if delta > 0 {
+                self.selectedTaskID = renderState.tasks[0].id
+            }
+            return
+        }
+        let next = current + delta
+        if next < 0 {
+            self.selectedTaskID = nil
+            focusGeneration += 1
+        } else {
+            self.selectedTaskID = renderState.tasks[min(next, renderState.tasks.count - 1)].id
+        }
     }
 
     func back() {
@@ -159,15 +190,31 @@ private struct LauncherRootView: View {
             Text("Recent tasks")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(model.renderState.tasks) { task in
-                        Button(action: { model.open(task) }) {
-                            taskRow(task)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(model.renderState.tasks) { task in
+                            Button(action: { model.open(task) }) {
+                                taskRow(task)
+                            }
+                            .buttonStyle(.plain)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(
+                                        model.selectedTaskID == task.id
+                                            ? Color.accentColor.opacity(0.16)
+                                            : Color.clear
+                                    )
+                            )
+                            .id(task.id)
+                            .accessibilityLabel("\(task.title), \(statusLabel(task.status))")
+                            .accessibilityHint("Open task")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("\(task.title), \(statusLabel(task.status))")
-                        .accessibilityHint("Open task")
+                    }
+                }
+                .onChange(of: model.selectedTaskID) { selected in
+                    if let selected {
+                        proxy.scrollTo(selected, anchor: .center)
                     }
                 }
             }
@@ -325,4 +372,10 @@ public func desktopctl_launcher_unmount() {
 public func desktopctl_launcher_focus_prompt() {
     guard Thread.isMainThread else { return }
     model?.focusGeneration += 1
+}
+
+@_cdecl("desktopctl_launcher_move_selection")
+public func desktopctl_launcher_move_selection(_ delta: Int) {
+    guard Thread.isMainThread else { return }
+    model?.moveSelection(delta)
 }

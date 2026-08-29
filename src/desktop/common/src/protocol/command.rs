@@ -60,6 +60,10 @@ pub enum Command {
     Ping,
     ServiceStatus,
     ActiveWindowDescribe,
+    ActiveAppPid,
+    WindowDescribeForPid {
+        pid: i64,
+    },
     AgentAccessSet {
         enabled: bool,
     },
@@ -325,6 +329,8 @@ impl Command {
             Command::Ping => "ping",
             Command::ServiceStatus => "service_status",
             Command::ActiveWindowDescribe => "active_window_describe",
+            Command::ActiveAppPid => "active_app_pid",
+            Command::WindowDescribeForPid { .. } => "window_describe_for_pid",
             Command::AgentAccessSet { .. } => "agent_access_set",
             Command::SettingsGet => "settings_get",
             Command::SettingsUpdate { .. } => "settings_update",
@@ -393,6 +399,18 @@ mod tests {
         assert_eq!(
             Command::ActiveWindowDescribe.name(),
             "active_window_describe"
+        );
+    }
+
+    #[test]
+    fn launcher_target_commands_have_stable_wire_names() {
+        assert_eq!(
+            serde_json::to_value(Command::ActiveAppPid).unwrap(),
+            serde_json::json!({ "cmd": "active_app_pid" })
+        );
+        assert_eq!(
+            serde_json::to_value(Command::WindowDescribeForPid { pid: 42 }).unwrap(),
+            serde_json::json!({ "cmd": "window_describe_for_pid", "pid": 42 })
         );
     }
 }
