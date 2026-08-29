@@ -10,5 +10,5 @@ pub use types::{
     API_VERSION, ActiveWindowPayload, Bounds, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
     PermissionState, PermissionsPayload, ServiceStatusPayload, SnapshotDisplay, SnapshotPayload,
     SnapshotText, ToggleState, TokenEntry, TokenizeElement, TokenizeImage, TokenizePayload,
-    TokenizeWindow, WindowSummary, now_millis,
+    TokenizeWindow, WindowListPayload, WindowSummary, now_millis,
 };

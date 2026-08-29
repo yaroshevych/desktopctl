@@ -15,14 +15,20 @@ pub struct ServiceStatusPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowSummary {
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_ref: Option<String>,
+    #[serde(default)]
     pub pid: i64,
     pub app: String,
     pub title: String,
     pub bounds: Bounds,
     pub frontmost: bool,
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowListPayload {
+    pub windows: Vec<WindowSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

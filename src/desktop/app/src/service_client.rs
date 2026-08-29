@@ -3,6 +3,7 @@ use desktop_core::{
     ipc,
     protocol::{
         ActiveWindowPayload, Command, RequestEnvelope, ResponseEnvelope, ServiceStatusPayload,
+        WindowListPayload, WindowSummary,
     },
 };
 use serde::de::DeserializeOwned;
@@ -23,6 +24,11 @@ impl ServiceClient {
 
     pub fn active_window(&self) -> Result<ActiveWindowPayload, AppError> {
         self.send_typed(Command::ActiveWindowDescribe)
+    }
+
+    pub fn windows(&self) -> Result<Vec<WindowSummary>, AppError> {
+        self.send_typed::<WindowListPayload>(Command::WindowList)
+            .map(|payload| payload.windows)
     }
 
     pub fn send_typed<T>(&self, command: Command) -> Result<T, AppError>

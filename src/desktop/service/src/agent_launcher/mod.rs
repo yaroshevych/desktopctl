@@ -12,7 +12,7 @@ mod controller {
     use desktop_core::{error::ErrorCode, protocol::TokenizePayload};
     use uuid::Uuid;
 
-    use crate::{daemon, trace};
+    use crate::trace;
     use desktop_app::{
         agent_runner::{
             AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
@@ -558,12 +558,9 @@ end run"#;
         result.take()?.ok()
     }
 
-    fn native_window_id_from_id(id: &str) -> Option<u32> {
-        id.rsplit(':').next()?.parse::<u32>().ok()
-    }
-
     fn window_context_for_target(target: &TargetWindowMetadata) -> Result<WindowContext, String> {
-        let windows = daemon::list_windows_for_agent_launcher().map_err(|error| {
+        let client = desktop_app::service_client::ServiceClient;
+        let windows = client.windows().map_err(|error| {
             if matches!(
                 error.code,
                 ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
@@ -590,38 +587,35 @@ end run"#;
                 )
             })?;
 
-        let native_window_id = native_window_id_from_id(&target_window.id);
-        let tokenized = {
-            let meta = crate::vision::pipeline::TokenizeWindowMeta {
-                id: target_window.id.clone(),
-                title: target_window.title.clone(),
-                app: Some(target_window.app.clone()),
-                bounds: target_window.bounds.clone(),
-                pid: i32::try_from(target_window.pid).ok(),
-                native_window_id,
-                capture_bounds: native_window_id.map(|_| target_window.bounds.clone()),
-                include_offscreen_ax: true,
-            };
-            match crate::vision::pipeline::tokenize_window(meta) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    return Err(
-                        if matches!(
-                            error.code,
-                            ErrorCode::PermissionDenied
-                                | ErrorCode::AccessibilityPermissionRequired
-                        ) {
-                            format!(
-                                "missing screen recording/accessibility permission: {}",
-                                error.message
-                            )
-                        } else {
-                            format!("target tokenization failed: {}", error.message)
-                        },
-                    );
+        let active_window_id = target
+            .window_ref
+            .clone()
+            .unwrap_or_else(|| target_window.id.clone());
+        let tokenized: TokenizePayload = client
+            .send_typed(desktop_core::protocol::Command::ScreenTokenize {
+                overlay_out_path: None,
+                window_query: None,
+                screenshot_path: None,
+                journal: false,
+                list_all_windows: false,
+                all: true,
+                active_window: true,
+                active_window_id: Some(active_window_id),
+                region: None,
+            })
+            .map_err(|error| {
+                if matches!(
+                    error.code,
+                    ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
+                ) {
+                    format!(
+                        "missing screen recording/accessibility permission: {}",
+                        error.message
+                    )
+                } else {
+                    format!("target tokenization failed: {}", error.message)
                 }
-            }
-        };
+            })?;
 
         let visible_windows: Vec<_> = windows
             .iter()
@@ -629,7 +623,7 @@ end run"#;
                 window.visible && window.bounds.width > 8.0 && window.bounds.height > 8.0
             })
             .take(24)
-            .map(crate::platform::windowing::WindowInfo::as_json)
+            .filter_map(|window| serde_json::to_value(window).ok())
             .collect();
         let os_version = std::process::Command::new("sw_vers")
             .arg("-productVersion")
@@ -755,7 +749,7 @@ end run"#;
 
     fn target_matches_window(
         target: &TargetWindowMetadata,
-        window: &crate::platform::windowing::WindowInfo,
+        window: &desktop_core::protocol::WindowSummary,
     ) -> bool {
         target
             .window_ref
@@ -768,19 +762,21 @@ end run"#;
     }
 
     fn target_window_is_current(target: &TargetWindowMetadata) -> Result<bool, String> {
-        let windows = daemon::list_windows_for_agent_launcher().map_err(|error| {
-            if matches!(
-                error.code,
-                ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
-            ) {
-                format!(
-                    "missing screen recording/accessibility permission: {}",
-                    error.message
-                )
-            } else {
-                format!("window enumeration failed: {}", error.message)
-            }
-        })?;
+        let windows = desktop_app::service_client::ServiceClient
+            .windows()
+            .map_err(|error| {
+                if matches!(
+                    error.code,
+                    ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
+                ) {
+                    format!(
+                        "missing screen recording/accessibility permission: {}",
+                        error.message
+                    )
+                } else {
+                    format!("window enumeration failed: {}", error.message)
+                }
+            })?;
         Ok(windows
             .iter()
             .any(|window| target_matches_window(target, window)))
@@ -1010,12 +1006,10 @@ end run"#;
     #[cfg(test)]
     mod tests {
         use super::{
-            ghostty_command, native_session_path_is_safe, native_window_id_from_id, posix_quote,
-            target_matches_window,
+            ghostty_command, native_session_path_is_safe, posix_quote, target_matches_window,
         };
-        use crate::platform::windowing::WindowInfo;
         use desktop_app::agent_sessions::TargetWindowMetadata;
-        use desktop_core::protocol::Bounds;
+        use desktop_core::protocol::{Bounds, WindowSummary};
         use std::{
             fs,
             path::Path,
@@ -1042,19 +1036,11 @@ end run"#;
         }
 
         #[test]
-        fn native_window_id_uses_cg_window_id_suffix() {
-            assert_eq!(native_window_id_from_id("123:456"), Some(456));
-            assert_eq!(native_window_id_from_id("mail_cef8c8"), None);
-        }
-
-        #[test]
         fn target_lookup_matches_public_window_reference() {
-            let window = WindowInfo {
+            let window = WindowSummary {
                 id: "123:456".into(),
                 window_ref: Some("mail_cef8c8".into()),
-                parent_id: None,
                 pid: 123,
-                index: 1,
                 app: "Mail".into(),
                 title: "Inbox".into(),
                 bounds: Bounds {
@@ -1065,7 +1051,6 @@ end run"#;
                 },
                 frontmost: false,
                 visible: true,
-                modal: None,
             };
             let target = TargetWindowMetadata {
                 window_ref: Some("mail_cef8c8".into()),
