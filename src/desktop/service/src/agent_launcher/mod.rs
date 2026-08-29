@@ -1,7 +1,4 @@
 #[cfg(target_os = "macos")]
-mod macos;
-
-#[cfg(target_os = "macos")]
 mod controller {
     use std::{
         collections::HashMap,
@@ -24,13 +21,12 @@ mod controller {
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
             SessionMessageRole, TargetWindowMetadata, truncate_one_line, unix_now_ms,
         },
+        launcher::macos::{
+            self as launcher_ui, CompletionNotice, LauncherAction, LauncherCallbacks,
+            LauncherScreen, LauncherSnapshot, SessionStatus, SessionSummary, TranscriptMessage,
+        },
     };
     use crate::{daemon, trace};
-
-    use super::macos::{
-        CompletionNotice, LauncherAction, LauncherCallbacks, LauncherScreen, LauncherSnapshot,
-        SessionStatus, SessionSummary, TranscriptMessage,
-    };
 
     struct State {
         store: AgentSessionStore,
@@ -86,7 +82,7 @@ mod controller {
             cancellations: HashMap::new(),
             pending_preparation: None,
         })));
-        super::macos::initialize(LauncherCallbacks {
+        launcher_ui::initialize(LauncherCallbacks {
             on_action: Arc::new(handle_action),
         })?;
         refresh();
@@ -94,8 +90,8 @@ mod controller {
     }
 
     pub fn toggle() {
-        if super::macos::is_visible() {
-            super::macos::hide();
+        if launcher_ui::is_visible() {
+            launcher_ui::hide();
             return;
         }
         let target_hint = daemon::capture_active_window_for_agent_launcher();
@@ -111,7 +107,7 @@ mod controller {
             return;
         };
         refresh();
-        super::macos::show();
+        launcher_ui::show();
 
         let preparation = preparation_handle_for_generation(generation);
         let Some(pid) = target_hint else {
@@ -390,7 +386,7 @@ end run"#;
                 }
             })();
             if let Err(error) = result {
-                super::macos::show_completion(CompletionNotice {
+                launcher_ui::show_completion(CompletionNotice {
                     title: session.title,
                     answer_preview: truncate_one_line(&error, 120),
                 });
@@ -875,9 +871,9 @@ end run"#;
             }
         }
         refresh();
-        if !super::macos::is_visible() {
+        if !launcher_ui::is_visible() {
             if let Some(notice) = notice {
-                super::macos::show_completion(notice);
+                launcher_ui::show_completion(notice);
             }
         }
     }
@@ -894,7 +890,7 @@ end run"#;
     fn refresh() {
         let snapshot = lock_state().map(|state| snapshot(&state));
         if let Some(snapshot) = snapshot {
-            super::macos::refresh(snapshot);
+            launcher_ui::refresh(snapshot);
         }
     }
 
