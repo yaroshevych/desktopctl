@@ -1,7 +1,16 @@
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq};
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MIN_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
 pub const API_VERSION: &str = "1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceStatusPayload {
+    pub service_version: String,
+    pub protocol_min: u32,
+    pub protocol_max: u32,
+    pub capabilities: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bounds {

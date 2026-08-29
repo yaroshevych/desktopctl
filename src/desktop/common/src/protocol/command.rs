@@ -58,6 +58,7 @@ pub struct RequestOptions {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
     Ping,
+    ServiceStatus,
     DisableGui,
     AppHide {
         name: String,
@@ -311,6 +312,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Ping => "ping",
+            Command::ServiceStatus => "service_status",
             Command::DisableGui => "disable",
             Command::AppHide { .. } => "app_hide",
             Command::AppShow { .. } => "app_show",
@@ -352,5 +354,17 @@ impl Command {
             Command::ReplayRecord { stop: false, .. } => "replay_record_start",
             Command::ReplayLoad { .. } => "replay_load",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+
+    #[test]
+    fn service_status_has_stable_wire_name() {
+        let value = serde_json::to_value(Command::ServiceStatus).expect("serialize command");
+        assert_eq!(value, serde_json::json!({ "cmd": "service_status" }));
+        assert_eq!(Command::ServiceStatus.name(), "service_status");
     }
 }

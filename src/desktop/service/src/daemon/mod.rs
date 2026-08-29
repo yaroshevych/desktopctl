@@ -656,6 +656,7 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
     matches!(
         command,
         Command::Ping
+            | Command::ServiceStatus
             | Command::DisableGui
             | Command::PermissionsCheck
             | Command::RequestShow { .. }
@@ -726,6 +727,19 @@ fn execute_with_context(
     }
     match command {
         Command::Ping => Ok(json!({ "message": "pong" })),
+        Command::ServiceStatus => serde_json::to_value(
+            desktop_core::protocol::ServiceStatusPayload {
+                service_version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_min: desktop_core::protocol::MIN_PROTOCOL_VERSION,
+                protocol_max: desktop_core::protocol::PROTOCOL_VERSION,
+                capabilities: vec![
+                    "automation".to_string(),
+                    "permissions".to_string(),
+                    "windowing".to_string(),
+                ],
+            },
+        )
+        .map_err(|error| AppError::internal(format!("encode service status failed: {error}"))),
         Command::DisableGui => {
             set_gui_ops_disabled(true);
             Ok(json!({}))
@@ -1088,6 +1102,19 @@ mod tests {
         let _guard = gui_ops_disabled_guard();
         let result = execute(desktop_core::protocol::Command::Ping).expect("ping");
         assert_eq!(result["message"], "pong");
+    }
+
+    #[test]
+    fn service_status_describes_compatible_boundary() {
+        let _guard = gui_ops_disabled_guard();
+        let result = execute(desktop_core::protocol::Command::ServiceStatus)
+            .expect("service status");
+        let status: desktop_core::protocol::ServiceStatusPayload =
+            serde_json::from_value(result).expect("decode service status");
+        assert_eq!(status.service_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(status.protocol_min, desktop_core::protocol::PROTOCOL_VERSION);
+        assert_eq!(status.protocol_max, desktop_core::protocol::PROTOCOL_VERSION);
+        assert!(status.capabilities.iter().any(|value| value == "automation"));
     }
 
     #[test]
