@@ -139,30 +139,34 @@ private final class LauncherModel: ObservableObject {
 private struct LauncherRootView: View {
     @ObservedObject var model: LauncherModel
     @FocusState private var promptFocused: Bool
+    @State private var hoveredTaskID: String?
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkle.magnifyingglass")
-                    .foregroundColor(.accentColor)
-                    .accessibilityHidden(true)
-                Text("DesktopCtl")
-                    .font(.headline)
-                Spacer()
-                Text(model.renderState.screen == "Session" ? model.renderState.sessionTitle : "Launcher")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-
             if model.renderState.screen == "Session" {
                 sessionBody
             } else {
                 launcherBody
             }
         }
-        .padding(18)
-        .background(.regularMaterial)
+        .padding(LauncherTheme.Spacing.xxl)
+        .background {
+            ZStack {
+                LauncherVisualEffectView()
+                LauncherTheme.panelScrim(
+                    colorScheme: colorScheme,
+                    reduceTransparency: reduceTransparency
+                )
+            }
+        }
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: LauncherTheme.Radius.panel,
+                style: .continuous
+            )
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             DispatchQueue.main.async { promptFocused = true }
@@ -174,22 +178,26 @@ private struct LauncherRootView: View {
 
     @ViewBuilder
     private var launcherBody: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 20, height: 24)
+                .foregroundColor(.secondary)
+                .accessibilityHidden(true)
             TextField("Ask DesktopCtl…", text: $model.prompt)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
+                .font(.system(size: 20, weight: .regular, design: .rounded))
                 .focused($promptFocused)
                 .onSubmit { model.sendPrompt() }
                 .accessibilityLabel("Launcher prompt")
-            Button("Send", action: model.sendPrompt)
-                .keyboardShortcut(.defaultAction)
-                .accessibilityHint("Submit launcher prompt")
+            LauncherKeyCap(title: "↵")
+                .accessibilityLabel("Return to submit")
         }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
 
         if !model.renderState.tasks.isEmpty {
-            Divider()
-            Text("Recent tasks")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            LauncherSectionHeader(title: "Recent tasks")
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
@@ -198,12 +206,23 @@ private struct LauncherRootView: View {
                                 taskRow(task)
                             }
                             .buttonStyle(.plain)
+                            .onHover { hovered in
+                                hoveredTaskID = hovered ? task.id : nil
+                            }
                             .background(
-                                RoundedRectangle(cornerRadius: 6)
+                                RoundedRectangle(cornerRadius: LauncherTheme.Radius.row, style: .continuous)
                                     .fill(
                                         model.selectedTaskID == task.id
-                                            ? Color.accentColor.opacity(0.16)
-                                            : Color.clear
+                                            ? LauncherTheme.selection(
+                                                colorScheme: colorScheme,
+                                                reduceTransparency: reduceTransparency
+                                            )
+                                            : (hoveredTaskID == task.id
+                                                ? LauncherTheme.hover(
+                                                    colorScheme: colorScheme,
+                                                    reduceTransparency: reduceTransparency
+                                                )
+                                                : Color.clear)
                                     )
                             )
                             .id(task.id)
@@ -225,13 +244,11 @@ private struct LauncherRootView: View {
     @ViewBuilder
     private var sessionBody: some View {
         HStack(spacing: 8) {
-            Button("‹ Sessions", action: model.back)
-                .buttonStyle(.plain)
+            LauncherBarButton(title: "Sessions", systemImage: "chevron.left", action: model.back)
                 .accessibilityLabel("Back to sessions")
             Spacer()
             if model.renderState.terminalAvailable {
-                Button("Open in Ghostty", action: model.openInGhostty)
-                    .buttonStyle(.bordered)
+                LauncherBarButton(title: "Open in Ghostty", systemImage: "terminal", action: model.openInGhostty)
                     .accessibilityHint("Open this session in Ghostty")
             }
         }
@@ -240,13 +257,22 @@ private struct LauncherRootView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(model.renderState.messages.enumerated()), id: \.offset) { index, message in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(message.user ? "You" : "Pi")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                        HStack {
+                            if message.user { Spacer(minLength: 42) }
                             Text(message.text)
                                 .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 9)
+                                .foregroundColor(message.user ? .white : .primary)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 17, style: .continuous)
+                                        .fill(
+                                            message.user
+                                                ? Color(nsColor: .systemBlue)
+                                                : Color.primary.opacity(0.10)
+                                        )
+                                )
+                            if !message.user { Spacer(minLength: 42) }
                         }
                         .id(index)
                         .accessibilityElement(children: .combine)
@@ -271,18 +297,26 @@ private struct LauncherRootView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                Button("Stop", action: model.cancelSession)
-                    .buttonStyle(.bordered)
+                LauncherBarButton(title: "Stop", systemImage: "stop.fill", action: model.cancelSession)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityHint("Cancel running session")
             } else {
-                TextField("Follow up…", text: $model.prompt)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($promptFocused)
-                    .onSubmit { model.sendPrompt() }
-                    .accessibilityLabel("Follow-up prompt")
-                Button("Send", action: model.sendPrompt)
-                    .keyboardShortcut(.defaultAction)
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.turn.down.left")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 20, height: 22)
+                        .foregroundColor(.secondary)
+                        .accessibilityHidden(true)
+                    TextField("Follow up…", text: $model.prompt)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 18, weight: .regular, design: .rounded))
+                        .focused($promptFocused)
+                        .onSubmit { model.sendPrompt() }
+                        .accessibilityLabel("Follow-up prompt")
+                    LauncherKeyCap(title: "↵")
+                        .accessibilityLabel("Return to submit")
+                }
+                .padding(.horizontal, 4)
             }
         }
     }

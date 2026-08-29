@@ -41,9 +41,9 @@ use objc2_foundation::{
 use super::swift_bridge;
 use desktop_core::error::AppError;
 
-const PANEL_WIDTH: f64 = 680.0;
+const PANEL_WIDTH: f64 = 750.0;
 const SESSION_PANEL_HEIGHT: f64 = 360.0;
-const MAX_HISTORY_PANEL_HEIGHT: f64 = 500.0;
+const MAX_HISTORY_PANEL_HEIGHT: f64 = 475.0;
 const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 80.0;
 const COMPLETION_WIDTH: f64 = 520.0;
 const COMPLETION_HEIGHT: f64 = 48.0;
@@ -352,7 +352,7 @@ fn create_panel(mtm: MainThreadMarker) -> Result<(), AppError> {
         panel.setBecomesKeyOnlyIfNeeded(false);
         panel.setHidesOnDeactivate(true);
         panel.setHasShadow(true);
-        panel.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setOpaque(false);
         panel.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary | NSWindowCollectionBehavior::Stationary);
         panel.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*panel)));
@@ -1462,7 +1462,7 @@ mod tests {
         let (_, short_y) = centered_top_origin(area, 680.0, 80.0, 72.0);
         let (_, tall_y) = centered_top_origin(area, 680.0, 500.0, 72.0);
         assert_eq!(short_y + 80.0, tall_y + 500.0);
-        assert_eq!(centered_top_origin(area, 680.0, 80.0, 72.0).0, -1300.0);
+        assert_eq!(centered_top_origin(area, 750.0, 80.0, 72.0).0, -1335.0);
     }
 
     #[test]

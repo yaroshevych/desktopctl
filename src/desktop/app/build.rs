@@ -6,8 +6,13 @@ fn main() {
     }
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let source = manifest_dir.join("ui-swift/LauncherBridge.swift");
-    println!("cargo:rerun-if-changed={}", source.display());
+    let sources = [
+        manifest_dir.join("ui-swift/LauncherTheme.swift"),
+        manifest_dir.join("ui-swift/LauncherBridge.swift"),
+    ];
+    for source in &sources {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let archive = out_dir.join("libdesktopctl_launcher_ui.a");
@@ -27,33 +32,34 @@ fn main() {
         other => panic!("unsupported macOS target architecture: {other:?}"),
     };
 
-    let status = Command::new("swiftc")
-        .args([
-            "-parse-as-library",
-            "-static",
-            "-emit-library",
-            "-module-name",
-            "DesktopCtlLauncherUI",
-            "-sdk",
-            &sdk,
-            "-target",
-            target,
-            "-framework",
-            "AppKit",
-            "-framework",
-            "Foundation",
-            "-framework",
+    let mut swiftc = Command::new("swiftc");
+    swiftc.args([
+        "-parse-as-library",
+        "-static",
+        "-emit-library",
+        "-module-name",
+        "DesktopCtlLauncherUI",
+        "-sdk",
+        &sdk,
+        "-target",
+        target,
+        "-framework",
+        "AppKit",
+        "-framework",
+        "Foundation",
+        "-framework",
             "SwiftUI",
-            "-o",
-        ])
+        ]);
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        swiftc.arg("-O");
+    }
+    let status = swiftc
+        .arg("-o")
         .arg(&archive)
-        .arg(&source)
+        .args(&sources)
         .status()
         .expect("swiftc is required to build the macOS launcher UI");
-    assert!(
-        status.success(),
-        "swiftc failed to build LauncherBridge.swift"
-    );
+    assert!(status.success(), "swiftc failed to build macOS launcher UI");
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     let swiftc = Command::new("xcrun")
