@@ -13,11 +13,10 @@ use desktop_core::{
     protocol::{Command, RequestEnvelope, ResponseEnvelope, now_millis},
 };
 
-use super::about;
-use desktop_app::launcher::controller as agent_launcher;
-use desktop_app::runtime::settings_dialog;
-
-use crate::{daemon, journal, overlay, platform::permissions, trace};
+use super::{about, settings_dialog};
+use crate::{
+    launcher::controller as agent_launcher, service_client::ServiceClient, service_manager, trace,
+};
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -98,7 +97,11 @@ pub(crate) fn set_agent_running(running: bool) {
 
 fn restore_tray_icon() {
     dispatch2::DispatchQueue::main().exec_async(|| {
-        let icon = if overlay::is_active() {
+        let overlay_running = ServiceClient
+            .status()
+            .map(|status| status.overlay_running)
+            .unwrap_or(false);
+        let icon = if overlay_running {
             ICON_ACTIVE.get().cloned()
         } else {
             ICON_IDLE.get().cloned()
@@ -111,15 +114,7 @@ fn restore_tray_icon() {
     });
 }
 
-pub(crate) fn run() -> Result<(), AppError> {
-    let args: Vec<String> = std::env::args().collect();
-    let background = args.iter().any(|a| a == "--background");
-    if args.iter().any(|a| a == "--on-demand") {
-        return daemon::run_blocking(
-            daemon::DaemonConfig::on_demand().with_background_input(background),
-        );
-    }
-
+pub fn run() -> Result<(), AppError> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use tray_icon::{
@@ -132,20 +127,27 @@ pub(crate) fn run() -> Result<(), AppError> {
     let ns_app = NSApplication::sharedApplication(mtm);
     let _ = ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
+    service_manager::ensure_running()?;
+    let client = ServiceClient;
+    let status = client.status()?;
+    let permissions: desktop_core::protocol::PermissionsPayload =
+        client.send_typed(Command::PermissionsCheck)?;
     let missing_permissions =
-        !permissions::accessibility_granted() || !permissions::screen_recording_granted();
-
-    daemon::start_background(daemon::DaemonConfig::resident().with_background_input(background))?;
-    journal::start_from_disk();
+        !permissions.accessibility.granted || !permissions.screen_recording.granted;
     agent_launcher::initialize(std::sync::Arc::new(set_agent_running))?;
 
-    if journal::current().enabled && !permissions::screen_recording_granted() {
+    let journal_enabled = client
+        .settings()
+        .ok()
+        .and_then(|value| value.pointer("/journal/enabled").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    if journal_enabled && !permissions.screen_recording.granted {
         notify_journal_needs_screen_recording();
     }
 
     let menu = Menu::new();
     let toggle_cli_gui_ops = MenuItem::new(
-        cli_gui_toggle_menu_label(daemon::gui_ops_disabled()),
+        cli_gui_toggle_menu_label(!status.agent_access_enabled),
         true,
         None,
     );
@@ -187,7 +189,6 @@ pub(crate) fn run() -> Result<(), AppError> {
             toggle_cli_gui_ops: toggle_cli_gui_ops.clone(),
         });
     });
-    daemon::register_gui_ops_state_hook(on_gui_ops_state_changed);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == about_id {
             about::show();
@@ -202,14 +203,19 @@ pub(crate) fn run() -> Result<(), AppError> {
             return;
         }
         if event.id == toggle_cli_gui_ops_id {
-            let disabled = !daemon::gui_ops_disabled();
-            daemon::set_gui_ops_disabled(disabled);
+            let current = ServiceClient.status().ok();
+            let enabled = !current
+                .as_ref()
+                .map(|status| status.agent_access_enabled)
+                .unwrap_or(false);
+            let disabled = !enabled;
+            let result = ServiceClient.set_agent_access(enabled);
             trace::log(format!("menubar:toggle_cli_gui_ops disabled={disabled}"));
 
-            if disabled && overlay::is_active() {
-                if let Err(err) = overlay::stop_overlay() {
-                    trace::log(format!("menubar:toggle_cli_gui_ops overlay_stop_err {err}"));
-                }
+            if result.is_ok() {
+                on_gui_ops_state_changed(disabled);
+            }
+            if disabled && current.is_some_and(|status| status.overlay_running) {
                 stop_overlay_live_loop();
                 dispatch2::DispatchQueue::main().exec_async(move || {
                     TRAY.with(|cell| {
@@ -223,14 +229,18 @@ pub(crate) fn run() -> Result<(), AppError> {
         }
         if event.id == toggle_overlay_id {
             trace::log("menubar:toggle_overlay click");
-            let result = if overlay::is_active() {
-                let result = overlay::stop_overlay();
+            let was_active = ServiceClient
+                .status()
+                .map(|status| status.overlay_running)
+                .unwrap_or(false);
+            let result = if was_active {
+                let result = ServiceClient.send(Command::OverlayStop);
                 if result.is_ok() {
                     stop_overlay_live_loop();
                 }
                 result
             } else {
-                let result = overlay::start_overlay();
+                let result = ServiceClient.send(Command::OverlayStart { duration_ms: None });
                 if result.is_ok() {
                     start_overlay_live_loop();
                 }
@@ -240,7 +250,10 @@ pub(crate) fn run() -> Result<(), AppError> {
                 trace::log(format!("menubar:toggle_overlay err {err}"));
                 eprintln!("overlay toggle failed: {err}");
             } else {
-                let is_active = overlay::is_active();
+                let is_active = ServiceClient
+                    .status()
+                    .map(|status| status.overlay_running)
+                    .unwrap_or(!was_active);
                 trace::log(format!("menubar:toggle_overlay ok active={is_active}"));
                 // Update icon on the main thread (TrayIcon is !Send).
                 dispatch2::DispatchQueue::main().exec_async(move || {

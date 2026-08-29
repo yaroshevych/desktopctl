@@ -17,9 +17,10 @@ windows_gnu_target := "x86_64-pc-windows-gnu"
 windows_arm64_target := "aarch64-pc-windows-gnullvm"
 
 build:
-  cd {{workspace_dir}} && cargo build --release -p desktopctld -p desktopctl
+  cd {{workspace_dir}} && cargo build --release -p desktopctld -p desktopctl -p desktop-app
   rm -rf {{app_dir}}
   mkdir -p {{macos_dir}} {{contents_dir}}/Resources {{dist_dir}}
+  cp {{workspace_dir}}/target/release/desktopctl-app {{macos_dir}}/desktopctl-app
   cp {{workspace_dir}}/target/release/desktopctld {{macos_dir}}/desktopctld
   cp {{workspace_dir}}/target/release/desktopctl-cli {{cli_path}}
   ln -sfn ./DesktopCtl.app/Contents/MacOS/desktopctl {{legacy_cli_path}}
@@ -27,7 +28,7 @@ build:
   printf 'APPL????' > {{contents_dir}}/PkgInfo
   swift {{workspace_dir}}/scripts/gen_icns.swift {{contents_dir}}/Resources/AppIcon.icns
   just -f {{workspace_dir}}/Justfile build-swift-dialogs
-  chmod +x {{macos_dir}}/desktopctld {{cli_path}} {{macos_dir}}/desktopctl-dialogs
+  chmod +x {{macos_dir}}/desktopctl-app {{macos_dir}}/desktopctld {{cli_path}} {{macos_dir}}/desktopctl-dialogs
   codesign --force --sign - {{cli_path}} >/dev/null 2>&1 || true
   codesign --force --deep --sign - {{app_dir}} >/dev/null 2>&1 || true
   echo "Built: {{app_dir}}"

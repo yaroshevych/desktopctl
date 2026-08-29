@@ -7,4 +7,5 @@ pub mod agent_sessions;
 pub mod launcher;
 pub mod runtime;
 pub mod service_client;
+pub mod service_manager;
 pub(crate) mod trace;

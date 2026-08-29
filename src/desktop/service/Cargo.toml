@@ -4,7 +4,6 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-desktop-app = { path = "../app" }
 desktop-core = { package = "desktop-common", path = "../common" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 interprocess = "2.4"

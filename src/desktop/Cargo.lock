@@ -744,6 +744,7 @@ dependencies = [
  "objc2-foundation",
  "serde",
  "serde_json",
+ "tray-icon",
  "uuid",
 ]
 
@@ -782,7 +783,6 @@ dependencies = [
  "cocoa",
  "core-foundation 0.10.1",
  "core-graphics",
- "desktop-app",
  "desktop-common",
  "dispatch2",
  "foreign-types",

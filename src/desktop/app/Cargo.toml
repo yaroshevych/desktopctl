@@ -3,6 +3,10 @@ name = "desktop-app"
 version = "0.2.0"
 edition = "2024"
 
+[[bin]]
+name = "desktopctl-app"
+path = "src/main.rs"
+
 [dependencies]
 desktop-core = { package = "desktop-common", path = "../common" }
 serde = { version = "1", features = ["derive"] }
@@ -14,3 +18,4 @@ dispatch2 = "0.3"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSError", "NSString", "NSURL"] }
+tray-icon = "0.21"

@@ -247,6 +247,7 @@ impl DaemonConfig {
     }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn start_background(config: DaemonConfig) -> Result<(), AppError> {
     apply_runtime_config(config);
     let outcome = app_policy::reload_current_from_disk();
@@ -280,6 +281,7 @@ pub fn gui_ops_disabled() -> bool {
     GUI_OPS_DISABLED.load(Ordering::SeqCst)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn register_gui_ops_state_hook(hook: fn(bool)) {
     let _ = GUI_OPS_STATE_HOOK.set(hook);
 }

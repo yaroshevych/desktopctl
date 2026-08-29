@@ -20,9 +20,10 @@ SWIFT_SOURCES := \
 .PHONY: install
 
 install:
-	cd $(DESKTOP_DIR) && cargo build --release -p desktopctld -p desktopctl
+	cd $(DESKTOP_DIR) && cargo build --release -p desktopctld -p desktopctl -p desktop-app
 	rm -rf $(APP_DIR)
 	mkdir -p $(MACOS_DIR) $(CONTENTS_DIR)/Resources $(DIST_DIR)
+	cp $(DESKTOP_DIR)/target/release/desktopctl-app $(MACOS_DIR)/desktopctl-app
 	cp $(DESKTOP_DIR)/target/release/desktopctld $(MACOS_DIR)/desktopctld
 	cp $(DESKTOP_DIR)/target/release/desktopctl-cli $(CLI_PATH)
 	ln -sfn ./DesktopCtl.app/Contents/MacOS/desktopctl $(DIST_DIR)/desktopctl
@@ -37,7 +38,7 @@ install:
 		-framework SwiftUI \
 		$(SWIFT_SOURCES) \
 		-o $(MACOS_DIR)/desktopctl-dialogs
-	chmod +x $(MACOS_DIR)/desktopctld $(CLI_PATH) $(MACOS_DIR)/desktopctl-dialogs
+	chmod +x $(MACOS_DIR)/desktopctl-app $(MACOS_DIR)/desktopctld $(CLI_PATH) $(MACOS_DIR)/desktopctl-dialogs
 	codesign --force --deep --options runtime --sign - $(APP_DIR)
 	rm -rf $(INSTALL_APP)
 	cp -R $(APP_DIR) $(INSTALL_APP)
