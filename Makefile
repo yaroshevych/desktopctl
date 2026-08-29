@@ -9,13 +9,13 @@ INSTALL_APP   := /Applications/$(APP_NAME)
 SDK           := $(shell xcrun --show-sdk-path)
 
 SWIFT_SOURCES := \
-	$(DESKTOP_DIR)/swift-dialogs/Models.swift \
-	$(DESKTOP_DIR)/swift-dialogs/DaemonIPC.swift \
-	$(DESKTOP_DIR)/swift-dialogs/JournalDialog.swift \
-	$(DESKTOP_DIR)/swift-dialogs/AppPolicyDialog.swift \
-	$(DESKTOP_DIR)/swift-dialogs/SetupAccessDialog.swift \
-	$(DESKTOP_DIR)/swift-dialogs/DesktopCtlSettings.swift \
-	$(DESKTOP_DIR)/swift-dialogs/main.swift
+	$(DESKTOP_DIR)/app/ui-swift/Models.swift \
+	$(DESKTOP_DIR)/app/ui-swift/DaemonIPC.swift \
+	$(DESKTOP_DIR)/app/ui-swift/JournalDialog.swift \
+	$(DESKTOP_DIR)/app/ui-swift/AppPolicyDialog.swift \
+	$(DESKTOP_DIR)/app/ui-swift/SetupAccessDialog.swift \
+	$(DESKTOP_DIR)/app/ui-swift/DesktopCtlSettings.swift \
+	$(DESKTOP_DIR)/app/ui-swift/main.swift
 
 .PHONY: install
 
