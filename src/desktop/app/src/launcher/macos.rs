@@ -49,6 +49,7 @@ const COMPLETION_FADE_SECONDS: f64 = 0.2;
 const COMPLETION_VISIBLE_MILLIS: u64 = 1_600;
 // Keep this in sync with the intrinsic two-line SwiftUI session row.
 const ROW_HEIGHT: f64 = 42.0;
+const ROW_SPACING: f64 = 2.0;
 const LIST_VERTICAL_INSET: f64 = 16.0;
 const KEY_ESCAPE: u16 = 53;
 const KEY_UP: u16 = 126;
@@ -122,7 +123,7 @@ define_class!(
         fn can_become_main_window(&self) -> bool { true }
 
         #[unsafe(method(animationResizeTime:))]
-        fn animation_resize_time(&self, _new_frame: NSRect) -> f64 { 0.18 }
+        fn animation_resize_time(&self, _new_frame: NSRect) -> f64 { 0.24 }
 
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
@@ -616,8 +617,10 @@ fn apply_show(sequence: u64) {
     if !has_panel {
         return;
     }
-    if !is_visible() {
+    let was_visible = is_visible();
+    if !was_visible {
         UI.with(|cell| cell.borrow_mut().show_all = false);
+        swift_bridge::prepare_for_presentation();
     }
     render_on_main(false);
     let controls = UI.with(|cell| {
@@ -736,7 +739,9 @@ fn launcher_panel_height(ui: &UiState) -> f64 {
     } else {
         LIST_VERTICAL_INSET
     };
-    (50.0 + list_inset + session_count as f64 * ROW_HEIGHT)
+    let rows_height = session_count as f64 * ROW_HEIGHT
+        + session_count.saturating_sub(1) as f64 * ROW_SPACING;
+    (50.0 + list_inset + rows_height)
         .clamp(MIN_LAUNCHER_PANEL_HEIGHT, MAX_HISTORY_PANEL_HEIGHT)
 }
 
@@ -751,8 +756,13 @@ fn resize_panel(ui: &UiState, content: &NSView, height: f64, animate: bool) {
             NSPoint::new(frame.origin.x, top - height),
             NSSize::new(PANEL_WIDTH, height),
         );
-        content.setFrameSize(target.size);
-        panel.setFrame_display_animate(target, true, true);
+        NSAnimationContext::beginGrouping();
+        NSAnimationContext::currentContext().setDuration(0.24);
+        unsafe {
+            let animator: *mut AnyObject = msg_send![panel, animator];
+            let _: () = msg_send![animator, setFrame: target, display: true];
+        }
+        NSAnimationContext::endGrouping();
         return;
     }
     panel.setContentSize(NSSize::new(PANEL_WIDTH, height));

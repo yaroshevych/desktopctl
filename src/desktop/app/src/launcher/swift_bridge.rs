@@ -8,6 +8,7 @@ unsafe extern "C" {
     fn desktopctl_launcher_mount(parent: *mut c_void, callback: Option<ActionCallback>) -> bool;
     fn desktopctl_launcher_set_snapshot(json: *const c_char, length: usize);
     fn desktopctl_launcher_focus_prompt();
+    fn desktopctl_launcher_prepare_for_presentation();
     fn desktopctl_launcher_move_selection(delta: isize);
     fn desktopctl_launcher_unmount();
 }
@@ -28,6 +29,10 @@ pub fn set_snapshot(snapshot: &LauncherSnapshot) {
 
 pub fn focus_prompt() {
     unsafe { desktopctl_launcher_focus_prompt() };
+}
+
+pub fn prepare_for_presentation() {
+    unsafe { desktopctl_launcher_prepare_for_presentation() };
 }
 
 pub fn move_selection(delta: isize) {

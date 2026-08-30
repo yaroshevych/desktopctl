@@ -36,7 +36,6 @@ private final class LauncherModel: ObservableObject {
     @Published var focusGeneration = 0
     @Published var selectedTaskID: String?
     var callback: LauncherActionCallback?
-    var reduceMotion = false
 
     func applySnapshot(_ data: Data) {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -147,11 +146,7 @@ private final class LauncherModel: ObservableObject {
                 ].id
             }
         }
-        if reduceMotion {
-            updateSelection()
-        } else {
-            withAnimation(.easeInOut(duration: 0.18), updateSelection)
-        }
+        updateSelection()
     }
 
     func back() {
@@ -171,20 +166,23 @@ private final class LauncherModel: ObservableObject {
     func prepareForPresentation() {
         renderState.showAll = false
         selectedTaskID = nil
+        focusPrompt()
+    }
+
+    func focusPrompt() {
         focusGeneration += 1
     }
 
     private func expandHistory(selecting taskID: String) {
-        let expand = {
-            self.renderState.showAll = true
+        emit(["type": "expand_history"])
+        // Let AppKit begin growing the panel before SwiftUI inserts rows that
+        // do not fit in the current viewport.
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.24)) {
+                self.renderState.showAll = true
+            }
             self.selectedTaskID = taskID
         }
-        if reduceMotion {
-            expand()
-        } else {
-            withAnimation(.easeInOut(duration: 0.18), expand)
-        }
-        emit(["type": "expand_history"])
     }
 
     private func emit(_ object: [String: String]) {
@@ -202,9 +200,7 @@ private struct LauncherRootView: View {
     @ObservedObject var model: LauncherModel
     @FocusState private var promptFocused: Bool
     @State private var hoveredTaskID: String?
-    @Namespace private var selectionHighlight
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
@@ -245,10 +241,8 @@ private struct LauncherRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
-            model.reduceMotion = reduceMotion
             DispatchQueue.main.async { promptFocused = true }
         }
-        .onChange(of: reduceMotion) { model.reduceMotion = $0 }
         .onChange(of: model.focusGeneration) { _ in
             promptFocused = false
             DispatchQueue.main.async {
@@ -279,76 +273,70 @@ private struct LauncherRootView: View {
         if !model.renderState.tasks.isEmpty {
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(model.renderState.tasks) { task in
-                            Button(action: { model.open(task) }) {
-                                taskRow(task)
-                            }
-                            .buttonStyle(.plain)
-                            .onHover { hovered in
-                                hoveredTaskID = hovered ? task.id : nil
-                            }
-                            .background(
-                                ZStack {
-                                    if model.selectedTaskID == task.id {
-                                        RoundedRectangle(
-                                            cornerRadius: LauncherTheme.Radius.row,
-                                            style: .continuous
-                                        )
-                                        .fill(
-                                            LauncherTheme.selection(
-                                                colorScheme: colorScheme,
-                                                reduceTransparency: reduceTransparency
-                                            )
-                                        )
-                                        .matchedGeometryEffect(
-                                            id: "session-selection",
-                                            in: selectionHighlight
-                                        )
-                                    } else if hoveredTaskID == task.id {
+                    ZStack(alignment: .topLeading) {
+                        if let selectedTaskID = model.selectedTaskID,
+                           let selectedIndex = model.renderState.tasks.firstIndex(
+                               where: { $0.id == selectedTaskID }
+                           ) {
+                            RoundedRectangle(
+                                cornerRadius: LauncherTheme.Radius.row,
+                                style: .continuous
+                            )
+                            .fill(
+                                LauncherTheme.selection(
+                                    colorScheme: colorScheme,
+                                    reduceTransparency: reduceTransparency
+                                )
+                            )
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 42)
+                            .padding(.horizontal, LauncherTheme.Spacing.md)
+                            .offset(y: LauncherTheme.Spacing.md + CGFloat(selectedIndex) * 44)
+                        }
+
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            ForEach(model.renderState.tasks) { task in
+                                Button(action: { model.open(task) }) {
+                                    taskRow(task)
+                                }
+                                .frame(height: 42)
+                                .buttonStyle(.plain)
+                                .onHover { hovered in
+                                    hoveredTaskID = hovered ? task.id : nil
+                                }
+                                .background {
+                                    if hoveredTaskID == task.id,
+                                       model.selectedTaskID != task.id {
                                         RoundedRectangle(
                                             cornerRadius: LauncherTheme.Radius.row,
                                             style: .continuous
                                         )
                                         .fill(
                                             LauncherTheme.hover(
-                                                    colorScheme: colorScheme,
-                                                    reduceTransparency: reduceTransparency
-                                                )
+                                                colorScheme: colorScheme,
+                                                reduceTransparency: reduceTransparency
+                                            )
                                         )
                                     }
                                 }
-                            )
-                            .animation(
-                                LauncherTheme.interactionAnimation(reduceMotion: reduceMotion),
-                                value: model.selectedTaskID
-                            )
-                            .transition(
-                                reduceMotion
-                                    ? .identity
-                                    : .opacity.combined(with: .move(edge: .top))
-                            )
-                            .id(task.id)
-                            .accessibilityLabel("\(task.title), \(statusLabel(task.status))")
-                            .accessibilityHint("Open task")
-                        }
-                    }
-                    .padding(.horizontal, LauncherTheme.Spacing.md)
-                    .padding(.vertical, LauncherTheme.Spacing.md)
-                    .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.18),
-                        value: model.renderState.showAll
-                    )
-                }
-                .onChange(of: model.selectedTaskID) { selected in
-                    if let selected {
-                        if reduceMotion {
-                            proxy.scrollTo(selected, anchor: .center)
-                        } else {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                proxy.scrollTo(selected, anchor: .center)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                                .id(task.id)
+                                .accessibilityLabel("\(task.title), \(statusLabel(task.status))")
+                                .accessibilityHint("Open task")
                             }
                         }
+                        .padding(.horizontal, LauncherTheme.Spacing.md)
+                        .padding(.vertical, LauncherTheme.Spacing.md)
+                        .animation(
+                            .easeInOut(duration: 0.24),
+                            value: model.renderState.showAll
+                        )
+                    }
+                }
+                .onChange(of: model.selectedTaskID) { selected in
+                    hoveredTaskID = nil
+                    if let selected {
+                        proxy.scrollTo(selected, anchor: .center)
                     }
                 }
             }
@@ -518,6 +506,12 @@ public func desktopctl_launcher_unmount() {
 
 @_cdecl("desktopctl_launcher_focus_prompt")
 public func desktopctl_launcher_focus_prompt() {
+    guard Thread.isMainThread else { return }
+    model?.focusPrompt()
+}
+
+@_cdecl("desktopctl_launcher_prepare_for_presentation")
+public func desktopctl_launcher_prepare_for_presentation() {
     guard Thread.isMainThread else { return }
     model?.prepareForPresentation()
 }
