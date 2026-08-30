@@ -233,23 +233,13 @@ private struct LauncherRootView: View {
 
     @ViewBuilder
     private var launcherBody: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .medium))
-                .frame(width: 20, height: 24)
-                .foregroundColor(.secondary)
-                .accessibilityHidden(true)
-            TextField("Ask DesktopCtl…", text: $model.prompt)
-                .textFieldStyle(.plain)
-                .font(.system(size: 20, weight: .regular, design: .rounded))
-                .focused($promptFocused)
-                .onSubmit { model.sendPrompt() }
-                .accessibilityLabel("Launcher prompt")
-            LauncherKeyCap(title: "↵")
-                .accessibilityLabel("Return to submit")
-        }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 4)
+        TextField("Ask DesktopCtl…", text: $model.prompt)
+            .textFieldStyle(.plain)
+            .font(.system(size: 20, weight: .regular, design: .rounded))
+            .focused($promptFocused)
+            .onSubmit { model.sendPrompt() }
+            .frame(height: 44)
+            .accessibilityLabel("Launcher prompt")
 
         if !model.renderState.tasks.isEmpty {
             ScrollViewReader { proxy in

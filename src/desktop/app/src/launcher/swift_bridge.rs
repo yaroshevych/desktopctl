@@ -12,10 +12,6 @@ unsafe extern "C" {
     fn desktopctl_launcher_unmount();
 }
 
-pub fn enabled() -> bool {
-    std::env::var_os("DESKTOPCTL_SWIFT_LAUNCHER").is_some()
-}
-
 pub fn mount(parent: *mut c_void, callback: ActionCallback) -> bool {
     unsafe { desktopctl_launcher_mount(parent, Some(callback)) }
 }

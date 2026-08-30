@@ -104,7 +104,7 @@ For a manual smoke test, focus an email or other app, press `Option-Space`, ente
 reopen the launcher, open the unread session, and send a follow-up. Pi's desktop
 operations should use the captured topmost non-DesktopCtl window.
 
-## SwiftUI launcher spike smoke
+## SwiftUI launcher smoke test
 
 Build and launch isolated test state. Direct binary launch preserves env vars;
 `just run`/`open` does not provide a reliable env-var path for this test.
@@ -113,7 +113,6 @@ Build and launch isolated test state. Direct binary launch preserves env vars;
 just -f src/desktop/Justfile build
 TEST_ROOT="$(mktemp -d -t desktopctl-launcher)"
 DESKTOPCTL_HOME="$TEST_ROOT/data" \
-DESKTOPCTL_SWIFT_LAUNCHER=1 \
 DESKTOPCTL_TRACE=1 \
 DESKTOPCTL_TRACE_PATH="$TEST_ROOT/trace.log" \
   src/desktop/dist/DesktopCtl.app/Contents/MacOS/desktopctl-app \
@@ -131,9 +130,8 @@ Manual checks:
 2. Type normal text. Press `Send`. Confirm panel hides and trace shows the
    request path. Reopen; recent SwiftUI task rows should show title, preview,
    status, and unread state. Open one and confirm Rust receives its session ID.
-3. Run once without `DESKTOPCTL_SWIFT_LAUNCHER=1` to compare current Rust
-   selection, `Show more`, session view, follow-up, and completion HUD. SwiftUI
-   session and HUD parity remain later migration slices.
+3. Check keyboard selection, history expansion, session view, follow-up, and
+   completion HUD behavior.
 4. Repeat on another Space and a full-screen app. Check panel placement,
    dismissal, and prior-app focus restoration.
 5. Select Japanese/Hiragana (or another IME), type marked text, then press

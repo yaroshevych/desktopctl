@@ -26,13 +26,11 @@ use objc2::{
     MainThreadOnly, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, Bool},
-    sel,
 };
 use objc2_app_kit::{
-    NSAnimationContext, NSApplication, NSBackingStoreType, NSButton, NSButtonType, NSColor,
-    NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSFloatingWindowLevel, NSFont, NSPanel,
-    NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView, NSTextAlignment, NSTextField,
-    NSTextView, NSView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSAnimationContext, NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFloatingWindowLevel,
+    NSFont, NSPanel, NSTextField, NSView, NSWindowCollectionBehavior, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -49,11 +47,8 @@ const COMPLETION_WIDTH: f64 = 520.0;
 const COMPLETION_HEIGHT: f64 = 48.0;
 const COMPLETION_FADE_SECONDS: f64 = 0.2;
 const COMPLETION_VISIBLE_MILLIS: u64 = 1_600;
-const INPUT_HEIGHT: f64 = 38.0;
 const ROW_HEIGHT: f64 = 42.0;
 const KEY_ESCAPE: u16 = 53;
-const KEY_RETURN: u16 = 36;
-const KEY_ENTER: u16 = 76;
 const KEY_UP: u16 = 126;
 const KEY_DOWN: u16 = 125;
 
@@ -88,17 +83,6 @@ pub use super::core::{
     CompletionNotice, LauncherAction, LauncherScreen, LauncherSnapshot, SessionStatus,
     SessionSummary, TranscriptMessage,
 };
-
-impl SessionStatus {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Completed => "complete",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
 
 pub type LauncherActionHandler = Arc<dyn Fn(LauncherAction) + Send + Sync + 'static>;
 
@@ -149,44 +133,6 @@ define_class!(
             }
         }
 
-        #[unsafe(method(submit:))]
-        fn submit(&self, _sender: Option<&AnyObject>) { submit_active(); }
-
-        #[unsafe(method(openRow:))]
-        fn open_row(&self, sender: &AnyObject) {
-            let tag: isize = unsafe { msg_send![sender, tag] };
-            open_row(tag.max(0) as usize);
-        }
-
-        #[unsafe(method(showMore:))]
-        fn show_more(&self, _sender: Option<&AnyObject>) {
-            UI.with(|cell| cell.borrow_mut().show_all = true);
-            render_on_main();
-        }
-
-        #[unsafe(method(back:))]
-        fn back(&self, _sender: Option<&AnyObject>) {
-            show_launcher_on_main();
-            if let Some(callbacks) = CALLBACKS.get() {
-                (callbacks.on_action)(LauncherAction::ReturnToLauncher);
-            }
-        }
-
-        #[unsafe(method(cancelSession:))]
-        fn cancel_session(&self, _sender: Option<&AnyObject>) {
-            let session_id = UI.with(|cell| cell.borrow().session_id.clone());
-            if let (Some(callbacks), Some(session_id)) = (CALLBACKS.get(), session_id) {
-                (callbacks.on_action)(LauncherAction::CancelSession { session_id });
-            }
-        }
-
-        #[unsafe(method(openInGhostty:))]
-        fn open_in_ghostty(&self, _sender: Option<&AnyObject>) {
-            let session_id = UI.with(|cell| cell.borrow().session_id.clone());
-            if let (Some(callbacks), Some(session_id)) = (CALLBACKS.get(), session_id) {
-                (callbacks.on_action)(LauncherAction::OpenInGhostty { session_id });
-            }
-        }
     }
 
     // SAFETY: NSWindowDelegate has no additional invariants for these methods.
@@ -201,29 +147,13 @@ define_class!(
 struct UiState {
     panel: Option<Retained<LauncherPanel>>,
     content: Option<Retained<NSView>>,
-    input: Option<Retained<NSTextField>>,
-    composer: Option<Retained<NSTextField>>,
-    transcript: Option<Retained<NSTextView>>,
-    transcript_scroll: Option<Retained<NSScrollView>>,
-    rows: Vec<Retained<NSButton>>,
-    launcher_scroll: Option<Retained<NSScrollView>>,
-    show_more: Option<Retained<NSButton>>,
-    share_context: Option<Retained<NSButton>>,
-    share_context_enabled: bool,
     show_all: bool,
-    back: Option<Retained<NSButton>>,
-    activity: Option<Retained<NSProgressIndicator>>,
-    status_label: Option<Retained<NSTextField>>,
-    stop: Option<Retained<NSButton>>,
-    terminal: Option<Retained<NSButton>>,
     completion_panel: Option<Retained<NSPanel>>,
     completion_label: Option<Retained<NSTextField>>,
     completion_generation: u64,
     anchor_visible_frame: Option<NSRect>,
     lifecycle_sequence: u64,
     snapshot: LauncherSnapshot,
-    selected: Option<usize>,
-    session_id: Option<String>,
 }
 
 impl Default for UiState {
@@ -231,29 +161,13 @@ impl Default for UiState {
         Self {
             panel: None,
             content: None,
-            input: None,
-            composer: None,
-            transcript: None,
-            transcript_scroll: None,
-            rows: Vec::new(),
-            launcher_scroll: None,
-            show_more: None,
-            share_context: None,
-            share_context_enabled: true,
             show_all: false,
-            back: None,
-            activity: None,
-            status_label: None,
-            stop: None,
-            terminal: None,
             completion_panel: None,
             completion_label: None,
             completion_generation: 0,
             anchor_visible_frame: None,
             lifecycle_sequence: 0,
             snapshot: LauncherSnapshot::default(),
-            selected: None,
-            session_id: None,
         }
     }
 }
@@ -360,25 +274,16 @@ fn create_panel(mtm: MainThreadMarker) -> Result<(), AppError> {
         let content = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_WIDTH, MIN_LAUNCHER_PANEL_HEIGHT)));
         content.setWantsLayer(true);
         panel.setContentView(Some(&content));
-        let input = text_field(mtm, "Ask DesktopCtl…", NSRect::new(NSPoint::new(18.0, MIN_LAUNCHER_PANEL_HEIGHT - 58.0), NSSize::new(PANEL_WIDTH - 36.0, INPUT_HEIGHT)), true);
-        unsafe {
-            input.setTarget(Some(&*panel));
-            input.setAction(Some(sel!(submit:)));
-        }
-        content.addSubview(&input);
-        if swift_bridge::enabled() {
-            input.setHidden(true);
-            if !swift_bridge::mount(
-                (&*content as *const NSView).cast_mut().cast(),
-                swift_action_callback,
-            ) {
-                eprintln!("swift launcher: mount failed; using Rust renderer");
-                input.setHidden(false);
-            }
+        if !swift_bridge::mount(
+            (&*content as *const NSView).cast_mut().cast(),
+            swift_action_callback,
+        ) {
+            return Err(AppError::backend_unavailable(
+                "Swift launcher view failed to mount",
+            ));
         }
         ui.panel = Some(panel);
         ui.content = Some(content);
-        ui.input = Some(input);
         Ok(())
     })
 }
@@ -707,16 +612,12 @@ fn apply_show(sequence: u64) {
     render_on_main();
     let controls = UI.with(|cell| {
         let ui = cell.borrow();
-        ui.panel.as_ref().cloned().map(|panel| {
-            (
-                panel,
-                ui.composer.as_ref().cloned(),
-                ui.input.as_ref().cloned(),
-                ui.anchor_visible_frame,
-            )
-        })
+        ui.panel
+            .as_ref()
+            .cloned()
+            .map(|panel| (panel, ui.anchor_visible_frame))
     });
-    let Some((panel, composer, input, anchor_visible_frame)) = controls else {
+    let Some((panel, anchor_visible_frame)) = controls else {
         return;
     };
     position_panel(&panel, anchor_visible_frame);
@@ -724,13 +625,7 @@ fn apply_show(sequence: u64) {
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
     panel.makeKeyAndOrderFront(None);
-    if swift_bridge::enabled() {
-        swift_bridge::focus_prompt();
-    } else if let Some(composer) = composer.as_ref() {
-        panel.makeFirstResponder(Some(composer));
-    } else if let Some(input) = input.as_ref() {
-        panel.makeFirstResponder(Some(input));
-    }
+    swift_bridge::focus_prompt();
     VISIBLE.store(true, Ordering::SeqCst);
 }
 
@@ -807,7 +702,7 @@ fn position_panel(panel: &NSPanel, cached_frame: Option<NSRect>) {
 
 fn render_on_main() {
     UI.with(|cell| {
-        let mut ui = cell.borrow_mut();
+        let ui = cell.borrow();
         let Some(content) = ui.content.as_ref().cloned() else {
             return;
         };
@@ -816,42 +711,7 @@ fn render_on_main() {
             LauncherScreen::Session { .. } => SESSION_PANEL_HEIGHT,
         };
         resize_panel(&ui, &content, height);
-        if swift_bridge::enabled() {
-            swift_bridge::set_snapshot(&ui.snapshot);
-            return;
-        }
-        clear_dynamic_views(&mut ui);
-        match ui.snapshot.screen.clone() {
-            LauncherScreen::Launcher => render_launcher(&mut ui, &content),
-            LauncherScreen::Session {
-                id,
-                title,
-                status,
-                terminal_available,
-                messages,
-            } => render_session(
-                &mut ui,
-                &content,
-                &id,
-                &title,
-                status,
-                terminal_available,
-                &messages,
-            ),
-        }
-    });
-    focus_session_input_on_main();
-}
-
-fn focus_session_input_on_main() {
-    UI.with(|cell| {
-        let ui = cell.borrow();
-        if !matches!(ui.snapshot.screen, LauncherScreen::Session { .. }) {
-            return;
-        }
-        if let (Some(panel), Some(composer)) = (ui.panel.as_ref(), ui.composer.as_ref()) {
-            panel.makeFirstResponder(Some(composer));
-        }
+        swift_bridge::set_snapshot(&ui.snapshot);
     });
 }
 
@@ -872,351 +732,7 @@ fn resize_panel(ui: &UiState, content: &NSView, height: f64) {
     };
     panel.setContentSize(NSSize::new(PANEL_WIDTH, height));
     content.setFrameSize(NSSize::new(PANEL_WIDTH, height));
-    if let Some(input) = ui.input.as_ref() {
-        input.setFrameOrigin(NSPoint::new(18.0, height - 58.0));
-    }
     position_panel(panel, ui.anchor_visible_frame);
-}
-
-fn clear_dynamic_views(ui: &mut UiState) {
-    for row in ui.rows.drain(..) {
-        row.removeFromSuperview();
-    }
-    if let Some(scroll) = ui.launcher_scroll.take() {
-        scroll.removeFromSuperview();
-    }
-    if let Some(button) = ui.show_more.take() {
-        button.removeFromSuperview();
-    }
-    if let Some(button) = ui.share_context.take() {
-        button.removeFromSuperview();
-    }
-    ui.transcript.take();
-    if let Some(scroll) = ui.transcript_scroll.take() {
-        scroll.removeFromSuperview();
-    }
-    if let Some(composer) = ui.composer.take() {
-        composer.removeFromSuperview();
-    }
-    if let Some(back) = ui.back.take() {
-        back.removeFromSuperview();
-    }
-    if let Some(activity) = ui.activity.take() {
-        unsafe { activity.stopAnimation(None) };
-        activity.removeFromSuperview();
-    }
-    if let Some(label) = ui.status_label.take() {
-        label.removeFromSuperview();
-    }
-    if let Some(stop) = ui.stop.take() {
-        stop.removeFromSuperview();
-    }
-    if let Some(terminal) = ui.terminal.take() {
-        terminal.removeFromSuperview();
-    }
-}
-
-fn render_launcher(ui: &mut UiState, content: &NSView) {
-    if let Some(input) = ui.input.as_ref() {
-        input.setHidden(false);
-    }
-    ui.selected = None;
-    ui.session_id = None;
-    let sessions = if ui.show_all {
-        &ui.snapshot.all
-    } else {
-        &ui.snapshot.recent
-    };
-    let panel_height = content.frame().size.height;
-    let has_more = !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len();
-    let list_bottom = 48.0;
-    let list_height = (panel_height - 66.0 - list_bottom).max(0.0);
-    let document_height = (sessions.len() as f64 * ROW_HEIGHT).max(list_height);
-    let document = NSView::initWithFrame(
-        NSView::alloc(MainThreadMarker::new().unwrap()),
-        NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(PANEL_WIDTH - 36.0, document_height),
-        ),
-    );
-    for (index, session) in sessions.iter().enumerate() {
-        let y = document_height - (index as f64 + 1.0) * ROW_HEIGHT;
-        let title = format!(
-            "{}  ·  {}  {}",
-            if session.unread { "●" } else { "○" },
-            session.title,
-            session.status.label()
-        );
-        let button = NSButton::initWithFrame(
-            NSButton::alloc(MainThreadMarker::new().unwrap()),
-            NSRect::new(NSPoint::new(0.0, y), NSSize::new(PANEL_WIDTH - 36.0, 34.0)),
-        );
-        button.setTitle(&NSString::from_str(&format!(
-            "{title}\n{}",
-            one_line(&session.preview, 110)
-        )));
-        button.setBordered(false);
-        button.setAlignment(NSTextAlignment::Left);
-        button.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        button.setTag(index as isize);
-        unsafe {
-            button.setTarget(Some(ui.panel.as_ref().unwrap()));
-            button.setAction(Some(sel!(openRow:)));
-        }
-        document.addSubview(&button);
-        ui.rows.push(button);
-    }
-    let scroll = NSScrollView::initWithFrame(
-        NSScrollView::alloc(MainThreadMarker::new().unwrap()),
-        NSRect::new(
-            NSPoint::new(18.0, list_bottom),
-            NSSize::new(PANEL_WIDTH - 36.0, list_height),
-        ),
-    );
-    scroll.setHasVerticalScroller(true);
-    scroll.setDrawsBackground(false);
-    scroll.setDocumentView(Some(&document));
-    content.addSubview(&scroll);
-    let clip = scroll.contentView();
-    clip.scrollToPoint(NSPoint::new(0.0, (document_height - list_height).max(0.0)));
-    scroll.reflectScrolledClipView(&clip);
-    ui.launcher_scroll = Some(scroll);
-
-    if has_more {
-        let show_more = NSButton::initWithFrame(
-            NSButton::alloc(MainThreadMarker::new().unwrap()),
-            NSRect::new(NSPoint::new(18.0, 10.0), NSSize::new(110.0, 28.0)),
-        );
-        show_more.setTitle(&NSString::from_str("Show more"));
-        show_more.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
-        unsafe {
-            show_more.setTarget(Some(ui.panel.as_ref().unwrap()));
-            show_more.setAction(Some(sel!(showMore:)));
-        }
-        content.addSubview(&show_more);
-        ui.show_more = Some(show_more);
-    }
-    let share_context = NSButton::initWithFrame(
-        NSButton::alloc(MainThreadMarker::new().unwrap()),
-        NSRect::new(
-            NSPoint::new(PANEL_WIDTH - 190.0, 10.0),
-            NSSize::new(172.0, 28.0),
-        ),
-    );
-    share_context.setTitle(&NSString::from_str("Share window context"));
-    share_context.setButtonType(NSButtonType::Switch);
-    share_context.setState(if ui.share_context_enabled {
-        NSControlStateValueOn
-    } else {
-        NSControlStateValueOff
-    });
-    share_context.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-    content.addSubview(&share_context);
-    ui.share_context = Some(share_context);
-}
-
-fn render_session(
-    ui: &mut UiState,
-    content: &NSView,
-    id: &str,
-    title: &str,
-    status: SessionStatus,
-    terminal_available: bool,
-    messages: &[TranscriptMessage],
-) {
-    if let Some(input) = ui.input.as_ref() {
-        input.setHidden(true);
-    }
-    ui.session_id = Some(id.to_string());
-    let back = NSButton::initWithFrame(
-        NSButton::alloc(MainThreadMarker::new().unwrap()),
-        NSRect::new(
-            NSPoint::new(18.0, SESSION_PANEL_HEIGHT - 44.0),
-            NSSize::new(100.0, 26.0),
-        ),
-    );
-    back.setTitle(&NSString::from_str("‹ Sessions"));
-    back.setBordered(false);
-    back.setAlignment(NSTextAlignment::Left);
-    unsafe {
-        back.setTarget(Some(ui.panel.as_ref().unwrap()));
-        back.setAction(Some(sel!(back:)));
-    }
-    content.addSubview(&back);
-    ui.back = Some(back);
-    if terminal_available {
-        let terminal = NSButton::initWithFrame(
-            NSButton::alloc(MainThreadMarker::new().unwrap()),
-            NSRect::new(
-                NSPoint::new(116.0, SESSION_PANEL_HEIGHT - 46.0),
-                NSSize::new(132.0, 26.0),
-            ),
-        );
-        terminal.setTitle(&NSString::from_str("Open in Ghostty"));
-        terminal.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
-        unsafe {
-            terminal.setTarget(Some(ui.panel.as_ref().unwrap()));
-            terminal.setAction(Some(sel!(openInGhostty:)));
-        }
-        content.addSubview(&terminal);
-        ui.terminal = Some(terminal);
-    }
-    if status == SessionStatus::Running {
-        let activity = NSProgressIndicator::initWithFrame(
-            NSProgressIndicator::alloc(MainThreadMarker::new().unwrap()),
-            NSRect::new(
-                NSPoint::new(PANEL_WIDTH - 194.0, SESSION_PANEL_HEIGHT - 42.0),
-                NSSize::new(18.0, 18.0),
-            ),
-        );
-        activity.setStyle(NSProgressIndicatorStyle::Spinning);
-        activity.setIndeterminate(true);
-        unsafe { activity.startAnimation(None) };
-        content.addSubview(&activity);
-        ui.activity = Some(activity);
-
-        let label = text_field(
-            MainThreadMarker::new().unwrap(),
-            "",
-            NSRect::new(
-                NSPoint::new(PANEL_WIDTH - 170.0, SESSION_PANEL_HEIGHT - 44.0),
-                NSSize::new(100.0, 22.0),
-            ),
-            false,
-        );
-        label.setStringValue(&NSString::from_str("Pi is working…"));
-        content.addSubview(&label);
-        ui.status_label = Some(label);
-
-        let stop = NSButton::initWithFrame(
-            NSButton::alloc(MainThreadMarker::new().unwrap()),
-            NSRect::new(
-                NSPoint::new(PANEL_WIDTH - 70.0, SESSION_PANEL_HEIGHT - 46.0),
-                NSSize::new(54.0, 26.0),
-            ),
-        );
-        stop.setTitle(&NSString::from_str("Stop"));
-        stop.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
-        unsafe {
-            stop.setTarget(Some(ui.panel.as_ref().unwrap()));
-            stop.setAction(Some(sel!(cancelSession:)));
-        }
-        content.addSubview(&stop);
-        ui.stop = Some(stop);
-    }
-    let transcript = NSTextView::initWithFrame(
-        NSTextView::alloc(MainThreadMarker::new().unwrap()),
-        NSRect::new(
-            NSPoint::new(18.0, 62.0),
-            NSSize::new(PANEL_WIDTH - 36.0, SESSION_PANEL_HEIGHT - 116.0),
-        ),
-    );
-    transcript.setEditable(false);
-    transcript.setSelectable(true);
-    let mut text = format!("{title}\n\n");
-    for message in messages {
-        text.push_str(if message.user { "You: " } else { "Pi: " });
-        text.push_str(&message.text);
-        text.push_str("\n\n");
-    }
-    unsafe {
-        let _: () = msg_send![&*transcript, setString: &*NSString::from_str(&text)];
-    }
-    let scroll = NSScrollView::initWithFrame(
-        NSScrollView::alloc(MainThreadMarker::new().unwrap()),
-        NSRect::new(
-            NSPoint::new(18.0, 62.0),
-            NSSize::new(PANEL_WIDTH - 36.0, SESSION_PANEL_HEIGHT - 116.0),
-        ),
-    );
-    scroll.setHasVerticalScroller(true);
-    scroll.setDocumentView(Some(&transcript));
-    content.addSubview(&scroll);
-    unsafe {
-        let _: () = msg_send![&*transcript, scrollToEndOfDocument: std::ptr::null::<AnyObject>()];
-    }
-    ui.transcript = Some(transcript);
-    ui.transcript_scroll = Some(scroll);
-    let composer = text_field(
-        MainThreadMarker::new().unwrap(),
-        if status == SessionStatus::Running {
-            "Wait for Pi to finish…"
-        } else {
-            "Follow up…"
-        },
-        NSRect::new(
-            NSPoint::new(18.0, 18.0),
-            NSSize::new(PANEL_WIDTH - 36.0, 34.0),
-        ),
-        true,
-    );
-    composer.setEditable(status != SessionStatus::Running);
-    unsafe {
-        composer.setTarget(Some(ui.panel.as_ref().unwrap()));
-        composer.setAction(Some(sel!(submit:)));
-    }
-    content.addSubview(&composer);
-    ui.composer = Some(composer);
-}
-
-fn submit_active() {
-    let selected = UI.with(|cell| {
-        let ui = cell.borrow();
-        if matches!(ui.snapshot.screen, LauncherScreen::Launcher) {
-            ui.selected
-        } else {
-            None
-        }
-    });
-    if let Some(index) = selected {
-        open_row(index);
-        return;
-    }
-    let action = UI.with(|cell| {
-        let mut ui = cell.borrow_mut();
-        let text = {
-            let field = if ui.session_id.is_some() {
-                ui.composer.as_ref()
-            } else {
-                ui.input.as_ref()
-            }?;
-            let text = field.stringValue().to_string().trim().to_string();
-            if !text.is_empty() {
-                field.setStringValue(&NSString::new());
-            }
-            text
-        };
-        if text.is_empty() {
-            return None;
-        }
-        let share_context = ui
-            .share_context
-            .as_ref()
-            .map(|button| button.state() == NSControlStateValueOn)
-            .unwrap_or(ui.share_context_enabled);
-        ui.share_context_enabled = share_context;
-        ui.session_id
-            .as_ref()
-            .map(|id| LauncherAction::FollowUp {
-                session_id: id.clone(),
-                prompt: text.clone(),
-                share_context,
-            })
-            .or_else(|| {
-                Some(LauncherAction::NewRequest {
-                    prompt: text,
-                    share_context,
-                })
-            })
-    });
-    if let Some(action) = action {
-        if matches!(action, LauncherAction::NewRequest { .. }) {
-            hide_on_main();
-        }
-        if let Some(callbacks) = CALLBACKS.get() {
-            (callbacks.on_action)(action);
-        }
-    }
 }
 
 fn handle_key_event(event: &NSEvent) -> bool {
@@ -1241,108 +757,16 @@ fn handle_key_event(event: &NSEvent) -> bool {
             }
             true
         }
-        KEY_RETURN | KEY_ENTER if !swift_bridge::enabled() => {
-            submit_active();
-            true
-        }
         KEY_UP => {
-            if swift_bridge::enabled() {
-                swift_bridge::move_selection(-1);
-            } else {
-                move_selection(-1);
-            }
+            swift_bridge::move_selection(-1);
             true
         }
         KEY_DOWN => {
-            if swift_bridge::enabled() {
-                swift_bridge::move_selection(1);
-            } else {
-                move_selection(1);
-            }
+            swift_bridge::move_selection(1);
             true
         }
         _ => false,
     }
-}
-
-fn open_row(index: usize) {
-    let id = UI.with(|cell| {
-        let mut ui = cell.borrow_mut();
-        let row = if ui.show_all {
-            ui.snapshot.all.get(index)?
-        } else {
-            ui.snapshot.recent.get(index)?
-        }
-        .clone();
-        ui.snapshot.screen = LauncherScreen::Session {
-            id: row.id.clone(),
-            title: row.title,
-            status: row.status,
-            terminal_available: false,
-            messages: Vec::new(),
-        };
-        ui.selected = None;
-        Some(row.id)
-    });
-    if let Some(session_id) = id {
-        render_on_main();
-        if let Some(callbacks) = CALLBACKS.get() {
-            (callbacks.on_action)(LauncherAction::OpenSession { session_id });
-        }
-    }
-}
-
-fn move_selection(delta: isize) {
-    let expand_to = UI.with(|cell| {
-        let ui = cell.borrow();
-        let recent_count = ui.snapshot.recent.len();
-        (delta > 0
-            && !ui.show_all
-            && ui.snapshot.all.len() > recent_count
-            && ui.selected == recent_count.checked_sub(1))
-        .then_some(recent_count)
-    });
-    if let Some(index) = expand_to {
-        UI.with(|cell| cell.borrow_mut().show_all = true);
-        render_on_main();
-        UI.with(|cell| {
-            let mut ui = cell.borrow_mut();
-            ui.selected = Some(index);
-            for (idx, row) in ui.rows.iter().enumerate() {
-                row.highlight(idx == index);
-                if idx == index {
-                    row.scrollRectToVisible(row.bounds());
-                }
-            }
-        });
-        return;
-    }
-
-    UI.with(|cell| {
-        let mut ui = cell.borrow_mut();
-        if !matches!(ui.snapshot.screen, LauncherScreen::Launcher) {
-            return;
-        }
-        let count = if ui.show_all {
-            ui.snapshot.all.len()
-        } else {
-            ui.snapshot.recent.len()
-        };
-        if count == 0 {
-            return;
-        }
-        let old = ui
-            .selected
-            .map(|value| value as isize)
-            .unwrap_or_else(|| if delta < 0 { 0 } else { -1 });
-        ui.selected = Some((old + delta).rem_euclid(count as isize) as usize);
-        for (idx, row) in ui.rows.iter().enumerate() {
-            row.highlight(ui.selected == Some(idx));
-            if ui.selected == Some(idx) {
-                row.scrollRectToVisible(row.bounds());
-            }
-        }
-    });
 }
 
 fn show_launcher_on_main() {
