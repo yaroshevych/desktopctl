@@ -28,9 +28,9 @@ use objc2::{
     runtime::{AnyObject, Bool},
 };
 use objc2_app_kit::{
-    NSAnimationContext, NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFloatingWindowLevel,
-    NSFont, NSPanel, NSTextField, NSView, NSWindowCollectionBehavior, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSAnimationContext, NSApplication, NSBackingStoreType, NSColor, NSEvent,
+    NSEventModifierFlags, NSFloatingWindowLevel, NSFont, NSPanel, NSTextField, NSView,
+    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -51,6 +51,8 @@ const COMPLETION_VISIBLE_MILLIS: u64 = 1_600;
 const ROW_HEIGHT: f64 = 42.0;
 const ROW_SPACING: f64 = 2.0;
 const LIST_VERTICAL_INSET: f64 = 16.0;
+const KEY_RETURN: u16 = 36;
+const KEY_ENTER: u16 = 76;
 const KEY_ESCAPE: u16 = 53;
 const KEY_UP: u16 = 126;
 const KEY_DOWN: u16 = 125;
@@ -376,9 +378,13 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
             }
         }
         Some("return_to_launcher") => LauncherAction::ReturnToLauncher,
+        Some("open_settings") => LauncherAction::OpenSettings,
         _ => return None,
     };
-    let hide_before_dispatch = matches!(launcher_action, LauncherAction::NewRequest { .. });
+    let hide_before_dispatch = matches!(
+        launcher_action,
+        LauncherAction::NewRequest { .. } | LauncherAction::OpenSettings
+    );
     Some((launcher_action, hide_before_dispatch))
 }
 
@@ -774,8 +780,35 @@ fn handle_key_event(event: &NSEvent) -> bool {
     if !VISIBLE.load(Ordering::SeqCst) {
         return false;
     }
+    let modifiers = event.modifierFlags()
+        & (NSEventModifierFlags::Control
+            | NSEventModifierFlags::Option
+            | NSEventModifierFlags::Shift
+            | NSEventModifierFlags::Command);
+    let characters = event
+        .charactersIgnoringModifiers()
+        .map(|characters| characters.to_string());
+    let command_comma = modifiers == NSEventModifierFlags::Command
+        && characters.as_deref() == Some(",");
+    if command_comma {
+        hide_on_main();
+        if let Some(callbacks) = CALLBACKS.get() {
+            (callbacks.on_action)(LauncherAction::OpenSettings);
+        }
+        return true;
+    }
+    let command_k = modifiers == NSEventModifierFlags::Command
+        && characters.as_deref().is_some_and(|value| value.eq_ignore_ascii_case("k"));
+    if command_k {
+        swift_bridge::toggle_actions_menu();
+        return true;
+    }
+
     match event.keyCode() {
         KEY_ESCAPE => {
+            if swift_bridge::dismiss_actions_menu() {
+                return true;
+            }
             let in_session = UI.with(|cell| {
                 matches!(
                     cell.borrow().snapshot.screen,
@@ -793,13 +826,20 @@ fn handle_key_event(event: &NSEvent) -> bool {
             true
         }
         KEY_UP => {
+            if swift_bridge::actions_menu_handles_navigation() {
+                return true;
+            }
             swift_bridge::move_selection(-1);
             true
         }
         KEY_DOWN => {
+            if swift_bridge::actions_menu_handles_navigation() {
+                return true;
+            }
             swift_bridge::move_selection(1);
             true
         }
+        KEY_RETURN | KEY_ENTER => swift_bridge::activate_actions_menu(),
         _ => false,
     }
 }

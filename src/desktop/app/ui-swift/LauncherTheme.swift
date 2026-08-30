@@ -122,9 +122,6 @@ internal struct LauncherVisualEffectView: NSViewRepresentable {
 internal struct LauncherKeyCap: View {
     internal let title: String
 
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
     internal init(_ title: String) {
         self.title = title
     }
@@ -138,18 +135,14 @@ internal struct LauncherKeyCap: View {
             .font(.system(size: 11, weight: .semibold, design: .rounded))
             .foregroundStyle(LauncherTheme.textSecondary)
             .lineLimit(1)
-            .frame(minWidth: 22, minHeight: 20)
-            .padding(.horizontal, LauncherTheme.Spacing.sm)
+            .frame(minWidth: 18, minHeight: 18)
             .background(
-                Capsule().fill(
-                    LauncherTheme.keyCapBackground(
-                        colorScheme: colorScheme,
-                        reduceTransparency: reduceTransparency
-                    )
-                )
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(0.035))
             )
             .overlay(
-                Capsule().stroke(LauncherTheme.textTertiary.opacity(0.24), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(LauncherTheme.textSecondary.opacity(0.46), lineWidth: 1)
             )
             .accessibilityLabel("Keyboard shortcut \(title)")
     }

@@ -183,6 +183,12 @@ mod controller {
         match action {
             LauncherAction::ToggleRequested => toggle(),
             LauncherAction::Dismissed => restore_focus(),
+            LauncherAction::OpenSettings => {
+                if let Some(mut state) = lock_state() {
+                    state.restore_pid = None;
+                }
+                crate::runtime::settings_dialog::show(None);
+            }
             LauncherAction::ReturnToLauncher => {
                 if let Some(mut state) = lock_state() {
                     state.open_session = None;

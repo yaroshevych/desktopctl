@@ -70,6 +70,7 @@ pub struct CompletionNotice {
 pub enum LauncherAction {
     ToggleRequested,
     Dismissed,
+    OpenSettings,
     ReturnToLauncher,
     NewRequest {
         prompt: String,

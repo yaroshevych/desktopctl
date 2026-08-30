@@ -10,6 +10,10 @@ unsafe extern "C" {
     fn desktopctl_launcher_focus_prompt();
     fn desktopctl_launcher_prepare_for_presentation();
     fn desktopctl_launcher_move_selection(delta: isize);
+    fn desktopctl_launcher_toggle_actions_menu();
+    fn desktopctl_launcher_dismiss_actions_menu() -> bool;
+    fn desktopctl_launcher_activate_actions_menu() -> bool;
+    fn desktopctl_launcher_actions_menu_handles_navigation() -> bool;
     fn desktopctl_launcher_unmount();
 }
 
@@ -37,6 +41,22 @@ pub fn prepare_for_presentation() {
 
 pub fn move_selection(delta: isize) {
     unsafe { desktopctl_launcher_move_selection(delta) };
+}
+
+pub fn toggle_actions_menu() {
+    unsafe { desktopctl_launcher_toggle_actions_menu() };
+}
+
+pub fn dismiss_actions_menu() -> bool {
+    unsafe { desktopctl_launcher_dismiss_actions_menu() }
+}
+
+pub fn activate_actions_menu() -> bool {
+    unsafe { desktopctl_launcher_activate_actions_menu() }
+}
+
+pub fn actions_menu_handles_navigation() -> bool {
+    unsafe { desktopctl_launcher_actions_menu_handles_navigation() }
 }
 
 #[allow(dead_code)]

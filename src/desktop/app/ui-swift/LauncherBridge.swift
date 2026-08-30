@@ -35,6 +35,7 @@ private final class LauncherModel: ObservableObject {
     @Published var prompt = ""
     @Published var focusGeneration = 0
     @Published var selectedTaskID: String?
+    @Published var showActionsMenu = false
     var callback: LauncherActionCallback?
 
     func applySnapshot(_ data: Data) {
@@ -163,9 +164,31 @@ private final class LauncherModel: ObservableObject {
         emit(["type": "open_in_ghostty", "session_id": renderState.sessionID])
     }
 
+    func toggleActionsMenu() {
+        withAnimation(.easeOut(duration: 0.16)) {
+            showActionsMenu.toggle()
+        }
+    }
+
+    func dismissActionsMenu() -> Bool {
+        guard showActionsMenu else { return false }
+        withAnimation(.easeOut(duration: 0.12)) {
+            showActionsMenu = false
+        }
+        return true
+    }
+
+    func activateActionsMenu() -> Bool {
+        guard showActionsMenu else { return false }
+        showActionsMenu = false
+        emit(["type": "open_settings"])
+        return true
+    }
+
     func prepareForPresentation() {
         renderState.showAll = false
         selectedTaskID = nil
+        showActionsMenu = false
         focusPrompt()
     }
 
@@ -200,6 +223,7 @@ private struct LauncherRootView: View {
     @ObservedObject var model: LauncherModel
     @FocusState private var promptFocused: Bool
     @State private var hoveredTaskID: String?
+    @State private var actionsButtonHovered = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -239,6 +263,31 @@ private struct LauncherRootView: View {
                 lineWidth: 0.5
             )
         }
+        .overlay {
+            if model.renderState.screen != "Session", model.showActionsMenu {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { _ = model.dismissActionsMenu() }
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if model.renderState.screen != "Session", model.showActionsMenu {
+                actionsMenu
+                    .padding(.trailing, LauncherTheme.Spacing.lg)
+                    .padding(.bottom, 46)
+                    .transition(
+                        .opacity.combined(
+                            with: .scale(scale: 0.94, anchor: .bottomTrailing)
+                        )
+                    )
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if model.renderState.screen != "Session", !model.renderState.tasks.isEmpty {
+                actionsButton
+                    .padding(LauncherTheme.Spacing.lg)
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             DispatchQueue.main.async { promptFocused = true }
@@ -247,6 +296,13 @@ private struct LauncherRootView: View {
             promptFocused = false
             DispatchQueue.main.async {
                 promptFocused = true
+            }
+        }
+        .onChange(of: model.showActionsMenu) { visible in
+            if visible {
+                promptFocused = false
+            } else {
+                DispatchQueue.main.async { promptFocused = true }
             }
         }
     }
@@ -326,7 +382,8 @@ private struct LauncherRootView: View {
                             }
                         }
                         .padding(.horizontal, LauncherTheme.Spacing.md)
-                        .padding(.vertical, LauncherTheme.Spacing.md)
+                        .padding(.top, LauncherTheme.Spacing.md)
+                        .padding(.bottom, 50)
                         .animation(
                             .easeInOut(duration: 0.24),
                             value: model.renderState.showAll
@@ -341,6 +398,104 @@ private struct LauncherRootView: View {
                 }
             }
         }
+
+    }
+
+    private var actionsButton: some View {
+        Button(action: model.toggleActionsMenu) {
+            HStack(spacing: LauncherTheme.Spacing.md) {
+                Text("Options")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(LauncherTheme.textSecondary)
+                HStack(spacing: 2) {
+                    LauncherKeyCap(title: "⌘")
+                    LauncherKeyCap(title: "K")
+                }
+            }
+            .padding(.horizontal, LauncherTheme.Spacing.lg)
+            .frame(height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(
+                        actionsButtonHovered
+                            ? Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10)
+                            : Color.clear
+                    )
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(
+                        Color.primary.opacity(actionsButtonHovered ? 0.18 : 0),
+                        lineWidth: 0.5
+                    )
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    colorScheme == .dark
+                        ? Color.white.opacity(0.07)
+                        : Color.black.opacity(0.045)
+                )
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(LauncherTheme.panelEdge(colorScheme: colorScheme), lineWidth: 0.5)
+        }
+        .onHover { hovered in
+            withAnimation(.easeOut(duration: 0.1)) {
+                actionsButtonHovered = hovered
+            }
+        }
+        .accessibilityLabel("Options")
+        .accessibilityHint("Open launcher options")
+    }
+
+    private var actionsMenu: some View {
+        VStack(spacing: 0) {
+            Button(action: { _ = model.activateActionsMenu() }) {
+                HStack(spacing: LauncherTheme.Spacing.lg) {
+                    Image(systemName: "gearshape")
+                        .frame(width: 18)
+                        .accessibilityHidden(true)
+                    Text("Settings")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(LauncherTheme.textSecondary)
+                    Spacer(minLength: LauncherTheme.Spacing.xxl)
+                    HStack(spacing: 2) {
+                        LauncherKeyCap(title: "⌘")
+                        LauncherKeyCap(title: ",")
+                    }
+                }
+                .padding(.horizontal, LauncherTheme.Spacing.xl)
+                .frame(width: 218, height: 38)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(
+                        LauncherTheme.selection(
+                            colorScheme: colorScheme,
+                            reduceTransparency: reduceTransparency
+                        )
+                    )
+            )
+            .accessibilityLabel("Open Settings")
+        }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(LauncherTheme.panelEdge(colorScheme: colorScheme), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.24), radius: 12, y: 5)
     }
 
     @ViewBuilder
@@ -520,4 +675,28 @@ public func desktopctl_launcher_prepare_for_presentation() {
 public func desktopctl_launcher_move_selection(_ delta: Int) {
     guard Thread.isMainThread else { return }
     model?.moveSelection(delta)
+}
+
+@_cdecl("desktopctl_launcher_toggle_actions_menu")
+public func desktopctl_launcher_toggle_actions_menu() {
+    guard Thread.isMainThread else { return }
+    model?.toggleActionsMenu()
+}
+
+@_cdecl("desktopctl_launcher_dismiss_actions_menu")
+public func desktopctl_launcher_dismiss_actions_menu() -> Bool {
+    guard Thread.isMainThread else { return false }
+    return model?.dismissActionsMenu() ?? false
+}
+
+@_cdecl("desktopctl_launcher_activate_actions_menu")
+public func desktopctl_launcher_activate_actions_menu() -> Bool {
+    guard Thread.isMainThread else { return false }
+    return model?.activateActionsMenu() ?? false
+}
+
+@_cdecl("desktopctl_launcher_actions_menu_handles_navigation")
+public func desktopctl_launcher_actions_menu_handles_navigation() -> Bool {
+    guard Thread.isMainThread else { return false }
+    return model?.showActionsMenu ?? false
 }
