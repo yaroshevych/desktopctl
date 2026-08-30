@@ -36,6 +36,8 @@ private final class LauncherModel: ObservableObject {
     @Published var focusGeneration = 0
     @Published var selectedTaskID: String?
     @Published var showActionsMenu = false
+    @Published private(set) var isScrolling = false
+    private var scrollGeneration = 0
     var callback: LauncherActionCallback?
 
     func applySnapshot(_ data: Data) {
@@ -109,20 +111,31 @@ private final class LauncherModel: ObservableObject {
         guard renderState.screen != "Session" else { return }
 
         // The controller intentionally keeps older sessions out of the initial
-        // list. Match the native renderer: Down from the last recent row reveals
-        // the full history and selects the first newly revealed row.
+        // list. Reveal the full history as keyboard navigation lands on the last
+        // recent row, while preserving that row as the selection.
         if delta > 0, !renderState.showAll, !renderState.allTasks.isEmpty {
             if renderState.recentTasks.isEmpty, selectedTaskID == nil {
                 expandHistory(selecting: renderState.allTasks[0].id)
+                return
+            }
+            if selectedTaskID == nil,
+               renderState.recentTasks.count == 1,
+               renderState.allTasks.count > renderState.recentTasks.count {
+                expandHistory(selecting: renderState.recentTasks[0].id)
+                return
+            }
+            if let selectedTaskID,
+               let current = renderState.recentTasks.firstIndex(where: { $0.id == selectedTaskID }),
+               current + 1 == renderState.recentTasks.count - 1,
+               renderState.allTasks.count > renderState.recentTasks.count {
+                expandHistory(selecting: renderState.recentTasks[current + 1].id)
                 return
             }
             if let selectedTaskID,
                let current = renderState.recentTasks.firstIndex(where: { $0.id == selectedTaskID }),
                current == renderState.recentTasks.count - 1,
                renderState.allTasks.count > renderState.recentTasks.count {
-                expandHistory(
-                    selecting: renderState.allTasks[renderState.recentTasks.count].id
-                )
+                expandHistory(selecting: renderState.allTasks[renderState.recentTasks.count].id)
                 return
             }
         }
@@ -167,6 +180,26 @@ private final class LauncherModel: ObservableObject {
     func toggleActionsMenu() {
         withAnimation(.easeOut(duration: 0.16)) {
             showActionsMenu.toggle()
+        }
+    }
+
+    func expandAllHistory() {
+        guard !renderState.showAll else { return }
+        emit(["type": "expand_history"])
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.24)) {
+                self.renderState.showAll = true
+            }
+        }
+    }
+
+    func noteScrollWheel() {
+        scrollGeneration += 1
+        let generation = scrollGeneration
+        isScrolling = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            guard self.scrollGeneration == generation else { return }
+            self.isScrolling = false
         }
     }
 
@@ -224,6 +257,7 @@ private struct LauncherRootView: View {
     @FocusState private var promptFocused: Bool
     @State private var hoveredTaskID: String?
     @State private var actionsButtonHovered = false
+    @State private var showAllHovered = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -305,6 +339,12 @@ private struct LauncherRootView: View {
                 DispatchQueue.main.async { promptFocused = true }
             }
         }
+        .onChange(of: model.isScrolling) { scrolling in
+            if scrolling {
+                hoveredTaskID = nil
+                showAllHovered = false
+            }
+        }
     }
 
     @ViewBuilder
@@ -358,7 +398,7 @@ private struct LauncherRootView: View {
                                 .frame(height: 42)
                                 .buttonStyle(.plain)
                                 .onHover { hovered in
-                                    hoveredTaskID = hovered ? task.id : nil
+                                    hoveredTaskID = !model.isScrolling && hovered ? task.id : nil
                                 }
                                 .background {
                                     if hoveredTaskID == task.id,
@@ -377,8 +417,51 @@ private struct LauncherRootView: View {
                                 }
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                                 .id(task.id)
-                                .accessibilityLabel("\(task.title), \(statusLabel(task.status))")
+                                .accessibilityLabel(
+                                    statusLabel(task.status).isEmpty
+                                        ? task.title
+                                        : "\(task.title), \(statusLabel(task.status))"
+                                )
                                 .accessibilityHint("Open task")
+                            }
+                            if !model.renderState.showAll,
+                               model.renderState.allTasks.count > model.renderState.recentTasks.count {
+                                Button(action: model.expandAllHistory) {
+                                    HStack(spacing: 9) {
+                                        Image(systemName: "chevron.down")
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .frame(width: 10)
+                                        Text("Show all")
+                                            .font(.body)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 42)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .frame(height: 42)
+                                .foregroundStyle(LauncherTheme.textSecondary)
+                                .background {
+                                    if showAllHovered {
+                                        RoundedRectangle(
+                                            cornerRadius: LauncherTheme.Radius.row,
+                                            style: .continuous
+                                        )
+                                        .fill(
+                                            LauncherTheme.hover(
+                                                colorScheme: colorScheme,
+                                                reduceTransparency: reduceTransparency
+                                            )
+                                        )
+                                    }
+                                }
+                                .onHover { hovered in
+                                    showAllHovered = !model.isScrolling && hovered
+                                }
+                                .transition(.identity)
+                                .accessibilityHint("Expand session history")
                             }
                         }
                         .padding(.horizontal, LauncherTheme.Spacing.md)
@@ -441,10 +524,6 @@ private struct LauncherRootView: View {
                         : Color.black.opacity(0.045)
                 )
         )
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(LauncherTheme.panelEdge(colorScheme: colorScheme), lineWidth: 0.5)
-        }
         .onHover { hovered in
             withAnimation(.easeOut(duration: 0.1)) {
                 actionsButtonHovered = hovered
@@ -590,9 +669,11 @@ private struct LauncherRootView: View {
                     Text(task.title)
                         .font(.body)
                         .lineLimit(1)
-                    Text(statusLabel(task.status))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    if !statusLabel(task.status).isEmpty {
+                        Text(statusLabel(task.status))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 if !task.preview.isEmpty {
                     Text(task.preview)
@@ -612,7 +693,7 @@ private struct LauncherRootView: View {
     private func statusLabel(_ value: String) -> String {
         switch value {
         case "Running": return "Working"
-        case "Completed": return "Complete"
+        case "Completed": return ""
         case "Failed": return "Failed"
         case "Cancelled": return "Cancelled"
         default: return value
@@ -622,6 +703,7 @@ private struct LauncherRootView: View {
 
 private var model: LauncherModel?
 private var hosting: NSHostingView<LauncherRootView>?
+private var scrollWheelMonitor: Any?
 
 @_cdecl("desktopctl_launcher_mount")
 public func desktopctl_launcher_mount(
@@ -639,6 +721,12 @@ public func desktopctl_launcher_mount(
     parentView.addSubview(nextHosting)
     model = nextModel
     hosting = nextHosting
+    scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+        if event.window === nextHosting.window, event.scrollingDeltaY != 0 {
+            nextModel.noteScrollWheel()
+        }
+        return event
+    }
     return true
 }
 
@@ -654,6 +742,10 @@ public func desktopctl_launcher_set_snapshot(
 @_cdecl("desktopctl_launcher_unmount")
 public func desktopctl_launcher_unmount() {
     guard Thread.isMainThread else { return }
+    if let monitor = scrollWheelMonitor {
+        NSEvent.removeMonitor(monitor)
+        scrollWheelMonitor = nil
+    }
     hosting?.removeFromSuperview()
     hosting = nil
     model = nil
