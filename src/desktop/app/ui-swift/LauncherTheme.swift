@@ -4,10 +4,10 @@ import SwiftUI
 // Small, native macOS token set. Keep this file independent from launcher state
 // so platform UI can reuse it without adding bridge or model work.
 internal enum LauncherTheme {
-    internal static let referenceWidth: CGFloat = 750
+    internal static let referenceWidth: CGFloat = 700
 
     internal enum Radius {
-        internal static let panel: CGFloat = 26
+        internal static let panel: CGFloat = 10
         internal static let row: CGFloat = 10
     }
 
@@ -24,6 +24,12 @@ internal enum LauncherTheme {
     internal static let headerHeight: CGFloat = 64
     internal static let rowIconSize: CGFloat = 24
     internal static let controlHeight: CGFloat = 32
+
+    internal static func panelEdge(colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color.white.opacity(0.22)
+            : Color.black.opacity(0.28)
+    }
 
     internal static let textPrimary = Color(nsColor: .labelColor)
     internal static let textSecondary = Color(nsColor: .secondaryLabelColor)

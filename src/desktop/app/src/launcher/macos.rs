@@ -41,10 +41,10 @@ use objc2_foundation::{
 use super::swift_bridge;
 use desktop_core::error::AppError;
 
-const PANEL_WIDTH: f64 = 750.0;
+const PANEL_WIDTH: f64 = 700.0;
 const SESSION_PANEL_HEIGHT: f64 = 360.0;
 const MAX_HISTORY_PANEL_HEIGHT: f64 = 475.0;
-const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 80.0;
+const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 84.0;
 const COMPLETION_WIDTH: f64 = 520.0;
 const COMPLETION_HEIGHT: f64 = 48.0;
 const COMPLETION_FADE_SECONDS: f64 = 0.2;
@@ -388,6 +388,10 @@ unsafe extern "C" fn swift_action_callback(ptr: *const std::ffi::c_char, length:
         return;
     }
     let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), length) };
+    if swift_requests_history_expansion(bytes) {
+        DispatchQueue::main().exec_async(expand_history_on_main);
+        return;
+    }
     let Ok(parsed) = std::panic::catch_unwind(|| parse_swift_action(bytes)) else {
         return;
     };
@@ -460,6 +464,36 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
     };
     let hide_before_dispatch = matches!(launcher_action, LauncherAction::NewRequest { .. });
     Some((launcher_action, hide_before_dispatch))
+}
+
+fn swift_requests_history_expansion(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|action| {
+            action
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("expand_history")
+}
+
+fn expand_history_on_main() {
+    let expanded = UI.with(|cell| {
+        let mut ui = cell.borrow_mut();
+        if matches!(ui.snapshot.screen, LauncherScreen::Launcher)
+            && ui.snapshot.all.len() > ui.snapshot.recent.len()
+        {
+            ui.show_all = true;
+            true
+        } else {
+            false
+        }
+    });
+    if expanded {
+        render_on_main();
+    }
 }
 
 fn show_completion_on_main(notice: CompletionNotice) {
@@ -827,7 +861,7 @@ fn launcher_panel_height(ui: &UiState) -> f64 {
     } else {
         ui.snapshot.recent.len()
     };
-    let bottom = 48.0;
+    let bottom = 16.0;
     (66.0 + bottom + session_count as f64 * ROW_HEIGHT)
         .clamp(MIN_LAUNCHER_PANEL_HEIGHT, MAX_HISTORY_PANEL_HEIGHT)
 }
@@ -1432,7 +1466,8 @@ fn install_hotkey() -> Result<(), AppError> {
 mod tests {
     use super::{
         LauncherAction, NSPoint, NSRect, WorkArea, accepts_lifecycle_sequence,
-        accepts_newer_revision, centered_top_origin, parse_swift_action, screen_index_for_point,
+        accepts_newer_revision, centered_top_origin, parse_swift_action,
+        screen_index_for_point, swift_requests_history_expansion,
     };
 
     #[test]
@@ -1518,5 +1553,15 @@ mod tests {
         assert!(parse_swift_action(br#"{"type":"new_request","prompt":"  "}"#).is_none());
         assert!(parse_swift_action(br#"{"type":"unknown"}"#).is_none());
         assert!(parse_swift_action(b"not-json").is_none());
+    }
+
+    #[test]
+    fn swift_history_expansion_action_is_recognized() {
+        assert!(swift_requests_history_expansion(
+            br#"{"type":"expand_history"}"#
+        ));
+        assert!(!swift_requests_history_expansion(
+            br#"{"type":"unknown"}"#
+        ));
     }
 }

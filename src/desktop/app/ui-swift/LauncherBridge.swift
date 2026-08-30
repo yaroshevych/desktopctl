@@ -15,13 +15,19 @@ private struct LauncherTask: Identifiable {
 }
 
 private struct LauncherRenderState {
-    var tasks: [LauncherTask] = []
+    var recentTasks: [LauncherTask] = []
+    var allTasks: [LauncherTask] = []
+    var showAll = false
     var screen = "Launcher"
     var sessionID = ""
     var sessionTitle = ""
     var sessionStatus = ""
     var terminalAvailable = false
     var messages: [(user: Bool, text: String)] = []
+
+    var tasks: [LauncherTask] {
+        showAll ? allTasks : recentTasks
+    }
 }
 
 private final class LauncherModel: ObservableObject {
@@ -36,12 +42,14 @@ private final class LauncherModel: ObservableObject {
         else { return }
 
         var next = LauncherRenderState()
+        next.showAll = renderState.showAll
         let rawScreen = root["screen"]
         if let value = rawScreen as? String {
             next.screen = value
         } else if let value = rawScreen as? [String: Any],
                   let session = value["Session"] as? [String: Any] {
             next.screen = "Session"
+            next.showAll = false
             next.sessionID = session["id"] as? String ?? ""
             next.sessionTitle = session["title"] as? String ?? "Session"
             next.sessionStatus = session["status"] as? String ?? ""
@@ -52,17 +60,21 @@ private final class LauncherModel: ObservableObject {
             }
         }
 
-        let rows = (root["recent"] as? [[String: Any]]) ?? []
-        next.tasks = rows.compactMap { row in
-            guard let id = row["id"] as? String else { return nil }
-            return LauncherTask(
-                id: id,
-                title: row["title"] as? String ?? "Untitled task",
-                preview: row["preview"] as? String ?? "",
-                status: row["status"] as? String ?? "",
-                unread: row["unread"] as? Bool ?? false
-            )
+        let parseTasks: ([[String: Any]]) -> [LauncherTask] = { rows in
+            rows.compactMap { row in
+                guard let id = row["id"] as? String else { return nil }
+                return LauncherTask(
+                    id: id,
+                    title: row["title"] as? String ?? "Untitled task",
+                    preview: row["preview"] as? String ?? "",
+                    status: row["status"] as? String ?? "",
+                    unread: row["unread"] as? Bool ?? false
+                )
+            }
         }
+        let recentRows = (root["recent"] as? [[String: Any]]) ?? []
+        next.recentTasks = parseTasks(recentRows)
+        next.allTasks = parseTasks((root["all"] as? [[String: Any]]) ?? recentRows)
         renderState = next
         if let selectedTaskID,
            !next.tasks.contains(where: { $0.id == selectedTaskID }) {
@@ -93,7 +105,28 @@ private final class LauncherModel: ObservableObject {
     }
 
     func moveSelection(_ delta: Int) {
-        guard renderState.screen != "Session", !renderState.tasks.isEmpty else { return }
+        guard renderState.screen != "Session" else { return }
+
+        // The controller intentionally keeps older sessions out of the initial
+        // list. Match the native renderer: Down from the last recent row reveals
+        // the full history and selects the first newly revealed row.
+        if delta > 0, !renderState.showAll, !renderState.allTasks.isEmpty {
+            if renderState.recentTasks.isEmpty, selectedTaskID == nil {
+                expandHistory()
+                selectedTaskID = renderState.allTasks[0].id
+                return
+            }
+            if let selectedTaskID,
+               let current = renderState.recentTasks.firstIndex(where: { $0.id == selectedTaskID }),
+               current == renderState.recentTasks.count - 1,
+               renderState.allTasks.count > renderState.recentTasks.count {
+                expandHistory()
+                self.selectedTaskID = renderState.allTasks[renderState.recentTasks.count].id
+                return
+            }
+        }
+
+        guard !renderState.tasks.isEmpty else { return }
         guard let selectedTaskID,
               let current = renderState.tasks.firstIndex(where: { $0.id == selectedTaskID })
         else {
@@ -125,6 +158,17 @@ private final class LauncherModel: ObservableObject {
         emit(["type": "open_in_ghostty", "session_id": renderState.sessionID])
     }
 
+    func prepareForPresentation() {
+        renderState.showAll = false
+        selectedTaskID = nil
+        focusGeneration += 1
+    }
+
+    private func expandHistory() {
+        renderState.showAll = true
+        emit(["type": "expand_history"])
+    }
+
     private func emit(_ object: [String: String]) {
         guard let callback,
               let data = try? JSONSerialization.data(withJSONObject: object)
@@ -141,6 +185,7 @@ private struct LauncherRootView: View {
     @FocusState private var promptFocused: Bool
     @State private var hoveredTaskID: String?
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
@@ -167,6 +212,16 @@ private struct LauncherRootView: View {
                 style: .continuous
             )
         )
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: LauncherTheme.Radius.panel,
+                style: .continuous
+            )
+            .strokeBorder(
+                LauncherTheme.panelEdge(colorScheme: colorScheme),
+                lineWidth: 0.5
+            )
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             DispatchQueue.main.async { promptFocused = true }
@@ -197,7 +252,6 @@ private struct LauncherRootView: View {
         .padding(.vertical, 4)
 
         if !model.renderState.tasks.isEmpty {
-            LauncherSectionHeader(title: "Recent tasks")
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
@@ -225,6 +279,10 @@ private struct LauncherRootView: View {
                                                 : Color.clear)
                                     )
                             )
+                            .animation(
+                                LauncherTheme.interactionAnimation(reduceMotion: reduceMotion),
+                                value: model.selectedTaskID
+                            )
                             .id(task.id)
                             .accessibilityLabel("\(task.title), \(statusLabel(task.status))")
                             .accessibilityHint("Open task")
@@ -233,7 +291,13 @@ private struct LauncherRootView: View {
                 }
                 .onChange(of: model.selectedTaskID) { selected in
                     if let selected {
-                        proxy.scrollTo(selected, anchor: .center)
+                        if reduceMotion {
+                            proxy.scrollTo(selected, anchor: .center)
+                        } else {
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                proxy.scrollTo(selected, anchor: .center)
+                            }
+                        }
                     }
                 }
             }
@@ -405,7 +469,7 @@ public func desktopctl_launcher_unmount() {
 @_cdecl("desktopctl_launcher_focus_prompt")
 public func desktopctl_launcher_focus_prompt() {
     guard Thread.isMainThread else { return }
-    model?.focusGeneration += 1
+    model?.prepareForPresentation()
 }
 
 @_cdecl("desktopctl_launcher_move_selection")
