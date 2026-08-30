@@ -110,14 +110,19 @@ mod controller {
             launcher_ui::hide();
             return;
         }
-        let target_hint = crate::service_client::ServiceClient
-            .active_app_pid()
-            .map_err(|error| {
-                trace::log(format!("agent_launcher:active_app_pid_error {error}"));
-                error
-            })
-            .ok()
-            .flatten();
+        // Capture focus synchronously before activating DesktopCtl. The service
+        // lookup remains a fallback for applications not represented by
+        // NSWorkspace.
+        let target_hint = crate::runtime::macos::frontmost_application_pid().or_else(|| {
+            crate::service_client::ServiceClient
+                .active_app_pid()
+                .map_err(|error| {
+                    trace::log(format!("agent_launcher:active_app_pid_error {error}"));
+                    error
+                })
+                .ok()
+                .flatten()
+        });
         let generation = if let Some(mut state) = lock_state() {
             state.launch_generation = state.launch_generation.wrapping_add(1);
             state.pending_target = None;

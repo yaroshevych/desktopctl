@@ -41,13 +41,15 @@ use desktop_core::error::AppError;
 
 const PANEL_WIDTH: f64 = 700.0;
 const SESSION_PANEL_HEIGHT: f64 = 360.0;
-const MAX_HISTORY_PANEL_HEIGHT: f64 = 475.0;
-const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 84.0;
+const MAX_HISTORY_PANEL_HEIGHT: f64 = 450.0;
+const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 50.0;
 const COMPLETION_WIDTH: f64 = 520.0;
 const COMPLETION_HEIGHT: f64 = 48.0;
 const COMPLETION_FADE_SECONDS: f64 = 0.2;
 const COMPLETION_VISIBLE_MILLIS: u64 = 1_600;
+// Keep this in sync with the intrinsic two-line SwiftUI session row.
 const ROW_HEIGHT: f64 = 42.0;
+const LIST_VERTICAL_INSET: f64 = 16.0;
 const KEY_ESCAPE: u16 = 53;
 const KEY_UP: u16 = 126;
 const KEY_DOWN: u16 = 125;
@@ -119,6 +121,9 @@ define_class!(
         #[unsafe(method(canBecomeMainWindow))]
         fn can_become_main_window(&self) -> bool { true }
 
+        #[unsafe(method(animationResizeTime:))]
+        fn animation_resize_time(&self, _new_frame: NSRect) -> f64 { 0.18 }
+
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
             Bool::new(handle_key_event(event))
@@ -139,6 +144,11 @@ define_class!(
     unsafe impl NSWindowDelegate for LauncherPanel {
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
+            // orderOut can deliver this notification after a rapid reopen. Do
+            // not let that stale resignation close a panel that is key again.
+            if self.isKeyWindow() {
+                return;
+            }
             hide_on_main();
         }
     }
@@ -230,7 +240,7 @@ pub fn refresh(snapshot: LauncherSnapshot) {
             return;
         }
         if is_visible() {
-            render_on_main();
+            render_on_main(false);
         }
     });
 }
@@ -397,7 +407,7 @@ fn expand_history_on_main() {
         }
     });
     if expanded {
-        render_on_main();
+        render_on_main(true);
     }
 }
 
@@ -609,7 +619,7 @@ fn apply_show(sequence: u64) {
     if !is_visible() {
         UI.with(|cell| cell.borrow_mut().show_all = false);
     }
-    render_on_main();
+    render_on_main(false);
     let controls = UI.with(|cell| {
         let ui = cell.borrow();
         ui.panel
@@ -700,7 +710,7 @@ fn position_panel(panel: &NSPanel, cached_frame: Option<NSRect>) {
     panel.setFrameOrigin(NSPoint::new(x, y));
 }
 
-fn render_on_main() {
+fn render_on_main(animate_resize: bool) {
     UI.with(|cell| {
         let ui = cell.borrow();
         let Some(content) = ui.content.as_ref().cloned() else {
@@ -710,7 +720,7 @@ fn render_on_main() {
             LauncherScreen::Launcher => launcher_panel_height(&ui),
             LauncherScreen::Session { .. } => SESSION_PANEL_HEIGHT,
         };
-        resize_panel(&ui, &content, height);
+        resize_panel(&ui, &content, height, animate_resize);
         swift_bridge::set_snapshot(&ui.snapshot);
     });
 }
@@ -721,15 +731,30 @@ fn launcher_panel_height(ui: &UiState) -> f64 {
     } else {
         ui.snapshot.recent.len()
     };
-    let bottom = 16.0;
-    (66.0 + bottom + session_count as f64 * ROW_HEIGHT)
+    let list_inset = if session_count == 0 {
+        0.0
+    } else {
+        LIST_VERTICAL_INSET
+    };
+    (50.0 + list_inset + session_count as f64 * ROW_HEIGHT)
         .clamp(MIN_LAUNCHER_PANEL_HEIGHT, MAX_HISTORY_PANEL_HEIGHT)
 }
 
-fn resize_panel(ui: &UiState, content: &NSView, height: f64) {
+fn resize_panel(ui: &UiState, content: &NSView, height: f64, animate: bool) {
     let Some(panel) = ui.panel.as_ref() else {
         return;
     };
+    if animate && panel.isVisible() {
+        let frame = panel.frame();
+        let top = frame.origin.y + frame.size.height;
+        let target = NSRect::new(
+            NSPoint::new(frame.origin.x, top - height),
+            NSSize::new(PANEL_WIDTH, height),
+        );
+        content.setFrameSize(target.size);
+        panel.setFrame_display_animate(target, true, true);
+        return;
+    }
     panel.setContentSize(NSSize::new(PANEL_WIDTH, height));
     content.setFrameSize(NSSize::new(PANEL_WIDTH, height));
     position_panel(panel, ui.anchor_visible_frame);

@@ -36,6 +36,7 @@ private final class LauncherModel: ObservableObject {
     @Published var focusGeneration = 0
     @Published var selectedTaskID: String?
     var callback: LauncherActionCallback?
+    var reduceMotion = false
 
     func applySnapshot(_ data: Data) {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -112,16 +113,16 @@ private final class LauncherModel: ObservableObject {
         // the full history and selects the first newly revealed row.
         if delta > 0, !renderState.showAll, !renderState.allTasks.isEmpty {
             if renderState.recentTasks.isEmpty, selectedTaskID == nil {
-                expandHistory()
-                selectedTaskID = renderState.allTasks[0].id
+                expandHistory(selecting: renderState.allTasks[0].id)
                 return
             }
             if let selectedTaskID,
                let current = renderState.recentTasks.firstIndex(where: { $0.id == selectedTaskID }),
                current == renderState.recentTasks.count - 1,
                renderState.allTasks.count > renderState.recentTasks.count {
-                expandHistory()
-                self.selectedTaskID = renderState.allTasks[renderState.recentTasks.count].id
+                expandHistory(
+                    selecting: renderState.allTasks[renderState.recentTasks.count].id
+                )
                 return
             }
         }
@@ -135,12 +136,21 @@ private final class LauncherModel: ObservableObject {
             }
             return
         }
-        let next = current + delta
-        if next < 0 {
-            self.selectedTaskID = nil
-            focusGeneration += 1
+        let updateSelection = {
+            let next = current + delta
+            if next < 0 {
+                self.selectedTaskID = nil
+                self.focusGeneration += 1
+            } else {
+                self.selectedTaskID = self.renderState.tasks[
+                    min(next, self.renderState.tasks.count - 1)
+                ].id
+            }
+        }
+        if reduceMotion {
+            updateSelection()
         } else {
-            self.selectedTaskID = renderState.tasks[min(next, renderState.tasks.count - 1)].id
+            withAnimation(.easeInOut(duration: 0.18), updateSelection)
         }
     }
 
@@ -164,8 +174,16 @@ private final class LauncherModel: ObservableObject {
         focusGeneration += 1
     }
 
-    private func expandHistory() {
-        renderState.showAll = true
+    private func expandHistory(selecting taskID: String) {
+        let expand = {
+            self.renderState.showAll = true
+            self.selectedTaskID = taskID
+        }
+        if reduceMotion {
+            expand()
+        } else {
+            withAnimation(.easeInOut(duration: 0.18), expand)
+        }
         emit(["type": "expand_history"])
     }
 
@@ -184,19 +202,22 @@ private struct LauncherRootView: View {
     @ObservedObject var model: LauncherModel
     @FocusState private var promptFocused: Bool
     @State private var hoveredTaskID: String?
+    @Namespace private var selectionHighlight
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             if model.renderState.screen == "Session" {
-                sessionBody
+                VStack(alignment: .leading, spacing: 12) {
+                    sessionBody
+                }
+                .padding(LauncherTheme.Spacing.xxl)
             } else {
                 launcherBody
             }
         }
-        .padding(LauncherTheme.Spacing.xxl)
         .background {
             ZStack {
                 LauncherVisualEffectView()
@@ -224,10 +245,15 @@ private struct LauncherRootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
+            model.reduceMotion = reduceMotion
             DispatchQueue.main.async { promptFocused = true }
         }
+        .onChange(of: reduceMotion) { model.reduceMotion = $0 }
         .onChange(of: model.focusGeneration) { _ in
-            promptFocused = true
+            promptFocused = false
+            DispatchQueue.main.async {
+                promptFocused = true
+            }
         }
     }
 
@@ -238,12 +264,21 @@ private struct LauncherRootView: View {
             .font(.system(size: 20, weight: .regular, design: .rounded))
             .focused($promptFocused)
             .onSubmit { model.sendPrompt() }
-            .frame(height: 44)
+            .frame(height: 50)
+            .offset(y: 2)
+            .padding(.horizontal, LauncherTheme.Spacing.xxl)
+            .overlay(alignment: .bottom) {
+                if !model.renderState.tasks.isEmpty {
+                    Rectangle()
+                        .fill(LauncherTheme.textTertiary.opacity(0.24))
+                        .frame(height: 0.5)
+                }
+            }
             .accessibilityLabel("Launcher prompt")
 
         if !model.renderState.tasks.isEmpty {
             ScrollViewReader { proxy in
-                ScrollView {
+                ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(model.renderState.tasks) { task in
                             Button(action: { model.open(task) }) {
@@ -254,44 +289,69 @@ private struct LauncherRootView: View {
                                 hoveredTaskID = hovered ? task.id : nil
                             }
                             .background(
-                                RoundedRectangle(cornerRadius: LauncherTheme.Radius.row, style: .continuous)
-                                    .fill(
-                                        model.selectedTaskID == task.id
-                                            ? LauncherTheme.selection(
+                                ZStack {
+                                    if model.selectedTaskID == task.id {
+                                        RoundedRectangle(
+                                            cornerRadius: LauncherTheme.Radius.row,
+                                            style: .continuous
+                                        )
+                                        .fill(
+                                            LauncherTheme.selection(
                                                 colorScheme: colorScheme,
                                                 reduceTransparency: reduceTransparency
                                             )
-                                            : (hoveredTaskID == task.id
-                                                ? LauncherTheme.hover(
+                                        )
+                                        .matchedGeometryEffect(
+                                            id: "session-selection",
+                                            in: selectionHighlight
+                                        )
+                                    } else if hoveredTaskID == task.id {
+                                        RoundedRectangle(
+                                            cornerRadius: LauncherTheme.Radius.row,
+                                            style: .continuous
+                                        )
+                                        .fill(
+                                            LauncherTheme.hover(
                                                     colorScheme: colorScheme,
                                                     reduceTransparency: reduceTransparency
                                                 )
-                                                : Color.clear)
-                                    )
+                                        )
+                                    }
+                                }
                             )
                             .animation(
                                 LauncherTheme.interactionAnimation(reduceMotion: reduceMotion),
                                 value: model.selectedTaskID
+                            )
+                            .transition(
+                                reduceMotion
+                                    ? .identity
+                                    : .opacity.combined(with: .move(edge: .top))
                             )
                             .id(task.id)
                             .accessibilityLabel("\(task.title), \(statusLabel(task.status))")
                             .accessibilityHint("Open task")
                         }
                     }
+                    .padding(.horizontal, LauncherTheme.Spacing.md)
+                    .padding(.vertical, LauncherTheme.Spacing.md)
+                    .animation(
+                        reduceMotion ? nil : .easeInOut(duration: 0.18),
+                        value: model.renderState.showAll
+                    )
                 }
                 .onChange(of: model.selectedTaskID) { selected in
                     if let selected {
                         if reduceMotion {
                             proxy.scrollTo(selected, anchor: .center)
                         } else {
-                            withAnimation(.easeOut(duration: 0.12)) {
+                            withAnimation(.easeInOut(duration: 0.18)) {
                                 proxy.scrollTo(selected, anchor: .center)
                             }
                         }
                     }
                 }
             }
-            .frame(maxHeight: 220)
         }
     }
 
