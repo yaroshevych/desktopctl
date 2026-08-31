@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::{
     MainThreadOnly, define_class, msg_send,
     rc::Retained,
@@ -40,7 +40,13 @@ use super::swift_bridge;
 use desktop_core::error::AppError;
 
 const PANEL_WIDTH: f64 = 700.0;
-const SESSION_PANEL_HEIGHT: f64 = 360.0;
+const SESSION_PANEL_HEIGHT: f64 = 320.0;
+const SESSION_MIN_WIDTH: f64 = 520.0;
+const SESSION_MAX_WIDTH: f64 = 1200.0;
+const SESSION_MIN_HEIGHT: f64 = 240.0;
+const SESSION_MAX_HEIGHT: f64 = 900.0;
+const WINDOW_SAFE_ZONE: f64 = 16.0;
+const OUTSIDE_CLICK_GRACE_NANOS: i64 = 100_000_000;
 const MAX_HISTORY_PANEL_HEIGHT: f64 = 450.0;
 const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 50.0;
 const COMPLETION_WIDTH: f64 = 520.0;
@@ -78,6 +84,13 @@ fn point_in_work_area(point: NSPoint, area: NSRect) -> bool {
         && point.y < area.origin.y + area.size.height
 }
 
+fn point_in_window_safe_zone(point: NSPoint, frame: NSRect) -> bool {
+    point.x >= frame.origin.x - WINDOW_SAFE_ZONE
+        && point.x <= frame.origin.x + frame.size.width + WINDOW_SAFE_ZONE
+        && point.y >= frame.origin.y - WINDOW_SAFE_ZONE
+        && point.y <= frame.origin.y + frame.size.height + WINDOW_SAFE_ZONE
+}
+
 fn screen_index_for_point(point: NSPoint, frames: &[NSRect]) -> Option<usize> {
     frames
         .iter()
@@ -102,6 +115,7 @@ static VISIBLE: AtomicBool = AtomicBool::new(false);
 static REQUESTED_VISIBLE: AtomicBool = AtomicBool::new(false);
 static NEXT_LIFECYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static HOTKEY_REGISTERED: AtomicBool = AtomicBool::new(false);
+static LIVE_RESIZE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 struct LauncherPanelIvars;
@@ -149,11 +163,62 @@ define_class!(
         fn window_did_resign_key(&self, _notification: &NSNotification) {
             // orderOut can deliver this notification after a rapid reopen. Do
             // not let that stale resignation close a panel that is key again.
-            if self.isKeyWindow() {
+            // AppKit can also resign the panel while the user is dragging a
+            // borderless window resize handle. That is still an in-window
+            // interaction, not an outside click.
+            if self.isKeyWindow() || LIVE_RESIZE.load(Ordering::SeqCst) || self.inLiveResize() {
                 return;
             }
-            hide_on_main();
+            // AppKit may report the key-window change before it reports the
+            // live-resize start. Give the resize hit-test a moment to settle
+            // before treating this as an outside click.
+            let _ = DispatchQueue::main().after(
+                DispatchTime::NOW.time(OUTSIDE_CLICK_GRACE_NANOS),
+                || {
+                    if LIVE_RESIZE.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let should_hide = UI.with(|cell| {
+                        let ui = cell.borrow();
+                        let Some(panel) = ui.panel.as_ref() else {
+                            return false;
+                        };
+                        if panel.inLiveResize() {
+                            return false;
+                        }
+                        panel.isVisible()
+                            && !point_in_window_safe_zone(
+                                NSEvent::mouseLocation(),
+                                panel.frame(),
+                            )
+                    });
+                    if should_hide {
+                        hide_on_main();
+                    }
+                },
+            );
         }
+
+        #[unsafe(method(windowWillStartLiveResize:))]
+        fn window_will_start_live_resize(&self, _notification: &NSNotification) {
+            LIVE_RESIZE.store(true, Ordering::SeqCst);
+            self.setHidesOnDeactivate(false);
+            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
+            self.makeKeyAndOrderFront(None);
+        }
+
+        #[unsafe(method(windowDidEndLiveResize:))]
+        fn window_did_end_live_resize(&self, _notification: &NSNotification) {
+            LIVE_RESIZE.store(false, Ordering::SeqCst);
+            self.setHidesOnDeactivate(true);
+            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
+            self.makeKeyAndOrderFront(None);
+        }
+
     }
 );
 
@@ -166,6 +231,7 @@ struct UiState {
     completion_generation: u64,
     anchor_visible_frame: Option<NSRect>,
     lifecycle_sequence: u64,
+    rendered_session: bool,
     snapshot: LauncherSnapshot,
 }
 
@@ -180,6 +246,7 @@ impl Default for UiState {
             completion_generation: 0,
             anchor_visible_frame: None,
             lifecycle_sequence: 0,
+            rendered_session: false,
             snapshot: LauncherSnapshot::default(),
         }
     }
@@ -625,7 +692,11 @@ fn apply_show(sequence: u64) {
     }
     let was_visible = is_visible();
     if !was_visible {
-        UI.with(|cell| cell.borrow_mut().show_all = false);
+        UI.with(|cell| {
+            let mut ui = cell.borrow_mut();
+            ui.show_all = false;
+            ui.rendered_session = false;
+        });
         swift_bridge::prepare_for_presentation();
     }
     render_on_main(false);
@@ -712,7 +783,7 @@ fn position_panel(panel: &NSPanel, cached_frame: Option<NSRect>) {
             width: frame.size.width,
             height: frame.size.height,
         },
-        PANEL_WIDTH,
+        panel.frame().size.width,
         panel.frame().size.height,
         72.0,
     );
@@ -721,16 +792,27 @@ fn position_panel(panel: &NSPanel, cached_frame: Option<NSRect>) {
 
 fn render_on_main(animate_resize: bool) {
     UI.with(|cell| {
-        let ui = cell.borrow();
+        let mut ui = cell.borrow_mut();
         let Some(content) = ui.content.as_ref().cloned() else {
             return;
         };
-        let height = match ui.snapshot.screen {
-            LauncherScreen::Launcher => launcher_panel_height(&ui),
-            LauncherScreen::Session { .. } => SESSION_PANEL_HEIGHT,
+        let is_session = matches!(ui.snapshot.screen, LauncherScreen::Session { .. });
+        let entering_session = is_session && !ui.rendered_session;
+        let size = match ui.snapshot.screen {
+            LauncherScreen::Launcher => NSSize::new(PANEL_WIDTH, launcher_panel_height(&ui)),
+            LauncherScreen::Session { .. } if entering_session => {
+                NSSize::new(PANEL_WIDTH, SESSION_PANEL_HEIGHT)
+            }
+            LauncherScreen::Session { .. } => ui
+                .panel
+                .as_ref()
+                .map(|panel| panel.frame().size)
+                .unwrap_or_else(|| NSSize::new(PANEL_WIDTH, SESSION_PANEL_HEIGHT)),
         };
-        resize_panel(&ui, &content, height, animate_resize);
+        configure_panel_resizing(&ui, is_session);
+        resize_panel(&ui, &content, size, animate_resize);
         swift_bridge::set_snapshot(&ui.snapshot);
+        ui.rendered_session = is_session;
     });
 }
 
@@ -759,7 +841,28 @@ fn launcher_panel_height(ui: &UiState) -> f64 {
         .clamp(MIN_LAUNCHER_PANEL_HEIGHT, MAX_HISTORY_PANEL_HEIGHT)
 }
 
-fn resize_panel(ui: &UiState, content: &NSView, height: f64, animate: bool) {
+fn configure_panel_resizing(ui: &UiState, session: bool) {
+    let Some(panel) = ui.panel.as_ref() else {
+        return;
+    };
+    let mut style_mask = panel.styleMask();
+    if session {
+        style_mask.insert(NSWindowStyleMask::Resizable);
+        style_mask.remove(NSWindowStyleMask::NonactivatingPanel);
+        panel.setContentMinSize(NSSize::new(SESSION_MIN_WIDTH, SESSION_MIN_HEIGHT));
+        panel.setContentMaxSize(NSSize::new(SESSION_MAX_WIDTH, SESSION_MAX_HEIGHT));
+    } else {
+        style_mask.remove(NSWindowStyleMask::Resizable);
+        style_mask.insert(NSWindowStyleMask::NonactivatingPanel);
+        panel.setContentMinSize(NSSize::new(PANEL_WIDTH, MIN_LAUNCHER_PANEL_HEIGHT));
+        panel.setContentMaxSize(NSSize::new(PANEL_WIDTH, MAX_HISTORY_PANEL_HEIGHT));
+    }
+    if style_mask != panel.styleMask() {
+        panel.setStyleMask(style_mask);
+    }
+}
+
+fn resize_panel(ui: &UiState, content: &NSView, size: NSSize, animate: bool) {
     let Some(panel) = ui.panel.as_ref() else {
         return;
     };
@@ -767,8 +870,8 @@ fn resize_panel(ui: &UiState, content: &NSView, height: f64, animate: bool) {
         let frame = panel.frame();
         let top = frame.origin.y + frame.size.height;
         let target = NSRect::new(
-            NSPoint::new(frame.origin.x, top - height),
-            NSSize::new(PANEL_WIDTH, height),
+            NSPoint::new(frame.origin.x, top - size.height),
+            size,
         );
         NSAnimationContext::beginGrouping();
         NSAnimationContext::currentContext().setDuration(0.24);
@@ -779,8 +882,8 @@ fn resize_panel(ui: &UiState, content: &NSView, height: f64, animate: bool) {
         NSAnimationContext::endGrouping();
         return;
     }
-    panel.setContentSize(NSSize::new(PANEL_WIDTH, height));
-    content.setFrameSize(NSSize::new(PANEL_WIDTH, height));
+    panel.setContentSize(size);
+    content.setFrameSize(size);
     position_panel(panel, ui.anchor_visible_frame);
 }
 
@@ -810,6 +913,30 @@ fn handle_key_event(event: &NSEvent) -> bool {
     if command_k {
         swift_bridge::toggle_actions_menu();
         return true;
+    }
+
+    let command_return = modifiers == NSEventModifierFlags::Command
+        && matches!(event.keyCode(), KEY_RETURN | KEY_ENTER);
+    if command_return {
+        let session_id = UI.with(|cell| {
+            let ui = cell.borrow();
+            match &ui.snapshot.screen {
+                LauncherScreen::Session {
+                    id,
+                    terminal_available: true,
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            }
+        });
+        if let Some(session_id) = session_id {
+            DispatchQueue::main().exec_async(move || {
+                if let Some(callbacks) = CALLBACKS.get() {
+                    (callbacks.on_action)(LauncherAction::OpenInGhostty { session_id });
+                }
+            });
+            return true;
+        }
     }
 
     match event.keyCode() {

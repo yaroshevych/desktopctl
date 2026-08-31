@@ -282,11 +282,178 @@ private final class LauncherModel: ObservableObject {
     }
 }
 
+private struct SessionBubbleTail: Shape {
+    let pointsRight: Bool
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+
+        if pointsRight {
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        } else {
+            path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        }
+
+        path.closeSubpath()
+        return path
+    }
+}
+
+// SwiftUI's plain TextField draws its placeholder with the NSTextFieldCell but
+// typed text with the field editor (an NSTextView). The two use different line
+// metrics, so text visibly jumps a couple of points when the field gains focus.
+// Building the field ourselves with a single-line cell makes both draw
+// identically, eliminating the jump.
+private final class AppKitPromptTextField: NSTextField {
+    var onCommandReturn: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isCommandReturn = (event.keyCode == 36 || event.keyCode == 76) && modifiers == .command
+        guard isCommandReturn else {
+            super.keyDown(with: event)
+            return
+        }
+        onCommandReturn?()
+    }
+}
+
+private struct AppKitPromptField: NSViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    var isFocused: FocusState<Bool>.Binding
+    let onSubmit: () -> Void
+    let onCommandReturn: (() -> Void)?
+
+    init(
+        placeholder: String,
+        text: Binding<String>,
+        isFocused: FocusState<Bool>.Binding,
+        onSubmit: @escaping () -> Void,
+        onCommandReturn: (() -> Void)? = nil
+    ) {
+        self.placeholder = placeholder
+        self._text = text
+        self.isFocused = isFocused
+        self.onSubmit = onSubmit
+        self.onCommandReturn = onCommandReturn
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> AppKitPromptTextField {
+        let field = AppKitPromptTextField()
+        field.onCommandReturn = onCommandReturn
+        field.placeholderString = placeholder
+        let systemFont = NSFont.systemFont(ofSize: 20, weight: .regular)
+        if let descriptor = systemFont.fontDescriptor.withDesign(.rounded),
+           let roundedFont = NSFont(descriptor: descriptor, size: 20) {
+            field.font = roundedFont
+        } else {
+            field.font = systemFont
+        }
+        field.isBezeled = false
+        field.isBordered = false
+        field.drawsBackground = false
+        field.isEditable = true
+        field.isSelectable = true
+        field.focusRingType = .none
+        field.alignment = .natural
+        field.cell?.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.cell?.wraps = false
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.textChanged(_:))
+        field.setAccessibilityLabel("Follow-up prompt")
+        return field
+    }
+
+    func updateNSView(_ field: AppKitPromptTextField, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        field.onCommandReturn = onCommandReturn
+
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+
+        // Focus was requested (e.g. session opened) but hasn't landed yet:
+        // keep asking until the field is in a window and becomes first
+        // responder. Real focus changes are reported via the delegate.
+        if isFocused.wrappedValue, field.currentEditor() == nil {
+            attemptFocus(field)
+        }
+    }
+
+    private func attemptFocus(_ field: NSTextField) {
+        DispatchQueue.main.async { [weak field] in
+            guard let field else { return }
+            if field.window != nil {
+                field.window?.makeFirstResponder(field)
+            } else if let coordinator = field.delegate as? Coordinator, coordinator.parent != nil {
+                attemptFocus(field)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: AppKitPromptField?
+
+        @objc func textChanged(_ sender: NSTextField) {
+            parent?.text = sender.stringValue
+            if sender.currentEditor() != nil {
+                parent?.onSubmit()
+            }
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)),
+                  let event = NSApp.currentEvent
+            else {
+                return false
+            }
+
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let nonCommandModifiers = modifiers.subtracting([.command, .numericPad])
+            guard modifiers.contains(.command), nonCommandModifiers.isEmpty else {
+                return false
+            }
+
+            parent?.onCommandReturn?()
+            return true
+        }
+
+        func controlTextDidBeginEditing(_ obj: Notification) {
+            guard let parent else { return }
+            if !parent.isFocused.wrappedValue {
+                parent.isFocused.wrappedValue = true
+            }
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            guard let parent else { return }
+            if parent.isFocused.wrappedValue {
+                parent.isFocused.wrappedValue = false
+            }
+        }
+    }
+}
+
 private struct LauncherRootView: View {
     @ObservedObject var model: LauncherModel
     @FocusState private var promptFocused: Bool
     @State private var hoveredTaskID: String?
-    @State private var actionsButtonHovered = false
     @State private var showAllHovered = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -294,10 +461,10 @@ private struct LauncherRootView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if model.renderState.screen == "Session" {
-                VStack(alignment: .leading, spacing: 12) {
-                    sessionBody
-                }
-                .padding(LauncherTheme.Spacing.xxl)
+                sessionBody
+                    .padding(.leading, LauncherTheme.Spacing.lg)
+                    .padding(.trailing, LauncherTheme.Spacing.md)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 launcherBody
             }
@@ -317,6 +484,24 @@ private struct LauncherRootView: View {
                 style: .continuous
             )
         )
+        // Keep the transparent pixels in the rounded corners attached to the
+        // panel for hit testing. Without this, clicks there reach the window
+        // behind the borderless panel.
+        .contentShape(Rectangle())
+        // Keep native resize handles inside the panel's input region even
+        // though the visual surface has rounded corners.
+        .overlay(alignment: .bottomLeading) {
+            Rectangle()
+                .fill(Color.black.opacity(0.001))
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+        }
+        .overlay(alignment: .bottomTrailing) {
+            Rectangle()
+                .fill(Color.black.opacity(0.001))
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+        }
         .overlay {
             RoundedRectangle(
                 cornerRadius: LauncherTheme.Radius.panel,
@@ -328,7 +513,7 @@ private struct LauncherRootView: View {
             )
         }
         .overlay {
-            if model.renderState.screen != "Session", model.showActionsMenu {
+            if model.showActionsMenu {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture { _ = model.dismissActionsMenu() }
@@ -346,9 +531,37 @@ private struct LauncherRootView: View {
                     )
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if model.renderState.screen == "Session", model.showActionsMenu {
+                actionsMenu
+                    .padding(.trailing, LauncherTheme.Spacing.lg)
+                    .padding(.bottom, 46)
+                    .transition(
+                        .opacity.combined(
+                            with: .scale(scale: 0.94, anchor: .bottomTrailing)
+                        )
+                    )
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             DispatchQueue.main.async { promptFocused = true }
+        }
+        .onChange(of: model.renderState.screen) { screen in
+            guard screen == "Session", model.renderState.sessionStatus != "Running" else {
+                return
+            }
+            DispatchQueue.main.async {
+                promptFocused = true
+            }
+        }
+        .onChange(of: model.renderState.sessionStatus) { status in
+            guard model.renderState.screen == "Session", status != "Running" else {
+                return
+            }
+            DispatchQueue.main.async {
+                promptFocused = true
+            }
         }
         .onChange(of: model.focusGeneration) { _ in
             promptFocused = false
@@ -502,9 +715,23 @@ private struct LauncherRootView: View {
     }
 
     private var actionsButton: some View {
-        Button(action: model.toggleActionsMenu) {
+        optionsButton(
+            title: model.renderState.activeApp ?? "Options",
+            accessibilityHint: "Open launcher options"
+        )
+    }
+
+    private var sessionActionsButton: some View {
+        optionsButton(
+            title: model.renderState.activeApp ?? "Options",
+            accessibilityHint: "Open session options"
+        )
+    }
+
+    private func optionsButton(title: String, accessibilityHint: String) -> some View {
+        LauncherPillButton(action: model.toggleActionsMenu) {
             HStack(spacing: LauncherTheme.Spacing.md) {
-                Text(model.renderState.activeApp ?? "Options")
+                Text(title)
                     .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(LauncherTheme.textSecondary)
                     .lineLimit(1)
@@ -513,42 +740,9 @@ private struct LauncherRootView: View {
                     LauncherKeyCap(title: "K")
                 }
             }
-            .padding(.horizontal, LauncherTheme.Spacing.lg)
-            .frame(height: 28)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(
-                        actionsButtonHovered
-                            ? Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10)
-                            : Color.clear
-                    )
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(
-                        Color.primary.opacity(actionsButtonHovered ? 0.18 : 0),
-                        lineWidth: 0.5
-                    )
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .padding(3)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(
-                    colorScheme == .dark
-                        ? Color.white.opacity(0.07)
-                        : Color.black.opacity(0.045)
-                )
-        )
-        .onHover { hovered in
-            withAnimation(.easeOut(duration: 0.1)) {
-                actionsButtonHovered = hovered
-            }
-        }
-        .accessibilityLabel(model.renderState.activeApp ?? "Options")
-        .accessibilityHint("Open launcher options")
+        .accessibilityLabel(title)
+        .accessibilityHint(accessibilityHint)
     }
 
     private var actionsMenu: some View {
@@ -597,81 +791,137 @@ private struct LauncherRootView: View {
 
     @ViewBuilder
     private var sessionBody: some View {
-        HStack(spacing: 8) {
-            LauncherBarButton(title: "Sessions", systemImage: "chevron.left", action: model.back)
-                .accessibilityLabel("Back to sessions")
-            Spacer()
-            if model.renderState.terminalAvailable {
-                LauncherBarButton(title: "Open in Ghostty", systemImage: "terminal", action: model.openInGhostty)
-                    .accessibilityHint("Open this session in Ghostty")
-            }
-        }
-
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(Array(model.renderState.messages.enumerated()), id: \.offset) { index, message in
-                        HStack {
-                            if message.user { Spacer(minLength: 42) }
-                            Text(message.text)
-                                .textSelection(.enabled)
-                                .padding(.horizontal, 13)
-                                .padding(.vertical, 9)
-                                .foregroundColor(message.user ? .white : .primary)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 17, style: .continuous)
-                                        .fill(
-                                            message.user
-                                                ? Color(nsColor: .systemBlue)
-                                                : Color.primary.opacity(0.10)
-                                        )
-                                )
-                            if !message.user { Spacer(minLength: 42) }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                LauncherPillButton(action: model.back) {
+                    HStack(spacing: LauncherTheme.Spacing.md) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 13, weight: .regular))
+                        Text("Sessions")
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(LauncherTheme.textSecondary)
+                        LauncherKeyCap(title: "Esc", horizontalPadding: 3)
+                    }
+                    .foregroundStyle(LauncherTheme.textSecondary)
+                }
+                    .accessibilityLabel("Back to sessions")
+                Spacer()
+                if model.renderState.terminalAvailable {
+                    LauncherPillButton(action: model.openInGhostty) {
+                        HStack(spacing: LauncherTheme.Spacing.md) {
+                            Text("Continue in Pi")
+                                .font(.system(size: 13, weight: .regular))
+                                .foregroundStyle(LauncherTheme.textSecondary)
+                            HStack(spacing: 2) {
+                                LauncherKeyCap(title: "⌘")
+                                LauncherKeyCap(title: "↵")
+                            }
                         }
-                        .id(index)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("\(message.user ? "You" : "Pi"): \(message.text)")
+                        .foregroundStyle(LauncherTheme.textSecondary)
+                    }
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .accessibilityHint("Continue this session in Pi")
+                }
+            }
+            .frame(height: 50)
+
+            Rectangle()
+                .fill(LauncherTheme.textTertiary.opacity(0.24))
+                .frame(height: 0.5)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, -LauncherTheme.Spacing.lg)
+                .padding(.top, LauncherTheme.Spacing.md)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(model.renderState.messages.enumerated()), id: \.offset) { index, message in
+                            HStack {
+                                if message.user { Spacer(minLength: 42) }
+                                Text(message.text)
+                                    .textSelection(.enabled)
+                                    .padding(.horizontal, 13)
+                                    .padding(.vertical, 9)
+                                    .foregroundColor(message.user ? .white : .primary)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 17, style: .continuous)
+                                            .fill(
+                                                message.user
+                                                    ? Color(nsColor: .systemBlue)
+                                                    : Color.primary.opacity(0.10)
+                                            )
+                                    )
+                                    .overlay(alignment: message.user ? .bottomTrailing : .bottomLeading) {
+                                        SessionBubbleTail(pointsRight: message.user)
+                                            .fill(
+                                                message.user
+                                                    ? Color(nsColor: .systemBlue)
+                                                    : Color.primary.opacity(0.10)
+                                            )
+                                            .frame(width: 18, height: 10)
+                                            .offset(x: message.user ? 6 : -6, y: 4)
+                                    }
+                                if !message.user { Spacer(minLength: 42) }
+                            }
+                            .frame(maxWidth: .infinity, alignment: message.user ? .trailing : .leading)
+                            .padding(.leading, message.user ? 0 : LauncherTheme.Spacing.xs)
+                            .padding(.trailing, message.user ? LauncherTheme.Spacing.xs : 0)
+                            .id(index)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(message.user ? "You" : "Pi"): \(message.text)")
+                        }
+                    }
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onAppear {
+                    guard let last = model.renderState.messages.indices.last else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(last, anchor: .bottom)
                     }
                 }
-                .padding(.vertical, 4)
-            }
-            .frame(maxHeight: 190)
-            .onChange(of: model.renderState.messages.count) { _ in
-                if let last = model.renderState.messages.indices.last {
-                    proxy.scrollTo(last, anchor: .bottom)
+                .onChange(of: model.renderState.messages.count) { _ in
+                    guard let last = model.renderState.messages.indices.last else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(last, anchor: .bottom)
+                    }
                 }
             }
-        }
 
-        HStack(spacing: 8) {
-            if model.renderState.sessionStatus == "Running" {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Pi is working…")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-                LauncherBarButton(title: "Stop", systemImage: "stop.fill", action: model.cancelSession)
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityHint("Cancel running session")
-            } else {
-                HStack(spacing: 10) {
-                    Image(systemName: "arrow.turn.down.left")
-                        .font(.system(size: 14, weight: .medium))
-                        .frame(width: 20, height: 22)
+            Rectangle()
+                .fill(LauncherTheme.textTertiary.opacity(0.24))
+                .frame(height: 0.5)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, -LauncherTheme.Spacing.lg)
+
+            HStack(spacing: 8) {
+                if model.renderState.sessionStatus == "Running" {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Pi is working…")
+                        .font(.caption)
                         .foregroundColor(.secondary)
-                        .accessibilityHidden(true)
-                    TextField("Follow up…", text: $model.prompt)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 18, weight: .regular, design: .rounded))
-                        .focused($promptFocused)
-                        .onSubmit { model.sendPrompt() }
-                        .accessibilityLabel("Follow-up prompt")
-                    LauncherKeyCap(title: "↵")
-                        .accessibilityLabel("Return to submit")
+                    Spacer()
+                    LauncherBarButton(title: "Stop", systemImage: "stop.fill", action: model.cancelSession)
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityHint("Cancel running session")
+                } else {
+                    AppKitPromptField(
+                        placeholder: "Follow up…",
+                        text: $model.prompt,
+                        isFocused: $promptFocused,
+                        onSubmit: { model.sendPrompt() },
+                        onCommandReturn: model.openInGhostty
+                    )
+                    .frame(maxWidth: .infinity)
+                    .frame(height: LauncherTheme.controlHeight)
+                    sessionActionsButton
                 }
-                .padding(.horizontal, 4)
             }
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .padding(.leading, 4)
         }
     }
 
@@ -739,6 +989,7 @@ public func desktopctl_launcher_mount(
     parentView.addSubview(nextHosting)
     model = nextModel
     hosting = nextHosting
+
     scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
         if event.window === nextHosting.window, event.scrollingDeltaY != 0 {
             nextModel.noteScrollWheel()

@@ -121,13 +121,16 @@ internal struct LauncherVisualEffectView: NSViewRepresentable {
 
 internal struct LauncherKeyCap: View {
     internal let title: String
+    private let horizontalPadding: CGFloat
 
-    internal init(_ title: String) {
+    internal init(_ title: String, horizontalPadding: CGFloat = 0) {
         self.title = title
+        self.horizontalPadding = horizontalPadding
     }
 
-    internal init(title: String) {
+    internal init(title: String, horizontalPadding: CGFloat = 0) {
         self.title = title
+        self.horizontalPadding = horizontalPadding
     }
 
     internal var body: some View {
@@ -136,6 +139,7 @@ internal struct LauncherKeyCap: View {
             .foregroundStyle(LauncherTheme.textSecondary)
             .lineLimit(1)
             .frame(minWidth: 18, minHeight: 18)
+            .padding(.horizontal, horizontalPadding)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Color.primary.opacity(0.035))
@@ -202,6 +206,63 @@ internal extension LauncherBarButton where Label == SwiftUI.Label<Text, Image> {
         self.init(action: action) {
             Label(title, systemImage: systemImage)
         }
+    }
+}
+
+internal struct LauncherPillButton<Label: View>: View {
+    private let action: () -> Void
+    private let label: () -> Label
+    @State private var isHovered = false
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    internal init(
+        action: @escaping () -> Void,
+        @ViewBuilder label: @escaping () -> Label
+    ) {
+        self.action = action
+        self.label = label
+    }
+
+    internal var body: some View {
+        Button(action: action) {
+            label()
+                .padding(.horizontal, LauncherTheme.Spacing.lg)
+                .frame(height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(
+                            isHovered
+                                ? Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10)
+                                : Color.clear
+                        )
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(
+                            Color.primary.opacity(isHovered ? 0.18 : 0),
+                            lineWidth: 0.5
+                        )
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    colorScheme == .dark
+                        ? Color.white.opacity(0.07)
+                        : Color.black.opacity(0.045)
+                )
+        )
+        .onHover { isHovered = $0 }
+        .animation(
+            LauncherTheme.interactionAnimation(reduceMotion: reduceMotion),
+            value: isHovered
+        )
     }
 }
 
