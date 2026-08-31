@@ -740,13 +740,21 @@ fn launcher_panel_height(ui: &UiState) -> f64 {
     } else {
         ui.snapshot.recent.len()
     };
-    let list_inset = if session_count == 0 {
+    let show_all_count = if !ui.show_all
+        && ui.snapshot.all.len() > ui.snapshot.recent.len()
+    {
+        1
+    } else {
+        0
+    };
+    let visible_row_count = session_count + show_all_count;
+    let list_inset = if visible_row_count == 0 {
         0.0
     } else {
         LIST_VERTICAL_INSET
     };
-    let rows_height = session_count as f64 * ROW_HEIGHT
-        + session_count.saturating_sub(1) as f64 * ROW_SPACING;
+    let rows_height = visible_row_count as f64 * ROW_HEIGHT
+        + visible_row_count.saturating_sub(1) as f64 * ROW_SPACING;
     (50.0 + list_inset + rows_height)
         .clamp(MIN_LAUNCHER_PANEL_HEIGHT, MAX_HISTORY_PANEL_HEIGHT)
 }

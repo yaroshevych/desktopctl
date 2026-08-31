@@ -29,6 +29,14 @@ private struct LauncherRenderState {
     var tasks: [LauncherTask] {
         showAll ? allTasks : recentTasks
     }
+
+    var showsAllHistory: Bool {
+        !showAll && allTasks.count > recentTasks.count
+    }
+
+    var additionalTaskCount: Int {
+        max(0, allTasks.count - recentTasks.count)
+    }
 }
 
 private final class LauncherModel: ObservableObject {
@@ -36,9 +44,11 @@ private final class LauncherModel: ObservableObject {
     @Published var prompt = ""
     @Published var focusGeneration = 0
     @Published var selectedTaskID: String?
+    @Published var showAllFocused = false
     @Published var showActionsMenu = false
     @Published private(set) var isScrolling = false
     private var scrollGeneration = 0
+    private var preserveScrollForNextSelection = false
     var callback: LauncherActionCallback?
 
     func applySnapshot(_ data: Data) {
@@ -85,9 +95,16 @@ private final class LauncherModel: ObservableObject {
            !next.tasks.contains(where: { $0.id == selectedTaskID }) {
             self.selectedTaskID = nil
         }
+        if showAllFocused && !next.showsAllHistory {
+            showAllFocused = false
+        }
     }
 
     func sendPrompt() {
+        if showAllFocused, !renderState.showAll {
+            expandHistory(selecting: renderState.allTasks[renderState.recentTasks.count].id)
+            return
+        }
         if renderState.screen != "Session",
            let selectedTaskID,
            let selected = renderState.tasks.first(where: { $0.id == selectedTaskID }) {
@@ -105,6 +122,7 @@ private final class LauncherModel: ObservableObject {
     }
 
     func open(_ task: LauncherTask) {
+        showAllFocused = false
         selectedTaskID = task.id
         emit(["type": "open_session", "session_id": task.id])
     }
@@ -112,32 +130,24 @@ private final class LauncherModel: ObservableObject {
     func moveSelection(_ delta: Int) {
         guard renderState.screen != "Session" else { return }
 
-        // The controller intentionally keeps older sessions out of the initial
-        // list. Reveal the full history as keyboard navigation lands on the last
-        // recent row, while preserving that row as the selection.
-        if delta > 0, !renderState.showAll, !renderState.allTasks.isEmpty {
-            if renderState.recentTasks.isEmpty, selectedTaskID == nil {
-                expandHistory(selecting: renderState.allTasks[0].id)
+        if !renderState.showAll, renderState.showsAllHistory {
+            if showAllFocused {
+                if delta > 0 {
+                    expandHistory(selecting: renderState.allTasks[renderState.recentTasks.count].id)
+                } else if delta < 0 {
+                    showAllFocused = false
+                    if let last = renderState.tasks.last {
+                        selectedTaskID = last.id
+                    } else {
+                        focusGeneration += 1
+                    }
+                }
                 return
             }
-            if selectedTaskID == nil,
-               renderState.recentTasks.count == 1,
-               renderState.allTasks.count > renderState.recentTasks.count {
-                expandHistory(selecting: renderState.recentTasks[0].id)
-                return
-            }
-            if let selectedTaskID,
-               let current = renderState.recentTasks.firstIndex(where: { $0.id == selectedTaskID }),
-               current + 1 == renderState.recentTasks.count - 1,
-               renderState.allTasks.count > renderState.recentTasks.count {
-                expandHistory(selecting: renderState.recentTasks[current + 1].id)
-                return
-            }
-            if let selectedTaskID,
-               let current = renderState.recentTasks.firstIndex(where: { $0.id == selectedTaskID }),
-               current == renderState.recentTasks.count - 1,
-               renderState.allTasks.count > renderState.recentTasks.count {
-                expandHistory(selecting: renderState.allTasks[renderState.recentTasks.count].id)
+            if renderState.tasks.isEmpty {
+                if delta > 0 {
+                    showAllFocused = true
+                }
                 return
             }
         }
@@ -155,7 +165,14 @@ private final class LauncherModel: ObservableObject {
             let next = current + delta
             if next < 0 {
                 self.selectedTaskID = nil
+                self.showAllFocused = false
                 self.focusGeneration += 1
+            } else if next >= self.renderState.tasks.count,
+                      delta > 0,
+                      !self.renderState.showAll,
+                      self.renderState.showsAllHistory {
+                self.selectedTaskID = nil
+                self.showAllFocused = true
             } else {
                 self.selectedTaskID = self.renderState.tasks[
                     min(next, self.renderState.tasks.count - 1)
@@ -189,9 +206,10 @@ private final class LauncherModel: ObservableObject {
         guard !renderState.showAll else { return }
         emit(["type": "expand_history"])
         DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.24)) {
-                self.renderState.showAll = true
-            }
+            // AppKit animates the panel resize. Keep the row-set change
+            // immediate so SwiftUI does not animate the layout a second time.
+            self.renderState.showAll = true
+            self.showAllFocused = false
         }
     }
 
@@ -223,6 +241,8 @@ private final class LauncherModel: ObservableObject {
     func prepareForPresentation() {
         renderState.showAll = false
         selectedTaskID = nil
+        showAllFocused = false
+        preserveScrollForNextSelection = false
         showActionsMenu = false
         focusPrompt()
     }
@@ -231,14 +251,22 @@ private final class LauncherModel: ObservableObject {
         focusGeneration += 1
     }
 
+    func consumePreserveScrollForNextSelection() -> Bool {
+        guard preserveScrollForNextSelection else { return false }
+        preserveScrollForNextSelection = false
+        return true
+    }
+
     private func expandHistory(selecting taskID: String) {
         emit(["type": "expand_history"])
-        // Let AppKit begin growing the panel before SwiftUI inserts rows that
-        // do not fit in the current viewport.
+        // The native panel resize and this row-set update are coordinated on
+        // the main queue; AppKit owns the visible expansion animation.
         DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.24)) {
-                self.renderState.showAll = true
-            }
+            // AppKit owns the expansion animation; changing the row set here
+            // must not trigger a competing SwiftUI layout animation.
+            self.renderState.showAll = true
+            self.showAllFocused = false
+            self.preserveScrollForNextSelection = true
             self.selectedTaskID = taskID
         }
     }
@@ -358,60 +386,31 @@ private struct LauncherRootView: View {
         .padding(.leading, LauncherTheme.Spacing.xxl)
         .padding(.trailing, LauncherTheme.Spacing.md)
         .overlay(alignment: .bottom) {
-            if !model.renderState.tasks.isEmpty {
+            if !model.renderState.tasks.isEmpty || model.renderState.showsAllHistory {
                 Rectangle()
                     .fill(LauncherTheme.textTertiary.opacity(0.24))
                     .frame(height: 0.5)
             }
         }
 
-        if !model.renderState.tasks.isEmpty {
+        if !model.renderState.tasks.isEmpty || model.renderState.showsAllHistory {
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     ZStack(alignment: .topLeading) {
-                        if let selectedTaskID = model.selectedTaskID,
-                           let selectedIndex = model.renderState.tasks.firstIndex(
-                               where: { $0.id == selectedTaskID }
-                           ) {
-                            RoundedRectangle(
-                                cornerRadius: LauncherTheme.Radius.row,
-                                style: .continuous
-                            )
-                            .fill(
-                                LauncherTheme.selection(
-                                    colorScheme: colorScheme,
-                                    reduceTransparency: reduceTransparency
-                                )
-                            )
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 42)
-                            .padding(.horizontal, LauncherTheme.Spacing.md)
-                            .offset(y: LauncherTheme.Spacing.md + CGFloat(selectedIndex) * 44)
-                        }
-
                         LazyVStack(alignment: .leading, spacing: 2) {
                             ForEach(model.renderState.tasks) { task in
                                 Button(action: { model.open(task) }) {
                                     taskRow(task)
                                 }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 .frame(height: 42)
                                 .buttonStyle(.plain)
                                 .onHover { hovered in
                                     hoveredTaskID = !model.isScrolling && hovered ? task.id : nil
                                 }
                                 .background {
-                                    if hoveredTaskID == task.id,
-                                       model.selectedTaskID != task.id {
-                                        RoundedRectangle(
-                                            cornerRadius: LauncherTheme.Radius.row,
-                                            style: .continuous
-                                        )
-                                        .fill(
-                                            LauncherTheme.hover(
-                                                colorScheme: colorScheme,
-                                                reduceTransparency: reduceTransparency
-                                            )
-                                        )
+                                    if model.selectedTaskID == task.id || hoveredTaskID == task.id {
+                                        rowHighlight(isSelected: model.selectedTaskID == task.id)
                                     }
                                 }
                                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -423,37 +422,17 @@ private struct LauncherRootView: View {
                                 )
                                 .accessibilityHint("Open task")
                             }
-                            if !model.renderState.showAll,
-                               model.renderState.allTasks.count > model.renderState.recentTasks.count {
+                            if model.renderState.showsAllHistory {
                                 Button(action: model.expandAllHistory) {
-                                    HStack(spacing: 9) {
-                                        Image(systemName: "chevron.down")
-                                            .font(.system(size: 10, weight: .semibold))
-                                            .frame(width: 10)
-                                        Text("Show all")
-                                            .font(.body)
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .frame(height: 42)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(Rectangle())
+                                    showAllRow
                                 }
                                 .buttonStyle(.plain)
-                                .frame(height: 42)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(height: 42, alignment: .topLeading)
                                 .foregroundStyle(LauncherTheme.textSecondary)
                                 .background {
-                                    if showAllHovered {
-                                        RoundedRectangle(
-                                            cornerRadius: LauncherTheme.Radius.row,
-                                            style: .continuous
-                                        )
-                                        .fill(
-                                            LauncherTheme.hover(
-                                                colorScheme: colorScheme,
-                                                reduceTransparency: reduceTransparency
-                                            )
-                                        )
+                                    if model.showAllFocused || showAllHovered {
+                                        rowHighlight(isSelected: model.showAllFocused)
                                     }
                                 }
                                 .onHover { hovered in
@@ -465,15 +444,13 @@ private struct LauncherRootView: View {
                         }
                         .padding(.horizontal, LauncherTheme.Spacing.md)
                         .padding(.top, LauncherTheme.Spacing.md)
-                        .padding(.bottom, 50)
-                        .animation(
-                            .easeInOut(duration: 0.24),
-                            value: model.renderState.showAll
-                        )
                     }
                 }
                 .onChange(of: model.selectedTaskID) { selected in
                     hoveredTaskID = nil
+                    if model.consumePreserveScrollForNextSelection() {
+                        return
+                    }
                     if let selected {
                         proxy.scrollTo(selected, anchor: .center)
                     }
@@ -481,6 +458,47 @@ private struct LauncherRootView: View {
             }
         }
 
+    }
+
+    @ViewBuilder
+    private func rowHighlight(isSelected: Bool) -> some View {
+        RoundedRectangle(
+            cornerRadius: LauncherTheme.Radius.row,
+            style: .continuous
+        )
+        .fill(
+            isSelected
+                ? LauncherTheme.selection(
+                    colorScheme: colorScheme,
+                    reduceTransparency: reduceTransparency
+                )
+                : LauncherTheme.hover(
+                    colorScheme: colorScheme,
+                    reduceTransparency: reduceTransparency
+                )
+        )
+    }
+
+    private var showAllRow: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 10, height: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Show all")
+                    .font(.body)
+                Text("\(model.renderState.additionalTaskCount) more sessions")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private var actionsButton: some View {
