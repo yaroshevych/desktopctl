@@ -47,6 +47,8 @@ pub struct LauncherSnapshot {
     pub screen: LauncherScreen,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_app: Option<String>,
+    #[serde(default = "default_render_keyboard_shortcuts")]
+    pub render_keyboard_shortcuts: bool,
     pub recent: Vec<SessionSummary>,
     pub all: Vec<SessionSummary>,
 }
@@ -57,10 +59,16 @@ impl Default for LauncherSnapshot {
             revision: 0,
             screen: LauncherScreen::Launcher,
             active_app: None,
+            render_keyboard_shortcuts: true,
             recent: Vec::new(),
             all: Vec::new(),
         }
     }
+}
+
+#[allow(dead_code)]
+fn default_render_keyboard_shortcuts() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]

@@ -12,11 +12,26 @@ use crate::{app_policy::AppPolicyConfig, journal::JournalConfig};
 
 static CONFIG_IO: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LauncherConfig {
+    #[serde(default = "default_render_keyboard_shortcuts")]
+    pub render_keyboard_shortcuts: bool,
+}
+
+impl Default for LauncherConfig {
+    fn default() -> Self {
+        Self {
+            render_keyboard_shortcuts: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct DesktopConfig {
     app_policy: AppPolicyConfig,
     journal: JournalConfig,
+    launcher: LauncherConfig,
 }
 
 enum LegacyValue<T> {
@@ -50,12 +65,20 @@ pub fn load_journal() -> Result<Option<JournalConfig>, String> {
     load_config().map(|config| config.map(|config| config.journal))
 }
 
+pub fn load_launcher() -> Result<Option<LauncherConfig>, String> {
+    load_config().map(|config| config.map(|config| config.launcher))
+}
+
 pub fn save_app_policy(policy: &AppPolicyConfig) -> Result<(), String> {
     update_config(|config| config.app_policy = policy.clone())
 }
 
 pub fn save_journal(journal: &JournalConfig) -> Result<(), String> {
     update_config(|config| config.journal = journal.clone())
+}
+
+pub fn save_launcher(launcher: &LauncherConfig) -> Result<(), String> {
+    update_config(|config| config.launcher = launcher.clone())
 }
 
 fn load_config() -> Result<Option<DesktopConfig>, String> {
@@ -68,6 +91,10 @@ fn load_config() -> Result<Option<DesktopConfig>, String> {
     toml::from_str(&raw)
         .map(Some)
         .map_err(|error| format!("invalid TOML in {}: {error}", path.display()))
+}
+
+fn default_render_keyboard_shortcuts() -> bool {
+    true
 }
 
 fn update_config(update: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {
@@ -132,6 +159,7 @@ fn migrate_config_from_sources(
             LegacyValue::Missing => JournalConfig::default(),
             LegacyValue::Blocked => unreachable!(),
         },
+        launcher: LauncherConfig::default(),
     };
     match toml::to_string_pretty(&config) {
         Ok(encoded) => match write_private_new(&target, encoded.as_bytes()) {

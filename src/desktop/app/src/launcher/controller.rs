@@ -33,6 +33,7 @@ mod controller {
 
     struct State {
         store: AgentSessionStore,
+        render_keyboard_shortcuts: bool,
         pending_target: Option<TargetWindowMetadata>,
         restore_pid: Option<i64>,
         launch_generation: u64,
@@ -88,8 +89,10 @@ mod controller {
         if let Some(warning) = warning {
             trace::log(format!("agent_launcher:store_warning {warning}"));
         }
+        let render_keyboard_shortcuts = launcher_keyboard_shortcuts_setting();
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
+            render_keyboard_shortcuts,
             pending_target: None,
             restore_pid: None,
             launch_generation: 0,
@@ -110,6 +113,7 @@ mod controller {
             launcher_ui::hide();
             return;
         }
+        reload_keyboard_shortcuts_setting();
         // Capture focus synchronously before activating DesktopCtl. The service
         // lookup remains a fallback for applications not represented by
         // NSWorkspace.
@@ -185,7 +189,7 @@ mod controller {
                 if let Some(mut state) = lock_state() {
                     state.restore_pid = None;
                 }
-                crate::runtime::settings_dialog::show(None);
+                crate::runtime::settings_dialog::show(Some("launcher"));
             }
             LauncherAction::ReturnToLauncher => {
                 if let Some(mut state) = lock_state() {
@@ -914,6 +918,27 @@ end run"#;
         }
     }
 
+    fn launcher_keyboard_shortcuts_setting() -> bool {
+        crate::service_client::ServiceClient
+            .settings()
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("launcher")
+                    .and_then(|launcher| launcher.get("render_keyboard_shortcuts"))
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(true)
+    }
+
+    pub fn reload_keyboard_shortcuts_setting() {
+        let render_keyboard_shortcuts = launcher_keyboard_shortcuts_setting();
+        if let Some(mut state) = lock_state() {
+            state.render_keyboard_shortcuts = render_keyboard_shortcuts;
+        }
+        refresh();
+    }
+
     fn snapshot(state: &State, revision: u64) -> LauncherSnapshot {
         const RECENT_WINDOW_MS: u64 = 30 * 60 * 1_000;
         let cutoff = unix_now_ms().saturating_sub(RECENT_WINDOW_MS);
@@ -955,6 +980,7 @@ end run"#;
                 .as_ref()
                 .and_then(|target| target.app.clone())
                 .filter(|app| !app.is_empty()),
+            render_keyboard_shortcuts: state.render_keyboard_shortcuts,
             recent,
             all,
         }
@@ -1109,4 +1135,4 @@ end run"#;
 }
 
 #[cfg(target_os = "macos")]
-pub use controller::{RunningHandler, initialize, toggle};
+pub use controller::{RunningHandler, initialize, reload_keyboard_shortcuts_setting, toggle};

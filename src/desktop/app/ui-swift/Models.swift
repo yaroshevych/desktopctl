@@ -46,6 +46,15 @@ struct AppPolicyOutput: Codable {
     var clipboardAllowed: Bool
 }
 
+struct LauncherInput: Codable {
+    var renderKeyboardShortcuts: Bool
+}
+
+struct LauncherOutput: Codable {
+    var saved: Bool
+    var renderKeyboardShortcuts: Bool
+}
+
 struct SetupAccessInput: Codable {
     var cliInstalled: Bool
     var accessibilityGranted: Bool

@@ -3,7 +3,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, OnceLock, atomic::{AtomicBool, Ordering}},
     thread,
 };
 
@@ -35,6 +35,20 @@ struct AppPolicyInput {
     warning: Option<String>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct LauncherInput {
+    #[serde(default = "default_render_keyboard_shortcuts")]
+    render_keyboard_shortcuts: bool,
+}
+
+impl Default for LauncherInput {
+    fn default() -> Self {
+        Self {
+            render_keyboard_shortcuts: true,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct StoredAppPolicy {
     policy_mode: PolicyMode,
@@ -48,6 +62,8 @@ struct StoredSettings {
     journal: JournalInput,
     app_policy: StoredAppPolicy,
     app_policy_warning: Option<String>,
+    #[serde(default)]
+    launcher: LauncherInput,
 }
 
 #[derive(Serialize)]
@@ -64,6 +80,7 @@ struct SettingsInput {
     journal: JournalInput,
     app_policy: AppPolicyInput,
     setup_access: SetupAccessInput,
+    launcher: LauncherInput,
     initial_tab: Option<String>,
 }
 
@@ -85,15 +102,45 @@ struct AppPolicyOutput {
 }
 
 #[derive(Deserialize)]
+struct LauncherOutput {
+    saved: bool,
+    render_keyboard_shortcuts: bool,
+}
+
+#[derive(Deserialize)]
 struct SettingsOutput {
     journal: JournalOutput,
     app_policy: AppPolicyOutput,
+    launcher: LauncherOutput,
+}
+
+fn default_render_keyboard_shortcuts() -> bool {
+    true
 }
 
 static ACTIVE_DIALOG_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+static SETTINGS_DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct SettingsDialogGuard;
+
+impl Drop for SettingsDialogGuard {
+    fn drop(&mut self) {
+        SETTINGS_DIALOG_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
 
 fn active_dialog_pids() -> &'static Mutex<HashSet<u32>> {
     ACTIVE_DIALOG_PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn activate_existing_dialog() {
+    let pid = active_dialog_pids()
+        .lock()
+        .ok()
+        .and_then(|pids| pids.iter().next().copied());
+    if let Some(pid) = pid {
+        let _ = crate::runtime::macos::activate_pid_immediately(i64::from(pid));
+    }
 }
 
 fn dialog_binary() -> Option<PathBuf> {
@@ -129,7 +176,12 @@ pub fn terminate_active() {
 }
 
 pub fn show(initial_tab: Option<&'static str>) {
+    if SETTINGS_DIALOG_ACTIVE.swap(true, Ordering::SeqCst) {
+        activate_existing_dialog();
+        return;
+    }
     thread::spawn(move || {
+        let _guard = SettingsDialogGuard;
         let Some(bin) = dialog_binary() else {
             eprintln!("settings dialog: desktopctl-dialogs binary not found");
             return;
@@ -180,6 +232,9 @@ pub fn show(initial_tab: Option<&'static str>) {
                     .into_iter()
                     .map(|p| p.display().to_string())
                     .collect(),
+            },
+            launcher: LauncherInput {
+                render_keyboard_shortcuts: stored.launcher.render_keyboard_shortcuts,
             },
             initial_tab: initial_tab.map(|s| s.to_string()),
         };
@@ -251,10 +306,16 @@ pub fn show(initial_tab: Option<&'static str>) {
                 "clipboard_allowed": output.app_policy.clipboard_allowed,
             })
         });
-        if (journal.is_some() || app_policy.is_some())
-            && let Err(error) = client.update_settings(journal, app_policy)
-        {
-            eprintln!("settings dialog: save service settings: {error}");
+        let launcher = output.launcher.saved.then(|| {
+            serde_json::json!({
+                "render_keyboard_shortcuts": output.launcher.render_keyboard_shortcuts,
+            })
+        });
+        if journal.is_some() || app_policy.is_some() || launcher.is_some() {
+            match client.update_settings(journal, app_policy, launcher) {
+                Ok(()) => crate::launcher::controller::reload_keyboard_shortcuts_setting(),
+                Err(error) => eprintln!("settings dialog: save service settings: {error}"),
+            }
         }
     });
 }

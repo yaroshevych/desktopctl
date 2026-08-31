@@ -195,7 +195,7 @@ pub fn run() -> Result<(), AppError> {
             return;
         }
         if event.id == settings_id {
-            settings_dialog::show(None);
+            settings_dialog::show(Some("launcher"));
             return;
         }
         if event.id == agent_launcher_id {

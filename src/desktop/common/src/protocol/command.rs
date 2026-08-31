@@ -73,6 +73,8 @@ pub enum Command {
         journal: Option<serde_json::Value>,
         #[serde(default)]
         app_policy: Option<serde_json::Value>,
+        #[serde(default)]
+        launcher: Option<serde_json::Value>,
     },
     DisableGui,
     AppHide {

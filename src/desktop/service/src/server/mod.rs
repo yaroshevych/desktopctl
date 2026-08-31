@@ -709,14 +709,22 @@ fn active_window_description() -> Result<Value, AppError> {
 fn settings_get() -> Result<Value, AppError> {
     let journal = crate::journal::load_current_from_disk().config;
     let policy = crate::app_policy::load_with_diagnostics();
+    let launcher = crate::storage::load_launcher()
+        .map_err(AppError::internal)?
+        .unwrap_or_default();
     Ok(json!({
         "journal": journal,
         "app_policy": policy.config,
         "app_policy_warning": policy.warning,
+        "launcher": launcher,
     }))
 }
 
-fn settings_update(journal: Option<Value>, app_policy: Option<Value>) -> Result<Value, AppError> {
+fn settings_update(
+    journal: Option<Value>,
+    app_policy: Option<Value>,
+    launcher: Option<Value>,
+) -> Result<Value, AppError> {
     if let Some(value) = journal {
         let config: crate::journal::JournalConfig =
             serde_json::from_value(value).map_err(|error| {
@@ -732,6 +740,11 @@ fn settings_update(journal: Option<Value>, app_policy: Option<Value>) -> Result<
         config.agent_access_disabled = crate::app_policy::current().agent_access_disabled;
         crate::app_policy::save(&config).map_err(AppError::internal)?;
         crate::app_policy::set_current(&config);
+    }
+    if let Some(value) = launcher {
+        let config: crate::storage::LauncherConfig = serde_json::from_value(value)
+            .map_err(|error| AppError::invalid_argument(format!("invalid launcher settings: {error}")))?;
+        crate::storage::save_launcher(&config).map_err(AppError::internal)?;
     }
     Ok(json!({ "saved": true }))
 }
@@ -837,7 +850,8 @@ fn execute_with_context(
         Command::SettingsUpdate {
             journal,
             app_policy,
-        } => settings_update(journal, app_policy),
+            launcher,
+        } => settings_update(journal, app_policy, launcher),
         Command::DisableGui => {
             set_gui_ops_disabled(true);
             Ok(json!({}))

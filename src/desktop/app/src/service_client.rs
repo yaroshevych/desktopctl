@@ -55,10 +55,12 @@ impl ServiceClient {
         &self,
         journal: Option<Value>,
         app_policy: Option<Value>,
+        launcher: Option<Value>,
     ) -> Result<(), AppError> {
         self.send(Command::SettingsUpdate {
             journal,
             app_policy,
+            launcher,
         })
         .map(|_| ())
     }

@@ -7,12 +7,14 @@ struct DesktopCtlSettingsInput: Codable {
     var journal: JournalInput
     var appPolicy: AppPolicyInput
     var setupAccess: SetupAccessInput
+    var launcher: LauncherInput
     var initialTab: String?
 }
 
 struct DesktopCtlSettingsOutput: Codable {
     var journal: JournalOutput
     var appPolicy: AppPolicyOutput
+    var launcher: LauncherOutput
 }
 
 // MARK: - View models
@@ -138,7 +140,52 @@ private final class SettingsPermissionsVM: ObservableObject {
     }
 }
 
+private final class SettingsLauncherVM: ObservableObject {
+    @Published var renderKeyboardShortcuts: Bool
+
+    init(_ input: LauncherInput) {
+        renderKeyboardShortcuts = input.renderKeyboardShortcuts
+    }
+
+    func buildOutput() -> LauncherOutput {
+        LauncherOutput(saved: true, renderKeyboardShortcuts: renderKeyboardShortcuts)
+    }
+
+    func saveLive() {
+        let value = renderKeyboardShortcuts
+        DispatchQueue.global().async {
+            _ = DaemonIPC.updateLauncherSettings(renderKeyboardShortcuts: value)
+        }
+    }
+}
+
 // MARK: - Tab content views
+
+private struct LauncherTabContent: View {
+    @ObservedObject var vm: SettingsLauncherVM
+
+    var body: some View {
+        Form {
+            Picker("Agent:", selection: .constant("pi")) {
+                Text("Pi").tag("pi")
+            }
+            .pickerStyle(.menu)
+
+            Picker("Terminal:", selection: .constant("ghostty")) {
+                Text("Ghostty").tag("ghostty")
+            }
+            .pickerStyle(.menu)
+
+            Toggle("Render keyboard shortcuts", isOn: $vm.renderKeyboardShortcuts)
+                .onChange(of: vm.renderKeyboardShortcuts) { _ in
+                    vm.saveLive()
+                }
+        }
+        .formStyle(.columns)
+        .padding(.horizontal, 20)
+        .padding(.top, 20)
+    }
+}
 
 private struct JournalTabContent: View {
     @ObservedObject var vm: SettingsJournalVM
@@ -337,11 +384,13 @@ private struct DesktopCtlSettingsView: View {
     @ObservedObject var journalVM: SettingsJournalVM
     @ObservedObject var policyVM: SettingsPolicyVM
     @ObservedObject var permissionsVM: SettingsPermissionsVM
+    @ObservedObject var launcherVM: SettingsLauncherVM
     @State var selectedTab: String
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
+                SettingsTabButton(title: "Launcher",     icon: "command",          tag: "launcher",    selected: $selectedTab)
                 SettingsTabButton(title: "Journal",     icon: "book",             tag: "journal",     selected: $selectedTab)
                 SettingsTabButton(title: "Applications", icon: "macwindow",       tag: "policy",      selected: $selectedTab)
                 SettingsTabButton(title: "Permissions", icon: "checkmark.shield", tag: "permissions", selected: $selectedTab)
@@ -355,6 +404,7 @@ private struct DesktopCtlSettingsView: View {
 
             Group {
                 switch selectedTab {
+                case "launcher":    LauncherTabContent(vm: launcherVM)
                 case "policy":      PolicyTabContent(vm: policyVM)
                 case "permissions": PermissionsTabContent(vm: permissionsVM)
                 default:            JournalTabContent(vm: journalVM)
@@ -420,12 +470,17 @@ enum DesktopCtlSettings {
         let journalVM = SettingsJournalVM(input.journal)
         let policyVM = SettingsPolicyVM(input.appPolicy)
         let permissionsVM = SettingsPermissionsVM(input.setupAccess)
+        let launcherVM = SettingsLauncherVM(input.launcher)
         var didWrite = false
 
         func writeAndExit() {
             guard !didWrite else { return }
             didWrite = true
-            let output = DesktopCtlSettingsOutput(journal: journalVM.buildOutput(), appPolicy: policyVM.output)
+            let output = DesktopCtlSettingsOutput(
+                journal: journalVM.buildOutput(),
+                appPolicy: policyVM.output,
+                launcher: launcherVM.buildOutput()
+            )
             let encoder = JSONEncoder()
             encoder.keyEncodingStrategy = .convertToSnakeCase
             if let data = try? encoder.encode(output) {
@@ -438,6 +493,7 @@ enum DesktopCtlSettings {
             journalVM: journalVM,
             policyVM: policyVM,
             permissionsVM: permissionsVM,
+            launcherVM: launcherVM,
             selectedTab: input.initialTab ?? "journal"
         )
 

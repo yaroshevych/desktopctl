@@ -20,6 +20,7 @@ private struct LauncherRenderState {
     var showAll = false
     var screen = "Launcher"
     var activeApp: String?
+    var renderKeyboardShortcuts = true
     var sessionID = ""
     var sessionTitle = ""
     var sessionStatus = ""
@@ -74,6 +75,7 @@ private final class LauncherModel: ObservableObject {
             }
         }
         next.activeApp = root["active_app"] as? String
+        next.renderKeyboardShortcuts = root["render_keyboard_shortcuts"] as? Bool ?? true
 
         let parseTasks: ([[String: Any]]) -> [LauncherTask] = { rows in
             rows.compactMap { row in
@@ -716,14 +718,14 @@ private struct LauncherRootView: View {
 
     private var actionsButton: some View {
         optionsButton(
-            title: model.renderState.activeApp ?? "Options",
+            title: model.renderState.activeApp ?? "Agent Context",
             accessibilityHint: "Open launcher options"
         )
     }
 
     private var sessionActionsButton: some View {
         optionsButton(
-            title: model.renderState.activeApp ?? "Options",
+            title: model.renderState.activeApp ?? "Agent Context",
             accessibilityHint: "Open session options"
         )
     }
@@ -731,13 +733,18 @@ private struct LauncherRootView: View {
     private func optionsButton(title: String, accessibilityHint: String) -> some View {
         LauncherPillButton(action: model.toggleActionsMenu) {
             HStack(spacing: LauncherTheme.Spacing.md) {
+                Image(systemName: "macwindow.badge.plus")
+                    .font(.system(size: 12, weight: .regular))
+                    .accessibilityHidden(true)
                 Text(title)
                     .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(LauncherTheme.textSecondary)
                     .lineLimit(1)
-                HStack(spacing: 2) {
-                    LauncherKeyCap(title: "⌘")
-                    LauncherKeyCap(title: "K")
+                if model.renderState.renderKeyboardShortcuts {
+                    HStack(spacing: 2) {
+                        LauncherKeyCap(title: "⌘")
+                        LauncherKeyCap(title: "K")
+                    }
                 }
             }
         }
@@ -756,9 +763,11 @@ private struct LauncherRootView: View {
                         .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(LauncherTheme.textSecondary)
                     Spacer(minLength: LauncherTheme.Spacing.xxl)
-                    HStack(spacing: 2) {
-                        LauncherKeyCap(title: "⌘")
-                        LauncherKeyCap(title: ",")
+                    if model.renderState.renderKeyboardShortcuts {
+                        HStack(spacing: 2) {
+                            LauncherKeyCap(title: "⌘")
+                            LauncherKeyCap(title: ",")
+                        }
                     }
                 }
                 .padding(.horizontal, LauncherTheme.Spacing.xl)
@@ -800,7 +809,9 @@ private struct LauncherRootView: View {
                         Text("Sessions")
                             .font(.system(size: 13, weight: .regular))
                             .foregroundStyle(LauncherTheme.textSecondary)
-                        LauncherKeyCap(title: "Esc", horizontalPadding: 3)
+                        if model.renderState.renderKeyboardShortcuts {
+                            LauncherKeyCap(title: "Esc", horizontalPadding: 3)
+                        }
                     }
                     .foregroundStyle(LauncherTheme.textSecondary)
                 }
@@ -812,9 +823,11 @@ private struct LauncherRootView: View {
                             Text("Continue in Pi")
                                 .font(.system(size: 13, weight: .regular))
                                 .foregroundStyle(LauncherTheme.textSecondary)
-                            HStack(spacing: 2) {
-                                LauncherKeyCap(title: "⌘")
-                                LauncherKeyCap(title: "↵")
+                            if model.renderState.renderKeyboardShortcuts {
+                                HStack(spacing: 2) {
+                                    LauncherKeyCap(title: "⌘")
+                                    LauncherKeyCap(title: "↵")
+                                }
                             }
                         }
                         .foregroundStyle(LauncherTheme.textSecondary)

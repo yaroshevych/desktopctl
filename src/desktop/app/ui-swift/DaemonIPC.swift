@@ -22,6 +22,21 @@ enum DaemonIPC {
         return nil
     }
 
+    // Saves launcher preferences immediately, so they take effect without
+    // waiting for the Settings window to close.
+    static func updateLauncherSettings(renderKeyboardShortcuts: Bool) -> Bool {
+        let paths = socketPaths()
+        for path in paths {
+            if tryUpdateLauncherSettings(
+                socketPath: path,
+                renderKeyboardShortcuts: renderKeyboardShortcuts
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Private
 
     private static func socketPaths() -> [String] {
@@ -82,6 +97,60 @@ enum DaemonIPC {
         let ax = (result["accessibility"] as? [String: Any])?["granted"] as? Bool ?? false
         let sr = (result["screen_recording"] as? [String: Any])?["granted"] as? Bool ?? false
         return PermissionsResult(accessibility: ax, screenRecording: sr)
+    }
+
+    private static func tryUpdateLauncherSettings(
+        socketPath: String,
+        renderKeyboardShortcuts: Bool
+    ) -> Bool {
+        let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { Darwin.close(sock) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = socketPath.utf8
+        guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return false }
+        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+            for (i, b) in pathBytes.enumerated() { buf[i] = b }
+        }
+
+        let connected = withUnsafePointer(to: addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(sock, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else { return false }
+
+        let request: [String: Any] = [
+            "protocol_version": 1,
+            "request_id": "dialog-launcher-settings",
+            "options": ["background_input": false],
+            "command": [
+                "cmd": "settings_update",
+                "launcher": [
+                    "render_keyboard_shortcuts": renderKeyboardShortcuts
+                ]
+            ]
+        ]
+        guard let payload = try? JSONSerialization.data(withJSONObject: request) else {
+            return false
+        }
+
+        var lenBE = UInt32(payload.count).bigEndian
+        let header = Data(bytes: &lenBE, count: 4)
+        guard sendAll(sock, header) && sendAll(sock, payload) else { return false }
+
+        var headerBuf = [UInt8](repeating: 0, count: 4)
+        guard recvAll(sock, &headerBuf) else { return false }
+        let bodyLen = Int(UInt32(bigEndian: headerBuf.withUnsafeBytes { $0.load(as: UInt32.self) }))
+        guard bodyLen > 0 && bodyLen < 4 * 1024 * 1024 else { return false }
+
+        var bodyBuf = [UInt8](repeating: 0, count: bodyLen)
+        guard recvAll(sock, &bodyBuf) else { return false }
+        guard let json = try? JSONSerialization.jsonObject(with: Data(bodyBuf)) as? [String: Any]
+        else { return false }
+        return json["ok"] as? Bool ?? false
     }
 
     private static func sendAll(_ sock: Int32, _ data: Data) -> Bool {
