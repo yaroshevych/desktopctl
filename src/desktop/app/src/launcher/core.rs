@@ -45,6 +45,8 @@ pub struct LauncherSnapshot {
     /// arrive late from worker threads.
     pub revision: u64,
     pub screen: LauncherScreen,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_app: Option<String>,
     pub recent: Vec<SessionSummary>,
     pub all: Vec<SessionSummary>,
 }
@@ -54,6 +56,7 @@ impl Default for LauncherSnapshot {
         Self {
             revision: 0,
             screen: LauncherScreen::Launcher,
+            active_app: None,
             recent: Vec::new(),
             all: Vec::new(),
         }

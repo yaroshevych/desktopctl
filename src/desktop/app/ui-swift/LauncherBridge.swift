@@ -19,6 +19,7 @@ private struct LauncherRenderState {
     var allTasks: [LauncherTask] = []
     var showAll = false
     var screen = "Launcher"
+    var activeApp: String?
     var sessionID = ""
     var sessionTitle = ""
     var sessionStatus = ""
@@ -62,6 +63,7 @@ private final class LauncherModel: ObservableObject {
                 return (message["user"] as? Bool ?? false, text)
             }
         }
+        next.activeApp = root["active_app"] as? String
 
         let parseTasks: ([[String: Any]]) -> [LauncherTask] = { rows in
             rows.compactMap { row in
@@ -304,22 +306,16 @@ private struct LauncherRootView: View {
                     .onTapGesture { _ = model.dismissActionsMenu() }
             }
         }
-        .overlay(alignment: .bottomTrailing) {
+        .overlay(alignment: .topTrailing) {
             if model.renderState.screen != "Session", model.showActionsMenu {
                 actionsMenu
                     .padding(.trailing, LauncherTheme.Spacing.lg)
-                    .padding(.bottom, 46)
+                    .padding(.top, 46)
                     .transition(
                         .opacity.combined(
-                            with: .scale(scale: 0.94, anchor: .bottomTrailing)
+                            with: .scale(scale: 0.94, anchor: .topTrailing)
                         )
                     )
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if model.renderState.screen != "Session", !model.renderState.tasks.isEmpty {
-                actionsButton
-                    .padding(LauncherTheme.Spacing.lg)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -349,22 +345,25 @@ private struct LauncherRootView: View {
 
     @ViewBuilder
     private var launcherBody: some View {
-        TextField("Ask DesktopCtl…", text: $model.prompt)
-            .textFieldStyle(.plain)
-            .font(.system(size: 20, weight: .regular, design: .rounded))
-            .focused($promptFocused)
-            .onSubmit { model.sendPrompt() }
-            .frame(height: 50)
-            .offset(y: 2)
-            .padding(.horizontal, LauncherTheme.Spacing.xxl)
-            .overlay(alignment: .bottom) {
-                if !model.renderState.tasks.isEmpty {
-                    Rectangle()
-                        .fill(LauncherTheme.textTertiary.opacity(0.24))
-                        .frame(height: 0.5)
-                }
+        HStack(spacing: LauncherTheme.Spacing.sm) {
+            TextField("Ask DesktopCtl…", text: $model.prompt)
+                .textFieldStyle(.plain)
+                .font(.system(size: 20, weight: .regular, design: .rounded))
+                .focused($promptFocused)
+                .onSubmit { model.sendPrompt() }
+                .accessibilityLabel("Launcher prompt")
+            actionsButton
+        }
+        .frame(height: 50)
+        .padding(.leading, LauncherTheme.Spacing.xxl)
+        .padding(.trailing, LauncherTheme.Spacing.md)
+        .overlay(alignment: .bottom) {
+            if !model.renderState.tasks.isEmpty {
+                Rectangle()
+                    .fill(LauncherTheme.textTertiary.opacity(0.24))
+                    .frame(height: 0.5)
             }
-            .accessibilityLabel("Launcher prompt")
+        }
 
         if !model.renderState.tasks.isEmpty {
             ScrollViewReader { proxy in
@@ -487,9 +486,10 @@ private struct LauncherRootView: View {
     private var actionsButton: some View {
         Button(action: model.toggleActionsMenu) {
             HStack(spacing: LauncherTheme.Spacing.md) {
-                Text("Options")
+                Text(model.renderState.activeApp ?? "Options")
                     .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(LauncherTheme.textSecondary)
+                    .lineLimit(1)
                 HStack(spacing: 2) {
                     LauncherKeyCap(title: "⌘")
                     LauncherKeyCap(title: "K")
@@ -529,7 +529,7 @@ private struct LauncherRootView: View {
                 actionsButtonHovered = hovered
             }
         }
-        .accessibilityLabel("Options")
+        .accessibilityLabel(model.renderState.activeApp ?? "Options")
         .accessibilityHint("Open launcher options")
     }
 

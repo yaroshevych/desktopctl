@@ -142,27 +142,25 @@ mod controller {
         };
         let preparation = preparation_handle_for_generation(generation);
         thread::spawn(move || {
-            let prepared = crate::service_client::ServiceClient
+            let target = crate::service_client::ServiceClient
                 .window_for_pid(pid)
                 .map(target_metadata)
-                .map(|target| PreparedTarget {
-                    context: window_context_for_target(&target),
-                    target,
-                })
                 .map_err(|error| error.to_string());
-            if let Ok(prepared) = &prepared {
-                if let Err(error) = &prepared.context {
+            if let Ok(target) = &target {
+                if let Some(mut state) = lock_state() {
+                    if state.launch_generation == generation {
+                        state.pending_target = Some(target.clone());
+                    }
+                }
+                refresh();
+            }
+            let prepared = target.map(|target| {
+                let context = window_context_for_target(&target);
+                if let Err(error) = &context {
                     trace::log(format!("agent_launcher:prefetch_context_warning {error}"));
                 }
-            }
-            if let Some(mut state) = lock_state() {
-                if state.launch_generation == generation {
-                    state.pending_target = prepared
-                        .as_ref()
-                        .ok()
-                        .map(|prepared| prepared.target.clone());
-                }
-            }
+                PreparedTarget { context, target }
+            });
             if let Some(preparation) = preparation {
                 let (lock, wake) = &*preparation;
                 *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prepared);
@@ -952,6 +950,11 @@ end run"#;
         LauncherSnapshot {
             revision,
             screen,
+            active_app: state
+                .pending_target
+                .as_ref()
+                .and_then(|target| target.app.clone())
+                .filter(|app| !app.is_empty()),
             recent,
             all,
         }
