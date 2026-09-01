@@ -96,20 +96,22 @@ pub(crate) fn set_agent_running(running: bool) {
 }
 
 fn restore_tray_icon() {
-    dispatch2::DispatchQueue::main().exec_async(|| {
+    thread::spawn(|| {
         let overlay_running = ServiceClient
             .status()
             .map(|status| status.overlay_running)
             .unwrap_or(false);
-        let icon = if overlay_running {
-            ICON_ACTIVE.get().cloned()
-        } else {
-            ICON_IDLE.get().cloned()
-        };
-        TRAY.with(|cell| {
-            if let Some(tray) = cell.borrow().as_ref() {
-                let _ = tray.set_icon_with_as_template(icon, true);
-            }
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let icon = if overlay_running {
+                ICON_ACTIVE.get().cloned()
+            } else {
+                ICON_IDLE.get().cloned()
+            };
+            TRAY.with(|cell| {
+                if let Some(tray) = cell.borrow().as_ref() {
+                    let _ = tray.set_icon_with_as_template(icon, true);
+                }
+            });
         });
     });
 }

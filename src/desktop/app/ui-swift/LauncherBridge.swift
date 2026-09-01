@@ -1,8 +1,12 @@
 import AppKit
 import Foundation
 import SwiftUI
+import UserNotifications
 
 public typealias LauncherActionCallback = @convention(c) (
+    UnsafePointer<CChar>?, Int
+) -> Void
+public typealias NotificationActionCallback = @convention(c) (
     UnsafePointer<CChar>?, Int
 ) -> Void
 
@@ -15,6 +19,7 @@ private struct LauncherTask: Identifiable {
 }
 
 private struct LauncherRenderState {
+    var revision: UInt64 = 0
     var recentTasks: [LauncherTask] = []
     var allTasks: [LauncherTask] = []
     var showAll = false
@@ -48,16 +53,36 @@ private final class LauncherModel: ObservableObject {
     @Published var showAllFocused = false
     @Published var showActionsMenu = false
     @Published private(set) var isScrolling = false
+    @Published private(set) var queuedFollowUps: [String] = []
     private var scrollGeneration = 0
     private var preserveScrollForNextSelection = false
+    private var queuedFollowUpsFlushPending = false
+    private var snapshotParseGeneration: UInt64 = 0
     var callback: LauncherActionCallback?
 
     func applySnapshot(_ data: Data) {
+        snapshotParseGeneration &+= 1
+        let generation = snapshotParseGeneration
+        let showAll = renderState.showAll
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let next = Self.parseSnapshot(data, showAll: showAll) else { return }
+            DispatchQueue.main.async {
+                guard let self,
+                      self.snapshotParseGeneration == generation,
+                      next.revision > self.renderState.revision
+                else { return }
+                self.commitSnapshot(next)
+            }
+        }
+    }
+
+    private static func parseSnapshot(_ data: Data, showAll: Bool) -> LauncherRenderState? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        else { return nil }
 
         var next = LauncherRenderState()
-        next.showAll = renderState.showAll
+        next.revision = (root["revision"] as? NSNumber)?.uint64Value ?? 0
+        next.showAll = showAll
         let rawScreen = root["screen"]
         if let value = rawScreen as? String {
             next.screen = value
@@ -92,6 +117,17 @@ private final class LauncherModel: ObservableObject {
         let recentRows = (root["recent"] as? [[String: Any]]) ?? []
         next.recentTasks = parseTasks(recentRows)
         next.allTasks = parseTasks((root["all"] as? [[String: Any]]) ?? recentRows)
+        return next
+    }
+
+    private func commitSnapshot(_ next: LauncherRenderState) {
+        if next.sessionID != renderState.sessionID {
+            queuedFollowUps.removeAll()
+            queuedFollowUpsFlushPending = false
+        }
+        if next.sessionStatus == "Running" {
+            queuedFollowUpsFlushPending = false
+        }
         renderState = next
         if let selectedTaskID,
            !next.tasks.contains(where: { $0.id == selectedTaskID }) {
@@ -116,11 +152,33 @@ private final class LauncherModel: ObservableObject {
         let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         if renderState.screen == "Session", !renderState.sessionID.isEmpty {
-            emit(["type": "follow_up", "session_id": renderState.sessionID, "prompt": value])
+            if renderState.sessionStatus == "Running" {
+                queuedFollowUps.append(value)
+            } else {
+                emit(["type": "follow_up", "session_id": renderState.sessionID, "prompt": value])
+            }
         } else {
             emit(["type": "new_request", "prompt": value])
         }
         prompt = ""
+    }
+
+    func flushQueuedFollowUps() {
+        guard renderState.screen == "Session",
+              !renderState.sessionID.isEmpty,
+              renderState.sessionStatus != "Running",
+              !queuedFollowUps.isEmpty,
+              !queuedFollowUpsFlushPending
+        else { return }
+
+        queuedFollowUpsFlushPending = true
+        let combinedPrompt = queuedFollowUps.joined(separator: "\n\n")
+        queuedFollowUps.removeAll()
+        emit([
+            "type": "follow_up",
+            "session_id": renderState.sessionID,
+            "prompt": combinedPrompt,
+        ])
     }
 
     func open(_ task: LauncherTask) {
@@ -420,19 +478,29 @@ private struct AppKitPromptField: NSViewRepresentable {
             textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
-            guard commandSelector == #selector(NSResponder.insertNewline(_:)),
-                  let event = NSApp.currentEvent
-            else {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else {
+                return false
+            }
+            guard !textView.hasMarkedText() else {
                 return false
             }
 
+            guard let event = NSApp.currentEvent else {
+                parent?.onSubmit()
+                return true
+            }
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let nonCommandModifiers = modifiers.subtracting([.command, .numericPad])
-            guard modifiers.contains(.command), nonCommandModifiers.isEmpty else {
+            guard nonCommandModifiers.isEmpty else {
                 return false
             }
 
-            parent?.onCommandReturn?()
+            if modifiers.contains(.command) {
+                parent?.onCommandReturn?()
+            } else {
+                parent?.text = control.stringValue
+                parent?.onSubmit()
+            }
             return true
         }
 
@@ -441,6 +509,11 @@ private struct AppKitPromptField: NSViewRepresentable {
             if !parent.isFocused.wrappedValue {
                 parent.isFocused.wrappedValue = true
             }
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            parent?.text = field.stringValue
         }
 
         func controlTextDidEndEditing(_ obj: Notification) {
@@ -849,6 +922,9 @@ private struct LauncherRootView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(Array(model.renderState.messages.enumerated()), id: \.offset) { index, message in
+                            let bubbleColor = message.user
+                                ? Color(nsColor: .systemBlue)
+                                : Color(nsColor: .controlBackgroundColor)
                             HStack {
                                 if message.user { Spacer(minLength: 42) }
                                 Text(message.text)
@@ -859,14 +935,14 @@ private struct LauncherRootView: View {
                                     .background {
                                         ZStack(alignment: message.user ? .bottomTrailing : .bottomLeading) {
                                             RoundedRectangle(cornerRadius: 17, style: .continuous)
-                                                .fill(message.user ? Color(nsColor: .systemBlue) : Color.primary)
+                                                .fill(bubbleColor)
                                             SessionBubbleTail(pointsRight: message.user)
-                                                .fill(message.user ? Color(nsColor: .systemBlue) : Color.primary)
+                                                .fill(bubbleColor)
                                                 .frame(width: 25, height: 14)
                                                 .offset(x: message.user ? 3 : -3, y: 0)
                                         }
                                         .compositingGroup()
-                                        .opacity(message.user ? 1.0 : 0.10)
+                                        .opacity(message.user ? 1.0 : 0.85)
                                     }
                                 if !message.user { Spacer(minLength: 42) }
                             }
@@ -877,21 +953,112 @@ private struct LauncherRootView: View {
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel("\(message.user ? "You" : "Pi"): \(message.text)")
                         }
+                        if model.renderState.sessionStatus == "Running" {
+                            HStack {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Pi is working…")
+                                        .foregroundColor(.primary)
+                                }
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 9)
+                                .background {
+                                    ZStack(alignment: .bottomLeading) {
+                                        RoundedRectangle(cornerRadius: 17, style: .continuous)
+                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                        SessionBubbleTail(pointsRight: false)
+                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                            .frame(width: 25, height: 14)
+                                            .offset(x: -3, y: 0)
+                                    }
+                                    .compositingGroup()
+                                    .opacity(0.85)
+                                }
+                                Spacer(minLength: 42)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, LauncherTheme.Spacing.xs)
+                            .id("working")
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("Pi is working")
+                        }
+                        ForEach(Array(model.queuedFollowUps.enumerated()), id: \.offset) { index, message in
+                            HStack {
+                                Spacer(minLength: 42)
+                                Text(message)
+                                    .textSelection(.enabled)
+                                    .padding(.horizontal, 13)
+                                    .padding(.vertical, 9)
+                                    .foregroundColor(.white)
+                                    .background {
+                                        ZStack(alignment: .bottomTrailing) {
+                                            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                                                .fill(Color(nsColor: .systemBlue))
+                                            if index == model.queuedFollowUps.count - 1 {
+                                                SessionBubbleTail(pointsRight: true)
+                                                    .fill(Color(nsColor: .systemBlue))
+                                                    .frame(width: 25, height: 14)
+                                                    .offset(x: 3, y: 0)
+                                            }
+                                        }
+                                        .compositingGroup()
+                                    }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.trailing, LauncherTheme.Spacing.xs)
+                            .id("queued-\(index)")
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("You: \(message)")
+                        }
                     }
                     .padding(.top, 4)
                     .padding(.bottom, 8)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onAppear {
+                    if let last = model.queuedFollowUps.indices.last {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo("queued-\(last)", anchor: .bottom)
+                        }
+                        return
+                    }
+                    if model.renderState.sessionStatus == "Running" {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo("working", anchor: .bottom)
+                        }
+                        return
+                    }
                     guard let last = model.renderState.messages.indices.last else { return }
                     DispatchQueue.main.async {
                         proxy.scrollTo(last, anchor: .bottom)
                     }
                 }
                 .onChange(of: model.renderState.messages.count) { _ in
+                    if let last = model.queuedFollowUps.indices.last {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo("queued-\(last)", anchor: .bottom)
+                        }
+                        return
+                    }
                     guard let last = model.renderState.messages.indices.last else { return }
                     DispatchQueue.main.async {
                         proxy.scrollTo(last, anchor: .bottom)
+                    }
+                }
+                .onChange(of: model.queuedFollowUps.count) { _ in
+                    guard let last = model.queuedFollowUps.indices.last else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("queued-\(last)", anchor: .bottom)
+                    }
+                }
+                .onChange(of: model.renderState.sessionStatus) { status in
+                    if status != "Running" {
+                        model.flushQueuedFollowUps()
+                        return
+                    }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("working", anchor: .bottom)
                     }
                 }
             }
@@ -903,26 +1070,21 @@ private struct LauncherRootView: View {
                 .padding(.horizontal, -LauncherTheme.Spacing.lg)
 
             HStack(spacing: 8) {
+                AppKitPromptField(
+                    placeholder: "Follow up…",
+                    text: $model.prompt,
+                    isFocused: $promptFocused,
+                    onSubmit: { model.sendPrompt() },
+                    onCommandReturn: model.openInGhostty
+                )
+                .frame(maxWidth: .infinity)
+                .frame(height: LauncherTheme.controlHeight)
                 if model.renderState.sessionStatus == "Running" {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Pi is working…")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                     Spacer()
                     LauncherBarButton(title: "Stop", systemImage: "stop.fill", action: model.cancelSession)
                         .keyboardShortcut(.cancelAction)
                         .accessibilityHint("Cancel running session")
                 } else {
-                    AppKitPromptField(
-                        placeholder: "Follow up…",
-                        text: $model.prompt,
-                        isFocused: $promptFocused,
-                        onSubmit: { model.sendPrompt() },
-                        onCommandReturn: model.openInGhostty
-                    )
-                    .frame(maxWidth: .infinity)
-                    .frame(height: LauncherTheme.controlHeight)
                     sessionActionsButton
                 }
             }
@@ -980,6 +1142,103 @@ private var model: LauncherModel?
 private var hosting: NSHostingView<LauncherRootView>?
 private var scrollWheelMonitor: Any?
 private var launcherSettingsObserver: NSObjectProtocol?
+
+private final class DesktopCtlNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    var callback: NotificationActionCallback?
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+           let sessionID = response.notification.request.content.userInfo["session_id"] as? String,
+           !sessionID.isEmpty {
+            sessionID.withCString { pointer in
+                callback?(pointer, sessionID.utf8.count)
+            }
+        }
+        completionHandler()
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler:
+            @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+}
+
+private let notificationDelegate = DesktopCtlNotificationDelegate()
+
+private func postCompletionNotification(title: String, body: String, sessionID: String) {
+    let center = UNUserNotificationCenter.current()
+
+    let post = {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        if !sessionID.isEmpty {
+            content.userInfo = ["session_id": sessionID]
+        }
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "completion-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        center.add(request) { error in
+            if let error {
+                fputs("desktopctl: failed to post completion notification: \(error)\n", stderr)
+            }
+        }
+    }
+
+    center.getNotificationSettings { settings in
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+                guard granted else {
+                    if let error {
+                        fputs("desktopctl: notification authorization failed: \(error)\n", stderr)
+                    }
+                    return
+                }
+                post()
+            }
+        case .authorized, .provisional, .ephemeral:
+            post()
+        case .denied:
+            break
+        @unknown default:
+            break
+        }
+    }
+}
+
+@_cdecl("desktopctl_launcher_show_completion_notification")
+public func desktopctl_launcher_show_completion_notification(
+    _ title: UnsafePointer<CChar>?,
+    _ body: UnsafePointer<CChar>?,
+    _ sessionID: UnsafePointer<CChar>?
+) {
+    guard let titlePtr = title, let bodyPtr = body, let sessionIDPtr = sessionID else { return }
+    let title = String(cString: titlePtr)
+    let body = String(cString: bodyPtr)
+    let sessionID = String(cString: sessionIDPtr)
+    postCompletionNotification(title: title, body: body, sessionID: sessionID)
+}
+
+@_cdecl("desktopctl_launcher_set_notification_action_callback")
+public func desktopctl_launcher_set_notification_action_callback(
+    _ callback: NotificationActionCallback?
+) {
+    notificationDelegate.callback = callback
+    UNUserNotificationCenter.current().delegate = notificationDelegate
+}
 
 public typealias LauncherSettingsChangedCallback =
     @convention(c) (Int32, Int32, Int32) -> Void
@@ -1039,8 +1298,11 @@ public func desktopctl_launcher_set_snapshot(
     _ json: UnsafePointer<CChar>?,
     _ length: Int
 ) {
-    guard Thread.isMainThread, let json, length >= 0 else { return }
-    model?.applySnapshot(Data(bytes: json, count: length))
+    guard let json, length >= 0 else { return }
+    let data = Data(bytes: json, count: length)
+    DispatchQueue.main.async {
+        model?.applySnapshot(data)
+    }
 }
 
 @_cdecl("desktopctl_launcher_unmount")

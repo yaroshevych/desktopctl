@@ -23,9 +23,10 @@ terminal process.
   thread. One run per DesktopCtl session is permitted at a time.
 
 While a session is running, its view shows a native activity spinner and a
-`Stop` button. The composer remains disabled until Pi finishes. Stopping sets
-the request's cancellation token; the runner kills and reaps the Pi child, then
-persists the session as cancelled.
+`Stop` button. The composer remains enabled: follow-ups typed while Pi is
+working are shown as queued user bubbles and sent together after Pi finishes.
+Stopping sets the request's cancellation token; the runner kills and reaps the
+Pi child, then persists the session as cancelled.
 
 After Pi has produced a native session identity, the session view also offers
 `Open in Ghostty`. DesktopCtl activates Ghostty, creates a new window (never a
@@ -100,7 +101,7 @@ just -f src/desktop/Justfile release-gates
 ```
 
 For a manual smoke test, focus an email or other app, press `Option-Space`, enter
-`summarise this`, and close the panel while Pi runs. Confirm the completion HUD,
+`summarise this`, and close the panel while Pi runs. Confirm the native completion notification,
 reopen the launcher, open the unread session, and send a follow-up. Pi's desktop
 operations should use the captured topmost non-DesktopCtl window.
 
@@ -131,7 +132,8 @@ Manual checks:
    request path. Reopen; recent SwiftUI task rows should show title, preview,
    status, and unread state. Open one and confirm Rust receives its session ID.
 3. Check keyboard selection, history expansion, session view, follow-up, and
-   completion HUD behavior.
+   the native macOS completion notification. On the first notification, macOS
+   may ask for notification permission; allow it before checking the banner.
 4. Repeat on another Space and a full-screen app. Check panel placement,
    dismissal, and prior-app focus restoration.
 5. Select Japanese/Hiragana (or another IME), type marked text, then press

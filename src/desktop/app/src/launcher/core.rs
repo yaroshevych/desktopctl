@@ -73,6 +73,7 @@ fn default_render_keyboard_shortcuts() -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct CompletionNotice {
+    pub session_id: String,
     pub prompt: String,
     pub answer_preview: String,
     pub target_app: Option<String>,

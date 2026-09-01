@@ -414,16 +414,49 @@ impl AgentSessionStore {
         native_session_path: Option<String>,
         native_session_cwd: Option<String>,
     ) -> Result<(), SessionStoreError> {
+        self.bind_native_session_in_memory(
+            session_id,
+            native_session_id,
+            native_session_path,
+            native_session_cwd,
+        )?;
+        self.save()
+    }
+
+    /// Update native session identity without persisting immediately. Callers
+    /// that are completing a request can persist the identity together with
+    /// the final answer in one atomic save.
+    pub fn bind_native_session_in_memory(
+        &mut self,
+        session_id: &str,
+        native_session_id: Option<String>,
+        native_session_path: Option<String>,
+        native_session_cwd: Option<String>,
+    ) -> Result<(), SessionStoreError> {
         let session = self
             .get_mut(session_id)
             .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?;
         session.native_session_id = native_session_id;
         session.native_session_path = native_session_path;
         session.native_session_cwd = native_session_cwd;
-        self.save()
+        Ok(())
     }
 
     pub fn complete_request(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        answer: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<(), SessionStoreError> {
+        self.complete_request_in_memory(session_id, request_id, answer, now_ms)?;
+        self.save()
+    }
+
+    /// Complete a request in memory so a caller can publish the new state
+    /// before performing the durable save. The caller must save the store
+    /// before allowing the process to exit.
+    pub fn complete_request_in_memory(
         &mut self,
         session_id: &str,
         request_id: &str,
@@ -446,7 +479,7 @@ impl AgentSessionStore {
         session.active_request_id = None;
         session.unread = true;
         session.visited = false;
-        self.save()
+        Ok(())
     }
 
     pub fn fail_request(

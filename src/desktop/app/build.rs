@@ -49,6 +49,8 @@ fn main() {
         "Foundation",
         "-framework",
             "SwiftUI",
+        "-framework",
+        "UserNotifications",
         ]);
     if env::var("PROFILE").as_deref() == Ok("release") {
         swiftc.arg("-O");
@@ -81,4 +83,5 @@ fn main() {
     println!("cargo:rustc-link-lib=static=swiftCompatibility56");
     println!("cargo:rustc-link-lib=static=swiftCompatibilityPacks");
     println!("cargo:rustc-link-lib=static=desktopctl_launcher_ui");
+    println!("cargo:rustc-link-lib=framework=UserNotifications");
 }

@@ -110,6 +110,9 @@ mod controller {
             },
             open_shortcut,
         )?;
+        crate::launcher::swift_bridge::start_notification_action_observer(
+            launcher_ui::notification_action_callback,
+        );
         refresh();
         Ok(())
     }
@@ -136,6 +139,11 @@ mod controller {
     pub fn toggle() {
         if launcher_ui::is_open_requested() {
             launcher_ui::hide();
+            return;
+        }
+        if let Some(session_id) = launcher_ui::take_recent_notification_session() {
+            launcher_ui::show();
+            open_session(session_id);
             return;
         }
         // Capture focus synchronously before activating DesktopCtl. Do not query
@@ -825,6 +833,7 @@ end run"#;
         result: Result<crate::agent_runner::AgentResult, crate::agent_runner::AgentRunnerError>,
     ) {
         let mut notice = None;
+        let mut save_after_refresh = false;
         if let Some(mut state) = lock_state() {
             state.cancellations.remove(session_id);
             let follow_up_shortcut = launcher_ui::shortcut_label(state.open_shortcut);
@@ -868,7 +877,7 @@ end run"#;
                             ));
                         }
                     } else {
-                        if let Err(error) = state.store.bind_native_session(
+                        if let Err(error) = state.store.bind_native_session_in_memory(
                             session_id,
                             result.session.id,
                             native_path,
@@ -876,7 +885,7 @@ end run"#;
                         ) {
                             trace::log(format!("agent_launcher:native_session_error {error}"));
                         }
-                        if let Err(error) = state.store.complete_request(
+                        if let Err(error) = state.store.complete_request_in_memory(
                             session_id,
                             request_id,
                             &result.final_answer,
@@ -889,6 +898,7 @@ end run"#;
                                 &result.final_answer,
                                 &follow_up_shortcut,
                             ));
+                            save_after_refresh = true;
                         }
                     }
                 }
@@ -912,8 +922,21 @@ end run"#;
                     }
                 }
             }
+            if save_after_refresh {
+                state.snapshot_revision = state.snapshot_revision.wrapping_add(1);
+                let snapshot = snapshot(&state, state.snapshot_revision);
+                launcher_ui::refresh(snapshot);
+            }
         }
-        refresh();
+        if save_after_refresh {
+            if let Some(state) = lock_state() {
+                if let Err(error) = state.store.save() {
+                    trace::log(format!("agent_launcher:complete_save_error {error}"));
+                }
+            }
+        } else {
+            refresh();
+        }
         if !launcher_ui::is_open_requested() {
             if let Some(notice) = notice {
                 launcher_ui::show_completion(notice);
@@ -985,6 +1008,7 @@ end run"#;
                 launcher_ui::shortcut_label(launcher_ui::LauncherShortcut::default())
             });
         launcher_ui::show_completion_immediately(CompletionNotice {
+            session_id: String::new(),
             prompt: "hi finder".to_owned(),
             answer_preview: "Hi! What can I help you find?".to_owned(),
             target_app,
@@ -1011,6 +1035,7 @@ end run"#;
             .and_then(|target| target.app.clone())
             .filter(|app| !app.trim().is_empty());
         CompletionNotice {
+            session_id: session.id.clone(),
             prompt,
             answer_preview: truncate_one_line(answer, 120),
             target_app,
