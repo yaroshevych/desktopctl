@@ -65,7 +65,7 @@ pub(crate) fn set_agent_running(running: bool) {
     let generation = AGENT_ICON_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     AGENT_ICON_RUNNING.store(running, Ordering::SeqCst);
     if !running {
-        restore_tray_icon();
+        restore_tray_icon(generation);
         return;
     }
     thread::spawn(move || {
@@ -74,6 +74,11 @@ pub(crate) fn set_agent_running(running: bool) {
             && AGENT_ICON_GENERATION.load(Ordering::SeqCst) == generation
         {
             dispatch2::DispatchQueue::main().exec_async(move || {
+                if !AGENT_ICON_RUNNING.load(Ordering::SeqCst)
+                    || AGENT_ICON_GENERATION.load(Ordering::SeqCst) != generation
+                {
+                    return;
+                }
                 let icon = ICON_AGENT_FRAMES
                     .get()
                     .and_then(|frames| frames.get(frame % frames.len().max(1)))
@@ -90,18 +95,23 @@ pub(crate) fn set_agent_running(running: bool) {
             thread::sleep(Duration::from_millis(120));
         }
         if AGENT_ICON_GENERATION.load(Ordering::SeqCst) == generation {
-            restore_tray_icon();
+            restore_tray_icon(generation);
         }
     });
 }
 
-fn restore_tray_icon() {
-    thread::spawn(|| {
+fn restore_tray_icon(generation: u64) {
+    thread::spawn(move || {
         let overlay_running = ServiceClient
             .status()
             .map(|status| status.overlay_running)
             .unwrap_or(false);
         dispatch2::DispatchQueue::main().exec_async(move || {
+            if AGENT_ICON_RUNNING.load(Ordering::SeqCst)
+                || AGENT_ICON_GENERATION.load(Ordering::SeqCst) != generation
+            {
+                return;
+            }
             let icon = if overlay_running {
                 ICON_ACTIVE.get().cloned()
             } else {
@@ -206,72 +216,77 @@ pub fn run() -> Result<(), AppError> {
             return;
         }
         if event.id == toggle_cli_gui_ops_id {
-            let current = ServiceClient.status().ok();
-            let enabled = !current
-                .as_ref()
-                .map(|status| status.agent_access_enabled)
-                .unwrap_or(false);
-            let disabled = !enabled;
-            let result = ServiceClient.set_agent_access(enabled);
-            trace::log(format!("menubar:toggle_cli_gui_ops disabled={disabled}"));
+            thread::spawn(|| {
+                let current = ServiceClient.status().ok();
+                let enabled = !current
+                    .as_ref()
+                    .map(|status| status.agent_access_enabled)
+                    .unwrap_or(false);
+                let disabled = !enabled;
+                let result = ServiceClient.set_agent_access(enabled);
+                trace::log(format!("menubar:toggle_cli_gui_ops disabled={disabled}"));
 
-            if result.is_ok() {
-                on_gui_ops_state_changed(disabled);
-            }
-            if disabled && current.is_some_and(|status| status.overlay_running) {
-                stop_overlay_live_loop();
-                dispatch2::DispatchQueue::main().exec_async(move || {
-                    TRAY.with(|cell| {
-                        if let Some(tray) = cell.borrow().as_ref() {
-                            let _ = tray.set_icon_with_as_template(ICON_IDLE.get().cloned(), true);
-                        }
+                if result.is_ok() {
+                    on_gui_ops_state_changed(disabled);
+                }
+                if disabled && current.is_some_and(|status| status.overlay_running) {
+                    stop_overlay_live_loop();
+                    dispatch2::DispatchQueue::main().exec_async(|| {
+                        TRAY.with(|cell| {
+                            if let Some(tray) = cell.borrow().as_ref() {
+                                let _ =
+                                    tray.set_icon_with_as_template(ICON_IDLE.get().cloned(), true);
+                            }
+                        });
                     });
-                });
-            }
+                }
+            });
             return;
         }
         if event.id == toggle_overlay_id {
-            trace::log("menubar:toggle_overlay click");
-            let was_active = ServiceClient
-                .status()
-                .map(|status| status.overlay_running)
-                .unwrap_or(false);
-            let result = if was_active {
-                let result = ServiceClient.send(Command::OverlayStop);
-                if result.is_ok() {
-                    stop_overlay_live_loop();
-                }
-                result
-            } else {
-                let result = ServiceClient.send(Command::OverlayStart { duration_ms: None });
-                if result.is_ok() {
-                    start_overlay_live_loop();
-                }
-                result
-            };
-            if let Err(err) = result {
-                trace::log(format!("menubar:toggle_overlay err {err}"));
-                eprintln!("overlay toggle failed: {err}");
-            } else {
-                let is_active = ServiceClient
+            thread::spawn(|| {
+                trace::log("menubar:toggle_overlay click");
+                let was_active = ServiceClient
                     .status()
                     .map(|status| status.overlay_running)
-                    .unwrap_or(!was_active);
-                trace::log(format!("menubar:toggle_overlay ok active={is_active}"));
-                // Update icon on the main thread (TrayIcon is !Send).
-                dispatch2::DispatchQueue::main().exec_async(move || {
-                    let icon = if is_active {
-                        ICON_ACTIVE.get().cloned()
-                    } else {
-                        ICON_IDLE.get().cloned()
-                    };
-                    TRAY.with(|cell| {
-                        if let Some(tray) = cell.borrow().as_ref() {
-                            let _ = tray.set_icon_with_as_template(icon, true);
-                        }
+                    .unwrap_or(false);
+                let result = if was_active {
+                    let result = ServiceClient.send(Command::OverlayStop);
+                    if result.is_ok() {
+                        stop_overlay_live_loop();
+                    }
+                    result
+                } else {
+                    let result = ServiceClient.send(Command::OverlayStart { duration_ms: None });
+                    if result.is_ok() {
+                        start_overlay_live_loop();
+                    }
+                    result
+                };
+                if let Err(err) = result {
+                    trace::log(format!("menubar:toggle_overlay err {err}"));
+                    eprintln!("overlay toggle failed: {err}");
+                } else {
+                    let is_active = ServiceClient
+                        .status()
+                        .map(|status| status.overlay_running)
+                        .unwrap_or(!was_active);
+                    trace::log(format!("menubar:toggle_overlay ok active={is_active}"));
+                    // Update icon on the main thread (TrayIcon is !Send).
+                    dispatch2::DispatchQueue::main().exec_async(move || {
+                        let icon = if is_active {
+                            ICON_ACTIVE.get().cloned()
+                        } else {
+                            ICON_IDLE.get().cloned()
+                        };
+                        TRAY.with(|cell| {
+                            if let Some(tray) = cell.borrow().as_ref() {
+                                let _ = tray.set_icon_with_as_template(icon, true);
+                            }
+                        });
                     });
-                });
-            }
+                }
+            });
             return;
         }
         if event.id == quit_id {

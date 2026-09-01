@@ -176,10 +176,14 @@ define_class!(
             // AppKit may report the key-window change before it reports the
             // live-resize start. Give the resize hit-test a moment to settle
             // before treating this as an outside click.
+            let resignation_sequence = NEXT_LIFECYCLE_SEQUENCE.load(Ordering::SeqCst);
             let _ = DispatchQueue::main().after(
                 DispatchTime::NOW.time(OUTSIDE_CLICK_GRACE_NANOS),
-                || {
-                    if LIVE_RESIZE.load(Ordering::SeqCst) {
+                move || {
+                    if LIVE_RESIZE.load(Ordering::SeqCst)
+                        || !is_open_requested()
+                        || NEXT_LIFECYCLE_SEQUENCE.load(Ordering::SeqCst) != resignation_sequence
+                    {
                         return;
                     }
                     let should_hide = UI.with(|cell| {
@@ -411,8 +415,10 @@ pub(crate) unsafe extern "C" fn notification_action_callback(
     DispatchQueue::main().exec_async(move || {
         clear_notification_session(&session_id);
         show();
-        if let Some(callbacks) = CALLBACKS.get() {
-            (callbacks.on_action)(LauncherAction::OpenSession { session_id });
+        if let Some(on_action) = CALLBACKS.get().map(|callbacks| callbacks.on_action.clone()) {
+            thread::spawn(move || {
+                on_action(LauncherAction::OpenSession { session_id });
+            });
         }
     });
 }
@@ -468,16 +474,20 @@ unsafe extern "C" fn swift_action_callback(ptr: *const std::ffi::c_char, length:
     let Some((launcher_action, hide_before_dispatch)) = parsed else {
         return;
     };
-    // Swift can call back while Rust is updating the hosted view under a UiState
-    // RefCell borrow. Defer all UI/controller work until the callback unwinds.
-    DispatchQueue::main().exec_async(move || {
-        if hide_before_dispatch {
-            hide_on_main();
-        }
-        if let Some(callbacks) = CALLBACKS.get() {
-            (callbacks.on_action)(launcher_action);
-        }
-    });
+    let main_thread_only = matches!(launcher_action, LauncherAction::OpenSettings);
+    // Swift callbacks arrive on AppKit's main thread. Keep only presentation
+    // changes there; controller actions perform store/workspace/IPC work off-main.
+    if hide_before_dispatch {
+        hide_on_main();
+    }
+    let Some(on_action) = CALLBACKS.get().map(|callbacks| callbacks.on_action.clone()) else {
+        return;
+    };
+    if main_thread_only {
+        DispatchQueue::main().exec_async(move || on_action(launcher_action));
+    } else {
+        thread::spawn(move || on_action(launcher_action));
+    }
 }
 
 fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {

@@ -54,11 +54,17 @@ private final class LauncherModel: ObservableObject {
     @Published var showActionsMenu = false
     @Published private(set) var isScrolling = false
     @Published private(set) var queuedFollowUps: [String] = []
+    @Published private(set) var flushingFollowUps: [String] = []
     private var scrollGeneration = 0
     private var preserveScrollForNextSelection = false
     private var queuedFollowUpsFlushPending = false
+    private var followUpRequestPending = false
     private var snapshotParseGeneration: UInt64 = 0
     var callback: LauncherActionCallback?
+
+    var displayedQueuedFollowUps: [String] {
+        flushingFollowUps + queuedFollowUps
+    }
 
     func applySnapshot(_ data: Data) {
         snapshotParseGeneration &+= 1
@@ -123,10 +129,23 @@ private final class LauncherModel: ObservableObject {
     private func commitSnapshot(_ next: LauncherRenderState) {
         if next.sessionID != renderState.sessionID {
             queuedFollowUps.removeAll()
+            flushingFollowUps.removeAll()
             queuedFollowUpsFlushPending = false
+            followUpRequestPending = false
         }
         if next.sessionStatus == "Running" {
+            // The controller accepted the request represented by the batch.
+            flushingFollowUps.removeAll()
             queuedFollowUpsFlushPending = false
+            followUpRequestPending = false
+        } else if next.sessionStatus == "Failed" || next.sessionStatus == "Cancelled" {
+            // Keep text recoverable if the controller could not start the batch.
+            if !flushingFollowUps.isEmpty {
+                queuedFollowUps.insert(contentsOf: flushingFollowUps, at: 0)
+            }
+            flushingFollowUps.removeAll()
+            queuedFollowUpsFlushPending = false
+            followUpRequestPending = false
         }
         renderState = next
         if let selectedTaskID,
@@ -152,9 +171,12 @@ private final class LauncherModel: ObservableObject {
         let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         if renderState.screen == "Session", !renderState.sessionID.isEmpty {
-            if renderState.sessionStatus == "Running" {
+            if renderState.sessionStatus == "Running"
+                || queuedFollowUpsFlushPending
+                || followUpRequestPending {
                 queuedFollowUps.append(value)
             } else {
+                followUpRequestPending = true
                 emit(["type": "follow_up", "session_id": renderState.sessionID, "prompt": value])
             }
         } else {
@@ -172,8 +194,10 @@ private final class LauncherModel: ObservableObject {
         else { return }
 
         queuedFollowUpsFlushPending = true
-        let combinedPrompt = queuedFollowUps.joined(separator: "\n\n")
+        followUpRequestPending = true
+        flushingFollowUps = queuedFollowUps
         queuedFollowUps.removeAll()
+        let combinedPrompt = flushingFollowUps.joined(separator: "\n\n")
         emit([
             "type": "follow_up",
             "session_id": renderState.sessionID,
@@ -924,11 +948,17 @@ private struct LauncherRootView: View {
                         ForEach(Array(model.renderState.messages.enumerated()), id: \.offset) { index, message in
                             let bubbleColor = message.user
                                 ? Color(nsColor: .systemBlue)
-                                : Color(nsColor: .controlBackgroundColor)
+                                : Color.primary
+                            let bubbleOpacity = message.user ? 1.0 : 0.10
                             HStack {
                                 if message.user { Spacer(minLength: 42) }
                                 Text(message.text)
                                     .textSelection(.enabled)
+                                    .frame(
+                                        maxWidth: message.text.count > 180 ? 560 : nil,
+                                        alignment: .leading
+                                    )
+                                    .fixedSize(horizontal: false, vertical: true)
                                     .padding(.horizontal, 13)
                                     .padding(.vertical, 9)
                                     .foregroundColor(message.user ? .white : .primary)
@@ -942,7 +972,7 @@ private struct LauncherRootView: View {
                                                 .offset(x: message.user ? 3 : -3, y: 0)
                                         }
                                         .compositingGroup()
-                                        .opacity(message.user ? 1.0 : 0.85)
+                                        .opacity(bubbleOpacity)
                                     }
                                 if !message.user { Spacer(minLength: 42) }
                             }
@@ -954,6 +984,7 @@ private struct LauncherRootView: View {
                             .accessibilityLabel("\(message.user ? "You" : "Pi"): \(message.text)")
                         }
                         if model.renderState.sessionStatus == "Running" {
+                            let workingBubbleColor = Color.primary
                             HStack {
                                 HStack(spacing: 8) {
                                     ProgressView()
@@ -966,14 +997,14 @@ private struct LauncherRootView: View {
                                 .background {
                                     ZStack(alignment: .bottomLeading) {
                                         RoundedRectangle(cornerRadius: 17, style: .continuous)
-                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                            .fill(workingBubbleColor)
                                         SessionBubbleTail(pointsRight: false)
-                                            .fill(Color(nsColor: .controlBackgroundColor))
+                                            .fill(workingBubbleColor)
                                             .frame(width: 25, height: 14)
                                             .offset(x: -3, y: 0)
-                                    }
-                                    .compositingGroup()
-                                    .opacity(0.85)
+                                        }
+                                        .compositingGroup()
+                                        .opacity(0.10)
                                 }
                                 Spacer(minLength: 42)
                             }
@@ -983,11 +1014,16 @@ private struct LauncherRootView: View {
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel("Pi is working")
                         }
-                        ForEach(Array(model.queuedFollowUps.enumerated()), id: \.offset) { index, message in
+                        ForEach(Array(model.displayedQueuedFollowUps.enumerated()), id: \.offset) { index, message in
                             HStack {
                                 Spacer(minLength: 42)
                                 Text(message)
                                     .textSelection(.enabled)
+                                    .frame(
+                                        maxWidth: message.count > 180 ? 560 : nil,
+                                        alignment: .leading
+                                    )
+                                    .fixedSize(horizontal: false, vertical: true)
                                     .padding(.horizontal, 13)
                                     .padding(.vertical, 9)
                                     .foregroundColor(.white)
@@ -995,7 +1031,7 @@ private struct LauncherRootView: View {
                                         ZStack(alignment: .bottomTrailing) {
                                             RoundedRectangle(cornerRadius: 17, style: .continuous)
                                                 .fill(Color(nsColor: .systemBlue))
-                                            if index == model.queuedFollowUps.count - 1 {
+                                            if index == model.displayedQueuedFollowUps.count - 1 {
                                                 SessionBubbleTail(pointsRight: true)
                                                     .fill(Color(nsColor: .systemBlue))
                                                     .frame(width: 25, height: 14)
@@ -1017,7 +1053,7 @@ private struct LauncherRootView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onAppear {
-                    if let last = model.queuedFollowUps.indices.last {
+                    if let last = model.displayedQueuedFollowUps.indices.last {
                         DispatchQueue.main.async {
                             proxy.scrollTo("queued-\(last)", anchor: .bottom)
                         }
@@ -1035,7 +1071,7 @@ private struct LauncherRootView: View {
                     }
                 }
                 .onChange(of: model.renderState.messages.count) { _ in
-                    if let last = model.queuedFollowUps.indices.last {
+                    if let last = model.displayedQueuedFollowUps.indices.last {
                         DispatchQueue.main.async {
                             proxy.scrollTo("queued-\(last)", anchor: .bottom)
                         }
@@ -1046,19 +1082,21 @@ private struct LauncherRootView: View {
                         proxy.scrollTo(last, anchor: .bottom)
                     }
                 }
-                .onChange(of: model.queuedFollowUps.count) { _ in
-                    guard let last = model.queuedFollowUps.indices.last else { return }
+                .onChange(of: model.displayedQueuedFollowUps.count) { _ in
+                    guard let last = model.displayedQueuedFollowUps.indices.last else { return }
                     DispatchQueue.main.async {
                         proxy.scrollTo("queued-\(last)", anchor: .bottom)
                     }
                 }
                 .onChange(of: model.renderState.sessionStatus) { status in
-                    if status != "Running" {
+                    if status == "Completed" {
                         model.flushQueuedFollowUps()
                         return
                     }
-                    DispatchQueue.main.async {
-                        proxy.scrollTo("working", anchor: .bottom)
+                    if status == "Running" {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo("working", anchor: .bottom)
+                        }
                     }
                 }
             }

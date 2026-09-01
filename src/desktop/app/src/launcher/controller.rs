@@ -143,7 +143,7 @@ mod controller {
         }
         if let Some(session_id) = launcher_ui::take_recent_notification_session() {
             launcher_ui::show();
-            open_session(session_id);
+            thread::spawn(move || open_session(session_id));
             return;
         }
         // Capture focus synchronously before activating DesktopCtl. Do not query
