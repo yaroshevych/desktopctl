@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 // MARK: - Models
@@ -141,31 +142,179 @@ private final class SettingsPermissionsVM: ObservableObject {
 }
 
 private final class SettingsLauncherVM: ObservableObject {
+    private static let defaultShortcut = LauncherShortcut(keyCode: kVK_Space, modifiers: 1 << 11)
+    private static let saveQueue = DispatchQueue(label: "com.desktopctl.settings-save")
+
     @Published var renderKeyboardShortcuts: Bool
+    @Published var openShortcut: LauncherShortcut
+    @Published var isRecording = false
+
+    private var monitor: Any?
 
     init(_ input: LauncherInput) {
         renderKeyboardShortcuts = input.renderKeyboardShortcuts
+        openShortcut = input.openShortcut
+    }
+
+    deinit {
+        stopRecording()
     }
 
     func buildOutput() -> LauncherOutput {
-        LauncherOutput(saved: true, renderKeyboardShortcuts: renderKeyboardShortcuts)
+        LauncherOutput(
+            saved: true,
+            renderKeyboardShortcuts: renderKeyboardShortcuts,
+            openShortcut: openShortcut
+        )
     }
 
     func saveLive() {
         let value = renderKeyboardShortcuts
-        DispatchQueue.global().async {
-            _ = DaemonIPC.updateLauncherSettings(renderKeyboardShortcuts: value)
+        let shortcut = openShortcut
+        DaemonIPC.notifyLauncherSettingsChanged(
+            renderKeyboardShortcuts: value, openShortcut: shortcut)
+        Self.saveQueue.async {
+            _ = DaemonIPC.updateLauncherSettings(
+                renderKeyboardShortcuts: value, openShortcut: shortcut)
         }
     }
+
+    func beginRecording() {
+        stopRecording()
+        isRecording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return nil }
+            let keyCode = Int(event.keyCode)
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if keyCode == kVK_Escape && flags.isEmpty {
+                stopRecording()
+                return nil
+            }
+
+            let modifiers = Self.carbonModifiers(from: flags)
+            guard modifiers != 0 || Self.functionKeyNames[keyCode] != nil else { return nil }
+            openShortcut = LauncherShortcut(keyCode: keyCode, modifiers: modifiers)
+            stopRecording()
+            saveLive()
+            return nil
+        }
+    }
+
+    func stopRecording() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+        isRecording = false
+    }
+
+    var canResetShortcut: Bool {
+        openShortcut != Self.defaultShortcut
+    }
+
+    func resetShortcut() {
+        stopRecording()
+        openShortcut = Self.defaultShortcut
+        saveLive()
+    }
+
+    var shortcutLabel: String {
+        Self.modifierSymbols(from: openShortcut.modifiers) + Self.keyName(for: openShortcut.keyCode)
+    }
+
+    private static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> Int {
+        var modifiers = 0
+        if flags.contains(.command) { modifiers |= 1 << 8 }
+        if flags.contains(.shift) { modifiers |= 1 << 9 }
+        if flags.contains(.option) { modifiers |= 1 << 11 }
+        if flags.contains(.control) { modifiers |= 1 << 12 }
+        return modifiers
+    }
+
+    private static func modifierSymbols(from modifiers: Int) -> String {
+        var symbols = ""
+        if modifiers & (1 << 12) != 0 { symbols += "⌃" }
+        if modifiers & (1 << 11) != 0 { symbols += "⌥" }
+        if modifiers & (1 << 9) != 0 { symbols += "⇧" }
+        if modifiers & (1 << 8) != 0 { symbols += "⌘" }
+        return symbols
+    }
+
+    private static func keyName(for keyCode: Int) -> String {
+        if let special = specialKeyNames[keyCode] { return special }
+        if let function = functionKeyNames[keyCode] { return function }
+        return ansiKeyNames[keyCode] ?? "Key \(keyCode)"
+    }
+
+    private static let specialKeyNames: [Int: String] = [
+        kVK_Space: "Space", kVK_Return: "↵", kVK_ANSI_KeypadEnter: "⌤",
+        kVK_Tab: "⇥", kVK_Delete: "⌫", kVK_ForwardDelete: "⌦",
+        kVK_Escape: "⎋", kVK_LeftArrow: "←", kVK_RightArrow: "→",
+        kVK_UpArrow: "↑", kVK_DownArrow: "↓"
+    ]
+
+    private static let functionKeyNames: [Int: String] = [
+        kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4", kVK_F5: "F5",
+        kVK_F6: "F6", kVK_F7: "F7", kVK_F8: "F8", kVK_F9: "F9", kVK_F10: "F10",
+        kVK_F11: "F11", kVK_F12: "F12", kVK_F13: "F13", kVK_F14: "F14", kVK_F15: "F15",
+        kVK_F16: "F16", kVK_F17: "F17", kVK_F18: "F18", kVK_F19: "F19", kVK_F20: "F20"
+    ]
+
+    private static let ansiKeyNames: [Int: String] = [
+        0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
+        8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
+        16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6",
+        23: "5", 24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0",
+        30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P", 37: "L",
+        38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",", 44: "/",
+        45: "N", 46: "M", 47: ".", 50: "`"
+    ]
 }
 
 // MARK: - Tab content views
+
+private struct LauncherShortcutRecorder: View {
+    @ObservedObject var vm: SettingsLauncherVM
+
+    var body: some View {
+        Text(vm.isRecording ? "Listening…" : vm.shortcutLabel)
+            .font(.system(.body, design: .rounded).monospaced())
+            .foregroundStyle(vm.isRecording ? Color.accentColor : .primary)
+            .frame(width: 132, height: 26)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(vm.isRecording ? 0.12 : 0.07))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(vm.isRecording ? Color.accentColor : Color.secondary.opacity(0.35))
+            )
+            .contentShape(Rectangle())
+            .onTapGesture { vm.beginRecording() }
+            .help("Click, then type a keyboard shortcut")
+            .accessibilityAddTraits(.isButton)
+            .onDisappear { vm.stopRecording() }
+    }
+}
 
 private struct LauncherTabContent: View {
     @ObservedObject var vm: SettingsLauncherVM
 
     var body: some View {
         Form {
+            LabeledContent("App Launcher:") {
+                HStack(spacing: 6) {
+                    LauncherShortcutRecorder(vm: vm)
+                    Button { vm.resetShortcut() } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(!vm.canResetShortcut)
+                    .help("Reset to Option–Space")
+                }
+            }
+
             Picker("Agent:", selection: .constant("pi")) {
                 Text("Pi").tag("pi")
             }

@@ -979,6 +979,34 @@ private struct LauncherRootView: View {
 private var model: LauncherModel?
 private var hosting: NSHostingView<LauncherRootView>?
 private var scrollWheelMonitor: Any?
+private var launcherSettingsObserver: NSObjectProtocol?
+
+public typealias LauncherSettingsChangedCallback =
+    @convention(c) (Int32, Int32, Int32) -> Void
+
+@_cdecl("desktopctl_launcher_start_settings_observer")
+public func desktopctl_launcher_start_settings_observer(
+    _ callback: LauncherSettingsChangedCallback?
+) {
+    guard Thread.isMainThread else { return }
+    let center = DistributedNotificationCenter.default()
+    if let launcherSettingsObserver {
+        center.removeObserver(launcherSettingsObserver)
+    }
+    launcherSettingsObserver = center.addObserver(
+        forName: Notification.Name("com.desktopctl.launcher.settings.changed"),
+        object: nil,
+        queue: .main
+    ) { notification in
+        guard let userInfo = notification.userInfo,
+              let keyCode = (userInfo["key_code"] as? NSNumber)?.int32Value,
+              let modifiers = (userInfo["modifiers"] as? NSNumber)?.int32Value,
+              let renderKeyboardShortcuts =
+                  (userInfo["render_keyboard_shortcuts"] as? NSNumber)?.int32Value
+        else { return }
+        callback?(keyCode, modifiers, renderKeyboardShortcuts)
+    }
+}
 
 @_cdecl("desktopctl_launcher_mount")
 public func desktopctl_launcher_mount(

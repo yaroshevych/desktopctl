@@ -13,15 +13,35 @@ use crate::{app_policy::AppPolicyConfig, journal::JournalConfig};
 static CONFIG_IO: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LauncherShortcut {
+    #[serde(default = "default_launcher_key_code")]
+    pub key_code: u32,
+    #[serde(default = "default_launcher_modifiers")]
+    pub modifiers: u32,
+}
+
+impl Default for LauncherShortcut {
+    fn default() -> Self {
+        Self {
+            key_code: default_launcher_key_code(),
+            modifiers: default_launcher_modifiers(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
     #[serde(default = "default_render_keyboard_shortcuts")]
     pub render_keyboard_shortcuts: bool,
+    #[serde(default)]
+    pub open_shortcut: LauncherShortcut,
 }
 
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
             render_keyboard_shortcuts: true,
+            open_shortcut: LauncherShortcut::default(),
         }
     }
 }
@@ -95,6 +115,14 @@ fn load_config() -> Result<Option<DesktopConfig>, String> {
 
 fn default_render_keyboard_shortcuts() -> bool {
     true
+}
+
+fn default_launcher_key_code() -> u32 {
+    49 // kVK_Space
+}
+
+fn default_launcher_modifiers() -> u32 {
+    1 << 11 // optionKey
 }
 
 fn update_config(update: impl FnOnce(&mut DesktopConfig)) -> Result<(), String> {

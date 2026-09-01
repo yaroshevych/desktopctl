@@ -89,7 +89,7 @@ mod controller {
         if let Some(warning) = warning {
             trace::log(format!("agent_launcher:store_warning {warning}"));
         }
-        let render_keyboard_shortcuts = launcher_keyboard_shortcuts_setting();
+        let (render_keyboard_shortcuts, open_shortcut) = launcher_settings();
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
             render_keyboard_shortcuts,
@@ -101,11 +101,33 @@ mod controller {
             pending_preparation: None,
             snapshot_revision: 0,
         })));
-        launcher_ui::initialize(LauncherCallbacks {
-            on_action: Arc::new(handle_action),
-        })?;
+        crate::launcher::swift_bridge::start_settings_observer(launcher_settings_changed);
+        launcher_ui::initialize(
+            LauncherCallbacks {
+                on_action: Arc::new(handle_action),
+            },
+            open_shortcut,
+        )?;
         refresh();
         Ok(())
+    }
+
+    unsafe extern "C" fn launcher_settings_changed(
+        key_code: i32,
+        modifiers: i32,
+        render_keyboard_shortcuts: i32,
+    ) {
+        let (Ok(key_code), Ok(modifiers)) =
+            (u32::try_from(key_code), u32::try_from(modifiers))
+        else {
+            return;
+        };
+
+        if let Some(mut state) = lock_state() {
+            state.render_keyboard_shortcuts = render_keyboard_shortcuts != 0;
+        }
+        launcher_ui::reload_hotkey(launcher_ui::LauncherShortcut { key_code, modifiers });
+        refresh();
     }
 
     pub fn toggle() {
@@ -113,20 +135,9 @@ mod controller {
             launcher_ui::hide();
             return;
         }
-        reload_keyboard_shortcuts_setting();
-        // Capture focus synchronously before activating DesktopCtl. The service
-        // lookup remains a fallback for applications not represented by
-        // NSWorkspace.
-        let target_hint = crate::runtime::macos::frontmost_application_pid().or_else(|| {
-            crate::service_client::ServiceClient
-                .active_app_pid()
-                .map_err(|error| {
-                    trace::log(format!("agent_launcher:active_app_pid_error {error}"));
-                    error
-                })
-                .ok()
-                .flatten()
-        });
+        // Capture focus synchronously before activating DesktopCtl. Do not query
+        // the service here: this path runs on AppKit's main thread.
+        let target_hint = crate::runtime::macos::frontmost_application_pid();
         let generation = if let Some(mut state) = lock_state() {
             state.launch_generation = state.launch_generation.wrapping_add(1);
             state.pending_target = None;
@@ -918,24 +929,32 @@ end run"#;
         }
     }
 
-    fn launcher_keyboard_shortcuts_setting() -> bool {
+    fn launcher_settings() -> (bool, launcher_ui::LauncherShortcut) {
         crate::service_client::ServiceClient
             .settings()
             .ok()
             .and_then(|value| {
-                value
-                    .get("launcher")
-                    .and_then(|launcher| launcher.get("render_keyboard_shortcuts"))
+                let launcher = value.get("launcher")?;
+                let render = launcher
+                    .get("render_keyboard_shortcuts")
                     .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                let shortcut = launcher
+                    .get("open_shortcut")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or_default();
+                Some((render, shortcut))
             })
-            .unwrap_or(true)
+            .unwrap_or_else(|| (true, launcher_ui::LauncherShortcut::default()))
     }
 
     pub fn reload_keyboard_shortcuts_setting() {
-        let render_keyboard_shortcuts = launcher_keyboard_shortcuts_setting();
+        let (render_keyboard_shortcuts, open_shortcut) = launcher_settings();
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts;
         }
+        launcher_ui::reload_hotkey(open_shortcut);
         refresh();
     }
 

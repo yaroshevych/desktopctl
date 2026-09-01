@@ -48,11 +48,18 @@ struct AppPolicyOutput: Codable {
 
 struct LauncherInput: Codable {
     var renderKeyboardShortcuts: Bool
+    var openShortcut: LauncherShortcut
 }
 
 struct LauncherOutput: Codable {
     var saved: Bool
     var renderKeyboardShortcuts: Bool
+    var openShortcut: LauncherShortcut
+}
+
+struct LauncherShortcut: Codable, Equatable {
+    var keyCode: Int
+    var modifiers: Int
 }
 
 struct SetupAccessInput: Codable {

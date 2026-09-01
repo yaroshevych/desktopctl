@@ -3,9 +3,11 @@ use std::ffi::{CString, c_char, c_void};
 use super::core::LauncherSnapshot;
 
 type ActionCallback = unsafe extern "C" fn(*const c_char, usize);
+type SettingsChangedCallback = unsafe extern "C" fn(i32, i32, i32);
 
 unsafe extern "C" {
     fn desktopctl_launcher_mount(parent: *mut c_void, callback: Option<ActionCallback>) -> bool;
+    fn desktopctl_launcher_start_settings_observer(callback: Option<SettingsChangedCallback>);
     fn desktopctl_launcher_set_snapshot(json: *const c_char, length: usize);
     fn desktopctl_launcher_focus_prompt();
     fn desktopctl_launcher_prepare_for_presentation();
@@ -19,6 +21,10 @@ unsafe extern "C" {
 
 pub fn mount(parent: *mut c_void, callback: ActionCallback) -> bool {
     unsafe { desktopctl_launcher_mount(parent, Some(callback)) }
+}
+
+pub fn start_settings_observer(callback: SettingsChangedCallback) {
+    unsafe { desktopctl_launcher_start_settings_observer(Some(callback)) };
 }
 
 pub fn set_snapshot(snapshot: &LauncherSnapshot) {

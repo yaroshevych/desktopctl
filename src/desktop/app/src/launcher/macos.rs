@@ -30,7 +30,8 @@ use objc2::{
 use objc2_app_kit::{
     NSAnimationContext, NSApplication, NSBackingStoreType, NSColor, NSEvent,
     NSEventModifierFlags, NSFloatingWindowLevel, NSFont, NSPanel, NSTextField, NSView,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -51,8 +52,9 @@ const MAX_HISTORY_PANEL_HEIGHT: f64 = 450.0;
 const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 50.0;
 const COMPLETION_WIDTH: f64 = 520.0;
 const COMPLETION_HEIGHT: f64 = 48.0;
+const COMPLETION_CORNER_RADIUS: f64 = 10.0;
 const COMPLETION_FADE_SECONDS: f64 = 0.2;
-const COMPLETION_VISIBLE_MILLIS: u64 = 1_600;
+const COMPLETION_VISIBLE_MILLIS: u64 = 2_000;
 // Keep this in sync with the intrinsic two-line SwiftUI session row.
 const ROW_HEIGHT: f64 = 42.0;
 const ROW_SPACING: f64 = 2.0;
@@ -254,9 +256,12 @@ impl Default for UiState {
 
 thread_local! { static UI: RefCell<UiState> = RefCell::new(UiState::default()); }
 
-/// Register the native Option-Space hotkey and prepare the panel. Call once from
+/// Register the launcher hotkey and prepare the panel. Call once from
 /// the existing `NSApplication` main thread before `NSApplication::run`.
-pub fn initialize(callbacks: LauncherCallbacks) -> Result<(), AppError> {
+pub fn initialize(
+    callbacks: LauncherCallbacks,
+    shortcut: LauncherShortcut,
+) -> Result<(), AppError> {
     if CALLBACKS.set(callbacks).is_err() {
         return Ok(());
     }
@@ -265,7 +270,7 @@ pub fn initialize(callbacks: LauncherCallbacks) -> Result<(), AppError> {
             "launcher initialization must run on the main thread",
         ));
     };
-    install_hotkey()?;
+    install_hotkey(shortcut)?;
     create_panel(mtm)
 }
 
@@ -510,7 +515,7 @@ fn show_completion_on_main(notice: CompletionNotice) {
             panel.setHidesOnDeactivate(false);
             panel.setHasShadow(true);
             panel.setOpaque(false);
-            panel.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+            panel.setBackgroundColor(Some(&NSColor::clearColor()));
             panel.setCollectionBehavior(
                 NSWindowCollectionBehavior::CanJoinAllSpaces
                     | NSWindowCollectionBehavior::FullScreenAuxiliary
@@ -518,6 +523,18 @@ fn show_completion_on_main(notice: CompletionNotice) {
             );
             panel.setIgnoresMouseEvents(true);
             panel.setLevel(NSFloatingWindowLevel);
+
+            let surface = NSVisualEffectView::initWithFrame(
+                NSVisualEffectView::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(COMPLETION_WIDTH, COMPLETION_HEIGHT),
+                ),
+            );
+            surface.setMaterial(NSVisualEffectMaterial::HUDWindow);
+            surface.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            surface.setState(NSVisualEffectState::Active);
+            style_completion_surface(&surface);
 
             let label = text_field(
                 mtm,
@@ -530,7 +547,9 @@ fn show_completion_on_main(notice: CompletionNotice) {
             );
             label.setSelectable(false);
             label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
-            panel.setContentView(Some(&label));
+            label.setTextColor(Some(&NSColor::labelColor()));
+            surface.addSubview(&label);
+            panel.setContentView(Some(&surface));
             ui.completion_label = Some(label);
             ui.completion_panel = Some(panel);
         }
@@ -580,6 +599,22 @@ fn show_completion_on_main(notice: CompletionNotice) {
             });
         });
     });
+}
+
+fn style_completion_surface(view: &NSView) {
+    view.setWantsLayer(true);
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    let border_color = NSColor::separatorColor().colorWithAlphaComponent(0.5);
+    let border_cg_color: *mut AnyObject = unsafe { msg_send![&*border_color, CGColor] };
+    unsafe {
+        let _: () = msg_send![layer, setCornerRadius: COMPLETION_CORNER_RADIUS];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        let _: () = msg_send![layer, setBorderWidth: 0.5_f64];
+        let _: () = msg_send![layer, setBorderColor: border_cg_color];
+    }
 }
 
 fn animate_alpha(panel: &NSPanel, alpha: f64) {
@@ -1018,8 +1053,31 @@ struct EventHotKeyID {
 const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
 const EVENT_HOT_KEY_PRESSED: u32 = 5;
 const HOTKEY_ID: u32 = 0x4454_4c41;
-const OPTION_KEY: u32 = 1 << 11;
-const SPACE_KEYCODE: u32 = 49;
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+pub struct LauncherShortcut {
+    #[serde(default = "default_launcher_key_code")]
+    pub key_code: u32,
+    #[serde(default = "default_launcher_modifiers")]
+    pub modifiers: u32,
+}
+
+impl Default for LauncherShortcut {
+    fn default() -> Self {
+        Self {
+            key_code: default_launcher_key_code(),
+            modifiers: default_launcher_modifiers(),
+        }
+    }
+}
+
+fn default_launcher_key_code() -> u32 {
+    49 // kVK_Space
+}
+
+fn default_launcher_modifiers() -> u32 {
+    1 << 11 // optionKey
+}
 
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
@@ -1040,6 +1098,7 @@ unsafe extern "C" {
         options: u32,
         out_ref: *mut EventHotKeyRef,
     ) -> OSStatus;
+    fn UnregisterEventHotKey(hot_key_ref: EventHotKeyRef) -> OSStatus;
 }
 
 unsafe extern "C" fn hotkey_handler(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> OSStatus {
@@ -1049,35 +1108,51 @@ unsafe extern "C" fn hotkey_handler(_: *mut c_void, _: *mut c_void, _: *mut c_vo
     0
 }
 
-fn install_hotkey() -> Result<(), AppError> {
-    if HOTKEY_REGISTERED.swap(true, Ordering::SeqCst) {
-        return Ok(());
-    }
+fn install_hotkey(shortcut: LauncherShortcut) -> Result<(), AppError> {
     unsafe {
-        let event = EventTypeSpec {
-            event_class: EVENT_CLASS_KEYBOARD,
-            event_kind: EVENT_HOT_KEY_PRESSED,
-        };
-        let mut handler: *mut c_void = std::ptr::null_mut();
         let target = GetApplicationEventTarget();
-        let status = InstallEventHandler(
-            target,
-            hotkey_handler,
-            1,
-            &event,
-            std::ptr::null_mut(),
-            &mut handler,
-        );
-        if status != 0 {
-            HOTKEY_REGISTERED.store(false, Ordering::SeqCst);
-            return Err(AppError::backend_unavailable(format!(
-                "Carbon hotkey handler registration failed ({status})"
-            )));
+        if !HOTKEY_REGISTERED.swap(true, Ordering::SeqCst) {
+            let event = EventTypeSpec {
+                event_class: EVENT_CLASS_KEYBOARD,
+                event_kind: EVENT_HOT_KEY_PRESSED,
+            };
+            let mut handler: *mut c_void = std::ptr::null_mut();
+            let status = InstallEventHandler(
+                target,
+                hotkey_handler,
+                1,
+                &event,
+                std::ptr::null_mut(),
+                &mut handler,
+            );
+            if status != 0 {
+                HOTKEY_REGISTERED.store(false, Ordering::SeqCst);
+                return Err(AppError::backend_unavailable(format!(
+                    "Carbon hotkey handler registration failed ({status})"
+                )));
+            }
         }
-        let mut hotkey: EventHotKeyRef = std::ptr::null_mut();
-        let status = RegisterEventHotKey(
-            SPACE_KEYCODE,
-            OPTION_KEY,
+        register_hotkey(shortcut, target)
+    }
+}
+
+static HOTKEY_REF: std::sync::OnceLock<std::sync::Mutex<Option<usize>>> =
+    std::sync::OnceLock::new();
+
+fn hotkey_ref() -> &'static std::sync::Mutex<Option<usize>> {
+    HOTKEY_REF.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn register_hotkey(shortcut: LauncherShortcut, target: EventTargetRef) -> Result<(), AppError> {
+    let mut current = hotkey_ref()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let old = *current;
+    let mut hotkey: EventHotKeyRef = std::ptr::null_mut();
+    let status = unsafe {
+        RegisterEventHotKey(
+            shortcut.key_code,
+            shortcut.modifiers,
             EventHotKeyID {
                 signature: HOTKEY_ID,
                 id: 1,
@@ -1085,15 +1160,34 @@ fn install_hotkey() -> Result<(), AppError> {
             target,
             0,
             &mut hotkey,
-        );
-        if status != 0 {
-            HOTKEY_REGISTERED.store(false, Ordering::SeqCst);
-            return Err(AppError::backend_unavailable(format!(
-                "Option-Space registration failed ({status})"
-            )));
-        }
-        Ok(())
+        )
+    };
+    if status != 0 {
+        return Err(AppError::backend_unavailable(format!(
+            "launcher hotkey registration failed ({status})"
+        )));
     }
+    if let Some(old) = old {
+        let _ = unsafe { UnregisterEventHotKey(old as EventHotKeyRef) };
+    }
+    *current = Some(hotkey as usize);
+    Ok(())
+}
+
+pub fn reload_hotkey(shortcut: LauncherShortcut) {
+    if MainThreadMarker::new().is_some() {
+        let target = unsafe { GetApplicationEventTarget() };
+        if let Err(error) = register_hotkey(shortcut, target) {
+            eprintln!("launcher: {error}");
+        }
+        return;
+    }
+    DispatchQueue::main().exec_async(move || unsafe {
+        let target = GetApplicationEventTarget();
+        if let Err(error) = register_hotkey(shortcut, target) {
+            eprintln!("launcher: {error}");
+        }
+    });
 }
 
 #[cfg(test)]

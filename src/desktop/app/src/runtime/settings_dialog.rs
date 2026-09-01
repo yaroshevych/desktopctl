@@ -36,15 +36,35 @@ struct AppPolicyInput {
 }
 
 #[derive(Deserialize, Serialize)]
+struct LauncherShortcut {
+    #[serde(default = "default_launcher_key_code")]
+    key_code: u32,
+    #[serde(default = "default_launcher_modifiers")]
+    modifiers: u32,
+}
+
+impl Default for LauncherShortcut {
+    fn default() -> Self {
+        Self {
+            key_code: default_launcher_key_code(),
+            modifiers: default_launcher_modifiers(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
 struct LauncherInput {
     #[serde(default = "default_render_keyboard_shortcuts")]
     render_keyboard_shortcuts: bool,
+    #[serde(default)]
+    open_shortcut: LauncherShortcut,
 }
 
 impl Default for LauncherInput {
     fn default() -> Self {
         Self {
             render_keyboard_shortcuts: true,
+            open_shortcut: LauncherShortcut::default(),
         }
     }
 }
@@ -105,6 +125,7 @@ struct AppPolicyOutput {
 struct LauncherOutput {
     saved: bool,
     render_keyboard_shortcuts: bool,
+    open_shortcut: LauncherShortcut,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +137,14 @@ struct SettingsOutput {
 
 fn default_render_keyboard_shortcuts() -> bool {
     true
+}
+
+fn default_launcher_key_code() -> u32 {
+    49 // kVK_Space
+}
+
+fn default_launcher_modifiers() -> u32 {
+    1 << 11 // optionKey
 }
 
 static ACTIVE_DIALOG_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
@@ -235,6 +264,10 @@ pub fn show(initial_tab: Option<&'static str>) {
             },
             launcher: LauncherInput {
                 render_keyboard_shortcuts: stored.launcher.render_keyboard_shortcuts,
+                open_shortcut: LauncherShortcut {
+                    key_code: stored.launcher.open_shortcut.key_code,
+                    modifiers: stored.launcher.open_shortcut.modifiers,
+                },
             },
             initial_tab: initial_tab.map(|s| s.to_string()),
         };
@@ -309,6 +342,10 @@ pub fn show(initial_tab: Option<&'static str>) {
         let launcher = output.launcher.saved.then(|| {
             serde_json::json!({
                 "render_keyboard_shortcuts": output.launcher.render_keyboard_shortcuts,
+                "open_shortcut": {
+                    "key_code": output.launcher.open_shortcut.key_code,
+                    "modifiers": output.launcher.open_shortcut.modifiers,
+                },
             })
         });
         if journal.is_some() || app_policy.is_some() || launcher.is_some() {

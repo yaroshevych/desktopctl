@@ -6,6 +6,9 @@ import Foundation
 // process — calling those from a process without screen recording permission triggers macOS 15
 // system prompts.
 enum DaemonIPC {
+    private static let launcherSettingsChanged = Notification.Name(
+        "com.desktopctl.launcher.settings.changed")
+
     struct PermissionsResult {
         let accessibility: Bool
         let screenRecording: Bool
@@ -24,17 +27,37 @@ enum DaemonIPC {
 
     // Saves launcher preferences immediately, so they take effect without
     // waiting for the Settings window to close.
-    static func updateLauncherSettings(renderKeyboardShortcuts: Bool) -> Bool {
+    static func updateLauncherSettings(
+        renderKeyboardShortcuts: Bool, openShortcut: LauncherShortcut
+    ) -> Bool {
         let paths = socketPaths()
         for path in paths {
             if tryUpdateLauncherSettings(
                 socketPath: path,
-                renderKeyboardShortcuts: renderKeyboardShortcuts
+                renderKeyboardShortcuts: renderKeyboardShortcuts,
+                openShortcut: openShortcut
             ) {
                 return true
             }
         }
         return false
+    }
+
+    // Tell the already-running launcher first. Persistence happens separately so a
+    // slow daemon socket cannot delay the new hotkey.
+    static func notifyLauncherSettingsChanged(
+        renderKeyboardShortcuts: Bool, openShortcut: LauncherShortcut
+    ) {
+        DistributedNotificationCenter.default().postNotificationName(
+            launcherSettingsChanged,
+            object: nil,
+            userInfo: [
+                "key_code": openShortcut.keyCode,
+                "modifiers": openShortcut.modifiers,
+                "render_keyboard_shortcuts": renderKeyboardShortcuts,
+            ],
+            deliverImmediately: true
+        )
     }
 
     // MARK: - Private
@@ -101,7 +124,8 @@ enum DaemonIPC {
 
     private static func tryUpdateLauncherSettings(
         socketPath: String,
-        renderKeyboardShortcuts: Bool
+        renderKeyboardShortcuts: Bool,
+        openShortcut: LauncherShortcut
     ) -> Bool {
         let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else { return false }
@@ -129,7 +153,11 @@ enum DaemonIPC {
             "command": [
                 "cmd": "settings_update",
                 "launcher": [
-                    "render_keyboard_shortcuts": renderKeyboardShortcuts
+                    "render_keyboard_shortcuts": renderKeyboardShortcuts,
+                    "open_shortcut": [
+                        "key_code": openShortcut.keyCode,
+                        "modifiers": openShortcut.modifiers
+                    ]
                 ]
             ]
         ]
