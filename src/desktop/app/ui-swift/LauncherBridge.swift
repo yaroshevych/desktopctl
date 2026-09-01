@@ -292,11 +292,11 @@ private struct SessionBubbleTail: Shape {
 
         if pointsRight {
             path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
             path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
         } else {
             path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
-            path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
             path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
         }
 
@@ -856,23 +856,17 @@ private struct LauncherRootView: View {
                                     .padding(.horizontal, 13)
                                     .padding(.vertical, 9)
                                     .foregroundColor(message.user ? .white : .primary)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 17, style: .continuous)
-                                            .fill(
-                                                message.user
-                                                    ? Color(nsColor: .systemBlue)
-                                                    : Color.primary.opacity(0.10)
-                                            )
-                                    )
-                                    .overlay(alignment: message.user ? .bottomTrailing : .bottomLeading) {
-                                        SessionBubbleTail(pointsRight: message.user)
-                                            .fill(
-                                                message.user
-                                                    ? Color(nsColor: .systemBlue)
-                                                    : Color.primary.opacity(0.10)
-                                            )
-                                            .frame(width: 18, height: 10)
-                                            .offset(x: message.user ? 6 : -6, y: 4)
+                                    .background {
+                                        ZStack(alignment: message.user ? .bottomTrailing : .bottomLeading) {
+                                            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                                                .fill(message.user ? Color(nsColor: .systemBlue) : Color.primary)
+                                            SessionBubbleTail(pointsRight: message.user)
+                                                .fill(message.user ? Color(nsColor: .systemBlue) : Color.primary)
+                                                .frame(width: 25, height: 14)
+                                                .offset(x: message.user ? 3 : -3, y: 0)
+                                        }
+                                        .compositingGroup()
+                                        .opacity(message.user ? 1.0 : 0.10)
                                     }
                                 if !message.user { Spacer(minLength: 42) }
                             }
