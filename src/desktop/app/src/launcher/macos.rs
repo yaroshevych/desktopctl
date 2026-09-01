@@ -28,8 +28,9 @@ use objc2::{
     runtime::{AnyObject, Bool},
 };
 use objc2_app_kit::{
-    NSAnimationContext, NSApplication, NSBackingStoreType, NSColor, NSEvent,
-    NSEventModifierFlags, NSFloatingWindowLevel, NSFont, NSPanel, NSTextField, NSView,
+    NSAnimationContext, NSApplication, NSBackingStoreType, NSColor, NSCursor, NSEvent,
+    NSEventModifierFlags, NSFloatingWindowLevel, NSFont, NSPanel, NSTextAlignment, NSTextField,
+    NSView,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
@@ -51,10 +52,19 @@ const OUTSIDE_CLICK_GRACE_NANOS: i64 = 100_000_000;
 const MAX_HISTORY_PANEL_HEIGHT: f64 = 450.0;
 const MIN_LAUNCHER_PANEL_HEIGHT: f64 = 50.0;
 const COMPLETION_WIDTH: f64 = 520.0;
-const COMPLETION_HEIGHT: f64 = 48.0;
+const COMPLETION_HEIGHT: f64 = 116.0;
 const COMPLETION_CORNER_RADIUS: f64 = 10.0;
+const COMPLETION_CONTEXT_PILL_MAX_WIDTH: f64 = 220.0;
+const COMPLETION_CONTEXT_PILL_HEIGHT: f64 = 28.0;
+const COMPLETION_CONTEXT_PILL_HORIZONTAL_PADDING: f64 = 16.0;
+const COMPLETION_CONTEXT_PROMPT_GAP: f64 = 8.0;
+const COMPLETION_SEPARATOR_Y: f64 = 68.0;
+const COMPLETION_PROMPT_Y: f64 = 79.0;
+const COMPLETION_CONTEXT_PILL_Y: f64 = 78.0;
+const COMPLETION_ANSWER_Y: f64 = 38.0;
+const COMPLETION_FOOTER_Y: f64 = 12.0;
 const COMPLETION_FADE_SECONDS: f64 = 0.2;
-const COMPLETION_VISIBLE_MILLIS: u64 = 2_000;
+const COMPLETION_VISIBLE_MILLIS: u64 = 4_000;
 // Keep this in sync with the intrinsic two-line SwiftUI session row.
 const ROW_HEIGHT: f64 = 42.0;
 const ROW_SPACING: f64 = 2.0;
@@ -229,7 +239,11 @@ struct UiState {
     content: Option<Retained<NSView>>,
     show_all: bool,
     completion_panel: Option<Retained<NSPanel>>,
-    completion_label: Option<Retained<NSTextField>>,
+    completion_prompt_label: Option<Retained<NSTextField>>,
+    completion_answer_label: Option<Retained<NSTextField>>,
+    completion_follow_up_label: Option<Retained<NSTextField>>,
+    completion_context_pill: Option<Retained<NSView>>,
+    completion_context_label: Option<Retained<NSTextField>>,
     completion_generation: u64,
     anchor_visible_frame: Option<NSRect>,
     lifecycle_sequence: u64,
@@ -244,7 +258,11 @@ impl Default for UiState {
             content: None,
             show_all: false,
             completion_panel: None,
-            completion_label: None,
+            completion_prompt_label: None,
+            completion_answer_label: None,
+            completion_follow_up_label: None,
+            completion_context_pill: None,
+            completion_context_label: None,
             completion_generation: 0,
             anchor_visible_frame: None,
             lifecycle_sequence: 0,
@@ -333,7 +351,16 @@ pub fn show_completion(notice: CompletionNotice) {
         if is_visible() {
             return;
         }
-        show_completion_on_main(notice);
+        show_completion_on_main(notice, true);
+    });
+}
+
+pub fn show_completion_immediately(notice: CompletionNotice) {
+    DispatchQueue::main().exec_async(move || {
+        if is_visible() {
+            return;
+        }
+        show_completion_on_main(notice, false);
     });
 }
 
@@ -490,7 +517,7 @@ fn expand_history_on_main() {
     }
 }
 
-fn show_completion_on_main(notice: CompletionNotice) {
+fn show_completion_on_main(notice: CompletionNotice, animated: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -513,7 +540,7 @@ fn show_completion_on_main(notice: CompletionNotice) {
             panel.setFloatingPanel(true);
             panel.setBecomesKeyOnlyIfNeeded(true);
             panel.setHidesOnDeactivate(false);
-            panel.setHasShadow(true);
+            panel.setHasShadow(false);
             panel.setOpaque(false);
             panel.setBackgroundColor(Some(&NSColor::clearColor()));
             panel.setCollectionBehavior(
@@ -523,6 +550,22 @@ fn show_completion_on_main(notice: CompletionNotice) {
             );
             panel.setIgnoresMouseEvents(true);
             panel.setLevel(NSFloatingWindowLevel);
+
+            let container = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(COMPLETION_WIDTH, COMPLETION_HEIGHT),
+                ),
+            );
+            let arrow_cursor = NSCursor::arrowCursor();
+            container.addCursorRect_cursor(
+                NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(COMPLETION_WIDTH, COMPLETION_HEIGHT),
+                ),
+                &arrow_cursor,
+            );
 
             let surface = NSVisualEffectView::initWithFrame(
                 NSVisualEffectView::alloc(mtm),
@@ -535,43 +578,132 @@ fn show_completion_on_main(notice: CompletionNotice) {
             surface.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
             surface.setState(NSVisualEffectState::Active);
             style_completion_surface(&surface);
+            let scrim = completion_scrim_view(mtm);
+            surface.addSubview(&scrim);
+            let separator = completion_separator_view(mtm);
+            surface.addSubview(&separator);
 
-            let label = text_field(
+            let prompt_label = text_field(
                 mtm,
                 "",
                 NSRect::new(
-                    NSPoint::new(16.0, 8.0),
-                    NSSize::new(COMPLETION_WIDTH - 32.0, 32.0),
+                    NSPoint::new(16.0, COMPLETION_PROMPT_Y),
+                    NSSize::new(COMPLETION_WIDTH - 32.0, 22.0),
                 ),
                 false,
             );
-            label.setSelectable(false);
-            label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
-            label.setTextColor(Some(&NSColor::labelColor()));
-            surface.addSubview(&label);
-            panel.setContentView(Some(&surface));
-            ui.completion_label = Some(label);
+            prompt_label.setSelectable(false);
+            prompt_label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+            prompt_label.setTextColor(Some(&NSColor::labelColor()));
+
+            let answer_label = text_field(
+                mtm,
+                "",
+                NSRect::new(
+                    NSPoint::new(16.0, COMPLETION_ANSWER_Y),
+                    NSSize::new(COMPLETION_WIDTH - 32.0, 22.0),
+                ),
+                false,
+            );
+            answer_label.setSelectable(false);
+            answer_label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+            answer_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+
+            let follow_up_label = text_field(
+                mtm,
+                "",
+                NSRect::new(
+                    NSPoint::new(16.0, COMPLETION_FOOTER_Y),
+                    NSSize::new(COMPLETION_WIDTH - 32.0, 18.0),
+                ),
+                false,
+            );
+            follow_up_label.setSelectable(false);
+            follow_up_label.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+            follow_up_label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+            follow_up_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+
+            let (context_pill, context_label) = completion_context_pill(mtm);
+            surface.addSubview(&context_pill);
+            surface.addSubview(&prompt_label);
+            surface.addSubview(&answer_label);
+            surface.addSubview(&follow_up_label);
+            container.addSubview(&surface);
+            panel.setContentView(Some(&container));
+            ui.completion_prompt_label = Some(prompt_label);
+            ui.completion_answer_label = Some(answer_label);
+            ui.completion_follow_up_label = Some(follow_up_label);
+            ui.completion_context_pill = Some(context_pill);
+            ui.completion_context_label = Some(context_label);
             ui.completion_panel = Some(panel);
         }
 
         ui.completion_generation = ui.completion_generation.wrapping_add(1);
         let generation = ui.completion_generation;
         let panel = ui.completion_panel.as_ref().unwrap();
-        let preview = if notice.answer_preview.trim().is_empty() {
-            notice.title
+        let context_pill_width = if let (Some(pill), Some(label)) = (
+            ui.completion_context_pill.as_ref(),
+            ui.completion_context_label.as_ref(),
+        ) {
+            if let Some(app) = notice.target_app.as_deref() {
+                let width = layout_completion_context_pill(pill, label, app);
+                pill.setHidden(false);
+                width
+            } else {
+                pill.setHidden(true);
+                0.0
+            }
         } else {
-            notice.answer_preview
+            0.0
         };
-        ui.completion_label
+        ui.completion_prompt_label
             .as_ref()
             .unwrap()
-            .setStringValue(&NSString::from_str(&one_line(&preview, 120)));
+            .setFrame(NSRect::new(
+                NSPoint::new(16.0, COMPLETION_PROMPT_Y),
+                NSSize::new(
+                    if context_pill_width > 0.0 {
+                        COMPLETION_WIDTH
+                            - 32.0
+                            - context_pill_width
+                            - COMPLETION_CONTEXT_PROMPT_GAP
+                    } else {
+                        COMPLETION_WIDTH - 32.0
+                    },
+                    22.0,
+                ),
+            ));
+        ui.completion_prompt_label
+            .as_ref()
+            .unwrap()
+            .setStringValue(&NSString::from_str(&one_line(&notice.prompt, 120)));
+        ui.completion_answer_label
+            .as_ref()
+            .unwrap()
+            .setStringValue(&NSString::from_str(&one_line(&notice.answer_preview, 120)));
+        ui.completion_follow_up_label
+            .as_ref()
+            .unwrap()
+            .setStringValue(&NSString::from_str(&format!(
+                "{} for follow-up",
+                notice.follow_up_shortcut
+            )));
         position_completion(panel, ui.anchor_visible_frame);
-        panel.setAlphaValue(0.0);
-        panel.orderFrontRegardless();
-        animate_alpha(panel, 1.0);
+        NSCursor::arrowCursor().set();
+        if animated {
+            panel.setAlphaValue(0.0);
+            panel.orderFrontRegardless();
+            animate_alpha(panel, 1.0);
+        } else {
+            panel.setAlphaValue(1.0);
+            panel.orderFrontRegardless();
+        }
         generation
     });
+
+    if !animated {
+        return;
+    }
 
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(COMPLETION_VISIBLE_MILLIS));
@@ -599,6 +731,113 @@ fn show_completion_on_main(notice: CompletionNotice) {
             });
         });
     });
+}
+
+fn completion_scrim_view(mtm: MainThreadMarker) -> Retained<NSView> {
+    let scrim = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(COMPLETION_WIDTH, COMPLETION_HEIGHT),
+        ),
+    );
+    scrim.setWantsLayer(true);
+    let layer: *mut AnyObject = unsafe { msg_send![&*scrim, layer] };
+    if !layer.is_null() {
+        let color = NSColor::blackColor().colorWithAlphaComponent(0.22);
+        let cg_color: *mut AnyObject = unsafe { msg_send![&*color, CGColor] };
+        unsafe {
+            let _: () = msg_send![layer, setBackgroundColor: cg_color];
+        }
+    }
+    scrim
+}
+
+fn completion_separator_view(mtm: MainThreadMarker) -> Retained<NSView> {
+    let separator = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0.0, COMPLETION_SEPARATOR_Y),
+            NSSize::new(COMPLETION_WIDTH, 0.5),
+        ),
+    );
+    separator.setWantsLayer(true);
+    let layer: *mut AnyObject = unsafe { msg_send![&*separator, layer] };
+    if !layer.is_null() {
+        let color = NSColor::tertiaryLabelColor().colorWithAlphaComponent(0.24);
+        let cg_color: *mut AnyObject = unsafe { msg_send![&*color, CGColor] };
+        unsafe {
+            let _: () = msg_send![layer, setBackgroundColor: cg_color];
+        }
+    }
+    separator
+}
+
+fn completion_context_pill(
+    mtm: MainThreadMarker,
+) -> (Retained<NSView>, Retained<NSTextField>) {
+    let pill = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0.0, COMPLETION_CONTEXT_PILL_Y),
+            NSSize::new(64.0, COMPLETION_CONTEXT_PILL_HEIGHT),
+        ),
+    );
+    style_completion_pill(&pill);
+
+    let label = text_field(
+        mtm,
+        "",
+        NSRect::new(
+            NSPoint::new(8.0, 2.0),
+            NSSize::new(48.0, 20.0),
+        ),
+        false,
+    );
+    label.setSelectable(false);
+    label.setAlignment(NSTextAlignment::Center);
+    label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+    label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+
+    pill.addSubview(&label);
+    pill.setHidden(true);
+    (pill, label)
+}
+
+fn layout_completion_context_pill(
+    pill: &NSView,
+    label: &NSTextField,
+    app: &str,
+) -> f64 {
+    label.setStringValue(&NSString::from_str(app));
+    label.sizeToFit();
+    let text_width = label.frame().size.width;
+    let width = (text_width + COMPLETION_CONTEXT_PILL_HORIZONTAL_PADDING)
+        .clamp(64.0, COMPLETION_CONTEXT_PILL_MAX_WIDTH);
+    pill.setFrame(NSRect::new(
+        NSPoint::new(COMPLETION_WIDTH - 16.0 - width, COMPLETION_CONTEXT_PILL_Y),
+        NSSize::new(width, COMPLETION_CONTEXT_PILL_HEIGHT),
+    ));
+    label.setFrame(NSRect::new(
+        NSPoint::new(8.0, 2.0),
+        NSSize::new(width - COMPLETION_CONTEXT_PILL_HORIZONTAL_PADDING, 20.0),
+    ));
+    width
+}
+
+fn style_completion_pill(view: &NSView) {
+    view.setWantsLayer(true);
+    let layer: *mut AnyObject = unsafe { msg_send![view, layer] };
+    if layer.is_null() {
+        return;
+    }
+    let background = NSColor::whiteColor().colorWithAlphaComponent(0.07);
+    let background_cg_color: *mut AnyObject = unsafe { msg_send![&*background, CGColor] };
+    unsafe {
+        let _: () = msg_send![layer, setCornerRadius: 10.0_f64];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        let _: () = msg_send![layer, setBackgroundColor: background_cg_color];
+    }
 }
 
 fn style_completion_surface(view: &NSView) {
@@ -1077,6 +1316,104 @@ fn default_launcher_key_code() -> u32 {
 
 fn default_launcher_modifiers() -> u32 {
     1 << 11 // optionKey
+}
+
+pub fn shortcut_label(shortcut: LauncherShortcut) -> String {
+    let mut label = String::new();
+    if shortcut.modifiers & (1 << 12) != 0 {
+        label.push('⌃');
+    }
+    if shortcut.modifiers & (1 << 11) != 0 {
+        label.push('⌥');
+    }
+    if shortcut.modifiers & (1 << 9) != 0 {
+        label.push('⇧');
+    }
+    if shortcut.modifiers & (1 << 8) != 0 {
+        label.push('⌘');
+    }
+    label.push_str(match shortcut.key_code {
+        49 => "Space",
+        36 => "↵",
+        76 => "⌤",
+        48 => "⇥",
+        51 => "⌫",
+        117 => "⌦",
+        53 => "⎋",
+        123 => "←",
+        124 => "→",
+        126 => "↑",
+        125 => "↓",
+        122 => "F1",
+        120 => "F2",
+        99 => "F3",
+        118 => "F4",
+        96 => "F5",
+        97 => "F6",
+        98 => "F7",
+        100 => "F8",
+        101 => "F9",
+        109 => "F10",
+        103 => "F11",
+        111 => "F12",
+        105 => "F13",
+        107 => "F14",
+        113 => "F15",
+        106 => "F16",
+        64 => "F17",
+        79 => "F18",
+        80 => "F19",
+        90 => "F20",
+        0 => "A",
+        1 => "S",
+        2 => "D",
+        3 => "F",
+        4 => "H",
+        5 => "G",
+        6 => "Z",
+        7 => "X",
+        8 => "C",
+        9 => "V",
+        11 => "B",
+        12 => "Q",
+        13 => "W",
+        14 => "E",
+        15 => "R",
+        16 => "Y",
+        17 => "T",
+        18 => "1",
+        19 => "2",
+        20 => "3",
+        21 => "4",
+        22 => "6",
+        23 => "5",
+        24 => "=",
+        25 => "9",
+        26 => "7",
+        27 => "-",
+        28 => "8",
+        29 => "0",
+        30 => "]",
+        31 => "O",
+        32 => "U",
+        33 => "[",
+        34 => "I",
+        35 => "P",
+        37 => "L",
+        38 => "J",
+        39 => "'",
+        40 => "K",
+        41 => ";",
+        42 => "\\",
+        43 => ",",
+        44 => "/",
+        45 => "N",
+        46 => "M",
+        47 => ".",
+        50 => "`",
+        key_code => return format!("{label}Key {key_code}"),
+    });
+    label
 }
 
 #[link(name = "Carbon", kind = "framework")]

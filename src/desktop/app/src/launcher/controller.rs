@@ -34,6 +34,7 @@ mod controller {
     struct State {
         store: AgentSessionStore,
         render_keyboard_shortcuts: bool,
+        open_shortcut: launcher_ui::LauncherShortcut,
         pending_target: Option<TargetWindowMetadata>,
         restore_pid: Option<i64>,
         launch_generation: u64,
@@ -93,6 +94,7 @@ mod controller {
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
             render_keyboard_shortcuts,
+            open_shortcut,
             pending_target: None,
             restore_pid: None,
             launch_generation: 0,
@@ -125,6 +127,7 @@ mod controller {
 
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts != 0;
+            state.open_shortcut = launcher_ui::LauncherShortcut { key_code, modifiers };
         }
         launcher_ui::reload_hotkey(launcher_ui::LauncherShortcut { key_code, modifiers });
         refresh();
@@ -389,6 +392,9 @@ mod controller {
         let Some(native_session) = native_session else {
             return;
         };
+        let follow_up_shortcut = lock_state()
+            .map(|state| launcher_ui::shortcut_label(state.open_shortcut))
+            .unwrap_or_else(|| launcher_ui::shortcut_label(launcher_ui::LauncherShortcut::default()));
         thread::spawn(move || {
             let result = (|| -> Result<(), String> {
                 let pi = discover_pi_executable().map_err(|error| error.to_string())?;
@@ -425,10 +431,11 @@ end run"#;
                 }
             })();
             if let Err(error) = result {
-                launcher_ui::show_completion(CompletionNotice {
-                    title: session.title,
-                    answer_preview: truncate_one_line(&error, 120),
-                });
+                launcher_ui::show_completion(completion_notice(
+                    &session,
+                    &error,
+                    &follow_up_shortcut,
+                ));
             }
         });
     }
@@ -820,6 +827,7 @@ end run"#;
         let mut notice = None;
         if let Some(mut state) = lock_state() {
             state.cancellations.remove(session_id);
+            let follow_up_shortcut = launcher_ui::shortcut_label(state.open_shortcut);
             set_running(!state.cancellations.is_empty());
             match result {
                 Ok(result) => {
@@ -853,10 +861,11 @@ end run"#;
                             ));
                         }
                         if let Some(session) = state.store.get(session_id) {
-                            notice = Some(CompletionNotice {
-                                title: session.title.clone(),
-                                answer_preview: truncate_one_line(&message, 120),
-                            });
+                            notice = Some(completion_notice(
+                                session,
+                                &message,
+                                &follow_up_shortcut,
+                            ));
                         }
                     } else {
                         if let Err(error) = state.store.bind_native_session(
@@ -875,10 +884,11 @@ end run"#;
                         ) {
                             trace::log(format!("agent_launcher:complete_error {error}"));
                         } else if let Some(session) = state.store.get(session_id) {
-                            notice = Some(CompletionNotice {
-                                title: session.title.clone(),
-                                answer_preview: truncate_one_line(&result.final_answer, 120),
-                            });
+                            notice = Some(completion_notice(
+                                session,
+                                &result.final_answer,
+                                &follow_up_shortcut,
+                            ));
                         }
                     }
                 }
@@ -894,10 +904,11 @@ end run"#;
                             .store
                             .fail_request(session_id, request_id, &message, unix_now_ms());
                     if let Some(session) = state.store.get(session_id) {
-                        notice = Some(CompletionNotice {
-                            title: session.title.clone(),
-                            answer_preview: truncate_one_line(&message, 120),
-                        });
+                        notice = Some(completion_notice(
+                            session,
+                            &message,
+                            &follow_up_shortcut,
+                        ));
                     }
                 }
             }
@@ -953,9 +964,58 @@ end run"#;
         let (render_keyboard_shortcuts, open_shortcut) = launcher_settings();
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts;
+            state.open_shortcut = open_shortcut;
         }
         launcher_ui::reload_hotkey(open_shortcut);
         refresh();
+    }
+
+    pub fn show_fake_completion_if_requested() {
+        let Ok(value) = std::env::var("DESKTOPCTL_FAKE_TOAST") else {
+            return;
+        };
+        let target_app = match value.trim() {
+            "" | "1" | "true" => Some("Finder".to_owned()),
+            "none" | "no-context" => None,
+            app => Some(app.to_owned()),
+        };
+        let follow_up_shortcut = lock_state()
+            .map(|state| launcher_ui::shortcut_label(state.open_shortcut))
+            .unwrap_or_else(|| {
+                launcher_ui::shortcut_label(launcher_ui::LauncherShortcut::default())
+            });
+        launcher_ui::show_completion_immediately(CompletionNotice {
+            prompt: "hi finder".to_owned(),
+            answer_preview: "Hi! What can I help you find?".to_owned(),
+            target_app,
+            follow_up_shortcut,
+        });
+    }
+
+    fn completion_notice(
+        session: &AgentSession,
+        answer: &str,
+        follow_up_shortcut: &str,
+    ) -> CompletionNotice {
+        let prompt = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == SessionMessageRole::User)
+            .map(|message| truncate_one_line(&message.text, 120))
+            .filter(|prompt| !prompt.is_empty())
+            .unwrap_or_else(|| session.title.clone());
+        let target_app = session
+            .target_window
+            .as_ref()
+            .and_then(|target| target.app.clone())
+            .filter(|app| !app.trim().is_empty());
+        CompletionNotice {
+            prompt,
+            answer_preview: truncate_one_line(answer, 120),
+            target_app,
+            follow_up_shortcut: follow_up_shortcut.to_owned(),
+        }
     }
 
     fn snapshot(state: &State, revision: u64) -> LauncherSnapshot {
@@ -1154,4 +1214,7 @@ end run"#;
 }
 
 #[cfg(target_os = "macos")]
-pub use controller::{RunningHandler, initialize, reload_keyboard_shortcuts_setting, toggle};
+pub use controller::{
+    RunningHandler, initialize, reload_keyboard_shortcuts_setting,
+    show_fake_completion_if_requested, toggle,
+};

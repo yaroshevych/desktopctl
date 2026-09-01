@@ -135,6 +135,7 @@ pub fn run() -> Result<(), AppError> {
     let missing_permissions =
         !permissions.accessibility.granted || !permissions.screen_recording.granted;
     agent_launcher::initialize(std::sync::Arc::new(set_agent_running))?;
+    agent_launcher::show_fake_completion_if_requested();
 
     let journal_enabled = client
         .settings()
