@@ -59,6 +59,9 @@ immediately, so the Settings window does not need to close or reload manually.
 
 - Launcher starts with the active window context. Opening a session keeps the
   same app context (for example, Safari) until selection changes.
+- The Options menu's `Share window context` checkbox is enabled by default and
+  applies to both launcher and session prompts. Disabling it sends the prompt
+  without target-window or detailed DesktopCtl context.
 - Context button label is `Agent Context` when no window is selected; otherwise
   it shows the selected app/window name. Its icon is
   `macwindow.badge.plus`.

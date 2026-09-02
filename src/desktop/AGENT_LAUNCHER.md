@@ -53,11 +53,13 @@ Pi is invoked directly with an argument array in non-interactive JSON mode. No
 shell is involved and user input is not interpolated into a command string. The
 runner reads JSON Lines, records the native session identifier from the session
 header, and displays only text blocks from the final assistant `message_end`.
-Follow-ups pass the persisted native session identifier back to Pi. The appended
-system instruction is separate from the user message and contains the captured
-topmost window's concise `--active-window <id>` selector plus compact Markdown
-environment context. Detailed tokenized contents are refreshed into
-`<session-workspace>/<window_id>.md`, which Pi can read when needed.
+Follow-ups pass the persisted native session identifier back to Pi. When the
+launcher's Options menu has `Share window context` enabled (the default), the
+appended system instruction is separate from the user message and contains the
+captured topmost window's concise `--active-window <id>` selector plus compact
+Markdown environment context. Detailed tokenized contents are refreshed into
+`<session-workspace>/<window_id>.md`, which Pi can read when needed. With the
+option disabled, the request includes no target-window or window-context prompt.
 
 `Agent Launcher…` is the first menu-bar menu item. While one or more Pi requests
 are running, DesktopCtl's aperture tray icon rotates and returns to the normal

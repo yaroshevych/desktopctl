@@ -52,6 +52,9 @@ private final class LauncherModel: ObservableObject {
     @Published var selectedTaskID: String?
     @Published var showAllFocused = false
     @Published var showActionsMenu = false
+    @Published private(set) var actionsMenuFocusIndex: Int?
+    @Published private(set) var actionsMenuFocusIsKeyboard = false
+    @Published var shareWindowContext = true
     @Published private(set) var isScrolling = false
     @Published private(set) var queuedFollowUps: [String] = []
     @Published private(set) var flushingFollowUps: [String] = []
@@ -177,10 +180,19 @@ private final class LauncherModel: ObservableObject {
                 queuedFollowUps.append(value)
             } else {
                 followUpRequestPending = true
-                emit(["type": "follow_up", "session_id": renderState.sessionID, "prompt": value])
+                emit([
+                    "type": "follow_up",
+                    "session_id": renderState.sessionID,
+                    "prompt": value,
+                    "share_context": shareWindowContext,
+                ])
             }
         } else {
-            emit(["type": "new_request", "prompt": value])
+            emit([
+                "type": "new_request",
+                "prompt": value,
+                "share_context": shareWindowContext,
+            ])
         }
         prompt = ""
     }
@@ -202,6 +214,7 @@ private final class LauncherModel: ObservableObject {
             "type": "follow_up",
             "session_id": renderState.sessionID,
             "prompt": combinedPrompt,
+            "share_context": shareWindowContext,
         ])
     }
 
@@ -280,10 +293,64 @@ private final class LauncherModel: ObservableObject {
         emit(["type": "open_in_ghostty", "session_id": renderState.sessionID])
     }
 
-    func toggleActionsMenu() {
+    func toggleActionsMenuFromMouse() {
+        toggleActionsMenu(selectingTopForKeyboard: false)
+    }
+
+    func toggleActionsMenuFromKeyboard() {
+        toggleActionsMenu(selectingTopForKeyboard: true)
+    }
+
+    private func toggleActionsMenu(selectingTopForKeyboard: Bool) {
+        let opening = !showActionsMenu
         withAnimation(.easeOut(duration: 0.16)) {
-            showActionsMenu.toggle()
+            showActionsMenu = opening
+            actionsMenuFocusIndex = opening && selectingTopForKeyboard ? 0 : nil
+            actionsMenuFocusIsKeyboard = opening && selectingTopForKeyboard
         }
+    }
+
+    func focusActionsMenuItem(_ index: Int, fromKeyboard: Bool) {
+        guard showActionsMenu, index >= 0, index < actionsMenuItemCount else { return }
+        actionsMenuFocusIndex = index
+        actionsMenuFocusIsKeyboard = fromKeyboard
+    }
+
+    func clearMouseActionsMenuFocus(_ index: Int) {
+        guard showActionsMenu,
+              !actionsMenuFocusIsKeyboard,
+              actionsMenuFocusIndex == index
+        else { return }
+        actionsMenuFocusIndex = nil
+    }
+
+    func moveActionsMenuFocus(delta: Int, escapeToPromptAtTop: Bool) -> Bool {
+        guard showActionsMenu, actionsMenuItemCount > 0 else { return false }
+        let current: Int
+        if let actionsMenuFocusIndex {
+            current = actionsMenuFocusIndex
+        } else {
+            current = delta < 0 ? 0 : actionsMenuItemCount - 1
+        }
+        if escapeToPromptAtTop, delta < 0, current == 0 {
+            _ = dismissActionsMenu()
+            focusPrompt()
+            return true
+        }
+        actionsMenuFocusIsKeyboard = true
+        actionsMenuFocusIndex = (current + delta + actionsMenuItemCount) % actionsMenuItemCount
+        return true
+    }
+
+    private var actionsMenuItemCount: Int { 2 }
+
+    func toggleShareWindowContext() {
+        shareWindowContext.toggle()
+    }
+
+    func activateShareWindowContextShortcut() {
+        focusActionsMenuItem(0, fromKeyboard: true)
+        toggleShareWindowContext()
     }
 
     func expandAllHistory() {
@@ -311,15 +378,30 @@ private final class LauncherModel: ObservableObject {
         guard showActionsMenu else { return false }
         withAnimation(.easeOut(duration: 0.12)) {
             showActionsMenu = false
+            actionsMenuFocusIndex = nil
+            actionsMenuFocusIsKeyboard = false
         }
         return true
     }
 
     func activateActionsMenu() -> Bool {
         guard showActionsMenu else { return false }
-        showActionsMenu = false
-        emit(["type": "open_settings"])
+        switch actionsMenuFocusIndex ?? 0 {
+        case 0:
+            toggleShareWindowContext()
+        case 1:
+            openSettings()
+        default:
+            return false
+        }
         return true
+    }
+
+    func openSettings() {
+        showActionsMenu = false
+        actionsMenuFocusIndex = nil
+        actionsMenuFocusIsKeyboard = false
+        emit(["type": "open_settings"])
     }
 
     func prepareForPresentation() {
@@ -328,6 +410,8 @@ private final class LauncherModel: ObservableObject {
         showAllFocused = false
         preserveScrollForNextSelection = false
         showActionsMenu = false
+        actionsMenuFocusIndex = nil
+        actionsMenuFocusIsKeyboard = false
         focusPrompt()
     }
 
@@ -355,7 +439,7 @@ private final class LauncherModel: ObservableObject {
         }
     }
 
-    private func emit(_ object: [String: String]) {
+    private func emit(_ object: [String: Any]) {
         guard let callback,
               let data = try? JSONSerialization.data(withJSONObject: object)
         else { return }
@@ -611,37 +695,6 @@ private struct LauncherRootView: View {
                 lineWidth: 0.5
             )
         }
-        .overlay {
-            if model.showActionsMenu {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture { _ = model.dismissActionsMenu() }
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            if model.renderState.screen != "Session", model.showActionsMenu {
-                actionsMenu
-                    .padding(.trailing, LauncherTheme.Spacing.lg)
-                    .padding(.top, 46)
-                    .transition(
-                        .opacity.combined(
-                            with: .scale(scale: 0.94, anchor: .topTrailing)
-                        )
-                    )
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if model.renderState.screen == "Session", model.showActionsMenu {
-                actionsMenu
-                    .padding(.trailing, LauncherTheme.Spacing.lg)
-                    .padding(.bottom, 46)
-                    .transition(
-                        .opacity.combined(
-                            with: .scale(scale: 0.94, anchor: .bottomTrailing)
-                        )
-                    )
-            }
-        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             DispatchQueue.main.async { promptFocused = true }
@@ -828,7 +881,7 @@ private struct LauncherRootView: View {
     }
 
     private func optionsButton(title: String, accessibilityHint: String) -> some View {
-        LauncherPillButton(action: model.toggleActionsMenu) {
+        LauncherPillButton(action: model.toggleActionsMenuFromMouse) {
             HStack(spacing: LauncherTheme.Spacing.md) {
                 Image(systemName: "macwindow.badge.plus")
                     .font(.system(size: 12, weight: .regular))
@@ -847,52 +900,9 @@ private struct LauncherRootView: View {
         }
         .accessibilityLabel(title)
         .accessibilityHint(accessibilityHint)
-    }
-
-    private var actionsMenu: some View {
-        VStack(spacing: 0) {
-            Button(action: { _ = model.activateActionsMenu() }) {
-                HStack(spacing: LauncherTheme.Spacing.lg) {
-                    Image(systemName: "gearshape")
-                        .frame(width: 18)
-                        .accessibilityHidden(true)
-                    Text("Settings")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(LauncherTheme.textSecondary)
-                    Spacer(minLength: LauncherTheme.Spacing.xxl)
-                    if model.renderState.renderKeyboardShortcuts {
-                        HStack(spacing: 2) {
-                            LauncherKeyCap(title: "⌘")
-                            LauncherKeyCap(title: ",")
-                        }
-                    }
-                }
-                .padding(.horizontal, LauncherTheme.Spacing.xl)
-                .frame(width: 218, height: 38)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(
-                        LauncherTheme.selection(
-                            colorScheme: colorScheme,
-                            reduceTransparency: reduceTransparency
-                        )
-                    )
-            )
-            .accessibilityLabel("Open Settings")
+        .background {
+            LauncherActionMenuAnchor(model: model)
         }
-        .padding(4)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(LauncherTheme.panelEdge(colorScheme: colorScheme), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.24), radius: 12, y: 5)
     }
 
     @ViewBuilder
@@ -1122,9 +1132,8 @@ private struct LauncherRootView: View {
                     LauncherBarButton(title: "Stop", systemImage: "stop.fill", action: model.cancelSession)
                         .keyboardShortcut(.cancelAction)
                         .accessibilityHint("Cancel running session")
-                } else {
-                    sessionActionsButton
                 }
+                sessionActionsButton
             }
             .frame(maxWidth: .infinity)
             .frame(height: 50)
@@ -1176,10 +1185,350 @@ private struct LauncherRootView: View {
     }
 }
 
+private struct LauncherActionsMenu: View {
+    @ObservedObject var model: LauncherModel
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        VStack(spacing: 0) {
+            LauncherActionsMenuRow(
+                model: model,
+                index: 0,
+                title: "Share window context",
+                systemImage: model.shareWindowContext ? "checkmark.square.fill" : "square",
+                showsIcon: true,
+                systemImageColor: model.shareWindowContext
+                    ? LauncherTheme.textSecondary
+                    : LauncherTheme.textTertiary,
+                accessibilityValue: model.shareWindowContext ? "On" : "Off",
+                keyboardShortcut: model.renderState.renderKeyboardShortcuts ? ["S"] : nil,
+                secondaryKeyboardShortcut: nil,
+                action: model.toggleShareWindowContext
+            )
+
+            LauncherActionsMenuRow(
+                model: model,
+                index: 1,
+                title: "Settings",
+                systemImage: "gearshape",
+                showsIcon: false,
+                systemImageColor: LauncherTheme.textSecondary,
+                accessibilityValue: "",
+                keyboardShortcut: model.renderState.renderKeyboardShortcuts ? ["⌘", ","] : nil,
+                secondaryKeyboardShortcut: nil,
+                action: { _ = model.activateActionsMenu() }
+            )
+        }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(LauncherTheme.panelEdge(colorScheme: colorScheme), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.24), radius: 12, y: 5)
+        .frame(width: 246, height: 90)
+    }
+}
+
+private struct LauncherActionsMenuRow: View {
+    @ObservedObject var model: LauncherModel
+    let index: Int
+    let title: String
+    let systemImage: String
+    let showsIcon: Bool
+    let systemImageColor: Color
+    let accessibilityValue: String
+    let keyboardShortcut: [String]?
+    let secondaryKeyboardShortcut: [String]?
+    let action: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: {
+            model.focusActionsMenuItem(index, fromKeyboard: false)
+            action()
+        }) {
+            HStack(spacing: LauncherTheme.Spacing.lg) {
+                if showsIcon {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(systemImageColor)
+                        .frame(width: 18)
+                        .accessibilityHidden(true)
+                } else {
+                    Color.clear
+                        .frame(width: 18)
+                        .accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: LauncherTheme.Spacing.sm) {
+                        Text(title)
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(LauncherTheme.textSecondary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        Spacer(minLength: LauncherTheme.Spacing.sm)
+                        if let keyboardShortcut {
+                            HStack(spacing: 2) {
+                                ForEach(keyboardShortcut, id: \.self) { key in
+                                    LauncherKeyCap(title: key)
+                                }
+                            }
+                        }
+                    }
+                    if let secondaryKeyboardShortcut {
+                        HStack(spacing: 2) {
+                            Spacer(minLength: 0)
+                            ForEach(secondaryKeyboardShortcut, id: \.self) { key in
+                                LauncherKeyCap(title: key)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, LauncherTheme.Spacing.xl)
+            .frame(width: 238, height: 38)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(rowBackground)
+        .onHover { hovered in
+            isHovered = hovered
+            if hovered {
+                model.focusActionsMenuItem(index, fromKeyboard: false)
+            } else {
+                model.clearMouseActionsMenuFocus(index)
+            }
+        }
+        .accessibilityLabel(title)
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private var rowBackground: some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(
+                model.actionsMenuFocusIsKeyboard
+                    ? model.actionsMenuFocusIndex == index
+                        ? LauncherTheme.selection(
+                            colorScheme: colorScheme,
+                            reduceTransparency: reduceTransparency
+                        )
+                        : Color.clear
+                    : isHovered
+                        ? LauncherTheme.hover(
+                            colorScheme: colorScheme,
+                            reduceTransparency: reduceTransparency
+                        )
+                        : model.actionsMenuFocusIndex == index
+                            ? LauncherTheme.selection(
+                                colorScheme: colorScheme,
+                                reduceTransparency: reduceTransparency
+                            )
+                            : Color.clear
+            )
+    }
+
+}
+
 private var model: LauncherModel?
 private var hosting: NSHostingView<LauncherRootView>?
+private var actionMenuPanel: NSPanel?
+private weak var actionMenuParent: NSWindow?
 private var scrollWheelMonitor: Any?
+private var actionMenuEventMonitor: Any?
+private var actionMenuKeyEventMonitor: Any?
+private var actionMenuActivationObserver: NSObjectProtocol?
 private var launcherSettingsObserver: NSObjectProtocol?
+
+private let launcherActionsMenuSize = NSSize(width: 246, height: 90)
+
+private final class LauncherActionMenuPanel: NSPanel {
+    weak var menuModel: LauncherModel?
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let menuModel, handleActionMenuKeyEvent(event, model: menuModel) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if let menuModel, handleActionMenuKeyEvent(event, model: menuModel) {
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown,
+           let menuModel,
+           handleActionMenuKeyEvent(event, model: menuModel)
+        {
+            return
+        }
+        super.sendEvent(event)
+    }
+}
+
+private func handleActionMenuKeyEvent(_ event: NSEvent, model: LauncherModel) -> Bool {
+    guard model.showActionsMenu else { return false }
+    let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    let characters = event.charactersIgnoringModifiers?.lowercased()
+    if modifiers == .command, characters == "k" {
+        model.toggleActionsMenuFromKeyboard()
+        return true
+    }
+    if modifiers == .command, characters == "," {
+        model.openSettings()
+        return true
+    }
+    if modifiers == .command, [36, 76].contains(event.keyCode) {
+        model.openInGhostty()
+        return true
+    }
+    if modifiers.isEmpty, characters == "s" {
+        model.activateShareWindowContextShortcut()
+        return true
+    }
+    switch event.keyCode {
+    case 53 where modifiers.isEmpty:
+        _ = model.dismissActionsMenu()
+        return true
+    case 126:
+        _ = model.moveActionsMenuFocus(delta: -1, escapeToPromptAtTop: true)
+        return true
+    case 125:
+        _ = model.moveActionsMenuFocus(delta: 1, escapeToPromptAtTop: false)
+        return true
+    case 48 where modifiers == .shift || modifiers.isEmpty:
+        let backwards = modifiers == .shift
+        _ = model.moveActionsMenuFocus(
+            delta: backwards ? -1 : 1,
+            escapeToPromptAtTop: false
+        )
+        return true
+    case 36 where modifiers.isEmpty, 76 where modifiers.isEmpty, 49 where modifiers.isEmpty:
+        _ = model.activateActionsMenu()
+        return true
+    default:
+        return false
+    }
+}
+
+private func handleLauncherTabEvent(_ event: NSEvent, model: LauncherModel) -> Bool {
+    guard !model.showActionsMenu,
+          model.renderState.screen != "Session",
+          event.keyCode == 48
+    else { return false }
+    let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    guard modifiers.isEmpty || modifiers == .shift else { return false }
+    model.moveSelection(modifiers == .shift ? -1 : 1)
+    return true
+}
+
+private struct LauncherActionMenuAnchor: NSViewRepresentable {
+    @ObservedObject var model: LauncherModel
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard model.showActionsMenu else {
+                hideActionMenuPanel()
+                return
+            }
+            showActionMenuPanel(for: model, anchoredTo: view)
+        }
+    }
+}
+
+private func showActionMenuPanel(for model: LauncherModel, anchoredTo anchor: NSView) {
+    guard let window = anchor.window else { return }
+    let panel: NSPanel
+    if let actionMenuPanel {
+        panel = actionMenuPanel
+    } else {
+        let nextPanel = LauncherActionMenuPanel(
+            contentRect: NSRect(origin: .zero, size: launcherActionsMenuSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        nextPanel.isReleasedWhenClosed = false
+        nextPanel.isFloatingPanel = true
+        nextPanel.hidesOnDeactivate = false
+        nextPanel.hasShadow = true
+        nextPanel.backgroundColor = .clear
+        nextPanel.isOpaque = false
+        nextPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let menuHosting = NSHostingView(rootView: LauncherActionsMenu(model: model))
+        menuHosting.frame = NSRect(origin: .zero, size: launcherActionsMenuSize)
+        menuHosting.autoresizingMask = [.width, .height]
+        nextPanel.contentView = menuHosting
+        nextPanel.menuModel = model
+        actionMenuPanel = nextPanel
+        panel = nextPanel
+    }
+
+    if actionMenuParent !== window {
+        if let actionMenuParent {
+            actionMenuParent.removeChildWindow(panel)
+        }
+        window.addChildWindow(panel, ordered: .above)
+        actionMenuParent = window
+    }
+
+    let anchorInWindow = anchor.convert(anchor.bounds, to: nil)
+    let anchorOnScreen = window.convertToScreen(anchorInWindow)
+    let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
+    let bounds = visibleFrame ?? NSRect(origin: .zero, size: launcherActionsMenuSize)
+    var x = anchorOnScreen.maxX - launcherActionsMenuSize.width
+    x = min(max(x, bounds.minX), bounds.maxX - launcherActionsMenuSize.width)
+    let spacing: CGFloat = 8
+    let belowY = anchorOnScreen.minY - launcherActionsMenuSize.height - spacing
+    let aboveY = anchorOnScreen.maxY + spacing
+    var y = belowY >= bounds.minY ? belowY : aboveY
+    y = min(max(y, bounds.minY), bounds.maxY - launcherActionsMenuSize.height)
+
+    panel.setFrame(
+        NSRect(origin: NSPoint(x: x, y: y), size: launcherActionsMenuSize),
+        display: true
+    )
+    panel.makeKeyAndOrderFront(nil)
+}
+
+private func hideActionMenuPanel() {
+    guard let actionMenuPanel else { return }
+    actionMenuPanel.orderOut(nil)
+    if let actionMenuParent {
+        actionMenuParent.removeChildWindow(actionMenuPanel)
+        if actionMenuParent.isVisible {
+            actionMenuParent.makeKeyAndOrderFront(nil)
+        }
+    }
+    actionMenuParent = nil
+}
+
+private func refocusVisibleActionMenu() {
+    guard let actionMenuPanel,
+          actionMenuPanel.isVisible,
+          model?.showActionsMenu == true
+    else { return }
+    actionMenuPanel.makeKeyAndOrderFront(nil)
+}
 
 private final class DesktopCtlNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     var callback: NotificationActionCallback?
@@ -1328,6 +1677,35 @@ public func desktopctl_launcher_mount(
         }
         return event
     }
+    actionMenuEventMonitor = NSEvent.addLocalMonitorForEvents(
+        matching: [.leftMouseDown, .rightMouseDown]
+    ) { event in
+        if let actionMenuPanel, actionMenuPanel.isVisible, event.window !== actionMenuPanel {
+            _ = nextModel.dismissActionsMenu()
+        }
+        return event
+    }
+    actionMenuKeyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        if let actionMenuPanel,
+           actionMenuPanel.isVisible,
+           nextModel.showActionsMenu
+        {
+            return handleActionMenuKeyEvent(event, model: nextModel) ? nil : event
+        }
+        return handleLauncherTabEvent(event, model: nextModel) ? nil : event
+    }
+    actionMenuActivationObserver = NotificationCenter.default.addObserver(
+        forName: NSWindow.didBecomeKeyNotification,
+        object: nil,
+        queue: .main
+    ) { notification in
+        guard let parent = actionMenuParent,
+              notification.object as AnyObject? === parent
+        else { return }
+        DispatchQueue.main.async {
+            refocusVisibleActionMenu()
+        }
+    }
     return true
 }
 
@@ -1350,6 +1728,20 @@ public func desktopctl_launcher_unmount() {
         NSEvent.removeMonitor(monitor)
         scrollWheelMonitor = nil
     }
+    if let monitor = actionMenuEventMonitor {
+        NSEvent.removeMonitor(monitor)
+        actionMenuEventMonitor = nil
+    }
+    if let monitor = actionMenuKeyEventMonitor {
+        NSEvent.removeMonitor(monitor)
+        actionMenuKeyEventMonitor = nil
+    }
+    if let observer = actionMenuActivationObserver {
+        NotificationCenter.default.removeObserver(observer)
+        actionMenuActivationObserver = nil
+    }
+    hideActionMenuPanel()
+    actionMenuPanel = nil
     hosting?.removeFromSuperview()
     hosting = nil
     model = nil
@@ -1376,7 +1768,16 @@ public func desktopctl_launcher_move_selection(_ delta: Int) {
 @_cdecl("desktopctl_launcher_toggle_actions_menu")
 public func desktopctl_launcher_toggle_actions_menu() {
     guard Thread.isMainThread else { return }
-    model?.toggleActionsMenu()
+    model?.toggleActionsMenuFromKeyboard()
+}
+
+@_cdecl("desktopctl_launcher_move_actions_menu_focus")
+public func desktopctl_launcher_move_actions_menu_focus(
+    _ delta: Int,
+    _ escapeTop: Bool
+) -> Bool {
+    guard Thread.isMainThread else { return false }
+    return model?.moveActionsMenuFocus(delta: delta, escapeToPromptAtTop: escapeTop) ?? false
 }
 
 @_cdecl("desktopctl_launcher_dismiss_actions_menu")

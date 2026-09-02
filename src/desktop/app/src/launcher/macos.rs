@@ -56,6 +56,7 @@ const LIST_VERTICAL_INSET: f64 = 16.0;
 const KEY_RETURN: u16 = 36;
 const KEY_ENTER: u16 = 76;
 const KEY_ESCAPE: u16 = 53;
+const KEY_TAB: u16 = 48;
 const KEY_UP: u16 = 126;
 const KEY_DOWN: u16 = 125;
 const NOTIFICATION_HOTKEY_WINDOW: Duration = Duration::from_secs(3);
@@ -170,7 +171,11 @@ define_class!(
             // AppKit can also resign the panel while the user is dragging a
             // borderless window resize handle. That is still an in-window
             // interaction, not an outside click.
-            if self.isKeyWindow() || LIVE_RESIZE.load(Ordering::SeqCst) || self.inLiveResize() {
+            if self.isKeyWindow()
+                || LIVE_RESIZE.load(Ordering::SeqCst)
+                || self.inLiveResize()
+                || swift_bridge::actions_menu_handles_navigation()
+            {
                 return;
             }
             // AppKit may report the key-window change before it reports the
@@ -181,6 +186,7 @@ define_class!(
                 DispatchTime::NOW.time(OUTSIDE_CLICK_GRACE_NANOS),
                 move || {
                     if LIVE_RESIZE.load(Ordering::SeqCst)
+                        || swift_bridge::actions_menu_handles_navigation()
                         || !is_open_requested()
                         || NEXT_LIFECYCLE_SEQUENCE.load(Ordering::SeqCst) != resignation_sequence
                     {
@@ -501,7 +507,10 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
             }
             LauncherAction::NewRequest {
                 prompt: prompt.to_owned(),
-                share_context: true,
+                share_context: action
+                    .get("share_context")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true),
             }
         }
         Some("open_session") => {
@@ -524,7 +533,10 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
             LauncherAction::FollowUp {
                 session_id: session_id.to_owned(),
                 prompt: prompt.to_owned(),
-                share_context: true,
+                share_context: action
+                    .get("share_context")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true),
             }
         }
         Some("cancel_session") => {
@@ -900,17 +912,31 @@ fn handle_key_event(event: &NSEvent) -> bool {
         }
         KEY_UP => {
             if swift_bridge::actions_menu_handles_navigation() {
-                return true;
+                return swift_bridge::move_actions_menu_focus(-1, true);
             }
             swift_bridge::move_selection(-1);
             true
         }
         KEY_DOWN => {
             if swift_bridge::actions_menu_handles_navigation() {
-                return true;
+                return swift_bridge::move_actions_menu_focus(1, false);
             }
             swift_bridge::move_selection(1);
             true
+        }
+        KEY_TAB => {
+            if swift_bridge::actions_menu_handles_navigation() {
+                let backwards = modifiers.contains(NSEventModifierFlags::Shift);
+                return swift_bridge::move_actions_menu_focus(
+                    if backwards { -1 } else { 1 },
+                    false,
+                );
+            }
+            if modifiers.is_empty() || modifiers == NSEventModifierFlags::Shift {
+                swift_bridge::move_selection(if modifiers.is_empty() { 1 } else { -1 });
+                return true;
+            }
+            false
         }
         KEY_RETURN | KEY_ENTER => swift_bridge::activate_actions_menu(),
         _ => false,
@@ -1275,6 +1301,37 @@ mod tests {
             }
         );
         assert!(hide);
+    }
+
+    #[test]
+    fn swift_new_request_can_disable_window_context() {
+        let (action, _) = parse_swift_action(
+            br#"{"type":"new_request","prompt":"ask this","share_context":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            LauncherAction::NewRequest {
+                prompt: "ask this".into(),
+                share_context: false,
+            }
+        );
+    }
+
+    #[test]
+    fn swift_follow_up_can_disable_window_context() {
+        let (action, _) = parse_swift_action(
+            br#"{"type":"follow_up","session_id":"session","prompt":"ask this","share_context":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            LauncherAction::FollowUp {
+                session_id: "session".into(),
+                prompt: "ask this".into(),
+                share_context: false,
+            }
+        );
     }
 
     #[test]

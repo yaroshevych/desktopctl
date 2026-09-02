@@ -822,6 +822,14 @@ mod tests {
     }
 
     #[test]
+    fn args_omit_desktop_context_when_not_requested() {
+        let request = AgentRequest::new("summarize");
+        let args = PiRunner::args_for(&request);
+        assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
+        assert_eq!(args.last(), Some(&OsString::from("summarize")));
+    }
+
+    #[test]
     fn path_takes_precedence_over_session_id() {
         let mut request = AgentRequest::new("follow up");
         request.session = Some(AgentSessionRef {

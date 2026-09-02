@@ -501,7 +501,9 @@ end run"#;
             request.session = native_session.filter(|session| {
                 session.id.as_deref().is_some_and(|id| !id.is_empty()) || session.path.is_some()
             });
-            request.target_window = target.as_ref().and_then(runner_target);
+            if share_context {
+                request.target_window = target.as_ref().and_then(runner_target);
+            }
             if share_context {
                 if let Some(target) = target.as_ref() {
                     let context = match prepared {
