@@ -57,6 +57,8 @@ struct LauncherInput {
     #[serde(default = "default_render_keyboard_shortcuts")]
     render_keyboard_shortcuts: bool,
     #[serde(default)]
+    use_native_notifications: bool,
+    #[serde(default)]
     open_shortcut: LauncherShortcut,
 }
 
@@ -64,6 +66,7 @@ impl Default for LauncherInput {
     fn default() -> Self {
         Self {
             render_keyboard_shortcuts: true,
+            use_native_notifications: false,
             open_shortcut: LauncherShortcut::default(),
         }
     }
@@ -125,6 +128,7 @@ struct AppPolicyOutput {
 struct LauncherOutput {
     saved: bool,
     render_keyboard_shortcuts: bool,
+    use_native_notifications: bool,
     open_shortcut: LauncherShortcut,
 }
 
@@ -264,6 +268,7 @@ pub fn show(initial_tab: Option<&'static str>) {
             },
             launcher: LauncherInput {
                 render_keyboard_shortcuts: stored.launcher.render_keyboard_shortcuts,
+                use_native_notifications: stored.launcher.use_native_notifications,
                 open_shortcut: LauncherShortcut {
                     key_code: stored.launcher.open_shortcut.key_code,
                     modifiers: stored.launcher.open_shortcut.modifiers,
@@ -342,6 +347,7 @@ pub fn show(initial_tab: Option<&'static str>) {
         let launcher = output.launcher.saved.then(|| {
             serde_json::json!({
                 "render_keyboard_shortcuts": output.launcher.render_keyboard_shortcuts,
+                "use_native_notifications": output.launcher.use_native_notifications,
                 "open_shortcut": {
                     "key_code": output.launcher.open_shortcut.key_code,
                     "modifiers": output.launcher.open_shortcut.modifiers,

@@ -146,6 +146,7 @@ private final class SettingsLauncherVM: ObservableObject {
     private static let saveQueue = DispatchQueue(label: "com.desktopctl.settings-save")
 
     @Published var renderKeyboardShortcuts: Bool
+    @Published var useNativeNotifications: Bool
     @Published var openShortcut: LauncherShortcut
     @Published var isRecording = false
 
@@ -153,6 +154,7 @@ private final class SettingsLauncherVM: ObservableObject {
 
     init(_ input: LauncherInput) {
         renderKeyboardShortcuts = input.renderKeyboardShortcuts
+        useNativeNotifications = input.useNativeNotifications
         openShortcut = input.openShortcut
     }
 
@@ -164,18 +166,24 @@ private final class SettingsLauncherVM: ObservableObject {
         LauncherOutput(
             saved: true,
             renderKeyboardShortcuts: renderKeyboardShortcuts,
+            useNativeNotifications: useNativeNotifications,
             openShortcut: openShortcut
         )
     }
 
     func saveLive() {
         let value = renderKeyboardShortcuts
+        let nativeValue = useNativeNotifications
         let shortcut = openShortcut
         DaemonIPC.notifyLauncherSettingsChanged(
-            renderKeyboardShortcuts: value, openShortcut: shortcut)
+            renderKeyboardShortcuts: value,
+            useNativeNotifications: nativeValue,
+            openShortcut: shortcut)
         Self.saveQueue.async {
             _ = DaemonIPC.updateLauncherSettings(
-                renderKeyboardShortcuts: value, openShortcut: shortcut)
+                renderKeyboardShortcuts: value,
+                useNativeNotifications: nativeValue,
+                openShortcut: shortcut)
         }
     }
 
@@ -327,6 +335,11 @@ private struct LauncherTabContent: View {
 
             Toggle("Render keyboard shortcuts", isOn: $vm.renderKeyboardShortcuts)
                 .onChange(of: vm.renderKeyboardShortcuts) { _ in
+                    vm.saveLive()
+                }
+
+            Toggle("Use native notifications", isOn: $vm.useNativeNotifications)
+                .onChange(of: vm.useNativeNotifications) { _ in
                     vm.saveLive()
                 }
         }

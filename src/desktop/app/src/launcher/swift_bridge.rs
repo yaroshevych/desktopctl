@@ -3,7 +3,7 @@ use std::ffi::{CString, c_char, c_void};
 use super::core::LauncherSnapshot;
 
 type ActionCallback = unsafe extern "C" fn(*const c_char, usize);
-type SettingsChangedCallback = unsafe extern "C" fn(i32, i32, i32);
+type SettingsChangedCallback = unsafe extern "C" fn(i32, i32, i32, i32);
 type NotificationActionCallback = unsafe extern "C" fn(*const c_char, usize);
 
 unsafe extern "C" {

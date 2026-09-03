@@ -6,13 +6,12 @@ mod controller {
         io::Write,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, Condvar, Mutex, OnceLock,
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
         thread,
     };
 
-    use desktop_core::{error::ErrorCode, protocol::TokenizePayload};
     use crate::trace;
     use crate::{
         agent_runner::{
@@ -31,10 +30,12 @@ mod controller {
             macos::{self as launcher_ui, LauncherCallbacks},
         },
     };
+    use desktop_core::{error::ErrorCode, protocol::TokenizePayload};
 
     struct State {
         store: AgentSessionStore,
         render_keyboard_shortcuts: bool,
+        use_native_notifications: bool,
         open_shortcut: launcher_ui::LauncherShortcut,
         pending_target: Option<TargetWindowMetadata>,
         restore_pid: Option<i64>,
@@ -91,10 +92,12 @@ mod controller {
         if let Some(warning) = warning {
             trace::log(format!("agent_launcher:store_warning {warning}"));
         }
-        let (render_keyboard_shortcuts, open_shortcut) = launcher_settings();
+        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut) =
+            launcher_settings();
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
             render_keyboard_shortcuts,
+            use_native_notifications,
             open_shortcut,
             pending_target: None,
             restore_pid: None,
@@ -122,18 +125,25 @@ mod controller {
         key_code: i32,
         modifiers: i32,
         render_keyboard_shortcuts: i32,
+        use_native_notifications: i32,
     ) {
-        let (Ok(key_code), Ok(modifiers)) =
-            (u32::try_from(key_code), u32::try_from(modifiers))
+        let (Ok(key_code), Ok(modifiers)) = (u32::try_from(key_code), u32::try_from(modifiers))
         else {
             return;
         };
 
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts != 0;
-            state.open_shortcut = launcher_ui::LauncherShortcut { key_code, modifiers };
+            state.use_native_notifications = use_native_notifications != 0;
+            state.open_shortcut = launcher_ui::LauncherShortcut {
+                key_code,
+                modifiers,
+            };
         }
-        launcher_ui::reload_hotkey(launcher_ui::LauncherShortcut { key_code, modifiers });
+        launcher_ui::reload_hotkey(launcher_ui::LauncherShortcut {
+            key_code,
+            modifiers,
+        });
         refresh();
     }
 
@@ -150,10 +160,7 @@ mod controller {
         // Capture focus synchronously before activating DesktopCtl. Do not query
         // the service here: this path runs on AppKit's main thread.
         let target_hint = crate::runtime::macos::frontmost_application_pid();
-        trace::agent_context(format!(
-            "toggle frontmost_pid={:?}",
-            target_hint,
-        ));
+        trace::agent_context(format!("toggle frontmost_pid={:?}", target_hint,));
         let generation = if let Some(mut state) = lock_state() {
             state.launch_generation = state.launch_generation.wrapping_add(1);
             state.pending_target = None;
@@ -174,8 +181,7 @@ mod controller {
         };
         trace::agent_context(format!(
             "toggle resolving target generation={} pid={}",
-            generation,
-            pid
+            generation, pid
         ));
         let preparation = preparation_handle_for_generation(generation);
         thread::spawn(move || {
@@ -440,7 +446,9 @@ mod controller {
         };
         let follow_up_shortcut = lock_state()
             .map(|state| launcher_ui::shortcut_label(state.open_shortcut))
-            .unwrap_or_else(|| launcher_ui::shortcut_label(launcher_ui::LauncherShortcut::default()));
+            .unwrap_or_else(|| {
+                launcher_ui::shortcut_label(launcher_ui::LauncherShortcut::default())
+            });
         thread::spawn(move || {
             let result = (|| -> Result<(), String> {
                 let pi = discover_pi_executable().map_err(|error| error.to_string())?;
@@ -477,11 +485,10 @@ end run"#;
                 }
             })();
             if let Err(error) = result {
-                launcher_ui::show_completion(completion_notice(
-                    &session,
-                    &error,
-                    &follow_up_shortcut,
-                ));
+                launcher_ui::show_completion(
+                    completion_notice(&session, &error, &follow_up_shortcut),
+                    use_native_notifications(),
+                );
             }
         });
     }
@@ -588,7 +595,9 @@ end run"#;
                         Some(value) => match value.context {
                             Ok(context) => match target_window_is_current(target) {
                                 Ok(true) => {
-                                    trace::agent_context("context prefetch reused; target still current");
+                                    trace::agent_context(
+                                        "context prefetch reused; target still current",
+                                    );
                                     Ok(context)
                                 }
                                 Ok(false) => {
@@ -650,9 +659,7 @@ end run"#;
                                 ));
                             }
                             Err(error) => {
-                                trace::agent_context(format!(
-                                    "context_file unavailable: {error}"
-                                ));
+                                trace::agent_context(format!("context_file unavailable: {error}"));
                                 trace::log(format!(
                                     "agent_launcher:context_file_unavailable; continuing_without_context {error}"
                                 ));
@@ -757,10 +764,7 @@ end run"#;
     }
 
     fn window_context_for_target(target: &TargetWindowMetadata) -> Result<WindowContext, String> {
-        trace::agent_context(format!(
-            "window_context start {}",
-            target_log_label(target)
-        ));
+        trace::agent_context(format!("window_context start {}", target_log_label(target)));
         let client = crate::service_client::ServiceClient;
         let active_window_id = target
             .window_ref
@@ -888,15 +892,9 @@ end run"#;
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
-            trace::agent_context(format!(
-                "context_file write_failed path={}",
-                path.display()
-            ));
+            trace::agent_context(format!("context_file write_failed path={}", path.display()));
         } else {
-            trace::agent_context(format!(
-                "context_file write_ok path={}",
-                path.display()
-            ));
+            trace::agent_context(format!("context_file write_ok path={}", path.display()));
         }
         result.map(|()| file_name)
     }
@@ -993,11 +991,8 @@ end run"#;
                             ));
                         }
                         if let Some(session) = state.store.get(session_id) {
-                            notice = Some(completion_notice(
-                                session,
-                                &message,
-                                &follow_up_shortcut,
-                            ));
+                            notice =
+                                Some(completion_notice(session, &message, &follow_up_shortcut));
                         }
                     } else {
                         if let Err(error) = state.store.bind_native_session_in_memory(
@@ -1037,11 +1032,7 @@ end run"#;
                             .store
                             .fail_request(session_id, request_id, &message, unix_now_ms());
                     if let Some(session) = state.store.get(session_id) {
-                        notice = Some(completion_notice(
-                            session,
-                            &message,
-                            &follow_up_shortcut,
-                        ));
+                        notice = Some(completion_notice(session, &message, &follow_up_shortcut));
                     }
                 }
             }
@@ -1062,7 +1053,7 @@ end run"#;
         }
         if !launcher_ui::is_open_requested() {
             if let Some(notice) = notice {
-                launcher_ui::show_completion(notice);
+                launcher_ui::show_completion(notice, use_native_notifications());
             }
         }
     }
@@ -1086,7 +1077,7 @@ end run"#;
         }
     }
 
-    fn launcher_settings() -> (bool, launcher_ui::LauncherShortcut) {
+    fn launcher_settings() -> (bool, bool, launcher_ui::LauncherShortcut) {
         crate::service_client::ServiceClient
             .settings()
             .ok()
@@ -1096,20 +1087,32 @@ end run"#;
                     .get("render_keyboard_shortcuts")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
+                let use_native_notifications = launcher
+                    .get("use_native_notifications")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 let shortcut = launcher
                     .get("open_shortcut")
                     .cloned()
                     .and_then(|value| serde_json::from_value(value).ok())
                     .unwrap_or_default();
-                Some((render, shortcut))
+                Some((render, use_native_notifications, shortcut))
             })
-            .unwrap_or_else(|| (true, launcher_ui::LauncherShortcut::default()))
+            .unwrap_or_else(|| (true, false, launcher_ui::LauncherShortcut::default()))
+    }
+
+    fn use_native_notifications() -> bool {
+        lock_state()
+            .map(|state| state.use_native_notifications)
+            .unwrap_or(false)
     }
 
     pub fn reload_keyboard_shortcuts_setting() {
-        let (render_keyboard_shortcuts, open_shortcut) = launcher_settings();
+        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut) =
+            launcher_settings();
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts;
+            state.use_native_notifications = use_native_notifications;
             state.open_shortcut = open_shortcut;
         }
         launcher_ui::reload_hotkey(open_shortcut);
@@ -1125,18 +1128,29 @@ end run"#;
             "none" | "no-context" => None,
             app => Some(app.to_owned()),
         };
-        let follow_up_shortcut = lock_state()
-            .map(|state| launcher_ui::shortcut_label(state.open_shortcut))
+        let (follow_up_shortcut, use_native_notifications) = lock_state()
+            .map(|state| {
+                (
+                    launcher_ui::shortcut_label(state.open_shortcut),
+                    state.use_native_notifications,
+                )
+            })
             .unwrap_or_else(|| {
-                launcher_ui::shortcut_label(launcher_ui::LauncherShortcut::default())
+                (
+                    launcher_ui::shortcut_label(launcher_ui::LauncherShortcut::default()),
+                    false,
+                )
             });
-        launcher_ui::show_completion_immediately(CompletionNotice {
-            session_id: String::new(),
-            prompt: "hi finder".to_owned(),
-            answer_preview: "Hi! What can I help you find?".to_owned(),
-            target_app,
-            follow_up_shortcut,
-        });
+        launcher_ui::show_completion_immediately(
+            CompletionNotice {
+                session_id: String::new(),
+                prompt: "hi finder".to_owned(),
+                answer_preview: "Hi! What can I help you find?".to_owned(),
+                target_app,
+                follow_up_shortcut,
+            },
+            use_native_notifications,
+        );
     }
 
     fn completion_notice(
@@ -1356,10 +1370,7 @@ end run"#;
                 timestamped_context_file_name("system_settings_0bfcbb", 1_788_466_843_858, 0);
             let second =
                 timestamped_context_file_name("system_settings_0bfcbb", 1_788_466_843_858, 1);
-            assert_eq!(
-                first,
-                "1788466843858_000000_system_settings_0bfcbb.md"
-            );
+            assert_eq!(first, "1788466843858_000000_system_settings_0bfcbb.md");
             assert_ne!(first, second);
             assert!(second.ends_with("_system_settings_0bfcbb.md"));
         }

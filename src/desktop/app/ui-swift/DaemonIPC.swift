@@ -28,13 +28,16 @@ enum DaemonIPC {
     // Saves launcher preferences immediately, so they take effect without
     // waiting for the Settings window to close.
     static func updateLauncherSettings(
-        renderKeyboardShortcuts: Bool, openShortcut: LauncherShortcut
+        renderKeyboardShortcuts: Bool,
+        useNativeNotifications: Bool,
+        openShortcut: LauncherShortcut
     ) -> Bool {
         let paths = socketPaths()
         for path in paths {
             if tryUpdateLauncherSettings(
                 socketPath: path,
                 renderKeyboardShortcuts: renderKeyboardShortcuts,
+                useNativeNotifications: useNativeNotifications,
                 openShortcut: openShortcut
             ) {
                 return true
@@ -46,7 +49,9 @@ enum DaemonIPC {
     // Tell the already-running launcher first. Persistence happens separately so a
     // slow daemon socket cannot delay the new hotkey.
     static func notifyLauncherSettingsChanged(
-        renderKeyboardShortcuts: Bool, openShortcut: LauncherShortcut
+        renderKeyboardShortcuts: Bool,
+        useNativeNotifications: Bool,
+        openShortcut: LauncherShortcut
     ) {
         DistributedNotificationCenter.default().postNotificationName(
             launcherSettingsChanged,
@@ -55,6 +60,7 @@ enum DaemonIPC {
                 "key_code": openShortcut.keyCode,
                 "modifiers": openShortcut.modifiers,
                 "render_keyboard_shortcuts": renderKeyboardShortcuts,
+                "use_native_notifications": useNativeNotifications,
             ],
             deliverImmediately: true
         )
@@ -125,6 +131,7 @@ enum DaemonIPC {
     private static func tryUpdateLauncherSettings(
         socketPath: String,
         renderKeyboardShortcuts: Bool,
+        useNativeNotifications: Bool,
         openShortcut: LauncherShortcut
     ) -> Bool {
         let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
@@ -154,6 +161,7 @@ enum DaemonIPC {
                 "cmd": "settings_update",
                 "launcher": [
                     "render_keyboard_shortcuts": renderKeyboardShortcuts,
+                    "use_native_notifications": useNativeNotifications,
                     "open_shortcut": [
                         "key_code": openShortcut.keyCode,
                         "modifiers": openShortcut.modifiers

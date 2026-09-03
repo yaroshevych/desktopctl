@@ -34,6 +34,8 @@ pub struct LauncherConfig {
     #[serde(default = "default_render_keyboard_shortcuts")]
     pub render_keyboard_shortcuts: bool,
     #[serde(default)]
+    pub use_native_notifications: bool,
+    #[serde(default)]
     pub open_shortcut: LauncherShortcut,
 }
 
@@ -41,6 +43,7 @@ impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
             render_keyboard_shortcuts: true,
+            use_native_notifications: false,
             open_shortcut: LauncherShortcut::default(),
         }
     }
@@ -446,6 +449,14 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn launcher_notifications_default_to_custom_ui() {
+        assert!(!LauncherConfig::default().use_native_notifications);
+        let legacy: LauncherConfig =
+            toml::from_str("render_keyboard_shortcuts = true").unwrap();
+        assert!(!legacy.use_native_notifications);
     }
 
     #[test]

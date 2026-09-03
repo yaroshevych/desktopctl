@@ -48,12 +48,14 @@ struct AppPolicyOutput: Codable {
 
 struct LauncherInput: Codable {
     var renderKeyboardShortcuts: Bool
+    var useNativeNotifications: Bool
     var openShortcut: LauncherShortcut
 }
 
 struct LauncherOutput: Codable {
     var saved: Bool
     var renderKeyboardShortcuts: Bool
+    var useNativeNotifications: Bool
     var openShortcut: LauncherShortcut
 }
 
