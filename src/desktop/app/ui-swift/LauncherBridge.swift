@@ -908,7 +908,7 @@ private struct LauncherRootView: View {
     @ViewBuilder
     private var sessionBody: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
                 LauncherPillButton(action: model.back) {
                     HStack(spacing: LauncherTheme.Spacing.md) {
                         Image(systemName: "chevron.left")

@@ -83,7 +83,7 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
     let app_prefix = normalized_app_prefix(&window.app);
     let ref_id = loop {
         // Opaque short id for CLI ergonomics; retry if collision exists in live buffer.
-        let suffix = Uuid::new_v4().simple().to_string()[..WINDOW_ID_LEN].to_string();
+        let suffix = Uuid::now_v7().simple().to_string()[..WINDOW_ID_LEN].to_string();
         let candidate = format!("{app_prefix}_{suffix}");
         if !store.by_ref.contains_key(&candidate) {
             break candidate;

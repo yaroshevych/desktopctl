@@ -149,6 +149,10 @@ mod controller {
         // Capture focus synchronously before activating DesktopCtl. Do not query
         // the service here: this path runs on AppKit's main thread.
         let target_hint = crate::runtime::macos::frontmost_application_pid();
+        trace::agent_context(format!(
+            "toggle frontmost_pid={:?}",
+            target_hint,
+        ));
         let generation = if let Some(mut state) = lock_state() {
             state.launch_generation = state.launch_generation.wrapping_add(1);
             state.pending_target = None;
@@ -164,29 +168,43 @@ mod controller {
         launcher_ui::show();
 
         let Some(pid) = target_hint else {
+            trace::agent_context("toggle no frontmost app; launcher shown without bound window");
             return;
         };
+        trace::agent_context(format!(
+            "toggle resolving target generation={} pid={}",
+            generation,
+            pid
+        ));
         let preparation = preparation_handle_for_generation(generation);
         thread::spawn(move || {
-            let target = crate::service_client::ServiceClient
+            let prepared = crate::service_client::ServiceClient
                 .window_for_pid(pid)
                 .map(target_metadata)
-                .map_err(|error| error.to_string());
-            if let Ok(target) = &target {
-                if let Some(mut state) = lock_state() {
-                    if state.launch_generation == generation {
-                        state.pending_target = Some(target.clone());
+                .map_err(|error| error.to_string())
+                .map(|target| {
+                    // Publish the target before the potentially slow context
+                    // capture so a request made while the launcher is open can
+                    // still start with a stable target.
+                    if let Some(mut state) = lock_state() {
+                        if state.launch_generation == generation {
+                            state.pending_target = Some(target.clone());
+                        }
                     }
-                }
-                refresh();
+                    refresh();
+                    let context = window_context_for_target(&target);
+                    if let Err(error) = &context {
+                        trace::log(format!("agent_launcher:prefetch_context_warning {error}"));
+                        trace::agent_context(format!("prefetch failed: {error}"));
+                    } else {
+                        trace::agent_context("prefetch completed");
+                    }
+                    PreparedTarget { context, target }
+                });
+            if let Err(error) = &prepared {
+                trace::agent_context(format!("target resolution failed pid={pid}: {error}"));
+                trace::log(format!("agent_launcher:target_resolution_error {error}"));
             }
-            let prepared = target.map(|target| {
-                let context = window_context_for_target(&target);
-                if let Err(error) = &context {
-                    trace::log(format!("agent_launcher:prefetch_context_warning {error}"));
-                }
-                PreparedTarget { context, target }
-            });
             if let Some(preparation) = preparation {
                 let (lock, wake) = &*preparation;
                 *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prepared);
@@ -256,6 +274,15 @@ mod controller {
             }
         });
         if let Some((session_id, request_id, target)) = created {
+            trace::agent_context(format!(
+                "new_request session={} share_context={} target={}",
+                session_id,
+                share_context,
+                target
+                    .as_ref()
+                    .map(target_log_label)
+                    .unwrap_or_else(|| "none".to_string())
+            ));
             refresh();
             let preparation = lock_state().and_then(|state| state.pending_preparation.clone());
             let workspace = match session_workspace(&session_id) {
@@ -294,6 +321,16 @@ mod controller {
             }
         });
         if let Some((request_id, session)) = request {
+            trace::agent_context(format!(
+                "follow_up session={} share_context={} stored_target={}",
+                session_id,
+                share_context,
+                session
+                    .target_window
+                    .as_ref()
+                    .map(target_log_label)
+                    .unwrap_or_else(|| "none".to_string())
+            ));
             let workspace = match session_workspace(&session.id) {
                 Ok(workspace) => workspace,
                 Err(error) => {
@@ -488,8 +525,24 @@ end run"#;
         }
         set_running(true);
         thread::spawn(move || {
-            let prepared = preparation.and_then(|handle| wait_for_preparation(&handle));
+            let preparation_wait = preparation.map(|handle| wait_for_preparation(&handle));
+            let prepared = preparation_wait
+                .as_ref()
+                .and_then(|(prepared, _timed_out)| prepared.clone());
+            let preparation_timed_out = preparation_wait
+                .as_ref()
+                .is_some_and(|(_, timed_out)| *timed_out);
             let target = target.or_else(|| prepared.as_ref().map(|value| value.target.clone()));
+            trace::agent_context(format!(
+                "run_pi session={} share_context={} prepared={} target={}",
+                session_id,
+                share_context,
+                prepared.is_some(),
+                target
+                    .as_ref()
+                    .map(target_log_label)
+                    .unwrap_or_else(|| "none".to_string())
+            ));
             if let Some(target) = target.as_ref() {
                 if let Some(mut state) = lock_state() {
                     if let Err(error) = state.store.set_target_window(&session_id, target.clone()) {
@@ -501,34 +554,122 @@ end run"#;
             request.session = native_session.filter(|session| {
                 session.id.as_deref().is_some_and(|id| !id.is_empty()) || session.path.is_some()
             });
+            trace::log(format!(
+                "agent_launcher:request_context_start share_context={share_context} target={} workspace={}",
+                target
+                    .as_ref()
+                    .and_then(|value| value.window_ref.as_deref().or(value.native_id.as_deref()))
+                    .unwrap_or("none"),
+                workspace.display()
+            ));
             if share_context {
                 request.target_window = target.as_ref().and_then(runner_target);
             }
+            trace::agent_context(format!(
+                "request session={} target_arg={} context_requested={} workspace={}",
+                session_id,
+                request
+                    .target_window
+                    .as_ref()
+                    .map(|value| value.id.as_str())
+                    .unwrap_or("none"),
+                share_context,
+                workspace.display()
+            ));
             if share_context {
                 if let Some(target) = target.as_ref() {
+                    trace::agent_context(format!(
+                        "context lookup session={} prepared_context={}",
+                        session_id,
+                        prepared.as_ref().is_some_and(|value| value.context.is_ok())
+                    ));
                     let context = match prepared {
-                        Some(value) => match target_window_is_current(target) {
-                            Ok(true) => value.context,
-                            Ok(false) => window_context_for_target(target),
-                            Err(error) => Err(error),
+                        Some(value) => match value.context {
+                            Ok(context) => match target_window_is_current(target) {
+                                Ok(true) => {
+                                    trace::agent_context("context prefetch reused; target still current");
+                                    Ok(context)
+                                }
+                                Ok(false) => {
+                                    trace::agent_context(
+                                        "context prefetch discarded; target is no longer current",
+                                    );
+                                    window_context_for_target(target)
+                                }
+                                Err(error) => {
+                                    trace::agent_context(format!(
+                                        "context current-target check failed: {error}"
+                                    ));
+                                    Err(error)
+                                }
+                            },
+                            Err(error) => {
+                                trace::agent_context(format!(
+                                    "context prefetch result failed; retrying: {error}"
+                                ));
+                                window_context_for_target(target)
+                            }
                         },
-                        None => window_context_for_target(target),
+                        None => {
+                            if preparation_timed_out {
+                                trace::agent_context(
+                                    "context prefetch timed out; continuing without context",
+                                );
+                                Err("context prefetch timed out".to_string())
+                            } else {
+                                trace::agent_context(
+                                    "context has no prefetch result; capturing now",
+                                );
+                                window_context_for_target(target)
+                            }
+                        }
                     };
                     match context {
                         Ok(context) => match write_window_context(&workspace, target, &context) {
                             Ok(file_name) => {
+                                trace::agent_context(format!(
+                                    "context ready session={} snapshot_markdown_bytes={} file={}",
+                                    session_id,
+                                    context.tokenized_markdown.len(),
+                                    workspace.join(&file_name).display()
+                                ));
+                                trace::log(format!(
+                                    "agent_launcher:context_file_written target={} file={}",
+                                    target
+                                        .window_ref
+                                        .as_deref()
+                                        .or(target.native_id.as_deref())
+                                        .unwrap_or("unknown"),
+                                    workspace.join(&file_name).display()
+                                ));
                                 request.window_context =
                                     Some(window_context_prompt(target, &context, &file_name));
+                                trace::agent_context(format!(
+                                    "request context_prompt attached session={} file={}",
+                                    session_id, file_name
+                                ));
                             }
-                            Err(error) => trace::log(format!(
-                                "agent_launcher:context_file_unavailable; continuing_without_context {error}"
-                            )),
+                            Err(error) => {
+                                trace::agent_context(format!(
+                                    "context_file unavailable: {error}"
+                                ));
+                                trace::log(format!(
+                                    "agent_launcher:context_file_unavailable; continuing_without_context {error}"
+                                ));
+                            }
                         },
-                        Err(error) => trace::log(format!(
-                            "agent_launcher:context_unavailable; continuing_without_context {error}"
-                        )),
+                        Err(error) => {
+                            trace::agent_context(format!("context unavailable: {error}"));
+                            trace::log(format!(
+                                "agent_launcher:context_unavailable; continuing_without_context {error}"
+                            ));
+                        }
                     }
                 } else {
+                    trace::agent_context(format!(
+                        "context skipped session={} reason=no_target",
+                        session_id
+                    ));
                     trace::log(
                         "agent_launcher:target_unavailable; continuing_without_target_context",
                     );
@@ -593,21 +734,36 @@ end run"#;
         Ok(())
     }
 
-    fn wait_for_preparation(handle: &PreparationHandle) -> Option<PreparedTarget> {
+    fn wait_for_preparation(handle: &PreparationHandle) -> (Option<PreparedTarget>, bool) {
         let (lock, wake) = &**handle;
         let mut result = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while result.is_none() {
-            result = wake
-                .wait(result)
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                trace::agent_context("context prefetch wait timed out");
+                return (None, true);
+            }
+            let (next, timeout) = wake
+                .wait_timeout(result, remaining)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            result = next;
+            if timeout.timed_out() && result.is_none() {
+                trace::agent_context("context prefetch wait timed out");
+                return (None, true);
+            }
         }
-        result.take()?.ok()
+        (result.take().and_then(Result::ok), false)
     }
 
     fn window_context_for_target(target: &TargetWindowMetadata) -> Result<WindowContext, String> {
+        trace::agent_context(format!(
+            "window_context start {}",
+            target_log_label(target)
+        ));
         let client = crate::service_client::ServiceClient;
         let windows = client.windows().map_err(|error| {
-            if matches!(
+            let message = if matches!(
                 error.code,
                 ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
             ) {
@@ -617,26 +773,43 @@ end run"#;
                 )
             } else {
                 format!("window enumeration failed: {}", error.message)
-            }
+            };
+            trace::agent_context(format!("window_context windows_failed: {message}"));
+            message
         })?;
+        trace::agent_context(format!(
+            "window_context windows_enumerated={} target_matches={}",
+            windows.len(),
+            windows
+                .iter()
+                .filter(|window| target_matches_window(target, window))
+                .count()
+        ));
         let target_window = windows
             .iter()
             .find(|window| target_matches_window(target, window))
             .ok_or_else(|| {
-                format!(
+                let message = format!(
                     "target window not found: {}",
                     target
                         .window_ref
                         .as_deref()
                         .or(target.native_id.as_deref())
                         .unwrap_or("unknown")
-                )
+                );
+                trace::agent_context(format!("window_context target_failed: {message}"));
+                message
             })?;
 
         let active_window_id = target
             .window_ref
             .clone()
             .unwrap_or_else(|| target_window.id.clone());
+        trace::agent_context(format!(
+            "window_context tokenize_start active_window_id={} native_id={}",
+            active_window_id,
+            target_window.id
+        ));
         let tokenized: TokenizePayload = client
             .send_typed(desktop_core::protocol::Command::ScreenTokenize {
                 overlay_out_path: None,
@@ -650,7 +823,7 @@ end run"#;
                 region: None,
             })
             .map_err(|error| {
-                if matches!(
+                let message = if matches!(
                     error.code,
                     ErrorCode::PermissionDenied | ErrorCode::AccessibilityPermissionRequired
                 ) {
@@ -660,8 +833,21 @@ end run"#;
                     )
                 } else {
                     format!("target tokenization failed: {}", error.message)
-                }
+                };
+                trace::agent_context(format!("window_context tokenize_failed: {message}"));
+                message
             })?;
+        trace::agent_context(format!(
+            "window_context tokenize_ok snapshot_id={} windows={} elements={} truncated={}",
+            tokenized.snapshot_id,
+            tokenized.windows.len(),
+            tokenized
+                .windows
+                .iter()
+                .map(|window| window.elements.len())
+                .sum::<usize>(),
+            tokenized.truncated
+        ));
 
         let visible_windows: Vec<_> = windows
             .iter()
@@ -674,18 +860,31 @@ end run"#;
         let os_version = std::process::Command::new("sw_vers")
             .arg("-productVersion")
             .output()
-            .map_err(|error| format!("OS version lookup failed: {error}"))
+            .map_err(|error| {
+                let message = format!("OS version lookup failed: {error}");
+                trace::agent_context(message.as_str());
+                message
+            })
             .and_then(|output| {
                 if output.status.success() {
                     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
                 } else {
-                    Err("OS version lookup failed: sw_vers returned a non-zero status".to_string())
+                    let message =
+                        "OS version lookup failed: sw_vers returned a non-zero status".to_string();
+                    trace::agent_context(message.as_str());
+                    Err(message)
                 }
             })?;
+        let tokenized_markdown = tokenized_payload_to_markdown(&tokenized)?;
+        trace::agent_context(format!(
+            "window_context markdown_ready bytes={} visible_windows={}",
+            tokenized_markdown.len(),
+            visible_windows.len()
+        ));
         Ok(WindowContext {
             os_version,
             visible_windows,
-            tokenized_markdown: tokenized_payload_to_markdown(&tokenized)?,
+            tokenized_markdown,
         })
     }
 
@@ -726,7 +925,12 @@ end run"#;
         let id = window_id_for_file(target)?;
         let file_name = format!("{id}.md");
         let path = workspace.join(&file_name);
-        let temporary = workspace.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
+        let temporary = workspace.join(format!(".{file_name}.tmp-{}", Uuid::now_v7()));
+        trace::agent_context(format!(
+            "context_file write_start path={} bytes={}",
+            path.display(),
+            context.tokenized_markdown.len()
+        ));
         let result = (|| -> Result<(), String> {
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -749,6 +953,15 @@ end run"#;
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
+            trace::agent_context(format!(
+                "context_file write_failed path={}",
+                path.display()
+            ));
+        } else {
+            trace::agent_context(format!(
+                "context_file write_ok path={}",
+                path.display()
+            ));
         }
         result.map(|()| file_name)
     }
@@ -1141,6 +1354,20 @@ end run"#;
             app: Some(window.app),
             title: Some(window.title),
         }
+    }
+
+    fn target_log_label(target: &TargetWindowMetadata) -> String {
+        format!(
+            "window_ref={} native_id={} pid={} app={} title={}",
+            target.window_ref.as_deref().unwrap_or("none"),
+            target.native_id.as_deref().unwrap_or("none"),
+            target
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            target.app.as_deref().unwrap_or("none"),
+            target.title.as_deref().unwrap_or("none"),
+        )
     }
 
     fn runner_target(target: &TargetWindowMetadata) -> Option<TargetWindow> {

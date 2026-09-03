@@ -317,6 +317,20 @@ impl PiRunner {
         // an argv element rather than shell source.
         args.push(OsString::from("--"));
         args.push(OsString::from(&request.prompt));
+        crate::trace::agent_context(format!(
+            "pi_args target_arg={} window_context_arg={} append_system_prompts={} session_arg={} prompt_bytes={}",
+            request
+                .target_window
+                .as_ref()
+                .map(|target| target.id.as_str())
+                .unwrap_or("none"),
+            request.window_context.is_some(),
+            args.iter()
+                .filter(|arg| *arg == "--append-system-prompt")
+                .count(),
+            request.session.is_some(),
+            request.prompt.len()
+        ));
         args
     }
 

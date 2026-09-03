@@ -339,8 +339,8 @@ impl AgentSessionStore {
                 "prompt must not be empty".into(),
             ));
         }
-        let id = Uuid::new_v4().to_string();
-        let request_id = Uuid::new_v4().to_string();
+        let id = Uuid::now_v7().to_string();
+        let request_id = Uuid::now_v7().to_string();
         let session = AgentSession {
             id: id.clone(),
             agent: "pi".to_string(),
@@ -382,7 +382,7 @@ impl AgentSessionStore {
         if session.status == AgentSessionStatus::Running || session.active_request_id.is_some() {
             return Err(SessionStoreError::AlreadyRunning(session_id.to_string()));
         }
-        let request_id = Uuid::new_v4().to_string();
+        let request_id = Uuid::now_v7().to_string();
         session.messages.push(SessionMessage::user(prompt, now_ms));
         session.status = AgentSessionStatus::Running;
         session.error = None;

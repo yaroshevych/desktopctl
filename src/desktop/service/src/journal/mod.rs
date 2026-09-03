@@ -226,7 +226,7 @@ fn write_journal_entry(output_dir: &Path) -> Result<(), AppError> {
         region: None,
     });
     let value = result?;
-    let request_id = format!("journal-{}", Uuid::new_v4());
+    let request_id = format!("journal-{}", Uuid::now_v7());
     let response = ResponseEnvelope::success(request_id, value);
     let value = serde_json::to_value(&response)
         .map_err(|err| AppError::internal(format!("encode journal response failed: {err}")))?;

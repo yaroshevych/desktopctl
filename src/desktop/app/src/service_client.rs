@@ -82,7 +82,7 @@ impl ServiceClient {
     where
         F: FnOnce(&RequestEnvelope) -> Result<ResponseEnvelope, AppError>,
     {
-        let request = RequestEnvelope::new(format!("app-{}", Uuid::new_v4()), command);
+        let request = RequestEnvelope::new(format!("app-{}", Uuid::now_v7()), command);
         match send(&request)? {
             ResponseEnvelope::Success(response) => Ok(response.result),
             ResponseEnvelope::Error(response) => Err(AppError {
