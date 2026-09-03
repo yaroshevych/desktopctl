@@ -56,10 +56,12 @@ header, and displays only text blocks from the final assistant `message_end`.
 Follow-ups pass the persisted native session identifier back to Pi. When the
 launcher's Options menu has `Share window context` enabled (the default), the
 appended system instruction is separate from the user message and contains the
-captured topmost window's concise `--active-window <id>` selector plus compact
-Markdown environment context. Detailed tokenized contents are refreshed into
-`<session-workspace>/<window_id>.md`, which Pi can read when needed. With the
-option disabled, the request includes no target-window or window-context prompt.
+captured topmost window's concise `--active-window <id>` selector plus a pointer
+to the detailed snapshot file. Each capture is written to a new
+`<session-workspace>/<timestamp>_<sequence>_<window_id>.md` file, which Pi can
+read when needed; the detailed tokenized payload is not duplicated in the
+prompt. With the option disabled, the request includes no target-window or
+window-context prompt.
 
 `Agent Launcher…` is the first menu-bar menu item. While one or more Pi requests
 are running, DesktopCtl's aperture tray icon rotates and returns to the normal

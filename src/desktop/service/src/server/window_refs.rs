@@ -4,8 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use uuid::Uuid;
-
 use crate::platform::windowing::WindowInfo;
 
 const WINDOW_REF_TTL: Duration = Duration::from_secs(10 * 60);
@@ -81,13 +79,15 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
         return existing;
     }
     let app_prefix = normalized_app_prefix(&window.app);
+    let mut attempt = 0u64;
     let ref_id = loop {
         // Opaque short id for CLI ergonomics; retry if collision exists in live buffer.
-        let suffix = Uuid::now_v7().simple().to_string()[..WINDOW_ID_LEN].to_string();
+        let suffix = ref_suffix(&native_key, attempt);
         let candidate = format!("{app_prefix}_{suffix}");
         if !store.by_ref.contains_key(&candidate) {
             break candidate;
         }
+        attempt = attempt.wrapping_add(1);
     };
     store.by_key.insert(native_key, ref_id.clone());
     store.by_ref.insert(
@@ -141,6 +141,25 @@ fn normalized_app_prefix(app: &str) -> String {
     }
 }
 
+fn ref_suffix(native_key: &str, attempt: u64) -> String {
+    // Keep reference issuance independent of the OS entropy source. This is a
+    // short ergonomic identifier, not a security token; the native key and
+    // store lookup remain the source of truth for resolution.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in native_key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash ^= attempt.wrapping_add(0x9e3779b97f4a7c15);
+    hash = hash.wrapping_mul(0x100000001b3);
+    hash ^= hash >> 29;
+    hash = hash.wrapping_mul(0x94d049bb133111eb);
+    hash ^= hash >> 31;
+
+    let mask = (1u64 << (WINDOW_ID_LEN * 4)) - 1;
+    format!("{:0width$x}", hash & mask, width = WINDOW_ID_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +191,14 @@ mod tests {
         assert_eq!(normalized_app_prefix("System Settings"), "system_settings");
         assert_eq!(normalized_app_prefix(" Xcode 16.2 "), "xcode_16_2");
         assert_eq!(normalized_app_prefix("   "), "window");
+    }
+
+    #[test]
+    fn reference_suffix_is_deterministic_and_compact() {
+        let first = ref_suffix("123:native-1", 0);
+        assert_eq!(first, ref_suffix("123:native-1", 0));
+        assert_eq!(first.len(), WINDOW_ID_LEN);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
