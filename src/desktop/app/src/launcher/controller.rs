@@ -1,7 +1,8 @@
 #[cfg(target_os = "macos")]
 mod controller {
     use std::{
-        collections::HashMap,
+        cmp::Reverse,
+        collections::{BTreeMap, BTreeSet, HashMap},
         fs,
         io::{Read, Write},
         path::{Path, PathBuf},
@@ -45,7 +46,34 @@ mod controller {
         pending_preparation: Option<PreparationHandle>,
         snapshot_revision: u64,
         history_limit: usize,
-        history_cache: Option<(u64, Vec<(u64, SessionSummary)>)>,
+        history_cache: HistoryCache,
+        transcript_ack: Option<(String, u64, usize)>,
+    }
+
+    #[derive(Default)]
+    struct HistoryCache {
+        rows: BTreeMap<(Reverse<u64>, String), SessionSummary>,
+        keys: HashMap<String, (Reverse<u64>, String)>,
+        unvisited: BTreeSet<(Reverse<u64>, String)>,
+    }
+
+    impl HistoryCache {
+        fn update(&mut self, store: &mut AgentSessionStore) {
+            for id in store.take_dirty_session_ids() {
+                if let Some(key) = self.keys.remove(&id) {
+                    self.rows.remove(&key);
+                    self.unvisited.remove(&key);
+                }
+                if let Some(session) = store.get(&id) {
+                    let key = (Reverse(session.updated_at_ms), id.clone());
+                    if session.status == AgentSessionStatus::Completed && !session.visited {
+                        self.unvisited.insert(key.clone());
+                    }
+                    self.rows.insert(key.clone(), summary(session));
+                    self.keys.insert(id, key);
+                }
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -109,7 +137,8 @@ mod controller {
             pending_preparation: None,
             snapshot_revision: 0,
             history_limit: 0,
-            history_cache: None,
+            history_cache: HistoryCache::default(),
+            transcript_ack: None,
         })));
         crate::launcher::swift_bridge::start_settings_observer(launcher_settings_changed);
         launcher_ui::initialize(
@@ -258,6 +287,36 @@ mod controller {
 
     fn handle_action(action: LauncherAction) {
         match action {
+            LauncherAction::AcknowledgeTranscript {
+                session_id,
+                epoch,
+                count,
+            } => {
+                if let Some(mut state) = lock_state() {
+                    if state.open_session.as_deref() == Some(session_id.as_str())
+                        && state.store.transcript_epoch(&session_id) == epoch
+                        && state
+                            .store
+                            .get(&session_id)
+                            .is_some_and(|session| count <= session.messages.len())
+                    {
+                        let prior = state
+                            .transcript_ack
+                            .as_ref()
+                            .filter(|(id, prior_epoch, _)| {
+                                id == &session_id && *prior_epoch == epoch
+                            })
+                            .map_or(0, |(_, _, count)| *count);
+                        state.transcript_ack = Some((session_id, epoch, count.max(prior)));
+                    }
+                }
+            }
+            LauncherAction::ResetTranscript => {
+                if let Some(mut state) = lock_state() {
+                    state.transcript_ack = None;
+                }
+                refresh();
+            }
             LauncherAction::ExpandHistory => {
                 if let Some(mut state) = lock_state() {
                     state.history_limit = state.history_limit.saturating_add(50);
@@ -407,6 +466,7 @@ mod controller {
                 return;
             }
             state.open_session = Some(session_id.clone());
+            state.transcript_ack = None;
         }
         refresh();
         sync_native_session(session_id);
@@ -1320,27 +1380,8 @@ end run"#;
     fn snapshot(state: &mut State, revision: u64) -> LauncherSnapshot {
         const RECENT_WINDOW_MS: u64 = 30 * 60 * 1_000;
         let cutoff = unix_now_ms().saturating_sub(RECENT_WINDOW_MS);
-        let pinned = state
-            .store
-            .latest_completed_unvisited()
-            .map(|session| session.id.clone());
-        let store_revision = state.store.revision();
-        if state
-            .history_cache
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != store_revision)
-        {
-            state.history_cache = Some((
-                store_revision,
-                state
-                    .store
-                    .recent(usize::MAX)
-                    .into_iter()
-                    .map(|session| (session.updated_at_ms, summary(session)))
-                    .collect(),
-            ));
-        }
-        let history = &state.history_cache.as_ref().unwrap().1;
+        state.history_cache.update(&mut state.store);
+        let history = &state.history_cache.rows;
         let all = if state.open_session.is_none() {
             history
                 .iter()
@@ -1352,21 +1393,29 @@ end run"#;
         };
         let mut recent: Vec<SessionSummary> = history
             .iter()
-            .filter(|(updated, _)| *updated >= cutoff)
+            .take_while(|((Reverse(updated), _), _)| *updated >= cutoff)
             .take(3)
             .map(|(_, row)| row.clone())
             .collect();
-        if let Some(pinned) = pinned {
-            if let Some(index) = recent.iter().position(|session| session.id == pinned) {
-                let session = recent.remove(index);
-                recent.insert(0, session);
-            }
+        let pinned = state.history_cache.unvisited.first().map(|(_, id)| id);
+        if let Some(index) = recent
+            .iter()
+            .position(|session| Some(&session.id) == pinned)
+        {
+            let session = recent.remove(index);
+            recent.insert(0, session);
         }
         let screen = state
             .open_session
             .as_deref()
             .and_then(|id| state.store.get(id))
-            .map(session_screen)
+            .map(|session| {
+                session_screen(
+                    session,
+                    state.store.transcript_epoch(&session.id),
+                    state.transcript_ack.as_ref(),
+                )
+            })
             .unwrap_or(LauncherScreen::Launcher);
         LauncherSnapshot {
             revision,
@@ -1401,7 +1450,16 @@ end run"#;
         }
     }
 
-    fn session_screen(session: &AgentSession) -> LauncherScreen {
+    fn session_screen(
+        session: &AgentSession,
+        epoch: u64,
+        ack: Option<&(String, u64, usize)>,
+    ) -> LauncherScreen {
+        let from = ack
+            .filter(|(id, prior_epoch, count)| {
+                id == &session.id && *prior_epoch == epoch && *count <= session.messages.len()
+            })
+            .map_or(0, |(_, _, count)| *count);
         LauncherScreen::Session {
             id: session.id.clone(),
             title: session.title.clone(),
@@ -1416,11 +1474,14 @@ end run"#;
             messages: session
                 .messages
                 .iter()
+                .skip(from)
                 .map(|message| TranscriptMessage {
                     user: message.role == SessionMessageRole::User,
                     text: message.text.clone(),
                 })
                 .collect(),
+            messages_from: from,
+            transcript_epoch: epoch,
         }
     }
 
@@ -1626,7 +1687,8 @@ end run"#;
                 pending_preparation: None,
                 snapshot_revision: 0,
                 history_limit: 0,
-                history_cache: None,
+                history_cache: super::HistoryCache::default(),
+                transcript_ack: None,
             };
             let collapsed = super::snapshot(&mut state, 1);
             assert!(collapsed.all.is_empty());
@@ -1642,6 +1704,56 @@ end run"#;
             assert!(expanded.all[0].unread);
             state.store.flush().unwrap();
             drop(state);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn transcript_deltas_use_acknowledged_prefix_and_reset_on_replacement() {
+            let root =
+                std::env::temp_dir().join(format!("desktopctl-deltas-{}", uuid::Uuid::now_v7()));
+            let mut store =
+                crate::agent_sessions::AgentSessionStore::new(root.join("sessions.json"));
+            let (id, request) = store.create_running("question", None, 1).unwrap();
+            store.complete_request(&id, &request, "answer", 2).unwrap();
+            let session = store.get(&id).unwrap();
+            let first_ack = (id.clone(), 0, 1);
+            let delta = super::session_screen(session, 0, Some(&first_ack));
+            let super::LauncherScreen::Session {
+                messages_from,
+                messages,
+                ..
+            } = delta
+            else {
+                panic!("session")
+            };
+            assert_eq!(messages_from, 1);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].text, "answer");
+            // Repeated snapshots before acknowledgement resend the same suffix.
+            let repeated = super::session_screen(session, 0, Some(&first_ack));
+            let super::LauncherScreen::Session { messages, .. } = repeated else {
+                panic!("session")
+            };
+            assert_eq!(messages.len(), 1);
+            let full_ack = (id.clone(), 0, 2);
+            let status_only = super::session_screen(session, 0, Some(&full_ack));
+            let super::LauncherScreen::Session { messages, .. } = status_only else {
+                panic!("session")
+            };
+            assert!(messages.is_empty());
+            let replaced = super::session_screen(session, 1, Some(&full_ack));
+            let super::LauncherScreen::Session {
+                messages_from,
+                messages,
+                ..
+            } = replaced
+            else {
+                panic!("session")
+            };
+            assert_eq!(messages_from, 0);
+            assert_eq!(messages.len(), 2);
+            store.flush().unwrap();
+            drop(store);
             fs::remove_dir_all(root).unwrap();
         }
 

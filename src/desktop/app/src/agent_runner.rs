@@ -11,7 +11,7 @@ use std::{
     env,
     ffi::OsString,
     fmt, fs,
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -106,7 +106,7 @@ const MAX_TRANSCRIPT_CACHE_ENTRIES: usize = 64;
 const MAX_TRANSCRIPT_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const TRANSCRIPT_CACHE_ENTRY_OVERHEAD: usize = 128;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NativeTranscriptEntry {
     id: String,
     parent_id: Option<String>,
@@ -117,6 +117,10 @@ struct NativeTranscriptEntry {
 struct CachedTranscript {
     len: u64,
     modified: Option<std::time::SystemTime>,
+    identity: Option<(u64, u64)>,
+    parsed_len: u64,
+    prefix_fingerprint: u64,
+    entries: Vec<NativeTranscriptEntry>,
     messages: Vec<NativeTranscriptMessage>,
     bytes: usize,
 }
@@ -133,40 +137,136 @@ pub fn load_native_transcript(
     let metadata = fs::metadata(&path).map_err(|source| AgentRunnerError::Io { source })?;
     let cache_key = path.clone();
     let modified = metadata.modified().ok();
-    if let Ok(cache) = transcript_cache().lock() {
-        if let Some(cached) = cache
-            .get(&cache_key)
-            .filter(|cached| cached.len == metadata.len() && cached.modified == modified)
+    let identity = file_identity(&metadata);
+    if let Ok(mut cache) = transcript_cache().lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            if cached.len == metadata.len()
+                && cached.modified == modified
+                && cached.identity == identity
+            {
+                return Ok((path, cached.messages.clone()));
+            }
+        }
+        // Remove the entry before moving its records. Other readers must never
+        // observe valid metadata paired with an emptied record vector.
+        let cached = cache.remove(&cache_key);
+        drop(cache);
+        let can_append = cached.as_ref().is_some_and(|cached| {
+            cached.identity == identity
+                && metadata.len() > cached.parsed_len
+                && file_prefix_fingerprint(&path, cached.parsed_len).ok()
+                    == Some(cached.prefix_fingerprint)
+        });
+        let appendable = cached
+            .filter(|_| can_append)
+            .map(|cached| (cached.parsed_len, cached.entries));
+        if let Some((parsed_len, mut entries)) = appendable {
+            let parsed_len = append_native_entries(&path, parsed_len, &mut entries, false)?;
+            let messages = transcript_branch(&entries)?;
+            store_transcript_cache(
+                cache_key,
+                &metadata,
+                modified,
+                identity,
+                parsed_len,
+                entries,
+                messages.clone(),
+            );
+            return Ok((path, messages));
+        }
+    }
+
+    let mut entries = Vec::new();
+    let parsed_len = append_native_entries(&path, 0, &mut entries, true)?;
+    let messages = transcript_branch(&entries)?;
+    store_transcript_cache(
+        cache_key,
+        &metadata,
+        modified,
+        identity,
+        parsed_len,
+        entries,
+        messages.clone(),
+    );
+    Ok((path, messages))
+}
+
+fn append_native_entries(
+    path: &Path,
+    offset: u64,
+    entries: &mut Vec<NativeTranscriptEntry>,
+    allow_final_without_newline: bool,
+) -> Result<u64, AgentRunnerError> {
+    let mut file = fs::File::open(path).map_err(|source| AgentRunnerError::Io { source })?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|source| AgentRunnerError::Io { source })?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut parsed_len = offset;
+    let mut line_number = entries.len() + 1;
+    loop {
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|source| AgentRunnerError::Io { source })?;
+        if read == 0 {
+            break;
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            parse_native_entry_line(&line, line_number, entries)?;
+            parsed_len += read as u64;
+        } else if allow_final_without_newline
+            && parse_native_entry_line(&line, line_number, entries).is_ok()
         {
-            return Ok((path, cached.messages.clone()));
+            parsed_len += read as u64;
+        } else {
+            break;
         }
+        line_number += 1;
     }
-    let file = fs::File::open(&path).map_err(|source| AgentRunnerError::Io { source })?;
-    let mut entries = Vec::<NativeTranscriptEntry>::new();
-    for (line_number, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|source| AgentRunnerError::Io { source })?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(&line).map_err(|source| {
-            AgentRunnerError::Parse(format!(
-                "invalid Pi session JSON on line {}: {source}",
-                line_number + 1
-            ))
-        })?;
-        if let Some(id) = value.get("id").and_then(Value::as_str) {
-            entries.push(NativeTranscriptEntry {
-                id: id.to_string(),
-                parent_id: value
-                    .get("parentId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                message: native_message(&value),
-            });
-        }
+    Ok(parsed_len)
+}
+
+fn parse_native_entry_line(
+    line: &[u8],
+    line_number: usize,
+    entries: &mut Vec<NativeTranscriptEntry>,
+) -> Result<(), AgentRunnerError> {
+    let line = std::str::from_utf8(line).map_err(|source| {
+        AgentRunnerError::Parse(format!(
+            "invalid Pi session JSON on line {line_number}: {source}"
+        ))
+    })?;
+    if line.trim().is_empty() {
+        return Ok(());
     }
+    let value: Value = serde_json::from_str(line).map_err(|source| {
+        AgentRunnerError::Parse(format!(
+            "invalid Pi session JSON on line {line_number}: {source}"
+        ))
+    })?;
+    if let Some(id) = value.get("id").and_then(Value::as_str) {
+        entries.push(NativeTranscriptEntry {
+            id: id.to_string(),
+            parent_id: value
+                .get("parentId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            message: native_message(&value),
+        });
+    }
+    Ok(())
+}
+
+fn transcript_branch(
+    entries: &[NativeTranscriptEntry],
+) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
     let Some(leaf) = entries.last().map(|entry| entry.id.as_str()) else {
-        return Ok((path, Vec::new()));
+        return Ok(Vec::new());
     };
     let by_id: HashMap<&str, &NativeTranscriptEntry> = entries
         .iter()
@@ -181,46 +281,105 @@ pub fn load_native_transcript(
                 "Pi session transcript contains a parent cycle at {id}"
             )));
         }
-        let Some(entry) = by_id.get(id) else {
-            break;
-        };
+        let Some(entry) = by_id.get(id) else { break };
         branch.push(*entry);
         cursor = entry.parent_id.as_deref();
     }
     branch.reverse();
-    let messages: Vec<NativeTranscriptMessage> = branch
+    Ok(branch
         .into_iter()
         .filter_map(|entry| entry.message.clone())
-        .collect();
-    let bytes = messages
+        .collect())
+}
+
+fn store_transcript_cache(
+    key: PathBuf,
+    metadata: &fs::Metadata,
+    modified: Option<std::time::SystemTime>,
+    identity: Option<(u64, u64)>,
+    parsed_len: u64,
+    entries: Vec<NativeTranscriptEntry>,
+    messages: Vec<NativeTranscriptMessage>,
+) {
+    let prefix_fingerprint = file_prefix_fingerprint(&key, parsed_len).unwrap_or_default();
+    let bytes = entries
         .iter()
-        .map(|message| message.text.len())
+        .map(|entry| {
+            std::mem::size_of::<NativeTranscriptEntry>()
+                + entry.id.len()
+                + entry.parent_id.as_deref().map_or(0, str::len)
+                + entry
+                    .message
+                    .as_ref()
+                    .map_or(0, |message| message.text.len())
+        })
         .sum::<usize>()
-        + cache_key.to_string_lossy().len()
+        + messages
+            .iter()
+            .map(|message| std::mem::size_of::<NativeTranscriptMessage>() + message.text.len())
+            .sum::<usize>()
+        + key.to_string_lossy().len()
         + TRANSCRIPT_CACHE_ENTRY_OVERHEAD;
-    if bytes <= MAX_TRANSCRIPT_CACHE_BYTES {
-        if let Ok(mut cache) = transcript_cache().lock() {
-            while (cache.len() >= MAX_TRANSCRIPT_CACHE_ENTRIES
-                || cache.values().map(|entry| entry.bytes).sum::<usize>() + bytes
-                    > MAX_TRANSCRIPT_CACHE_BYTES)
-                && !cache.is_empty()
-            {
-                if let Some(key) = cache.keys().next().cloned() {
-                    cache.remove(&key);
-                }
-            }
-            cache.insert(
-                cache_key,
-                CachedTranscript {
-                    len: metadata.len(),
-                    modified,
-                    messages: messages.clone(),
-                    bytes,
-                },
-            );
-        }
+    if bytes > MAX_TRANSCRIPT_CACHE_BYTES {
+        return;
     }
-    Ok((path, messages))
+    if let Ok(mut cache) = transcript_cache().lock() {
+        while (cache.len() >= MAX_TRANSCRIPT_CACHE_ENTRIES
+            || cache.values().map(|entry| entry.bytes).sum::<usize>() + bytes
+                > MAX_TRANSCRIPT_CACHE_BYTES)
+            && !cache.is_empty()
+        {
+            if let Some(key) = cache.keys().next().cloned() {
+                cache.remove(&key);
+            }
+        }
+        cache.insert(
+            key,
+            CachedTranscript {
+                len: metadata.len(),
+                modified,
+                identity,
+                parsed_len,
+                prefix_fingerprint,
+                entries,
+                messages,
+                bytes,
+            },
+        );
+    }
+}
+
+fn file_prefix_fingerprint(path: &Path, parsed_len: u64) -> Result<u64, AgentRunnerError> {
+    let mut file = fs::File::open(path).map_err(|source| AgentRunnerError::Io { source })?;
+    let sample_len = parsed_len.min(4096) as usize;
+    let mut sample = vec![0u8; sample_len];
+    file.read_exact(&mut sample)
+        .map_err(|source| AgentRunnerError::Io { source })?;
+    if parsed_len > 4096 {
+        file.seek(SeekFrom::Start(parsed_len - 4096))
+            .map_err(|source| AgentRunnerError::Io { source })?;
+        let mut tail = vec![0u8; 4096];
+        file.read_exact(&mut tail)
+            .map_err(|source| AgentRunnerError::Io { source })?;
+        sample.extend_from_slice(&tail);
+    }
+    let mut hash = 1469598103934665603u64;
+    for byte in sample {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    Ok(hash)
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 fn native_message(entry: &Value) -> Option<NativeTranscriptMessage> {
@@ -1238,6 +1397,126 @@ mod tests {
         let (_, second) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
         let _ = fs::remove_file(path);
         assert_eq!(second[0].text, "changed content");
+    }
+
+    #[test]
+    fn native_transcript_append_updates_active_branch_incrementally() {
+        let path = env::temp_dir().join(format!(
+            "desktopctl-pi-session-append-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session\",\"id\":\"pi-append\"}\n",
+                "{\"type\":\"message\",\"id\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"first\"}}\n",
+                "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"message\":{\"role\":\"assistant\",\"content\":\"old\",\"stopReason\":\"stop\"}}\n"
+            ),
+        )
+        .unwrap();
+        let _ = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"u1\",\"message\":{{\"role\":\"assistant\",\"content\":\"new branch\",\"stopReason\":\"stop\"}}}}"
+        )
+        .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    let (_, messages) =
+                        load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+                    assert_eq!(messages.len(), 2);
+                    assert_eq!(messages[0].text, "first");
+                    assert_eq!(messages[1].text, "new branch");
+                })
+            })
+            .collect();
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        let (_, messages) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        let _ = fs::remove_file(path);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "new branch"]
+        );
+    }
+
+    #[test]
+    fn native_transcript_waits_for_partial_tail_then_parses_completion() {
+        let path = env::temp_dir().join(format!(
+            "desktopctl-pi-session-partial-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, "{\"type\":\"session\",\"id\":\"pi-partial\"}\n{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"").unwrap();
+        let (_, before) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        assert!(before.is_empty());
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"partial\"}}\n").unwrap();
+        let (_, after) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        let _ = fs::remove_file(path);
+        assert_eq!(after[0].text, "partial");
+    }
+
+    #[test]
+    fn native_transcript_rebuilds_after_truncation() {
+        let path = env::temp_dir().join(format!(
+            "desktopctl-pi-session-truncate-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, "{\"type\":\"session\",\"id\":\"pi-truncate\"}\n{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"before\"}}\n").unwrap();
+        let _ = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        fs::write(&path, "{\"type\":\"session\",\"id\":\"pi-truncate\"}\n{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"after\"}}\n").unwrap();
+        let (_, messages) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        let _ = fs::remove_file(path);
+        assert_eq!(messages[0].text, "after");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_transcript_rebuilds_after_atomic_replacement() {
+        let path = env::temp_dir().join(format!(
+            "desktopctl-pi-session-replace-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let replacement = path.with_extension("replacement.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"session\",\"id\":\"pi-replace\"}\n{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"before\"}}\n",
+        )
+        .unwrap();
+        let _ = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        fs::write(
+            &replacement,
+            "{\"type\":\"session\",\"id\":\"pi-replace\"}\n{\"type\":\"message\",\"id\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"after replacement\"}}\n",
+        )
+        .unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let (_, messages) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        let _ = fs::remove_file(path);
+        assert_eq!(messages[0].text, "after replacement");
     }
 
     #[cfg(unix)]

@@ -8,7 +8,7 @@
 #![allow(dead_code)] // Store exposes focused operations used by tests and future adapters.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     fs::{self, File, OpenOptions},
@@ -198,6 +198,9 @@ pub struct AgentSessionStore {
     sessions: Vec<AgentSession>,
     persistence: Persistence,
     revision: u64,
+    dirty_sessions: HashSet<String>,
+    transcript_epochs: HashMap<String, u64>,
+    session_index: HashMap<String, usize>,
 }
 
 /// A single writer owns disk I/O.  Callers only send the changed session;
@@ -240,6 +243,8 @@ impl Persistence {
             .name("agent-session-store".into())
             .spawn(move || {
                 let mut sessions = sessions;
+                let mut dirty = HashMap::<String, AgentSession>::new();
+                let mut full_write = false;
                 loop {
                     let pending = {
                         let (lock, wake) = &*worker_mailbox.mailbox;
@@ -257,18 +262,33 @@ impl Persistence {
                         batch
                     };
                     let should_exit = pending.closed;
+                    full_write |= pending.snapshot.is_some();
                     if let Some(snapshot) = pending.snapshot {
                         sessions = snapshot;
+                        dirty.clear();
                     }
                     for session in pending.adds {
+                        dirty.insert(session.id.clone(), session.clone());
                         apply_persist_command(&mut sessions, PersistCommand::Add(session));
                     }
                     for session in pending.replaces.into_values() {
+                        dirty.insert(session.id.clone(), session.clone());
                         apply_persist_command(&mut sessions, PersistCommand::Replace(session));
                     }
-                    let result = write_snapshot(&path, &sessions);
+                    let result = if !full_write && dirty.is_empty() {
+                        Ok(())
+                    } else if full_write || !records_dir(&path).join("manifest").exists() {
+                        migrate_records(&path, &sessions)
+                    } else {
+                        dirty
+                            .values()
+                            .try_for_each(|session| write_session_record(&path, session))
+                    };
                     if let Err(error) = &result {
                         eprintln!("agent session store persistence failed: {error}");
+                    } else {
+                        dirty.clear();
+                        full_write = false;
                     }
                     for ack in pending.flushers {
                         let _ = ack.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
@@ -365,6 +385,7 @@ fn apply_persist_command(sessions: &mut Vec<AgentSession>, command: PersistComma
     }
 }
 
+#[cfg(test)]
 fn write_snapshot(path: &Path, sessions: &[AgentSession]) -> Result<(), SessionStoreError> {
     let Some(parent) = path.parent() else {
         return Err(SessionStoreError::Invalid(
@@ -406,6 +427,103 @@ fn write_snapshot(path: &Path, sessions: &[AgentSession]) -> Result<(), SessionS
     write_result
 }
 
+fn records_dir(path: &Path) -> PathBuf {
+    path.with_extension("records")
+}
+
+fn write_session_record(path: &Path, session: &AgentSession) -> Result<(), SessionStoreError> {
+    if Uuid::parse_str(&session.id).is_err() {
+        return Err(SessionStoreError::Invalid("invalid session ID".into()));
+    }
+    let dir = records_dir(path);
+    fs::create_dir_all(&dir)?;
+    set_private_permissions(&dir)?;
+    let bytes = serde_json::to_vec_pretty(session)?;
+    let temp = dir.join(format!(
+        ".{}.tmp-{}-{}",
+        session.id,
+        std::process::id(),
+        TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let target = dir.join(format!("{}.json", session.id));
+    let result = (|| -> Result<(), SessionStoreError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        set_private_permissions_file(&file)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, target)?;
+        #[cfg(unix)]
+        fs::File::open(&dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn migrate_records(path: &Path, sessions: &[AgentSession]) -> Result<(), SessionStoreError> {
+    let dir = records_dir(path);
+    fs::create_dir_all(&dir)?;
+    set_private_permissions(&dir)?;
+    for session in sessions {
+        write_session_record(path, session)?;
+    }
+    let marker = dir.join("manifest");
+    if !marker.exists() {
+        let temp = dir.join(format!(
+            ".manifest.tmp-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        set_private_permissions_file(&file)?;
+        file.write_all(b"1\n")?;
+        file.sync_all()?;
+        fs::rename(&temp, &marker)?;
+        #[cfg(unix)]
+        if let Err(error) = fs::File::open(&dir).and_then(|directory| directory.sync_all()) {
+            let _ = fs::remove_file(&marker);
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+fn load_records(path: &Path) -> Result<Vec<AgentSession>, SessionStoreError> {
+    let dir = records_dir(path);
+    let marker = fs::read_to_string(dir.join("manifest"))?;
+    if marker.trim() != "1" {
+        return Err(SessionStoreError::Invalid(
+            "unsupported session records manifest".into(),
+        ));
+    }
+    let mut sessions = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let session: AgentSession = serde_json::from_slice(&fs::read(entry.path())?)?;
+        if Uuid::parse_str(&session.id).is_err()
+            || entry.file_name().to_string_lossy() != format!("{}.json", session.id)
+        {
+            return Err(SessionStoreError::Invalid(
+                "invalid session ID in records".into(),
+            ));
+        }
+        sessions.push(session);
+    }
+    sessions.sort_by(|a: &AgentSession, b: &AgentSession| a.id.cmp(&b.id));
+    Ok(sessions)
+}
+
 impl AgentSessionStore {
     /// Resolve the unified per-user workspace directory.
     pub fn data_dir() -> Option<PathBuf> {
@@ -428,29 +546,46 @@ impl AgentSessionStore {
 
     pub fn load_at(path: impl Into<PathBuf>, now_ms: u64) -> Result<Self, SessionStoreError> {
         let path = path.into();
-        if !path.exists() {
+        if !path.exists() && !records_dir(&path).join("manifest").exists() {
             return Ok(Self {
                 persistence: Persistence::start(path.clone(), Vec::new()),
                 path,
                 sessions: Vec::new(),
                 revision: 0,
+                dirty_sessions: HashSet::new(),
+                transcript_epochs: HashMap::new(),
+                session_index: HashMap::new(),
             });
         }
 
-        let bytes = fs::read(&path)?;
-        let persisted: PersistedSessions = serde_json::from_slice(&bytes)?;
-        if persisted.version != STORE_VERSION {
-            return Err(SessionStoreError::Invalid(format!(
-                "unsupported store version {}; expected {STORE_VERSION}",
-                persisted.version
-            )));
-        }
-        let sessions = persisted.sessions;
+        let sessions = if records_dir(&path).join("manifest").exists() {
+            load_records(&path)?
+        } else {
+            let bytes = fs::read(&path)?;
+            let persisted: PersistedSessions = serde_json::from_slice(&bytes)?;
+            if persisted.version != STORE_VERSION {
+                return Err(SessionStoreError::Invalid(format!(
+                    "unsupported store version {}; expected {STORE_VERSION}",
+                    persisted.version
+                )));
+            }
+            persisted.sessions
+        };
+        let dirty_sessions = sessions.iter().map(|s| s.id.clone()).collect();
+        let transcript_epochs = sessions.iter().map(|s| (s.id.clone(), 0)).collect();
+        let session_index = sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id.clone(), i))
+            .collect();
         let mut store = Self {
             persistence: Persistence::start(path.clone(), sessions.clone()),
             path,
             sessions,
             revision: 0,
+            dirty_sessions,
+            transcript_epochs,
+            session_index,
         };
         if store.recover_stale_running_at(now_ms) > 0 {
             store.save()?;
@@ -471,6 +606,9 @@ impl AgentSessionStore {
                     path,
                     sessions: Vec::new(),
                     revision: 0,
+                    dirty_sessions: HashSet::new(),
+                    transcript_epochs: HashMap::new(),
+                    session_index: HashMap::new(),
                 },
                 Some(error.to_string()),
             ),
@@ -484,6 +622,9 @@ impl AgentSessionStore {
             path,
             sessions: Vec::new(),
             revision: 0,
+            dirty_sessions: HashSet::new(),
+            transcript_epochs: HashMap::new(),
+            session_index: HashMap::new(),
         }
     }
 
@@ -501,12 +642,37 @@ impl AgentSessionStore {
         self.revision
     }
 
+    /// Return and clear session IDs changed since the previous drain. Startup
+    /// marks every loaded session so caches can initialize incrementally.
+    pub fn take_dirty_session_ids(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dirty_sessions)
+            .into_iter()
+            .collect()
+    }
+
+    /// Epoch changes only when native transcript contents are replaced by a
+    /// newer snapshot. Consumers can pair this with their acknowledged count
+    /// and safely request cumulative deltas after skipped UI refreshes.
+    pub fn transcript_epoch(&self, session_id: &str) -> u64 {
+        self.transcript_epochs.get(session_id).copied().unwrap_or(0)
+    }
+
+    fn mark_dirty(&mut self, id: &str) {
+        self.dirty_sessions.insert(id.to_string());
+    }
+
     pub fn get(&self, id: &str) -> Option<&AgentSession> {
-        self.sessions.iter().find(|session| session.id == id)
+        self.session_index
+            .get(id)
+            .and_then(|index| self.sessions.get(*index))
     }
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut AgentSession> {
-        self.sessions.iter_mut().find(|session| session.id == id)
+        self.mark_dirty(id);
+        self.session_index
+            .get(id)
+            .copied()
+            .and_then(|index| self.sessions.get_mut(index))
     }
 
     /// Persist the current state atomically.  The temporary file is created
@@ -535,6 +701,7 @@ impl AgentSessionStore {
             .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?
             .clone();
         self.revision = self.revision.wrapping_add(1);
+        self.mark_dirty(&session.id);
         self.persistence.replace(session)
     }
 
@@ -571,7 +738,10 @@ impl AgentSessionStore {
             active_request_id: Some(request_id.clone()),
         };
         self.sessions.push(session);
+        self.session_index
+            .insert(id.clone(), self.sessions.len() - 1);
         self.revision = self.revision.wrapping_add(1);
+        self.mark_dirty(&id);
         self.persistence
             .add(self.sessions.last().expect("just pushed").clone())?;
         Ok((id, request_id))
@@ -782,6 +952,12 @@ impl AgentSessionStore {
         if native_session_path.is_some() {
             session.native_session_path = native_session_path;
         }
+        let _ = session;
+        let epoch = self
+            .transcript_epochs
+            .entry(session_id.to_string())
+            .or_default();
+        *epoch = epoch.wrapping_add(1);
         self.persist_session(session_id)?;
         Ok(true)
     }
@@ -791,6 +967,7 @@ impl AgentSessionStore {
     /// it automatically during normal startup.
     pub fn recover_stale_running_at(&mut self, now_ms: u64) -> usize {
         let mut recovered = 0;
+        let mut dirty = Vec::new();
         for session in &mut self.sessions {
             if session.status == AgentSessionStatus::Running || session.active_request_id.is_some()
             {
@@ -799,8 +976,12 @@ impl AgentSessionStore {
                 session.active_request_id = None;
                 session.updated_at_ms = now_ms;
                 session.unread = true;
+                dirty.push(session.id.clone());
                 recovered += 1;
             }
+        }
+        for id in dirty {
+            self.mark_dirty(&id);
         }
         recovered
     }
@@ -1244,5 +1425,77 @@ mod tests {
         assert!(store.flush().is_err());
         drop(store);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_migration_preserves_backup_and_only_rewrites_changed_record() {
+        let path = test_path("record-migration").join("sessions.json");
+        let mut seed = AgentSessionStore::new(&path);
+        let (first, request) = seed.create_running("one", None, 1).unwrap();
+        seed.complete_request(&first, &request, "first", 2).unwrap();
+        let (second, request) = seed.create_running("two", None, 3).unwrap();
+        seed.complete_request(&second, &request, "second", 4)
+            .unwrap();
+        seed.flush().unwrap();
+        let sessions = seed.sessions().to_vec();
+        drop(seed);
+        fs::remove_dir_all(records_dir(&path)).unwrap();
+        write_snapshot(&path, &sessions).unwrap();
+        let legacy = fs::read(&path).unwrap();
+        let mut store = AgentSessionStore::load_at(&path, 5).unwrap();
+        assert!(!records_dir(&path).join("manifest").exists());
+        store.mark_unread(&first, false).unwrap();
+        store.flush().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), legacy);
+        let untouched = records_dir(&path).join(format!("{second}.json"));
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&untouched).unwrap().ino()
+        };
+        store.mark_unread(&first, true).unwrap();
+        store.flush().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(&untouched).unwrap().ino(), inode);
+        }
+        drop(store);
+        let loaded = AgentSessionStore::load_at(&path, 6).unwrap();
+        assert_eq!(loaded.sessions().len(), 2);
+        assert!(loaded.get(&first).unwrap().unread);
+        drop(loaded);
+        fs::write(&untouched, "corrupt").unwrap();
+        assert!(AgentSessionStore::load_at(&path, 7).is_err());
+        clean(&path);
+    }
+
+    #[test]
+    fn failed_record_write_is_retried_by_flush() {
+        let path = test_path("record-retry").join("sessions.json");
+        let mut store = AgentSessionStore::new(&path);
+        let (id, request) = store.create_running("one", None, 1).unwrap();
+        store.complete_request(&id, &request, "answer", 2).unwrap();
+        store.flush().unwrap();
+        let record = records_dir(&path).join(format!("{id}.json"));
+        fs::remove_file(&record).unwrap();
+        fs::create_dir(&record).unwrap();
+        store.mark_unread(&id, false).unwrap();
+        assert!(store.flush().is_err());
+        assert!(store.flush().is_err(), "failed update must remain dirty");
+        fs::remove_dir(&record).unwrap();
+        store.flush().unwrap();
+        let persisted: AgentSession = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        assert!(!persisted.unread);
+        drop(store);
+        clean(&path);
+    }
+
+    #[test]
+    fn empty_flush_does_not_create_a_migration_marker() {
+        let path = test_path("empty-flush").join("sessions.json");
+        let store = AgentSessionStore::new(&path);
+        store.flush().unwrap();
+        assert!(!records_dir(&path).exists());
     }
 }

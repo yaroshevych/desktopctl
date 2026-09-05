@@ -78,22 +78,30 @@ idle/overlay icon when the last request finishes.
 
 ## Persistence
 
-Launcher metadata is stored atomically as JSON at:
+Launcher metadata uses atomic per-session JSON records under:
 
 ```text
-${DESKTOPCTL_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/desktopctl}/workspaces/agent-sessions.json
+${DESKTOPCTL_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/desktopctl}/workspaces/agent-sessions.records/
 ```
 
 `DESKTOPCTL_HOME` overrides the complete DesktopCtl data root. Otherwise
 `XDG_DATA_HOME/desktopctl` is used when set, followed by
-`$HOME/.local/share/desktopctl`. The document contains a schema version and a
-list of DesktopCtl sessions: UUID, adapter and Pi-native session identity,
+`$HOME/.local/share/desktopctl`. The directory contains a version marker and
+one record per DesktopCtl session: UUID, adapter and Pi-native session identity,
 title, short transcript, target-window metadata, timestamps, status, and
 unread/visited state. A single background writer coalesces session updates and
-performs atomic persistence outside the launcher state lock. History summaries
-are cached by store revision; expanded history loads in batches of 50 rows.
-Unchanged native transcripts use a bounded cache, and cyclic parent links are
-rejected. A malformed file is left untouched and ignored with a
+persists only changed session records outside the launcher state lock. The
+legacy `agent-sessions.json` is read until the first write completes migration;
+the migration marker is installed last, and the legacy file remains untouched
+as a backup. Failed writes stay pending for a later flush retry.
+History summaries update by changed session ID; expanded history loads in
+batches of 50 rows. Session views send cumulative deltas from Swift's last
+acknowledged message count. Transcript replacement forces a full reset. Swift
+uses one parser and one replaceable pending snapshot, so bursts do not create
+parallel parsing work.
+Native transcripts use a bounded cache and parse appended JSONL records from
+the last complete offset; truncation/replacement rebuilds the cache, and cyclic
+parent links are rejected. A malformed file is left untouched and ignored with a
 diagnostic. Sessions left running by a process crash become failed during
 startup recovery.
 
@@ -123,6 +131,17 @@ reopen the launcher, open the unread session, and send a follow-up. Pi's desktop
 operations should use the captured topmost non-DesktopCtl window.
 
 ## SwiftUI launcher smoke test
+
+Standalone Swift model regression checks (deltas and snapshot coalescing):
+
+```bash
+swiftc -D LAUNCHER_MODEL_TESTS -parse-as-library \
+  src/desktop/app/ui-swift/LauncherTheme.swift \
+  src/desktop/app/ui-swift/LauncherBridge.swift \
+  src/desktop/app/ui-swift/LauncherBridgeTests.swift \
+  -o /tmp/desktopctl-launcher-model-tests
+/tmp/desktopctl-launcher-model-tests
+```
 
 Build and launch isolated test state. Direct binary launch preserves env vars;
 `just run`/`open` does not provide a reliable env-var path for this test.

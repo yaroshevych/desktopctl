@@ -596,6 +596,12 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
         }
         Some("return_to_launcher") => LauncherAction::ReturnToLauncher,
         Some("expand_history") => LauncherAction::ExpandHistory,
+        Some("ack_transcript") => LauncherAction::AcknowledgeTranscript {
+            session_id: action.get("session_id")?.as_str()?.to_owned(),
+            epoch: action.get("epoch")?.as_u64()?,
+            count: usize::try_from(action.get("count")?.as_u64()?).ok()?,
+        },
+        Some("reset_transcript") => LauncherAction::ResetTranscript,
         Some("open_settings") => LauncherAction::OpenSettings,
         _ => return None,
     };
@@ -623,7 +629,7 @@ fn expand_history_on_main() {
     let expanded = UI.with(|cell| {
         let mut ui = cell.borrow_mut();
         if matches!(ui.snapshot.screen, LauncherScreen::Launcher)
-            && ui.snapshot.all.len() > ui.snapshot.recent.len()
+            && ui.snapshot.history_total > ui.snapshot.recent.len()
         {
             ui.show_all = true;
             true
@@ -1207,7 +1213,7 @@ fn launcher_panel_height(ui: &UiState) -> f64 {
     } else {
         ui.snapshot.recent.len()
     };
-    let show_all_count = if !ui.show_all && ui.snapshot.all.len() > ui.snapshot.recent.len() {
+    let show_all_count = if ui.snapshot.history_total > session_count {
         1
     } else {
         0

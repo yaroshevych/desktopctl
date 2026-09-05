@@ -32,6 +32,8 @@ private struct LauncherRenderState {
     var sessionStatus = ""
     var terminalAvailable = false
     var messages: [(user: Bool, text: String)] = []
+    var messagesFrom = 0
+    var transcriptEpoch: UInt64 = 0
 
     var tasks: [LauncherTask] {
         showAll ? allTasks : recentTasks
@@ -63,7 +65,11 @@ private final class LauncherModel: ObservableObject {
     private var preserveScrollForNextSelection = false
     private var queuedFollowUpsFlushPending = false
     private var followUpRequestPending = false
-    private var snapshotParseGeneration: UInt64 = 0
+    private var pendingSnapshot: Data?
+    private var snapshotParsing = false
+    #if LAUNCHER_MODEL_TESTS
+    private var snapshotParseCount = 0
+    #endif
     private var selectAfterHistoryCount: Int?
     var callback: LauncherActionCallback?
 
@@ -72,17 +78,28 @@ private final class LauncherModel: ObservableObject {
     }
 
     func applySnapshot(_ data: Data) {
-        snapshotParseGeneration &+= 1
-        let generation = snapshotParseGeneration
+        pendingSnapshot = data
+        parsePendingSnapshot()
+    }
+
+    private func parsePendingSnapshot() {
+        guard !snapshotParsing, let data = pendingSnapshot else { return }
+        pendingSnapshot = nil
+        snapshotParsing = true
+        #if LAUNCHER_MODEL_TESTS
+        snapshotParseCount += 1
+        #endif
         let showAll = renderState.showAll
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let next = Self.parseSnapshot(data, showAll: showAll) else { return }
+            let next = Self.parseSnapshot(data, showAll: showAll)
             DispatchQueue.main.async {
-                guard let self,
-                      self.snapshotParseGeneration == generation,
-                      next.revision > self.renderState.revision
-                else { return }
-                self.commitSnapshot(next)
+                guard let self else { return }
+                self.snapshotParsing = false
+                if self.pendingSnapshot == nil, let next,
+                   next.revision > self.renderState.revision {
+                    self.commitSnapshot(next)
+                }
+                self.parsePendingSnapshot()
             }
         }
     }
@@ -105,6 +122,8 @@ private final class LauncherModel: ObservableObject {
             next.sessionTitle = session["title"] as? String ?? "Session"
             next.sessionStatus = session["status"] as? String ?? ""
             next.terminalAvailable = session["terminal_available"] as? Bool ?? false
+            next.messagesFrom = session["messages_from"] as? Int ?? 0
+            next.transcriptEpoch = (session["transcript_epoch"] as? NSNumber)?.uint64Value ?? 0
             next.messages = (session["messages"] as? [[String: Any]] ?? []).compactMap { message in
                 guard let text = message["text"] as? String else { return nil }
                 return (message["user"] as? Bool ?? false, text)
@@ -132,7 +151,21 @@ private final class LauncherModel: ObservableObject {
         return next
     }
 
-    private func commitSnapshot(_ next: LauncherRenderState) {
+    private func commitSnapshot(_ incoming: LauncherRenderState) {
+        var next = incoming
+        if next.screen == "Session", next.messagesFrom > 0 {
+            guard next.sessionID == renderState.sessionID,
+                  next.transcriptEpoch == renderState.transcriptEpoch,
+                  next.messagesFrom <= renderState.messages.count else {
+                emit(["type": "reset_transcript"])
+                return
+            }
+            if next.messages.isEmpty && next.messagesFrom == renderState.messages.count {
+                next.messages = renderState.messages
+            } else {
+                next.messages = Array(renderState.messages.prefix(next.messagesFrom)) + next.messages
+            }
+        }
         if next.sessionID != renderState.sessionID {
             queuedFollowUps.removeAll()
             flushingFollowUps.removeAll()
@@ -154,6 +187,10 @@ private final class LauncherModel: ObservableObject {
             followUpRequestPending = false
         }
         renderState = next
+        if next.screen == "Session" {
+            emit(["type": "ack_transcript", "session_id": next.sessionID,
+                  "epoch": next.transcriptEpoch, "count": next.messages.count])
+        }
         if let previousCount = selectAfterHistoryCount, next.showAll,
            next.allTasks.count > previousCount {
             selectedTaskID = next.allTasks[previousCount].id
@@ -461,6 +498,56 @@ private final class LauncherModel: ObservableObject {
         }
     }
 }
+
+#if LAUNCHER_MODEL_TESTS
+// Compiled only by the standalone model regression harness.
+extension LauncherModel {
+    static func runRegressionTests() {
+        let model = LauncherModel()
+        func snapshot(_ revision: Int, _ from: Int, _ epoch: Int, _ texts: [String]) -> Data {
+            try! JSONSerialization.data(withJSONObject: [
+                "revision": revision,
+                "screen": ["Session": ["id": "test", "title": "Test", "status": "Completed",
+                    "messages_from": from, "transcript_epoch": epoch,
+                    "messages": texts.map { ["user": false, "text": $0] }]],
+                "recent": [], "all": [], "history_total": 0,
+            ])
+        }
+        func waitFor(_ revision: UInt64) {
+            let deadline = Date().addingTimeInterval(5)
+            while model.renderState.revision < revision && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            precondition(model.renderState.revision == revision, "snapshot processing stalled")
+        }
+        model.applySnapshot(snapshot(1, 0, 0, ["question"]))
+        waitFor(1)
+        model.applySnapshot(snapshot(2, 1, 0, ["answer"]))
+        waitFor(2)
+        precondition(model.renderState.messages.map { $0.text } == ["question", "answer"])
+        model.applySnapshot(snapshot(3, 1, 0, ["answer", "follow-up"]))
+        waitFor(3)
+        precondition(model.renderState.messages.count == 3, "overlapping delta duplicated messages")
+        model.applySnapshot(snapshot(4, 3, 0, []))
+        waitFor(4)
+        precondition(model.renderState.messages.count == 3, "status update lost transcript")
+        model.applySnapshot(snapshot(5, 0, 1, ["replacement"]))
+        waitFor(5)
+        precondition(model.renderState.messages.map { $0.text } == ["replacement"])
+        let before = model.snapshotParseCount
+        for revision in 6...105 {
+            model.applySnapshot(snapshot(revision, 0, 1, ["latest \(revision)"]))
+        }
+        waitFor(105)
+        precondition(model.snapshotParseCount - before <= 2, "snapshot burst was not coalesced")
+        precondition(model.renderState.messages[0].text == "latest 105")
+    }
+}
+
+func runLauncherModelRegressionTests() {
+    LauncherModel.runRegressionTests()
+}
+#endif
 
 private struct SessionBubbleTail: Shape {
     let pointsRight: Bool

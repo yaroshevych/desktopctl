@@ -36,6 +36,8 @@ pub enum LauncherScreen {
         status: SessionStatus,
         terminal_available: bool,
         messages: Vec<TranscriptMessage>,
+        messages_from: usize,
+        transcript_epoch: u64,
     },
 }
 
@@ -89,6 +91,12 @@ pub enum LauncherAction {
     OpenSettings,
     ReturnToLauncher,
     ExpandHistory,
+    AcknowledgeTranscript {
+        session_id: String,
+        epoch: u64,
+        count: usize,
+    },
+    ResetTranscript,
     NewRequest {
         prompt: String,
         share_context: bool,
