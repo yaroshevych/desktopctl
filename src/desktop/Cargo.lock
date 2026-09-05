@@ -739,6 +739,7 @@ version = "0.2.0"
 dependencies = [
  "desktop-common",
  "dispatch2",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

@@ -3,7 +3,7 @@ mod controller {
     use std::{
         collections::HashMap,
         fs,
-        io::Write,
+        io::{Read, Write},
         path::{Path, PathBuf},
         sync::{
             Arc, Condvar, Mutex, OnceLock,
@@ -44,6 +44,8 @@ mod controller {
         cancellations: HashMap<String, Arc<AtomicBool>>,
         pending_preparation: Option<PreparationHandle>,
         snapshot_revision: u64,
+        history_limit: usize,
+        history_cache: Option<(u64, Vec<(u64, SessionSummary)>)>,
     }
 
     #[derive(Clone, Debug)]
@@ -106,6 +108,8 @@ mod controller {
             cancellations: HashMap::new(),
             pending_preparation: None,
             snapshot_revision: 0,
+            history_limit: 0,
+            history_cache: None,
         })));
         crate::launcher::swift_bridge::start_settings_observer(launcher_settings_changed);
         launcher_ui::initialize(
@@ -118,6 +122,33 @@ mod controller {
             launcher_ui::notification_action_callback,
         );
         refresh();
+        // Clean crashed-run/legacy snapshots too, without holding the UI lock
+        // during directory scans. Running sessions retain their current inputs.
+        thread::spawn(|| {
+            loop {
+                let idle_sessions = lock_state()
+                    .map(|state| {
+                        state
+                            .store
+                            .sessions()
+                            .iter()
+                            .filter(|session| session.status != AgentSessionStatus::Running)
+                            .map(|session| session.id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if let Ok(paths) = desktop_core::paths::AppPaths::resolve() {
+                    for id in idle_sessions {
+                        if let Ok(workspace) = paths.ensure_agent_workspace_dir(&id) {
+                            if let Err(error) = prune_window_context(&workspace, unix_now_ms(), 0) {
+                                trace::log(format!("agent_launcher:context_cleanup_error {error}"));
+                            }
+                        }
+                    }
+                }
+                thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        });
         Ok(())
     }
 
@@ -166,6 +197,7 @@ mod controller {
             state.pending_target = None;
             state.restore_pid = target_hint;
             state.open_session = None;
+            state.history_limit = 0;
             state.pending_preparation =
                 target_hint.map(|_| Arc::new((Mutex::new(None), Condvar::new())));
             state.launch_generation
@@ -199,13 +231,9 @@ mod controller {
                         }
                     }
                     refresh();
-                    let context = window_context_for_target(&target);
-                    if let Err(error) = &context {
-                        trace::log(format!("agent_launcher:prefetch_context_warning {error}"));
-                        trace::agent_context(format!("prefetch failed: {error}"));
-                    } else {
-                        trace::agent_context("prefetch completed");
-                    }
+                    // Sharing is chosen in Swift at submission time. Resolve only
+                    // identity here; never capture window contents before consent.
+                    let context = Err("capture deferred until submission".to_string());
                     PreparedTarget { context, target }
                 });
             if let Err(error) = &prepared {
@@ -230,6 +258,12 @@ mod controller {
 
     fn handle_action(action: LauncherAction) {
         match action {
+            LauncherAction::ExpandHistory => {
+                if let Some(mut state) = lock_state() {
+                    state.history_limit = state.history_limit.saturating_add(50);
+                }
+                refresh();
+            }
             LauncherAction::ToggleRequested => toggle(),
             LauncherAction::Dismissed => restore_focus(),
             LauncherAction::OpenSettings => {
@@ -241,6 +275,7 @@ mod controller {
             LauncherAction::ReturnToLauncher => {
                 if let Some(mut state) = lock_state() {
                     state.open_session = None;
+                    state.history_limit = 0;
                 }
                 refresh();
             }
@@ -533,7 +568,18 @@ end run"#;
         }
         set_running(true);
         thread::spawn(move || {
-            let preparation_wait = preparation.map(|handle| wait_for_preparation(&handle));
+            let preparation_wait = preparation
+                .filter(|_| share_context)
+                .map(|handle| wait_for_preparation(&handle, &cancellation));
+            if cancellation.load(Ordering::Acquire) {
+                finish_run(
+                    &session_id,
+                    &request_id,
+                    &workspace,
+                    Err(crate::agent_runner::AgentRunnerError::Cancelled),
+                );
+                return;
+            }
             let prepared = preparation_wait
                 .as_ref()
                 .and_then(|(prepared, _timed_out)| prepared.clone());
@@ -682,6 +728,15 @@ end run"#;
                     );
                 }
             }
+            if cancellation.load(Ordering::Acquire) {
+                finish_run(
+                    &session_id,
+                    &request_id,
+                    &workspace,
+                    Err(crate::agent_runner::AgentRunnerError::Cancelled),
+                );
+                return;
+            }
             let result = PiRunner::new()
                 .with_current_dir(workspace.clone())
                 .spawn(request)
@@ -741,21 +796,27 @@ end run"#;
         Ok(())
     }
 
-    fn wait_for_preparation(handle: &PreparationHandle) -> (Option<PreparedTarget>, bool) {
+    fn wait_for_preparation(
+        handle: &PreparationHandle,
+        cancellation: &AtomicBool,
+    ) -> (Option<PreparedTarget>, bool) {
         let (lock, wake) = &**handle;
         let mut result = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while result.is_none() {
+            if cancellation.load(Ordering::Acquire) {
+                return (None, true);
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 trace::agent_context("context prefetch wait timed out");
                 return (None, true);
             }
             let (next, timeout) = wake
-                .wait_timeout(result, remaining)
+                .wait_timeout(result, remaining.min(std::time::Duration::from_millis(50)))
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             result = next;
-            if timeout.timed_out() && result.is_none() {
+            if timeout.timed_out() && result.is_none() && std::time::Instant::now() >= deadline {
                 trace::agent_context("context prefetch wait timed out");
                 return (None, true);
             }
@@ -860,6 +921,11 @@ end run"#;
         target: &TargetWindowMetadata,
         context: &WindowContext,
     ) -> Result<String, String> {
+        if context.tokenized_markdown.len() > MAX_CONTEXT_BYTES {
+            return Err("window snapshot exceeds 1 MiB limit".into());
+        }
+        prune_window_context(workspace, unix_now_ms(), 1)
+            .map_err(|error| format!("unable to prune old window snapshots: {error}"))?;
         let id = window_id_for_file(target)?;
         let sequence = CONTEXT_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let file_name = timestamped_context_file_name(id, context.captured_at_ms, sequence);
@@ -901,6 +967,65 @@ end run"#;
 
     fn timestamped_context_file_name(id: &str, captured_at_ms: u64, sequence: u64) -> String {
         format!("{captured_at_ms}_{sequence:06}_{id}.md")
+    }
+
+    const MAX_CONTEXT_BYTES: usize = 1024 * 1024;
+    const MAX_CONTEXT_FILES: usize = 8;
+    const CONTEXT_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+
+    fn context_file_timestamp(name: &str) -> Option<u64> {
+        let mut parts = name.strip_suffix(".md")?.splitn(3, '_');
+        let timestamp = parts.next()?;
+        let sequence = parts.next()?;
+        let id = parts.next()?;
+        if timestamp.len() < 13
+            || !timestamp.bytes().all(|b| b.is_ascii_digit())
+            || sequence.len() < 6
+            || !sequence.bytes().all(|b| b.is_ascii_digit())
+            || id.is_empty()
+            || !id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+        {
+            return None;
+        }
+        timestamp.parse().ok()
+    }
+
+    fn prune_window_context(workspace: &Path, now_ms: u64, reserve: usize) -> std::io::Result<()> {
+        let mut owned = Vec::new();
+        for entry in fs::read_dir(workspace)? {
+            let entry = entry?;
+            // Never follow symlinks or remove unrelated workspace documents.
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let Some(timestamp) = context_file_timestamp(&entry.file_name().to_string_lossy())
+            else {
+                continue;
+            };
+            let mut header = [0u8; 64];
+            let read = fs::File::open(entry.path())?.read(&mut header)?;
+            if !header[..read].starts_with(b"# Screen Tokenize\n\n- request_id: launcher-") {
+                continue;
+            }
+            owned.push((timestamp, entry.path(), entry.metadata()?.len()));
+        }
+        owned.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        let mut count = reserve;
+        let mut bytes = reserve as u64 * MAX_CONTEXT_BYTES as u64;
+        for (timestamp, path, size) in owned {
+            if now_ms.saturating_sub(timestamp) > CONTEXT_MAX_AGE_MS
+                || count >= MAX_CONTEXT_FILES
+                || bytes.saturating_add(size) > (MAX_CONTEXT_FILES * MAX_CONTEXT_BYTES) as u64
+            {
+                fs::remove_file(path)?;
+            } else {
+                count += 1;
+                bytes += size;
+            }
+        }
+        Ok(())
     }
 
     fn window_context_prompt(file_name: &str) -> String {
@@ -1038,22 +1163,33 @@ end run"#;
             }
             if save_after_refresh {
                 state.snapshot_revision = state.snapshot_revision.wrapping_add(1);
-                let snapshot = snapshot(&state, state.snapshot_revision);
+                let revision = state.snapshot_revision;
+                let snapshot = snapshot(&mut state, revision);
                 launcher_ui::refresh(snapshot);
             }
         }
         if save_after_refresh {
-            if let Some(state) = lock_state() {
-                if let Err(error) = state.store.save() {
+            if let Some(mut state) = lock_state() {
+                if let Err(error) = state.store.persist_session(session_id) {
                     trace::log(format!("agent_launcher:complete_save_error {error}"));
                 }
             }
         } else {
             refresh();
         }
+        flush_pending_sessions();
         if !launcher_ui::is_open_requested() {
             if let Some(notice) = notice {
                 launcher_ui::show_completion(notice, use_native_notifications());
+            }
+        }
+    }
+
+    pub fn flush_pending_sessions() {
+        let handle = lock_state().map(|state| state.store.flush_handle());
+        if let Some(handle) = handle {
+            if let Err(error) = handle.flush() {
+                trace::log(format!("agent_launcher:flush_error {error}"));
             }
         }
     }
@@ -1070,7 +1206,8 @@ end run"#;
     fn refresh() {
         let snapshot = lock_state().map(|mut state| {
             state.snapshot_revision = state.snapshot_revision.wrapping_add(1);
-            snapshot(&state, state.snapshot_revision)
+            let revision = state.snapshot_revision;
+            snapshot(&mut state, revision)
         });
         if let Some(snapshot) = snapshot {
             launcher_ui::refresh(snapshot);
@@ -1180,26 +1317,44 @@ end run"#;
         }
     }
 
-    fn snapshot(state: &State, revision: u64) -> LauncherSnapshot {
+    fn snapshot(state: &mut State, revision: u64) -> LauncherSnapshot {
         const RECENT_WINDOW_MS: u64 = 30 * 60 * 1_000;
         let cutoff = unix_now_ms().saturating_sub(RECENT_WINDOW_MS);
         let pinned = state
             .store
             .latest_completed_unvisited()
             .map(|session| session.id.clone());
-        let all: Vec<SessionSummary> = state
-            .store
-            .recent(usize::MAX)
-            .into_iter()
-            .map(summary)
-            .collect();
-        let mut recent: Vec<SessionSummary> = state
-            .store
-            .recent(usize::MAX)
-            .into_iter()
-            .filter(|session| session.updated_at_ms >= cutoff)
+        let store_revision = state.store.revision();
+        if state
+            .history_cache
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != store_revision)
+        {
+            state.history_cache = Some((
+                store_revision,
+                state
+                    .store
+                    .recent(usize::MAX)
+                    .into_iter()
+                    .map(|session| (session.updated_at_ms, summary(session)))
+                    .collect(),
+            ));
+        }
+        let history = &state.history_cache.as_ref().unwrap().1;
+        let all = if state.open_session.is_none() {
+            history
+                .iter()
+                .take(state.history_limit)
+                .map(|(_, row)| row.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut recent: Vec<SessionSummary> = history
+            .iter()
+            .filter(|(updated, _)| *updated >= cutoff)
             .take(3)
-            .map(summary)
+            .map(|(_, row)| row.clone())
             .collect();
         if let Some(pinned) = pinned {
             if let Some(index) = recent.iter().position(|session| session.id == pinned) {
@@ -1224,6 +1379,7 @@ end run"#;
             render_keyboard_shortcuts: state.render_keyboard_shortcuts,
             recent,
             all,
+            history_total: history.len(),
         }
     }
 
@@ -1307,8 +1463,9 @@ end run"#;
     #[cfg(test)]
     mod tests {
         use super::{
-            ghostty_command, native_session_path_is_safe, posix_quote, target_matches_window,
-            timestamped_context_file_name, window_context_prompt,
+            CONTEXT_MAX_AGE_MS, MAX_CONTEXT_FILES, ghostty_command, native_session_path_is_safe,
+            posix_quote, prune_window_context, target_matches_window,
+            timestamped_context_file_name, wait_for_preparation, window_context_prompt,
         };
         use crate::agent_sessions::TargetWindowMetadata;
         use desktop_core::protocol::{Bounds, WindowSummary};
@@ -1384,6 +1541,111 @@ end run"#;
         }
 
         #[test]
+        fn context_retention_preserves_unrelated_files_and_bounds_snapshots() {
+            let root =
+                std::env::temp_dir().join(format!("desktopctl-retention-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&root).unwrap();
+            let now = 1_800_000_000_000;
+            let header = "# Screen Tokenize\n\n- request_id: launcher-test\n";
+            let unrelated = root.join(timestamped_context_file_name("notes", now, 99));
+            fs::write(&unrelated, "user notes").unwrap();
+            let expired = root.join(timestamped_context_file_name(
+                "window",
+                now - CONTEXT_MAX_AGE_MS - 1,
+                0,
+            ));
+            fs::write(&expired, header).unwrap();
+            let oversized = root.join(timestamped_context_file_name("oversized", now, 1000));
+            fs::write(&oversized, header).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&oversized)
+                .unwrap()
+                .set_len((super::MAX_CONTEXT_BYTES * 9) as u64)
+                .unwrap();
+            for sequence in 0..12 {
+                fs::write(
+                    root.join(timestamped_context_file_name("window", now, sequence)),
+                    header,
+                )
+                .unwrap();
+            }
+            let link = root.join(timestamped_context_file_name("link", now, 98));
+            std::os::unix::fs::symlink(&unrelated, &link).unwrap();
+            prune_window_context(&root, now, 1).unwrap();
+            assert!(!expired.exists());
+            assert!(!oversized.exists());
+            assert_eq!(fs::read_to_string(&unrelated).unwrap(), "user notes");
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::read_dir(&root).unwrap().count(),
+                MAX_CONTEXT_FILES - 1 + 2
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn cancelled_preparation_returns_without_waiting_for_resolution() {
+            let handle =
+                std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+            let cancelled = std::sync::atomic::AtomicBool::new(true);
+            let started = std::time::Instant::now();
+            assert!(wait_for_preparation(&handle, &cancelled).0.is_none());
+            assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        }
+
+        #[test]
+        fn history_snapshots_page_rows_and_refresh_after_mutations() {
+            let root =
+                std::env::temp_dir().join(format!("desktopctl-history-{}", uuid::Uuid::now_v7()));
+            let mut store =
+                crate::agent_sessions::AgentSessionStore::new(root.join("sessions.json"));
+            let now = crate::agent_sessions::unix_now_ms();
+            let mut latest = String::new();
+            for index in 0..60 {
+                latest = store
+                    .create_running(format!("task {index}"), None, now - 60 + index)
+                    .unwrap()
+                    .0;
+            }
+            let mut state = super::State {
+                store,
+                render_keyboard_shortcuts: true,
+                use_native_notifications: false,
+                open_shortcut: Default::default(),
+                pending_target: None,
+                restore_pid: None,
+                launch_generation: 0,
+                open_session: None,
+                cancellations: Default::default(),
+                pending_preparation: None,
+                snapshot_revision: 0,
+                history_limit: 0,
+                history_cache: None,
+            };
+            let collapsed = super::snapshot(&mut state, 1);
+            assert!(collapsed.all.is_empty());
+            assert_eq!(collapsed.history_total, 60);
+            assert_eq!(collapsed.recent.len(), 3);
+            assert_eq!(collapsed.recent[0].id, latest);
+            state.history_limit = 50;
+            assert_eq!(super::snapshot(&mut state, 2).all.len(), 50);
+            state.store.mark_unread(&latest, true).unwrap();
+            state.history_limit = 100;
+            let expanded = super::snapshot(&mut state, 3);
+            assert_eq!(expanded.all.len(), 60);
+            assert!(expanded.all[0].unread);
+            state.store.flush().unwrap();
+            drop(state);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
         fn native_session_path_must_be_outside_workspace() {
             let root = std::env::temp_dir().join(format!(
                 "desktopctl-native-session-path-test-{}-{}",
@@ -1411,6 +1673,6 @@ end run"#;
 
 #[cfg(target_os = "macos")]
 pub use controller::{
-    RunningHandler, initialize, reload_keyboard_shortcuts_setting,
+    RunningHandler, flush_pending_sessions, initialize, reload_keyboard_shortcuts_setting,
     show_fake_completion_if_requested, toggle,
 };

@@ -26,7 +26,9 @@ While a session is running, its view shows a native activity spinner and a
 `Stop` button. The composer remains enabled: follow-ups typed while Pi is
 working are shown as queued user bubbles and sent together after Pi finishes.
 Stopping sets the request's cancellation token; the runner kills and reaps the
-Pi child, then persists the session as cancelled.
+Pi process group on Unix, then persists the session as cancelled. Output pipes
+are bounded (8 MiB stdout, 256 KiB stderr); exceeding either limit reports an
+error. Reader shutdown is bounded even when a descendant keeps a pipe open.
 
 After Pi has produced a native session identity, the session view also offers
 `Open in Ghostty`. DesktopCtl activates Ghostty, creates a new window (never a
@@ -61,7 +63,14 @@ to the detailed snapshot file. Each capture is written to a new
 `<session-workspace>/<timestamp>_<sequence>_<window_id>.md` file, which Pi can
 read when needed; the detailed tokenized payload is not duplicated in the
 prompt. With the option disabled, the request includes no target-window or
-window-context prompt.
+window-context prompt. Window contents are captured only after submission with
+sharing enabled; opening the panel resolves window identity only.
+
+Snapshots are limited to 1 MiB each, eight files / 8 MiB per workspace, and
+24 hours of retention. Cleanup runs before a new capture and hourly for idle
+sessions, including at startup. Cleanup recognizes launcher filenames and the
+launcher markdown header; unrelated files and symlinks are left alone. Older
+snapshot references in Pi history may therefore expire.
 
 `Agent Launcher…` is the first menu-bar menu item. While one or more Pi requests
 are running, DesktopCtl's aperture tray icon rotates and returns to the normal
@@ -80,7 +89,11 @@ ${DESKTOPCTL_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/desktopctl}/workspaces/a
 `$HOME/.local/share/desktopctl`. The document contains a schema version and a
 list of DesktopCtl sessions: UUID, adapter and Pi-native session identity,
 title, short transcript, target-window metadata, timestamps, status, and
-unread/visited state. A malformed file is left untouched and ignored with a
+unread/visited state. A single background writer coalesces session updates and
+performs atomic persistence outside the launcher state lock. History summaries
+are cached by store revision; expanded history loads in batches of 50 rows.
+Unchanged native transcripts use a bounded cache, and cyclic parent links are
+rejected. A malformed file is left untouched and ignored with a
 diagnostic. Sessions left running by a process crash become failed during
 startup recovery.
 

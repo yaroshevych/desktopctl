@@ -51,6 +51,7 @@ pub struct LauncherSnapshot {
     pub render_keyboard_shortcuts: bool,
     pub recent: Vec<SessionSummary>,
     pub all: Vec<SessionSummary>,
+    pub history_total: usize,
 }
 
 impl Default for LauncherSnapshot {
@@ -62,6 +63,7 @@ impl Default for LauncherSnapshot {
             render_keyboard_shortcuts: true,
             recent: Vec::new(),
             all: Vec::new(),
+            history_total: 0,
         }
     }
 }
@@ -86,6 +88,7 @@ pub enum LauncherAction {
     Dismissed,
     OpenSettings,
     ReturnToLauncher,
+    ExpandHistory,
     NewRequest {
         prompt: String,
         share_context: bool,

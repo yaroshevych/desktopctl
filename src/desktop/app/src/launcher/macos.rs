@@ -516,7 +516,6 @@ unsafe extern "C" fn swift_action_callback(ptr: *const std::ffi::c_char, length:
     let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), length) };
     if swift_requests_history_expansion(bytes) {
         DispatchQueue::main().exec_async(expand_history_on_main);
-        return;
     }
     let Ok(parsed) = std::panic::catch_unwind(|| parse_swift_action(bytes)) else {
         return;
@@ -596,6 +595,7 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
             }
         }
         Some("return_to_launcher") => LauncherAction::ReturnToLauncher,
+        Some("expand_history") => LauncherAction::ExpandHistory,
         Some("open_settings") => LauncherAction::OpenSettings,
         _ => return None,
     };

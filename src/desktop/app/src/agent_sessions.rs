@@ -8,12 +8,15 @@
 #![allow(dead_code)] // Store exposes focused operations used by tests and future adapters.
 
 use std::{
+    collections::HashMap,
     error::Error,
     fmt,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, Condvar, Mutex, mpsc},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -189,10 +192,218 @@ struct PersistedSessions {
 }
 
 /// Persistent collection of DesktopCtl launcher sessions.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AgentSessionStore {
     path: PathBuf,
     sessions: Vec<AgentSession>,
+    persistence: Persistence,
+    revision: u64,
+}
+
+/// A single writer owns disk I/O.  Callers only send the changed session;
+/// serialization and fsync happen after the caller releases the launcher
+/// mutex. A mailbox keeps only the latest pending value per session.
+#[derive(Debug)]
+struct Persistence {
+    mailbox: PersistenceHandle,
+}
+
+#[derive(Debug)]
+enum PersistCommand {
+    Replace(AgentSession),
+    Add(AgentSession),
+    Snapshot(Vec<AgentSession>),
+    Flush(mpsc::Sender<Result<(), String>>),
+}
+
+#[derive(Debug, Default)]
+struct PendingPersistence {
+    closed: bool,
+    snapshot: Option<Vec<AgentSession>>,
+    adds: Vec<AgentSession>,
+    replaces: HashMap<String, AgentSession>,
+    flushers: Vec<mpsc::Sender<Result<(), String>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PersistenceHandle {
+    mailbox: Arc<(Mutex<PendingPersistence>, Condvar)>,
+}
+
+impl Persistence {
+    fn start(path: PathBuf, sessions: Vec<AgentSession>) -> Self {
+        let mailbox = PersistenceHandle {
+            mailbox: Arc::new((Mutex::new(PendingPersistence::default()), Condvar::new())),
+        };
+        let worker_mailbox = mailbox.clone();
+        thread::Builder::new()
+            .name("agent-session-store".into())
+            .spawn(move || {
+                let mut sessions = sessions;
+                loop {
+                    let pending = {
+                        let (lock, wake) = &*worker_mailbox.mailbox;
+                        let mut pending = lock.lock().expect("persistence mailbox poisoned");
+                        while pending.is_empty() && !pending.closed {
+                            pending = wake.wait(pending).expect("persistence mailbox poisoned");
+                        }
+                        if pending.is_empty() && pending.closed {
+                            break;
+                        }
+                        let closed = pending.closed;
+                        let mut batch = std::mem::take(&mut *pending);
+                        pending.closed = closed;
+                        batch.closed = closed;
+                        batch
+                    };
+                    let should_exit = pending.closed;
+                    if let Some(snapshot) = pending.snapshot {
+                        sessions = snapshot;
+                    }
+                    for session in pending.adds {
+                        apply_persist_command(&mut sessions, PersistCommand::Add(session));
+                    }
+                    for session in pending.replaces.into_values() {
+                        apply_persist_command(&mut sessions, PersistCommand::Replace(session));
+                    }
+                    let result = write_snapshot(&path, &sessions);
+                    if let Err(error) = &result {
+                        eprintln!("agent session store persistence failed: {error}");
+                    }
+                    for ack in pending.flushers {
+                        let _ = ack.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                    }
+                    if should_exit {
+                        break;
+                    }
+                }
+            })
+            .expect("failed to start agent session persistence worker");
+        Self { mailbox }
+    }
+
+    fn replace(&self, session: AgentSession) -> Result<(), SessionStoreError> {
+        self.mailbox.enqueue(PersistCommand::Replace(session))
+    }
+
+    fn add(&self, session: AgentSession) -> Result<(), SessionStoreError> {
+        self.mailbox.enqueue(PersistCommand::Add(session))
+    }
+
+    fn snapshot(&self, sessions: Vec<AgentSession>) -> Result<(), SessionStoreError> {
+        self.mailbox.enqueue(PersistCommand::Snapshot(sessions))
+    }
+}
+
+impl PersistenceHandle {
+    fn enqueue(&self, command: PersistCommand) -> Result<(), SessionStoreError> {
+        let (lock, wake) = &*self.mailbox;
+        let mut pending = lock
+            .lock()
+            .map_err(|_| SessionStoreError::Invalid("persistence mailbox poisoned".into()))?;
+        if pending.closed {
+            return Err(SessionStoreError::Invalid(
+                "persistence worker stopped".into(),
+            ));
+        }
+        match command {
+            PersistCommand::Snapshot(sessions) => {
+                pending.snapshot = Some(sessions);
+                pending.adds.clear();
+                pending.replaces.clear();
+            }
+            PersistCommand::Add(session) => pending.adds.push(session),
+            PersistCommand::Replace(session) => {
+                pending.replaces.insert(session.id.clone(), session);
+            }
+            PersistCommand::Flush(sender) => pending.flushers.push(sender),
+        }
+        wake.notify_one();
+        Ok(())
+    }
+
+    pub fn flush(&self) -> Result<(), SessionStoreError> {
+        let (tx, rx) = mpsc::channel();
+        self.enqueue(PersistCommand::Flush(tx))?;
+        rx.recv()
+            .map_err(|_| SessionStoreError::Invalid("persistence worker stopped".into()))?
+            .map_err(SessionStoreError::Invalid)
+    }
+}
+
+impl Drop for Persistence {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.mailbox.mailbox;
+        if let Ok(mut pending) = lock.lock() {
+            pending.closed = true;
+            wake.notify_one();
+        }
+    }
+}
+
+impl PendingPersistence {
+    fn is_empty(&self) -> bool {
+        self.snapshot.is_none()
+            && self.adds.is_empty()
+            && self.replaces.is_empty()
+            && self.flushers.is_empty()
+    }
+}
+
+fn apply_persist_command(sessions: &mut Vec<AgentSession>, command: PersistCommand) {
+    match command {
+        PersistCommand::Snapshot(next) => *sessions = next,
+        PersistCommand::Add(session) => sessions.push(session),
+        PersistCommand::Replace(session) => {
+            if let Some(current) = sessions.iter_mut().find(|item| item.id == session.id) {
+                *current = session;
+            } else {
+                sessions.push(session);
+            }
+        }
+        PersistCommand::Flush(_) => {}
+    }
+}
+
+fn write_snapshot(path: &Path, sessions: &[AgentSession]) -> Result<(), SessionStoreError> {
+    let Some(parent) = path.parent() else {
+        return Err(SessionStoreError::Invalid(
+            "session store path has no parent directory".into(),
+        ));
+    };
+    if AgentSessionStore::default_path().as_deref() == Some(path) {
+        desktop_core::paths::AppPaths::resolve()?.ensure_workspaces_dir()?;
+    } else {
+        fs::create_dir_all(parent)?;
+        set_private_permissions(parent)?;
+    }
+    let payload = PersistedSessions {
+        version: STORE_VERSION,
+        sessions: sessions.to_vec(),
+    };
+    let bytes = serde_json::to_vec_pretty(&payload)?;
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        STORE_FILE_NAME,
+        std::process::id(),
+        sequence
+    ));
+    let write_result = (|| -> Result<(), SessionStoreError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        set_private_permissions_file(&file)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    write_result
 }
 
 impl AgentSessionStore {
@@ -219,8 +430,10 @@ impl AgentSessionStore {
         let path = path.into();
         if !path.exists() {
             return Ok(Self {
+                persistence: Persistence::start(path.clone(), Vec::new()),
                 path,
                 sessions: Vec::new(),
+                revision: 0,
             });
         }
 
@@ -232,9 +445,12 @@ impl AgentSessionStore {
                 persisted.version
             )));
         }
+        let sessions = persisted.sessions;
         let mut store = Self {
+            persistence: Persistence::start(path.clone(), sessions.clone()),
             path,
-            sessions: persisted.sessions,
+            sessions,
+            revision: 0,
         };
         if store.recover_stale_running_at(now_ms) > 0 {
             store.save()?;
@@ -251,8 +467,10 @@ impl AgentSessionStore {
             Ok(store) => (store, None),
             Err(error) => (
                 Self {
+                    persistence: Persistence::start(path.clone(), Vec::new()),
                     path,
                     sessions: Vec::new(),
+                    revision: 0,
                 },
                 Some(error.to_string()),
             ),
@@ -260,9 +478,12 @@ impl AgentSessionStore {
     }
 
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
         Self {
-            path: path.into(),
+            persistence: Persistence::start(path.clone(), Vec::new()),
+            path,
             sessions: Vec::new(),
+            revision: 0,
         }
     }
 
@@ -272,6 +493,12 @@ impl AgentSessionStore {
 
     pub fn sessions(&self) -> &[AgentSession] {
         &self.sessions
+    }
+
+    /// Monotonically increases whenever a mutating store operation is
+    /// persisted or an in-memory completion is published.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn get(&self, id: &str) -> Option<&AgentSession> {
@@ -285,45 +512,30 @@ impl AgentSessionStore {
     /// Persist the current state atomically.  The temporary file is created
     /// beside the destination so rename is on the same filesystem.
     pub fn save(&self) -> Result<(), SessionStoreError> {
-        let Some(parent) = self.path.parent() else {
-            return Err(SessionStoreError::Invalid(
-                "session store path has no parent directory".into(),
-            ));
-        };
-        if Self::default_path().as_deref() == Some(self.path.as_path()) {
-            desktop_core::paths::AppPaths::resolve()?.ensure_workspaces_dir()?;
-        } else {
-            fs::create_dir_all(parent)?;
-            set_private_permissions(parent)?;
-        }
+        self.persistence.snapshot(self.sessions.clone())
+    }
 
-        let payload = PersistedSessions {
-            version: STORE_VERSION,
-            sessions: self.sessions.clone(),
-        };
-        let bytes = serde_json::to_vec_pretty(&payload)?;
-        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temp_path = parent.join(format!(
-            ".{}.tmp-{}-{}",
-            STORE_FILE_NAME,
-            std::process::id(),
-            sequence
-        ));
-        let write_result = (|| -> Result<(), SessionStoreError> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path)?;
-            set_private_permissions_file(&file)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            fs::rename(&temp_path, &self.path)?;
-            Ok(())
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&temp_path);
-        }
-        write_result
+    /// Wait until all queued mutations are durably written. Call after the
+    /// launcher state mutex is released (shutdown and tests).
+    pub fn flush(&self) -> Result<(), SessionStoreError> {
+        self.persistence.mailbox.flush()
+    }
+
+    pub fn flush_handle(&self) -> PersistenceHandle {
+        self.persistence.mailbox.clone()
+    }
+
+    /// Enqueue one changed session. Cloning one session is bounded by that
+    /// session, while the expensive whole-store serialization is off-thread.
+    /// Enqueue the current value of one session for durable persistence.
+    /// Call after any `*_in_memory` batch is complete.
+    pub fn persist_session(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
+        let session = self
+            .get(session_id)
+            .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?
+            .clone();
+        self.revision = self.revision.wrapping_add(1);
+        self.persistence.replace(session)
     }
 
     /// Start a new Pi request and create its DesktopCtl session metadata.
@@ -359,7 +571,9 @@ impl AgentSessionStore {
             active_request_id: Some(request_id.clone()),
         };
         self.sessions.push(session);
-        self.save()?;
+        self.revision = self.revision.wrapping_add(1);
+        self.persistence
+            .add(self.sessions.last().expect("just pushed").clone())?;
         Ok((id, request_id))
     }
 
@@ -388,7 +602,7 @@ impl AgentSessionStore {
         session.error = None;
         session.updated_at_ms = now_ms;
         session.active_request_id = Some(request_id.clone());
-        self.save()?;
+        self.persist_session(session_id)?;
         Ok(request_id)
     }
 
@@ -402,7 +616,7 @@ impl AgentSessionStore {
             .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?;
         if session.target_window.is_none() {
             session.target_window = Some(target_window);
-            self.save()?;
+            self.persist_session(session_id)?;
         }
         Ok(())
     }
@@ -420,7 +634,7 @@ impl AgentSessionStore {
             native_session_path,
             native_session_cwd,
         )?;
-        self.save()
+        self.persist_session(session_id)
     }
 
     /// Update native session identity without persisting immediately. Callers
@@ -450,7 +664,7 @@ impl AgentSessionStore {
         now_ms: u64,
     ) -> Result<(), SessionStoreError> {
         self.complete_request_in_memory(session_id, request_id, answer, now_ms)?;
-        self.save()
+        self.persist_session(session_id)
     }
 
     /// Complete a request in memory so a caller can publish the new state
@@ -479,6 +693,7 @@ impl AgentSessionStore {
         session.active_request_id = None;
         session.unread = true;
         session.visited = false;
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -520,7 +735,7 @@ impl AgentSessionStore {
         session.visited = true;
         session.unread = false;
         session.updated_at_ms = now_ms;
-        self.save()
+        self.persist_session(session_id)
     }
 
     pub fn mark_unread(&mut self, session_id: &str, unread: bool) -> Result<(), SessionStoreError> {
@@ -528,7 +743,7 @@ impl AgentSessionStore {
             .get_mut(session_id)
             .ok_or_else(|| SessionStoreError::NotFound(session_id.to_string()))?;
         session.unread = unread;
-        self.save()
+        self.persist_session(session_id)
     }
 
     pub fn sync_native_transcript(
@@ -567,7 +782,7 @@ impl AgentSessionStore {
         if native_session_path.is_some() {
             session.native_session_path = native_session_path;
         }
-        self.save()?;
+        self.persist_session(session_id)?;
         Ok(true)
     }
 
@@ -648,7 +863,7 @@ impl AgentSessionStore {
         session.updated_at_ms = now_ms;
         session.active_request_id = None;
         session.unread = true;
-        self.save()
+        self.persist_session(session_id)
     }
 }
 
@@ -660,15 +875,38 @@ pub fn unix_now_ms() -> u64 {
 }
 
 pub fn derive_title(prompt: &str) -> String {
-    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_one_line(&normalized, TITLE_MAX_CHARS)
+    truncate_one_line(prompt, TITLE_MAX_CHARS)
 }
 
 pub fn truncate_one_line(text: &str, max_chars: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = normalized.chars();
-    let value: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
+    let mut value = String::new();
+    let mut emitted = 0;
+    let mut overflow = false;
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_space = emitted > 0;
+            continue;
+        }
+        if pending_space {
+            if emitted < max_chars {
+                value.push(' ');
+                emitted += 1;
+            } else {
+                overflow = true;
+                break;
+            }
+            pending_space = false;
+        }
+        if emitted < max_chars {
+            value.push(character);
+            emitted += 1;
+        } else {
+            overflow = true;
+            break;
+        }
+    }
+    if overflow {
         let suffix = "…";
         if max_chars <= suffix.chars().count() {
             suffix.chars().take(max_chars).collect()
@@ -753,6 +991,7 @@ mod tests {
             .complete_request(&id, &request, "A concise answer", 200)
             .expect("complete");
 
+        store.flush().expect("flush");
         let loaded = AgentSessionStore::load_at(&path, 300).expect("load");
         let session = loaded.get(&id).expect("session");
         assert_eq!(session.agent, "pi");
@@ -860,12 +1099,14 @@ mod tests {
         let (id, _) = store
             .create_running("interrupted", None, 100)
             .expect("create");
+        store.flush().expect("flush");
         let loaded = AgentSessionStore::load_at(&path, 200).expect("load");
         let session = loaded.get(&id).expect("session");
         assert_eq!(session.status, AgentSessionStatus::Failed);
         assert!(session.unread);
         assert_eq!(session.active_request_id, None);
         assert_eq!(session.updated_at_ms, 200);
+        loaded.flush().expect("flush");
         let reloaded = AgentSessionStore::load_at(&path, 300).expect("reload");
         assert_eq!(reloaded.get(&id).unwrap().updated_at_ms, 200);
         clean(&path);
@@ -913,6 +1154,7 @@ mod tests {
                 .sync_native_transcript(&id, messages.clone(), Some("/tmp/pi.jsonl".into()))
                 .unwrap()
         );
+        store.flush().expect("flush");
         let loaded = AgentSessionStore::load_at(&path, 20).unwrap();
         let session = loaded.get(&id).unwrap();
         assert_eq!(session.messages, messages);
@@ -950,5 +1192,57 @@ mod tests {
             "new follow-up"
         );
         clean(&path);
+    }
+
+    #[test]
+    fn truncation_does_not_materialize_unbounded_input() {
+        let input = format!("{} tail", "x".repeat(2_000_000));
+        assert_eq!(truncate_one_line(&input, 12), "xxxxxxxxxxx…");
+        assert_eq!(truncate_one_line("  héllo\n\tworld  ", 20), "héllo world");
+        assert_eq!(truncate_one_line("abc  ", 3), "abc");
+        assert_eq!(truncate_one_line("abc d", 3), "ab…");
+        assert_eq!(truncate_one_line("abc", 0), "");
+    }
+
+    #[test]
+    fn concurrent_flush_barriers_persist_latest_coalesced_update() {
+        let path = test_path("flush-barriers").join("sessions.json");
+        let mut store = AgentSessionStore::new(&path);
+        let (id, request) = store.create_running("hello", None, 1).unwrap();
+        for _ in 0..100 {
+            store.mark_unread(&id, true).unwrap();
+            store.mark_unread(&id, false).unwrap();
+        }
+        store.complete_request(&id, &request, "done", 2).unwrap();
+        let waiters: Vec<_> = (0..4)
+            .map(|_| {
+                let handle = store.flush_handle();
+                std::thread::spawn(move || handle.flush())
+            })
+            .collect();
+        for waiter in waiters {
+            waiter.join().unwrap().unwrap();
+        }
+        let loaded = AgentSessionStore::load_at(&path, 3).unwrap();
+        assert_eq!(loaded.get(&id).unwrap().final_answer(), Some("done"));
+        assert_eq!(loaded.sessions().len(), 1);
+        let handle = store.flush_handle();
+        drop(store);
+        assert!(handle.flush().is_err());
+        drop(loaded);
+        clean(&path);
+    }
+
+    #[test]
+    fn flush_reports_disk_write_failure() {
+        let root = test_path("flush-failure");
+        fs::create_dir_all(&root).unwrap();
+        let obstruction = root.join("file");
+        fs::write(&obstruction, "not a directory").unwrap();
+        let mut store = AgentSessionStore::new(obstruction.join("sessions.json"));
+        store.create_running("hello", None, 1).unwrap();
+        assert!(store.flush().is_err());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 }

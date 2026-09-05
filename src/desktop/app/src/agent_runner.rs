@@ -7,16 +7,20 @@
 #![allow(dead_code)] // Adapter API includes cancellation/configuration seams used by future UI.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fmt, fs,
     io::{self, BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -95,12 +99,50 @@ pub struct NativeTranscriptMessage {
     pub timestamp_ms: u64,
 }
 
+const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STDERR_BYTES: usize = 256 * 1024;
+const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_TRANSCRIPT_CACHE_ENTRIES: usize = 64;
+const MAX_TRANSCRIPT_CACHE_BYTES: usize = 4 * 1024 * 1024;
+const TRANSCRIPT_CACHE_ENTRY_OVERHEAD: usize = 128;
+
+#[derive(Debug)]
+struct NativeTranscriptEntry {
+    id: String,
+    parent_id: Option<String>,
+    message: Option<NativeTranscriptMessage>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedTranscript {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    messages: Vec<NativeTranscriptMessage>,
+    bytes: usize,
+}
+
+fn transcript_cache() -> &'static Mutex<HashMap<PathBuf, CachedTranscript>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedTranscript>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn load_native_transcript(
     session: &AgentSessionRef,
 ) -> Result<(PathBuf, Vec<NativeTranscriptMessage>), AgentRunnerError> {
     let path = resolve_native_session_path(session)?;
+    let metadata = fs::metadata(&path).map_err(|source| AgentRunnerError::Io { source })?;
+    let cache_key = path.clone();
+    let modified = metadata.modified().ok();
+    if let Ok(cache) = transcript_cache().lock() {
+        if let Some(cached) = cache
+            .get(&cache_key)
+            .filter(|cached| cached.len == metadata.len() && cached.modified == modified)
+        {
+            return Ok((path, cached.messages.clone()));
+        }
+    }
     let file = fs::File::open(&path).map_err(|source| AgentRunnerError::Io { source })?;
-    let mut entries = Vec::new();
+    let mut entries = Vec::<NativeTranscriptEntry>::new();
     for (line_number, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|source| AgentRunnerError::Io { source })?;
         if line.trim().is_empty() {
@@ -113,37 +155,71 @@ pub fn load_native_transcript(
             ))
         })?;
         if let Some(id) = value.get("id").and_then(Value::as_str) {
-            entries.push((
-                id.to_string(),
-                value
+            entries.push(NativeTranscriptEntry {
+                id: id.to_string(),
+                parent_id: value
                     .get("parentId")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                value,
-            ));
+                message: native_message(&value),
+            });
         }
     }
-    let Some((leaf, _, _)) = entries.last() else {
+    let Some(leaf) = entries.last().map(|entry| entry.id.as_str()) else {
         return Ok((path, Vec::new()));
     };
-    let by_id: HashMap<&str, &(String, Option<String>, Value)> = entries
+    let by_id: HashMap<&str, &NativeTranscriptEntry> = entries
         .iter()
-        .map(|entry| (entry.0.as_str(), entry))
+        .map(|entry| (entry.id.as_str(), entry))
         .collect();
     let mut branch = Vec::new();
-    let mut cursor = Some(leaf.as_str());
+    let mut visited = HashSet::new();
+    let mut cursor = Some(leaf);
     while let Some(id) = cursor {
+        if !visited.insert(id) {
+            return Err(AgentRunnerError::Parse(format!(
+                "Pi session transcript contains a parent cycle at {id}"
+            )));
+        }
         let Some(entry) = by_id.get(id) else {
             break;
         };
         branch.push(*entry);
-        cursor = entry.1.as_deref();
+        cursor = entry.parent_id.as_deref();
     }
     branch.reverse();
-    let messages = branch
+    let messages: Vec<NativeTranscriptMessage> = branch
         .into_iter()
-        .filter_map(|(_, _, entry)| native_message(entry))
+        .filter_map(|entry| entry.message.clone())
         .collect();
+    let bytes = messages
+        .iter()
+        .map(|message| message.text.len())
+        .sum::<usize>()
+        + cache_key.to_string_lossy().len()
+        + TRANSCRIPT_CACHE_ENTRY_OVERHEAD;
+    if bytes <= MAX_TRANSCRIPT_CACHE_BYTES {
+        if let Ok(mut cache) = transcript_cache().lock() {
+            while (cache.len() >= MAX_TRANSCRIPT_CACHE_ENTRIES
+                || cache.values().map(|entry| entry.bytes).sum::<usize>() + bytes
+                    > MAX_TRANSCRIPT_CACHE_BYTES)
+                && !cache.is_empty()
+            {
+                if let Some(key) = cache.keys().next().cloned() {
+                    cache.remove(&key);
+                }
+            }
+            cache.insert(
+                cache_key,
+                CachedTranscript {
+                    len: metadata.len(),
+                    modified,
+                    messages: messages.clone(),
+                    bytes,
+                },
+            );
+        }
+    }
     Ok((path, messages))
 }
 
@@ -353,6 +429,7 @@ impl PiRunner {
         if let Some(dir) = self.current_dir.as_deref() {
             command.current_dir(dir);
         }
+        configure_process_group(&mut command);
         Ok(command)
     }
 }
@@ -408,36 +485,49 @@ impl AgentProcess {
             .stderr
             .take()
             .ok_or_else(|| AgentRunnerError::Process("Pi stderr pipe was unavailable".into()))?;
-        let stdout_thread = thread::spawn(move || read_pipe(stdout));
-        let stderr_thread = thread::spawn(move || read_pipe(stderr));
+        let stop_readers = Arc::new(AtomicBool::new(false));
+        let (stdout_rx, stdout_thread) = spawn_pipe_reader(
+            stdout,
+            MAX_STDOUT_BYTES,
+            "stdout",
+            Arc::clone(&stop_readers),
+        );
+        let (stderr_rx, stderr_thread) = spawn_pipe_reader(
+            stderr,
+            MAX_STDERR_BYTES,
+            "stderr",
+            Arc::clone(&stop_readers),
+        );
 
         let status = loop {
             if cancellation.load(Ordering::Acquire) {
-                let _ = child.kill();
+                stop_readers.store(true, Ordering::Release);
+                terminate_process_group(&mut child);
                 let _ = child.wait();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
+                let _ = collect_pipe(stdout_rx, stdout_thread);
+                let _ = collect_pipe(stderr_rx, stderr_thread);
                 return Err(AgentRunnerError::Cancelled);
             }
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(source) => {
-                    let _ = child.kill();
+                    stop_readers.store(true, Ordering::Release);
+                    terminate_process_group(&mut child);
                     let _ = child.wait();
-                    let _ = stdout_thread.join();
-                    let _ = stderr_thread.join();
+                    let _ = collect_pipe(stdout_rx, stdout_thread);
+                    let _ = collect_pipe(stderr_rx, stderr_thread);
                     return Err(AgentRunnerError::Wait { source });
                 }
             }
         };
 
-        let stdout = stdout_thread
-            .join()
-            .map_err(|_| AgentRunnerError::Process("Pi stdout reader panicked".into()))??;
-        let stderr = stderr_thread
-            .join()
-            .map_err(|_| AgentRunnerError::Process("Pi stderr reader panicked".into()))??;
+        // A child can exit while a descendant still owns a pipe. Kill the
+        // process group before waiting for readers so completion is bounded.
+        stop_readers.store(true, Ordering::Release);
+        terminate_process_group(&mut child);
+        let stdout = collect_pipe(stdout_rx, stdout_thread)?;
+        let stderr = collect_pipe(stderr_rx, stderr_thread)?;
         if !status.success() {
             let detail = stderr.trim();
             return Err(if detail.is_empty() {
@@ -456,9 +546,7 @@ impl AgentProcess {
         match child.try_wait() {
             Ok(Some(_)) => Ok(()),
             Ok(None) => {
-                child
-                    .kill()
-                    .map_err(|source| AgentRunnerError::Kill { source })?;
+                terminate_process_group(&mut child);
                 child
                     .wait()
                     .map(|_| ())
@@ -473,18 +561,156 @@ impl Drop for AgentProcess {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
+                terminate_process_group(&mut child);
                 let _ = child.wait();
             }
         }
     }
 }
 
-fn read_pipe<R: Read>(mut pipe: R) -> Result<String, AgentRunnerError> {
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)
-        .map_err(|source| AgentRunnerError::Io { source })?;
-    String::from_utf8(bytes).map_err(|source| AgentRunnerError::Utf8 { source })
+trait PipeNonblocking {
+    fn set_nonblocking(&self) -> io::Result<()>;
+}
+
+#[cfg(unix)]
+impl PipeNonblocking for std::process::ChildStdout {
+    fn set_nonblocking(&self) -> io::Result<()> {
+        set_fd_nonblocking(self)
+    }
+}
+
+#[cfg(unix)]
+impl PipeNonblocking for std::process::ChildStderr {
+    fn set_nonblocking(&self) -> io::Result<()> {
+        set_fd_nonblocking(self)
+    }
+}
+
+#[cfg(unix)]
+fn set_fd_nonblocking<T: std::os::fd::AsRawFd>(pipe: &T) -> io::Result<()> {
+    use std::os::fd::RawFd;
+    let fd: RawFd = pipe.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+impl<T> PipeNonblocking for T {
+    fn set_nonblocking(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
+    mut pipe: R,
+    limit: usize,
+    stream: &'static str,
+    stop: Arc<AtomicBool>,
+) -> (
+    Receiver<Result<String, AgentRunnerError>>,
+    thread::JoinHandle<()>,
+) {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        if let Err(source) = pipe.set_nonblocking() {
+            let _ = sender.send(Err(AgentRunnerError::Io { source }));
+            return;
+        }
+        let mut bytes = Vec::with_capacity(limit.min(8192));
+        let mut chunk = [0u8; 8192];
+        let mut oversized = false;
+        let mut stop_deadline = None;
+        loop {
+            if stop.load(Ordering::Acquire) {
+                let deadline =
+                    *stop_deadline.get_or_insert_with(|| Instant::now() + PIPE_DRAIN_TIMEOUT);
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let keep = if bytes.len() < limit {
+                        let keep = count.min(limit - bytes.len());
+                        bytes.extend_from_slice(&chunk[..keep]);
+                        keep
+                    } else {
+                        0
+                    };
+                    oversized |= count > keep;
+                }
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(source) => {
+                    let _ = sender.send(Err(AgentRunnerError::Io { source }));
+                    return;
+                }
+            }
+        }
+        let result = if oversized {
+            Err(AgentRunnerError::Process(format!(
+                "Pi {stream} exceeded the {} byte limit",
+                limit
+            )))
+        } else {
+            String::from_utf8(bytes).map_err(|source| AgentRunnerError::Utf8 { source })
+        };
+        let _ = sender.send(result);
+    });
+    (receiver, handle)
+}
+
+fn collect_pipe(
+    receiver: Receiver<Result<String, AgentRunnerError>>,
+    handle: thread::JoinHandle<()>,
+) -> Result<String, AgentRunnerError> {
+    let result = receiver
+        .recv_timeout(PIPE_DRAIN_TIMEOUT)
+        .map_err(|_| AgentRunnerError::Process("timed out draining Pi output pipe".into()))?;
+    handle
+        .join()
+        .map_err(|_| AgentRunnerError::Process("Pi output reader panicked".into()))?;
+    result
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut Child) {
+    unsafe {
+        if libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) == -1 {
+            let _ = child.kill();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(child: &mut Child) {
+    let _ = child.kill();
 }
 
 /// Resolve Pi without relying on the interactive shell's PATH.  The explicit
@@ -956,5 +1182,100 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn native_transcript_rejects_parent_cycles() {
+        let path = env::temp_dir().join(format!(
+            "desktopctl-pi-session-cycle-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session\",\"id\":\"pi-cycle\"}\n",
+                "{\"type\":\"message\",\"id\":\"a\",\"parentId\":\"b\",\"message\":{\"role\":\"user\",\"content\":\"a\"}}\n",
+                "{\"type\":\"message\",\"id\":\"b\",\"parentId\":\"a\",\"message\":{\"role\":\"assistant\",\"content\":\"b\",\"stopReason\":\"stop\"}}\n"
+            ),
+        )
+        .expect("write native session");
+
+        let error = load_native_transcript(&AgentSessionRef::path(&path)).unwrap_err();
+        let _ = fs::remove_file(path);
+        assert!(error.to_string().contains("parent cycle"));
+    }
+
+    #[test]
+    fn native_transcript_cache_invalidates_when_file_changes() {
+        let path = env::temp_dir().join(format!(
+            "desktopctl-pi-session-cache-test-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let header = "{\"type\":\"session\",\"id\":\"pi-cache\"}\n";
+        fs::write(
+            &path,
+            format!(
+                "{header}{{\"type\":\"message\",\"id\":\"u\",\"message\":{{\"role\":\"user\",\"content\":\"first\"}}}}\n"
+            ),
+        )
+        .expect("write native session");
+        let (_, first) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        assert_eq!(first[0].text, "first");
+
+        fs::write(
+            &path,
+            format!(
+                "{header}{{\"type\":\"message\",\"id\":\"u\",\"message\":{{\"role\":\"user\",\"content\":\"changed content\"}}}}\n"
+            ),
+        )
+        .expect("rewrite native session");
+        let (_, second) = load_native_transcript(&AgentSessionRef::path(&path)).unwrap();
+        let _ = fs::remove_file(path);
+        assert_eq!(second[0].text, "changed content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_reader_accepts_exact_limit_and_rejects_over_limit() {
+        for (payload, expected_error) in [("abc", false), ("abcd", true)] {
+            let mut child = Command::new("sh")
+                .args(["-c", &format!("printf {payload}")])
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("spawn shell");
+            let stdout = child.stdout.take().expect("stdout pipe");
+            let (receiver, reader) =
+                spawn_pipe_reader(stdout, 3, "stdout", Arc::new(AtomicBool::new(false)));
+            child.wait().expect("wait shell");
+            let result = collect_pipe(receiver, reader);
+            assert_eq!(result.is_err(), expected_error, "payload={payload}");
+            if !expected_error {
+                assert_eq!(result.unwrap(), payload);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_process_group_with_descendant() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        configure_process_group(&mut command);
+        let child = command.spawn().expect("spawn shell");
+        let mut process = AgentProcess::new(child);
+        let cancellation = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let error = process
+            .wait_with_cancellation(&cancellation)
+            .expect_err("cancelled process");
+        assert!(matches!(error, AgentRunnerError::Cancelled));
+        assert!(started.elapsed() < PIPE_DRAIN_TIMEOUT + Duration::from_secs(1));
     }
 }

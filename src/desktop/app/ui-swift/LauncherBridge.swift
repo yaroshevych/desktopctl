@@ -22,6 +22,7 @@ private struct LauncherRenderState {
     var revision: UInt64 = 0
     var recentTasks: [LauncherTask] = []
     var allTasks: [LauncherTask] = []
+    var historyTotal = 0
     var showAll = false
     var screen = "Launcher"
     var activeApp: String?
@@ -37,11 +38,11 @@ private struct LauncherRenderState {
     }
 
     var showsAllHistory: Bool {
-        !showAll && allTasks.count > recentTasks.count
+        historyTotal > (showAll ? allTasks.count : recentTasks.count)
     }
 
     var additionalTaskCount: Int {
-        max(0, allTasks.count - recentTasks.count)
+        max(0, historyTotal - (showAll ? allTasks.count : recentTasks.count))
     }
 }
 
@@ -63,6 +64,7 @@ private final class LauncherModel: ObservableObject {
     private var queuedFollowUpsFlushPending = false
     private var followUpRequestPending = false
     private var snapshotParseGeneration: UInt64 = 0
+    private var selectAfterHistoryCount: Int?
     var callback: LauncherActionCallback?
 
     var displayedQueuedFollowUps: [String] {
@@ -126,6 +128,7 @@ private final class LauncherModel: ObservableObject {
         let recentRows = (root["recent"] as? [[String: Any]]) ?? []
         next.recentTasks = parseTasks(recentRows)
         next.allTasks = parseTasks((root["all"] as? [[String: Any]]) ?? recentRows)
+        next.historyTotal = root["history_total"] as? Int ?? next.allTasks.count
         return next
     }
 
@@ -151,6 +154,11 @@ private final class LauncherModel: ObservableObject {
             followUpRequestPending = false
         }
         renderState = next
+        if let previousCount = selectAfterHistoryCount, next.showAll,
+           next.allTasks.count > previousCount {
+            selectedTaskID = next.allTasks[previousCount].id
+            selectAfterHistoryCount = nil
+        }
         if let selectedTaskID,
            !next.tasks.contains(where: { $0.id == selectedTaskID }) {
             self.selectedTaskID = nil
@@ -161,8 +169,8 @@ private final class LauncherModel: ObservableObject {
     }
 
     func sendPrompt() {
-        if showAllFocused, !renderState.showAll {
-            expandHistory(selecting: renderState.allTasks[renderState.recentTasks.count].id)
+        if showAllFocused, renderState.showsAllHistory {
+            loadHistorySelectingNext()
             return
         }
         if renderState.screen != "Session",
@@ -227,10 +235,10 @@ private final class LauncherModel: ObservableObject {
     func moveSelection(_ delta: Int) {
         guard renderState.screen != "Session" else { return }
 
-        if !renderState.showAll, renderState.showsAllHistory {
+        if renderState.showsAllHistory {
             if showAllFocused {
                 if delta > 0 {
-                    expandHistory(selecting: renderState.allTasks[renderState.recentTasks.count].id)
+                    loadHistorySelectingNext()
                 } else if delta < 0 {
                     showAllFocused = false
                     if let last = renderState.tasks.last {
@@ -266,7 +274,6 @@ private final class LauncherModel: ObservableObject {
                 self.focusGeneration += 1
             } else if next >= self.renderState.tasks.count,
                       delta > 0,
-                      !self.renderState.showAll,
                       self.renderState.showsAllHistory {
                 self.selectedTaskID = nil
                 self.showAllFocused = true
@@ -354,7 +361,6 @@ private final class LauncherModel: ObservableObject {
     }
 
     func expandAllHistory() {
-        guard !renderState.showAll else { return }
         emit(["type": "expand_history"])
         DispatchQueue.main.async {
             // AppKit animates the panel resize. Keep the row-set change
@@ -362,6 +368,11 @@ private final class LauncherModel: ObservableObject {
             self.renderState.showAll = true
             self.showAllFocused = false
         }
+    }
+
+    private func loadHistorySelectingNext() {
+        selectAfterHistoryCount = renderState.tasks.count
+        expandAllHistory()
     }
 
     func noteScrollWheel() {
@@ -405,6 +416,7 @@ private final class LauncherModel: ObservableObject {
     }
 
     func prepareForPresentation() {
+        selectAfterHistoryCount = nil
         renderState.showAll = false
         selectedTaskID = nil
         showAllFocused = false
@@ -851,7 +863,7 @@ private struct LauncherRootView: View {
                 .foregroundColor(.secondary)
                 .frame(width: 10, height: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Show all")
+                Text(model.renderState.showAll ? "Show more" : "Show history")
                     .font(.body)
                 Text("\(model.renderState.additionalTaskCount) more sessions")
                     .font(.caption)
