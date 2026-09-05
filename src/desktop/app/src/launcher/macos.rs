@@ -38,6 +38,7 @@ use objc2_foundation::{
 };
 
 use super::swift_bridge;
+use crate::trace;
 use desktop_core::error::AppError;
 
 const PANEL_WIDTH: f64 = 700.0;
@@ -371,16 +372,23 @@ fn accepts_lifecycle_sequence(current: u64, incoming: u64) -> bool {
     incoming > current
 }
 
-pub fn show_completion(notice: CompletionNotice, use_native_notifications: bool) {
+pub(crate) fn show_completion(
+    notice: CompletionNotice,
+    use_native_notifications: bool,
+    timing: Option<Arc<trace::E2eTiming>>,
+) {
     DispatchQueue::main().exec_async(move || {
         if is_visible() {
+            if let Some(timing) = timing.as_ref() {
+                timing.mark("notification_skipped", "launcher_visible=true");
+            }
             return;
         }
         remember_notification(&notice.session_id);
         if use_native_notifications {
-            show_native_completion_notification(notice);
+            show_native_completion_notification(notice, timing);
         } else {
-            show_completion_on_main(notice, true);
+            show_completion_on_main(notice, true, timing);
         }
     });
 }
@@ -392,20 +400,29 @@ pub fn show_completion_immediately(notice: CompletionNotice, use_native_notifica
         }
         remember_notification(&notice.session_id);
         if use_native_notifications {
-            show_native_completion_notification(notice);
+            show_native_completion_notification(notice, None);
         } else {
-            show_completion_on_main(notice, false);
+            show_completion_on_main(notice, false, None);
         }
     });
 }
 
-fn show_native_completion_notification(notice: CompletionNotice) {
+fn show_native_completion_notification(
+    notice: CompletionNotice,
+    timing: Option<Arc<trace::E2eTiming>>,
+) {
     let title = notice
         .target_app
         .as_deref()
         .map(|app| format!("DesktopCtl · {app}"))
         .unwrap_or_else(|| "DesktopCtl".to_owned());
     let body = one_line(&notice.answer_preview, 120);
+    if let Some(timing) = timing.as_ref() {
+        timing.mark(
+            "notification_request_submitted",
+            format!("session={}", notice.session_id),
+        );
+    }
     swift_bridge::show_completion_notification_for_session(&title, &body, &notice.session_id);
 }
 
@@ -642,7 +659,11 @@ fn expand_history_on_main() {
     }
 }
 
-fn show_completion_on_main(notice: CompletionNotice, animated: bool) {
+fn show_completion_on_main(
+    notice: CompletionNotice,
+    animated: bool,
+    timing: Option<Arc<trace::E2eTiming>>,
+) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -819,6 +840,12 @@ fn show_completion_on_main(notice: CompletionNotice, animated: bool) {
         } else {
             panel.setAlphaValue(1.0);
             panel.orderFrontRegardless();
+        }
+        if let Some(timing) = timing.as_ref() {
+            timing.mark(
+                "completion_panel_visible",
+                format!("session={} animated={animated}", notice.session_id),
+            );
         }
         generation
     });
@@ -1104,6 +1131,9 @@ fn apply_show(sequence: u64) {
     panel.makeKeyAndOrderFront(None);
     swift_bridge::focus_prompt();
     VISIBLE.store(true, Ordering::SeqCst);
+    if let Some(timing) = trace::current_launcher_timing() {
+        timing.mark("launcher_panel_visible", "");
+    }
 }
 
 fn hide_on_main() {
@@ -1566,6 +1596,7 @@ unsafe extern "C" {
 }
 
 unsafe extern "C" fn hotkey_handler(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> OSStatus {
+    trace::log("e2e event=hotkey_received");
     if let Some(callbacks) = CALLBACKS.get() {
         (callbacks.on_action)(LauncherAction::ToggleRequested);
     }

@@ -192,7 +192,18 @@ du -sh src/desktop/dist/DesktopCtl.app
 tail -f "$TEST_ROOT/trace.log"
 ```
 
-Current trace has no hotkey-received or panel-visible markers, so it cannot
-measure hotkey-to-visible latency. Use a stopwatch for that number; add explicit
-markers before automating the measurement. Record cold launch, warm
-`Option-Space` -> visible, first-responder readiness, idle RSS, and visible RSS.
+Each launcher run also emits correlated `e2e` lines with a monotonic
+`elapsed_ms` value. After a manual run, filter them with:
+
+```bash
+rg 'e2e id=' "$TEST_ROOT/trace.log"
+```
+
+The markers cover hotkey receipt, launcher panel visibility, active-window
+resolution, window capture/tokenization, Pi launch and response, session
+persistence, and completion notification submission. Enable the trace with
+`DESKTOPCTL_TRACE=1` as shown above.
+
+The `e2e` markers make hotkey-to-visible latency directly measurable. Record
+cold launch, warm `Option-Space` -> visible, first-responder readiness, idle
+RSS, and visible RSS when comparing runs.

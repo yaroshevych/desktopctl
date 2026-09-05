@@ -217,9 +217,12 @@ mod controller {
             thread::spawn(move || open_session(session_id));
             return;
         }
+        let timing = crate::trace::begin_launcher_timing();
+        timing.mark("launcher_toggle", "");
         // Capture focus synchronously before activating DesktopCtl. Do not query
         // the service here: this path runs on AppKit's main thread.
         let target_hint = crate::runtime::macos::frontmost_application_pid();
+        timing.mark("frontmost_app_captured", format!("pid={:?}", target_hint));
         trace::agent_context(format!("toggle frontmost_pid={:?}", target_hint,));
         let generation = if let Some(mut state) = lock_state() {
             state.launch_generation = state.launch_generation.wrapping_add(1);
@@ -244,6 +247,7 @@ mod controller {
             "toggle resolving target generation={} pid={}",
             generation, pid
         ));
+        timing.mark("target_resolution_start", format!("pid={pid}"));
         let preparation = preparation_handle_for_generation(generation);
         thread::spawn(move || {
             let prepared = crate::service_client::ServiceClient
@@ -265,6 +269,13 @@ mod controller {
                     let context = Err("capture deferred until submission".to_string());
                     PreparedTarget { context, target }
                 });
+            match &prepared {
+                Ok(prepared) => timing.mark(
+                    "target_resolution_done",
+                    format!("target={}", target_log_label(&prepared.target)),
+                ),
+                Err(error) => timing.mark("target_resolution_error", format!("error={error}")),
+            }
             if let Err(error) = &prepared {
                 trace::agent_context(format!("target resolution failed pid={pid}: {error}"));
                 trace::log(format!("agent_launcher:target_resolution_error {error}"));
@@ -375,6 +386,16 @@ mod controller {
             }
         });
         if let Some((session_id, request_id, target)) = created {
+            let timing =
+                trace::take_launcher_timing().unwrap_or_else(|| trace::begin_launcher_timing());
+            timing.mark(
+                "request_submitted",
+                format!(
+                    "session={} prompt_bytes={} share_context={share_context}",
+                    session_id,
+                    prompt.len()
+                ),
+            );
             trace::agent_context(format!(
                 "new_request session={} share_context={} target={}",
                 session_id,
@@ -403,6 +424,7 @@ mod controller {
                 share_context,
                 preparation,
                 workspace,
+                timing,
             );
         }
     }
@@ -422,6 +444,15 @@ mod controller {
             }
         });
         if let Some((request_id, session)) = request {
+            let timing = trace::E2eTiming::new("follow_up");
+            timing.mark(
+                "request_submitted",
+                format!(
+                    "session={} prompt_bytes={} share_context={share_context}",
+                    session_id,
+                    prompt.len()
+                ),
+            );
             trace::agent_context(format!(
                 "follow_up session={} share_context={} stored_target={}",
                 session_id,
@@ -454,6 +485,7 @@ mod controller {
                 share_context,
                 None,
                 workspace,
+                timing,
             );
             refresh();
         }
@@ -583,6 +615,7 @@ end run"#;
                 launcher_ui::show_completion(
                     completion_notice(&session, &error, &follow_up_shortcut),
                     use_native_notifications(),
+                    None,
                 );
             }
         });
@@ -619,6 +652,7 @@ end run"#;
         share_context: bool,
         preparation: Option<PreparationHandle>,
         workspace: PathBuf,
+        timing: Arc<crate::trace::E2eTiming>,
     ) {
         let cancellation = Arc::new(AtomicBool::new(false));
         if let Some(mut state) = lock_state() {
@@ -628,6 +662,7 @@ end run"#;
         }
         set_running(true);
         thread::spawn(move || {
+            timing.mark("run_worker_started", format!("session={session_id}"));
             let preparation_wait = preparation
                 .filter(|_| share_context)
                 .map(|handle| wait_for_preparation(&handle, &cancellation));
@@ -637,6 +672,7 @@ end run"#;
                     &request_id,
                     &workspace,
                     Err(crate::agent_runner::AgentRunnerError::Cancelled),
+                    Arc::clone(&timing),
                 );
                 return;
             }
@@ -647,6 +683,10 @@ end run"#;
                 .as_ref()
                 .is_some_and(|(_, timed_out)| *timed_out);
             let target = target.or_else(|| prepared.as_ref().map(|value| value.target.clone()));
+            timing.mark(
+                "target_ready",
+                format!("session={} present={}", session_id, target.is_some()),
+            );
             trace::agent_context(format!(
                 "run_pi session={} share_context={} prepared={} target={}",
                 session_id,
@@ -710,7 +750,7 @@ end run"#;
                                     trace::agent_context(
                                         "context prefetch discarded; target is no longer current",
                                     );
-                                    window_context_for_target(target)
+                                    window_context_for_target(target, &timing)
                                 }
                                 Err(error) => {
                                     trace::agent_context(format!(
@@ -723,7 +763,7 @@ end run"#;
                                 trace::agent_context(format!(
                                     "context prefetch result failed; retrying: {error}"
                                 ));
-                                window_context_for_target(target)
+                                window_context_for_target(target, &timing)
                             }
                         },
                         None => {
@@ -736,13 +776,17 @@ end run"#;
                                 trace::agent_context(
                                     "context has no prefetch result; capturing now",
                                 );
-                                window_context_for_target(target)
+                                window_context_for_target(target, &timing)
                             }
                         }
                     };
                     match context {
                         Ok(context) => match write_window_context(&workspace, target, &context) {
                             Ok(file_name) => {
+                                timing.mark(
+                                    "window_context_file_written",
+                                    format!("session={} file={file_name}", session_id),
+                                );
                                 trace::agent_context(format!(
                                     "context ready session={} snapshot_markdown_bytes={} file={}",
                                     session_id,
@@ -794,14 +838,38 @@ end run"#;
                     &request_id,
                     &workspace,
                     Err(crate::agent_runner::AgentRunnerError::Cancelled),
+                    Arc::clone(&timing),
                 );
                 return;
             }
-            let result = PiRunner::new()
+            timing.mark("pi_launch_start", format!("session={session_id}"));
+            let result = match PiRunner::new()
                 .with_current_dir(workspace.clone())
                 .spawn(request)
-                .and_then(|mut process| process.wait_with_cancellation(&cancellation));
-            finish_run(&session_id, &request_id, &workspace, result);
+            {
+                Ok(mut process) => {
+                    timing.mark("pi_spawned", format!("session={session_id}"));
+                    let result = process.wait_with_cancellation(&cancellation);
+                    match &result {
+                        Ok(_) => {
+                            timing.mark("pi_response_received", format!("session={session_id}"))
+                        }
+                        Err(error) => timing.mark(
+                            "pi_response_error",
+                            format!("session={} error={error}", session_id),
+                        ),
+                    }
+                    result
+                }
+                Err(error) => {
+                    timing.mark(
+                        "pi_launch_error",
+                        format!("session={} error={error}", session_id),
+                    );
+                    Err(error)
+                }
+            };
+            finish_run(&session_id, &request_id, &workspace, result, timing);
         });
     }
 
@@ -884,7 +952,14 @@ end run"#;
         (result.take().and_then(Result::ok), false)
     }
 
-    fn window_context_for_target(target: &TargetWindowMetadata) -> Result<WindowContext, String> {
+    fn window_context_for_target(
+        target: &TargetWindowMetadata,
+        timing: &crate::trace::E2eTiming,
+    ) -> Result<WindowContext, String> {
+        timing.mark(
+            "window_capture_start",
+            format!("target={}", target_log_label(target)),
+        );
         trace::agent_context(format!("window_context start {}", target_log_label(target)));
         let client = crate::service_client::ServiceClient;
         let active_window_id = target
@@ -920,9 +995,23 @@ end run"#;
                 } else {
                     format!("target tokenization failed: {}", error.message)
                 };
+                timing.mark("window_capture_error", format!("error={message}"));
                 trace::agent_context(format!("window_context tokenize_failed: {message}"));
                 message
             })?;
+        timing.mark(
+            "window_capture_done",
+            format!(
+                "snapshot_id={} windows={} elements={}",
+                tokenized.snapshot_id,
+                tokenized.windows.len(),
+                tokenized
+                    .windows
+                    .iter()
+                    .map(|window| window.elements.len())
+                    .sum::<usize>()
+            ),
+        );
         trace::agent_context(format!(
             "window_context tokenize_ok snapshot_id={} windows={} elements={} truncated={}",
             tokenized.snapshot_id,
@@ -937,6 +1026,10 @@ end run"#;
 
         let captured_at_ms = unix_now_ms();
         let tokenized_markdown = tokenized_payload_to_markdown(&tokenized)?;
+        timing.mark(
+            "window_capture_markdown_ready",
+            format!("bytes={}", tokenized_markdown.len()),
+        );
         trace::agent_context(format!(
             "window_context markdown_ready bytes={} captured_at_ms={captured_at_ms}",
             tokenized_markdown.len()
@@ -1137,7 +1230,12 @@ end run"#;
         request_id: &str,
         workspace: &Path,
         result: Result<crate::agent_runner::AgentResult, crate::agent_runner::AgentRunnerError>,
+        timing: Arc<crate::trace::E2eTiming>,
     ) {
+        timing.mark(
+            "controller_response_handling_start",
+            format!("session={session_id}"),
+        );
         let mut notice = None;
         let mut save_after_refresh = false;
         if let Some(mut state) = lock_state() {
@@ -1196,6 +1294,13 @@ end run"#;
                         ) {
                             trace::log(format!("agent_launcher:complete_error {error}"));
                         } else if let Some(session) = state.store.get(session_id) {
+                            timing.mark(
+                                "session_completed_in_memory",
+                                format!(
+                                    "session={session_id} answer_bytes={}",
+                                    result.final_answer.len()
+                                ),
+                            );
                             notice = Some(completion_notice(
                                 session,
                                 &result.final_answer,
@@ -1232,6 +1337,8 @@ end run"#;
             if let Some(mut state) = lock_state() {
                 if let Err(error) = state.store.persist_session(session_id) {
                     trace::log(format!("agent_launcher:complete_save_error {error}"));
+                } else {
+                    timing.mark("session_persisted", format!("session={session_id}"));
                 }
             }
         } else {
@@ -1240,7 +1347,15 @@ end run"#;
         flush_pending_sessions();
         if !launcher_ui::is_open_requested() {
             if let Some(notice) = notice {
-                launcher_ui::show_completion(notice, use_native_notifications());
+                timing.mark(
+                    "notification_dispatch_requested",
+                    format!(
+                        "session={} native={}",
+                        notice.session_id,
+                        use_native_notifications()
+                    ),
+                );
+                launcher_ui::show_completion(notice, use_native_notifications(), Some(timing));
             }
         }
     }
