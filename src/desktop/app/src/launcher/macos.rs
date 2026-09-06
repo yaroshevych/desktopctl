@@ -164,7 +164,11 @@ define_class!(
 
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
-            Bool::new(handle_key_event(event))
+            if handle_key_event(event) {
+                Bool::new(true)
+            } else {
+                unsafe { msg_send![super(self), performKeyEquivalent: event] }
+            }
         }
 
         #[unsafe(method(keyDown:))]
