@@ -278,6 +278,7 @@ struct UiState {
     panel: Option<Retained<LauncherPanel>>,
     content: Option<Retained<NSView>>,
     show_all: bool,
+    history_expansion_pending: bool,
     completion_panel: Option<Retained<NSPanel>>,
     completion_session_id: Option<String>,
     completion_prompt_label: Option<Retained<NSTextField>>,
@@ -299,6 +300,7 @@ impl Default for UiState {
             panel: None,
             content: None,
             show_all: false,
+            history_expansion_pending: false,
             completion_panel: None,
             completion_session_id: None,
             completion_prompt_label: None,
@@ -369,20 +371,26 @@ pub fn refresh(snapshot: LauncherSnapshot) {
             return;
         };
         DispatchQueue::main().exec_async(move || {
-            let accepted = UI.with(|cell| {
+            let animate_history_expansion = UI.with(|cell| {
                 let mut ui = cell.borrow_mut();
                 if !accepts_newer_revision(ui.snapshot.revision, snapshot.revision) {
-                    return false;
+                    return None;
                 }
+                let animate_history_expansion = ui.history_expansion_pending
+                    && ui.show_all
+                    && snapshot.all.len() > ui.snapshot.all.len();
                 ui.snapshot = snapshot;
                 ui.snapshot_json = Some(snapshot_json);
-                true
+                if animate_history_expansion {
+                    ui.history_expansion_pending = false;
+                }
+                Some(animate_history_expansion)
             });
-            if !accepted {
+            let Some(animate_history_expansion) = animate_history_expansion else {
                 return;
-            }
+            };
             if is_visible() {
-                render_on_main(false);
+                render_on_main(animate_history_expansion);
             }
         });
     });
@@ -685,18 +693,24 @@ fn swift_requests_history_expansion(bytes: &[u8]) -> bool {
 }
 
 fn expand_history_on_main() {
-    let expanded = UI.with(|cell| {
+    let animate_now = UI.with(|cell| {
         let mut ui = cell.borrow_mut();
         if matches!(ui.snapshot.screen, LauncherScreen::Launcher)
+            && !ui.show_all
             && ui.snapshot.history_total > ui.snapshot.recent.len()
         {
             ui.show_all = true;
-            true
+            if ui.snapshot.all.is_empty() {
+                ui.history_expansion_pending = true;
+                false
+            } else {
+                true
+            }
         } else {
             false
         }
     });
-    if expanded {
+    if animate_now {
         render_on_main(true);
     }
 }
@@ -1160,6 +1174,7 @@ fn apply_show(sequence: u64) {
         UI.with(|cell| {
             let mut ui = cell.borrow_mut();
             ui.show_all = false;
+            ui.history_expansion_pending = false;
             ui.rendered_session = false;
         });
         swift_bridge::prepare_for_presentation();

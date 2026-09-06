@@ -72,6 +72,8 @@ private final class LauncherModel: ObservableObject {
     private var snapshotParseCount = 0
     #endif
     private var selectAfterHistoryCount: Int?
+    private var selectAfterHistoryID: String?
+    private var historyExpansionPending = false
     var callback: LauncherActionCallback?
 
     var displayedQueuedFollowUps: [String] {
@@ -188,6 +190,18 @@ private final class LauncherModel: ObservableObject {
             queuedFollowUpsFlushPending = false
             followUpRequestPending = false
         }
+        if historyExpansionPending {
+            if next.screen == "Launcher",
+               next.allTasks.count > renderState.allTasks.count {
+                // Keep the current rows visible while the native panel expands;
+                // switch to the paged rows only after they have arrived.
+                next.showAll = true
+                historyExpansionPending = false
+            } else if next.screen == "Session" {
+                historyExpansionPending = false
+                selectAfterHistoryID = nil
+            }
+        }
         renderState = next
         if next.screen == "Session" {
             emit(["type": "ack_transcript", "session_id": next.sessionID,
@@ -197,6 +211,12 @@ private final class LauncherModel: ObservableObject {
            next.allTasks.count > previousCount {
             selectedTaskID = next.allTasks[previousCount].id
             selectAfterHistoryCount = nil
+        }
+        if let taskID = selectAfterHistoryID,
+           next.showAll,
+           next.tasks.contains(where: { $0.id == taskID }) {
+            selectedTaskID = taskID
+            selectAfterHistoryID = nil
         }
         if let selectedTaskID,
            !next.tasks.contains(where: { $0.id == selectedTaskID }) {
@@ -400,13 +420,9 @@ private final class LauncherModel: ObservableObject {
     }
 
     func expandAllHistory() {
+        historyExpansionPending = true
         emit(["type": "expand_history"])
-        DispatchQueue.main.async {
-            // AppKit animates the panel resize. Keep the row-set change
-            // immediate so SwiftUI does not animate the layout a second time.
-            self.renderState.showAll = true
-            self.showAllFocused = false
-        }
+        showAllFocused = false
     }
 
     private func loadHistorySelectingNext() {
@@ -456,6 +472,8 @@ private final class LauncherModel: ObservableObject {
 
     func prepareForPresentation() {
         selectAfterHistoryCount = nil
+        selectAfterHistoryID = nil
+        historyExpansionPending = false
         renderState.showAll = false
         selectedTaskID = nil
         showAllFocused = false
@@ -477,17 +495,13 @@ private final class LauncherModel: ObservableObject {
     }
 
     private func expandHistory(selecting taskID: String) {
+        historyExpansionPending = true
+        selectAfterHistoryID = taskID
         emit(["type": "expand_history"])
-        // The native panel resize and this row-set update are coordinated on
-        // the main queue; AppKit owns the visible expansion animation.
-        DispatchQueue.main.async {
-            // AppKit owns the expansion animation; changing the row set here
-            // must not trigger a competing SwiftUI layout animation.
-            self.renderState.showAll = true
-            self.showAllFocused = false
-            self.preserveScrollForNextSelection = true
-            self.selectedTaskID = taskID
-        }
+        // Keep the current rows visible while AppKit expands the panel. The
+        // selected task is applied when the paged rows arrive in commitSnapshot.
+        showAllFocused = false
+        preserveScrollForNextSelection = true
     }
 
     private func emit(_ object: [String: Any]) {
@@ -543,6 +557,44 @@ extension LauncherModel {
         waitFor(105)
         precondition(model.snapshotParseCount - before <= 2, "snapshot burst was not coalesced")
         precondition(model.renderState.messages[0].text == "latest 105")
+
+        let historyModel = LauncherModel()
+        func launcherSnapshot(_ revision: Int, _ recent: [String], _ all: [String], _ total: Int) -> Data {
+            func task(_ id: String) -> [String: Any] {
+                ["id": id, "title": id, "preview": "", "status": "Completed", "unread": false]
+            }
+            return try! JSONSerialization.data(withJSONObject: [
+                "revision": revision,
+                "screen": "Launcher",
+                "recent": recent.map(task),
+                "all": all.map(task),
+                "history_total": total,
+            ])
+        }
+        func waitForHistory(_ revision: UInt64) {
+            let deadline = Date().addingTimeInterval(5)
+            while historyModel.renderState.revision < revision && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            precondition(historyModel.renderState.revision == revision,
+                         "history snapshot processing stalled")
+        }
+        historyModel.applySnapshot(launcherSnapshot(1, ["recent-1", "recent-2", "recent-3"], [], 95))
+        waitForHistory(1)
+        historyModel.expandAllHistory()
+        precondition(!historyModel.renderState.showAll,
+                     "history switched to an empty expanded list")
+        historyModel.applySnapshot(launcherSnapshot(
+            2,
+            ["recent-1", "recent-2", "recent-3"],
+            (1...50).map { "history-\($0)" },
+            95
+        ))
+        waitForHistory(2)
+        precondition(historyModel.renderState.showAll,
+                     "history did not expand when paged rows arrived")
+        precondition(historyModel.renderState.tasks.count == 50,
+                     "expanded history did not expose the loaded page")
     }
 }
 
