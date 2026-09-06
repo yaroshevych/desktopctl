@@ -100,6 +100,7 @@ pub struct AgentRequest {
     pub session: Option<AgentSessionRef>,
     pub target_window: Option<TargetWindow>,
     pub window_context: Option<String>,
+    pub read_only: bool,
 }
 
 impl AgentRequest {
@@ -109,6 +110,7 @@ impl AgentRequest {
             session: None,
             target_window: None,
             window_context: None,
+            read_only: false,
         }
     }
 }
@@ -970,6 +972,15 @@ impl PiRunner {
             OsString::from("json"),
             OsString::from("--print"),
         ];
+        if request.read_only {
+            args.splice(
+                0..0,
+                [
+                    OsString::from("--tools"),
+                    OsString::from("read,grep,find,ls"),
+                ],
+            );
+        }
         if let Some(session) = request.session.as_ref().filter(|s| !s.is_empty()) {
             if let Some(path) = session.path.as_ref() {
                 args.push(OsString::from("--session"));
@@ -1126,7 +1137,11 @@ impl CodexRunner {
             OsString::from("--ask-for-approval"),
             OsString::from("never"),
             OsString::from("--sandbox"),
-            OsString::from("workspace-write"),
+            OsString::from(if request.read_only {
+                "read-only"
+            } else {
+                "workspace-write"
+            }),
             OsString::from("exec"),
             OsString::from("--json"),
             OsString::from("--model"),
@@ -1149,7 +1164,12 @@ impl CodexRunner {
                     .unwrap_or_default(),
             ));
         }
-        args.push(OsString::from(prompt_for_cli(request)));
+        let prompt = if request.read_only {
+            format!("{}\n\n{}", read_only_instruction(), prompt_for_cli(request))
+        } else {
+            prompt_for_cli(request)
+        };
+        args.push(OsString::from(prompt));
         args
     }
 
@@ -1280,6 +1300,12 @@ impl GooseRunner {
             OsString::from("--name"),
             OsString::from(session_name),
         ];
+        if request.read_only {
+            args.extend([
+                OsString::from("--system"),
+                OsString::from(read_only_instruction()),
+            ]);
+        }
         if request
             .session
             .as_ref()
@@ -1387,8 +1413,10 @@ impl OpenCodeRunner {
             OsString::from("json"),
             OsString::from("--model"),
             OsString::from(Self::MODEL),
-            OsString::from("--auto"),
         ];
+        if !request.read_only {
+            args.push(OsString::from("--auto"));
+        }
         if let Some(session) = request
             .session
             .as_ref()
@@ -1398,9 +1426,18 @@ impl OpenCodeRunner {
                 args.extend([OsString::from("--session"), OsString::from(id)]);
             }
         }
-        args.push(OsString::from(prompt_for_cli(request)));
+        let prompt = if request.read_only {
+            format!("{}\n\n{}", read_only_instruction(), prompt_for_cli(request))
+        } else {
+            prompt_for_cli(request)
+        };
+        args.push(OsString::from(prompt));
         args
     }
+}
+
+fn read_only_instruction() -> &'static str {
+    "Read-only mode is enabled. Inspect and explain the existing project, but do not create, edit, delete, rename, or otherwise modify files; do not run commands that modify project or system state."
 }
 
 impl AgentRunner for OpenCodeRunner {
@@ -2458,6 +2495,36 @@ mod tests {
     }
 
     #[test]
+    fn codex_args_use_read_only_sandbox_when_requested() {
+        let mut request = AgentRequest::new("review");
+        request.read_only = true;
+        let args = CodexRunner::args_for(&request);
+        assert!(
+            args.windows(2).any(|pair| {
+                pair == [OsString::from("--sandbox"), OsString::from("read-only")]
+            })
+        );
+    }
+
+    #[test]
+    fn pi_args_limit_tools_in_read_only_mode() {
+        let mut request = AgentRequest::new("review");
+        request.read_only = true;
+        let args = PiRunner::args_for(&request);
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("--tools"),
+                OsString::from("read,grep,find,ls"),
+            ]
+        }));
+        assert!(
+            !PiRunner::args_for(&AgentRequest::new("review"))
+                .iter()
+                .any(|arg| arg == "--tools")
+        );
+    }
+
+    #[test]
     fn parses_goose_json_messages_and_ignores_thinking() {
         let output = r#"{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Hello"}]}],"metadata":{"status":"completed"}}"#;
         let result = parse_goose_output(output).expect("valid Goose output");
@@ -2494,6 +2561,19 @@ mod tests {
         }));
         assert!(args.iter().any(|arg| arg == "--resume"));
         assert!(args.iter().any(|arg| arg == "--quiet"));
+    }
+
+    #[test]
+    fn goose_args_include_read_only_system_instruction() {
+        let mut request = AgentRequest::new("review");
+        request.read_only = true;
+        let args = GooseRunner::args_for(&request, "desktopctl-session");
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == OsString::from("--system")
+                && pair[1]
+                    .to_string_lossy()
+                    .contains("Read-only mode is enabled")
+        }));
     }
 
     #[test]
@@ -2536,6 +2616,18 @@ mod tests {
             ]
         }));
         assert!(args.iter().any(|arg| arg == "--auto"));
+    }
+
+    #[test]
+    fn opencode_args_do_not_auto_approve_read_only_requests() {
+        let mut request = AgentRequest::new("review");
+        request.read_only = true;
+        let args = OpenCodeRunner::args_for(&request);
+        assert!(!args.iter().any(|arg| arg == "--auto"));
+        assert!(
+            args.last()
+                .is_some_and(|arg| arg.to_string_lossy().contains("Read-only mode is enabled"))
+        );
     }
 
     #[test]

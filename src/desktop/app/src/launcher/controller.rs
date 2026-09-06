@@ -414,12 +414,14 @@ mod controller {
             LauncherAction::NewRequest {
                 prompt,
                 share_context,
-            } => start_new(prompt, share_context),
+                read_only,
+            } => start_new(prompt, share_context, read_only),
             LauncherAction::FollowUp {
                 session_id,
                 prompt,
                 share_context,
-            } => follow_up(session_id, prompt, share_context),
+                read_only,
+            } => follow_up(session_id, prompt, share_context, read_only),
             LauncherAction::OpenSession { session_id } => open_session(session_id),
             LauncherAction::CancelSession { session_id } => cancel(&session_id),
             LauncherAction::OpenInTerminal { session_id } => open_in_terminal(session_id),
@@ -433,7 +435,7 @@ mod controller {
         }
     }
 
-    fn start_new(prompt: String, share_context: bool) {
+    fn start_new(prompt: String, share_context: bool, read_only: bool) {
         let created = lock_state().and_then(|mut state| {
             let target = state.pending_target.take();
             let agent = state.agent;
@@ -456,15 +458,16 @@ mod controller {
             timing.mark(
                 "request_submitted",
                 format!(
-                    "session={} prompt_bytes={} share_context={share_context}",
+                    "session={} prompt_bytes={} share_context={share_context} read_only={read_only}",
                     session_id,
                     prompt.len()
                 ),
             );
             trace::agent_context(format!(
-                "new_request session={} share_context={} target={}",
+                "new_request session={} share_context={} read_only={} target={}",
                 session_id,
                 share_context,
+                read_only,
                 target
                     .as_ref()
                     .map(target_log_label)
@@ -488,6 +491,7 @@ mod controller {
                 agent,
                 target,
                 share_context,
+                read_only,
                 preparation,
                 workspace,
                 timing,
@@ -495,7 +499,7 @@ mod controller {
         }
     }
 
-    fn follow_up(session_id: String, prompt: String, share_context: bool) {
+    fn follow_up(session_id: String, prompt: String, share_context: bool, read_only: bool) {
         let request = lock_state().and_then(|mut state| {
             if state.cancellations.contains_key(&session_id) {
                 trace::log(format!(
@@ -521,15 +525,16 @@ mod controller {
             timing.mark(
                 "request_submitted",
                 format!(
-                    "session={} prompt_bytes={} share_context={share_context}",
+                    "session={} prompt_bytes={} share_context={share_context} read_only={read_only}",
                     session_id,
                     prompt.len()
                 ),
             );
             trace::agent_context(format!(
-                "follow_up session={} share_context={} stored_target={}",
+                "follow_up session={} share_context={} read_only={} stored_target={}",
                 session_id,
                 share_context,
+                read_only,
                 session
                     .target_window
                     .as_ref()
@@ -558,6 +563,7 @@ mod controller {
                 agent,
                 session.target_window,
                 share_context,
+                read_only,
                 None,
                 workspace,
                 timing,
@@ -932,6 +938,7 @@ end run"#;
         agent: AgentKind,
         target: Option<TargetWindowMetadata>,
         share_context: bool,
+        read_only: bool,
         preparation: Option<PreparationHandle>,
         workspace: PathBuf,
         timing: Arc<crate::trace::E2eTiming>,
@@ -972,10 +979,11 @@ end run"#;
                 format!("session={} present={}", session_id, target.is_some()),
             );
             trace::agent_context(format!(
-                "run_agent agent={} session={} share_context={} prepared={} target={}",
+                "run_agent agent={} session={} share_context={} read_only={} prepared={} target={}",
                 agent.key(),
                 session_id,
                 share_context,
+                read_only,
                 prepared.is_some(),
                 target
                     .as_ref()
@@ -990,6 +998,7 @@ end run"#;
                 }
             }
             let mut request = AgentRequest::new(prompt);
+            request.read_only = read_only;
             request.session = native_session.filter(|session| {
                 session.id.as_deref().is_some_and(|id| !id.is_empty()) || session.path.is_some()
             });

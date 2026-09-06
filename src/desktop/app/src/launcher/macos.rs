@@ -625,6 +625,10 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
                     .get("share_context")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(true),
+                read_only: action
+                    .get("read_only")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
             }
         }
         Some("open_session") => {
@@ -651,6 +655,10 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
                     .get("share_context")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(true),
+                read_only: action
+                    .get("read_only")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
             }
         }
         Some("cancel_session") => {
@@ -1837,6 +1845,7 @@ mod tests {
             LauncherAction::NewRequest {
                 prompt: "ask this".into(),
                 share_context: true,
+                read_only: false,
             }
         );
         assert!(hide);
@@ -1853,6 +1862,22 @@ mod tests {
             LauncherAction::NewRequest {
                 prompt: "ask this".into(),
                 share_context: false,
+                read_only: false,
+            }
+        );
+    }
+
+    #[test]
+    fn swift_new_request_can_enable_read_only_mode() {
+        let (action, _) =
+            parse_swift_action(br#"{"type":"new_request","prompt":"review","read_only":true}"#)
+                .unwrap();
+        assert_eq!(
+            action,
+            LauncherAction::NewRequest {
+                prompt: "review".into(),
+                share_context: true,
+                read_only: true,
             }
         );
     }
@@ -1869,6 +1894,7 @@ mod tests {
                 session_id: "session".into(),
                 prompt: "ask this".into(),
                 share_context: false,
+                read_only: false,
             }
         );
     }

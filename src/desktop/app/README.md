@@ -62,6 +62,9 @@ immediately, so the Settings window does not need to close or reload manually.
 - The Options menu's `Share window context` checkbox is enabled by default and
   applies to both launcher and session prompts. Disabling it sends the prompt
   without target-window or detailed DesktopCtl context.
+- The Options menu's `Read-only mode` checkbox is off by default, applies to
+  both launcher and session prompts, and is toggled with `R` while the menu is
+  open (`Cmd-K`).
 - Context button label is `Agent Context` when no window is selected; otherwise
   it shows the selected app/window name. Its icon is
   `macwindow.badge.plus`.

@@ -59,6 +59,7 @@ private final class LauncherModel: ObservableObject {
     @Published private(set) var actionsMenuFocusIndex: Int?
     @Published private(set) var actionsMenuFocusIsKeyboard = false
     @Published var shareWindowContext = true
+    @Published var readOnlyMode = false
     @Published private(set) var isScrolling = false
     @Published private(set) var queuedFollowUps: [String] = []
     @Published private(set) var flushingFollowUps: [String] = []
@@ -252,6 +253,7 @@ private final class LauncherModel: ObservableObject {
                     "session_id": renderState.sessionID,
                     "prompt": value,
                     "share_context": shareWindowContext,
+                    "read_only": readOnlyMode,
                 ])
             }
         } else {
@@ -259,6 +261,7 @@ private final class LauncherModel: ObservableObject {
                 "type": "new_request",
                 "prompt": value,
                 "share_context": shareWindowContext,
+                "read_only": readOnlyMode,
             ])
         }
         prompt = ""
@@ -282,6 +285,7 @@ private final class LauncherModel: ObservableObject {
             "session_id": renderState.sessionID,
             "prompt": combinedPrompt,
             "share_context": shareWindowContext,
+            "read_only": readOnlyMode,
         ])
     }
 
@@ -408,7 +412,7 @@ private final class LauncherModel: ObservableObject {
         return true
     }
 
-    private var actionsMenuItemCount: Int { 2 }
+    private var actionsMenuItemCount: Int { 3 }
 
     func toggleShareWindowContext() {
         shareWindowContext.toggle()
@@ -417,6 +421,15 @@ private final class LauncherModel: ObservableObject {
     func activateShareWindowContextShortcut() {
         focusActionsMenuItem(0, fromKeyboard: true)
         toggleShareWindowContext()
+    }
+
+    func toggleReadOnlyMode() {
+        readOnlyMode.toggle()
+    }
+
+    func activateReadOnlyModeShortcut() {
+        focusActionsMenuItem(1, fromKeyboard: true)
+        toggleReadOnlyMode()
     }
 
     func expandAllHistory() {
@@ -456,6 +469,8 @@ private final class LauncherModel: ObservableObject {
         case 0:
             toggleShareWindowContext()
         case 1:
+            toggleReadOnlyMode()
+        case 2:
             openSettings()
         default:
             return false
@@ -1363,6 +1378,21 @@ private struct LauncherActionsMenu: View {
             LauncherActionsMenuRow(
                 model: model,
                 index: 1,
+                title: "Read-only mode",
+                systemImage: model.readOnlyMode ? "checkmark.square.fill" : "square",
+                showsIcon: true,
+                systemImageColor: model.readOnlyMode
+                    ? LauncherTheme.textSecondary
+                    : LauncherTheme.textTertiary,
+                accessibilityValue: model.readOnlyMode ? "On" : "Off",
+                keyboardShortcut: model.renderState.renderKeyboardShortcuts ? ["R"] : nil,
+                secondaryKeyboardShortcut: nil,
+                action: model.toggleReadOnlyMode
+            )
+
+            LauncherActionsMenuRow(
+                model: model,
+                index: 2,
                 title: "Settings",
                 systemImage: "gearshape",
                 showsIcon: false,
@@ -1383,7 +1413,7 @@ private struct LauncherActionsMenu: View {
                 .stroke(LauncherTheme.panelEdge(colorScheme: colorScheme), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.24), radius: 12, y: 5)
-        .frame(width: 246, height: 90)
+        .frame(width: 246, height: 128)
     }
 }
 
@@ -1500,7 +1530,7 @@ private var actionMenuKeyEventMonitor: Any?
 private var actionMenuActivationObserver: NSObjectProtocol?
 private var launcherSettingsObserver: NSObjectProtocol?
 
-private let launcherActionsMenuSize = NSSize(width: 246, height: 90)
+private let launcherActionsMenuSize = NSSize(width: 246, height: 128)
 
 private final class LauncherActionMenuPanel: NSPanel {
     weak var menuModel: LauncherModel?
@@ -1551,6 +1581,10 @@ private func handleActionMenuKeyEvent(_ event: NSEvent, model: LauncherModel) ->
     }
     if modifiers.isEmpty, characters == "s" {
         model.activateShareWindowContextShortcut()
+        return true
+    }
+    if modifiers.isEmpty, characters == "r" {
+        model.activateReadOnlyModeShortcut()
         return true
     }
     switch event.keyCode {

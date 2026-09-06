@@ -101,11 +101,13 @@ pub enum LauncherAction {
     NewRequest {
         prompt: String,
         share_context: bool,
+        read_only: bool,
     },
     FollowUp {
         session_id: String,
         prompt: String,
         share_context: bool,
+        read_only: bool,
     },
     OpenSession {
         session_id: String,
