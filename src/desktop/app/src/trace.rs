@@ -12,6 +12,7 @@ use std::{
 /// completion notification paths. The wall-clock timestamp on each trace line
 /// is useful across processes; this monotonic elapsed value is useful for
 /// measuring one end-to-end request without clock adjustments getting involved.
+#[derive(Debug)]
 pub(crate) struct E2eTiming {
     id: u64,
     started: Instant,
@@ -89,16 +90,19 @@ fn write_line(message: &str) {
 }
 
 pub fn log(message: impl AsRef<str>) {
-    let enabled = std::env::var("DESKTOPCTL_TRACE")
+    if !enabled() {
+        return;
+    }
+    write_line(message.as_ref());
+}
+
+pub(crate) fn enabled() -> bool {
+    std::env::var("DESKTOPCTL_TRACE")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
         || std::env::var("DESKTOPCTL_TRACE_PATH")
             .ok()
-            .is_some_and(|value| !value.trim().is_empty());
-    if !enabled {
-        return;
-    }
-    write_line(message.as_ref());
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Opt-in diagnostics for the launcher-to-Pi DesktopCtl context handoff.

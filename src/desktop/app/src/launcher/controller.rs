@@ -2,7 +2,7 @@
 mod controller {
     use std::{
         cmp::Reverse,
-        collections::{BTreeMap, BTreeSet, HashMap},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         fs,
         io::{Read, Write},
         path::{Path, PathBuf},
@@ -48,6 +48,8 @@ mod controller {
         history_limit: usize,
         history_cache: HistoryCache,
         transcript_ack: Option<(String, u64, usize)>,
+        native_sync_inflight: HashSet<String>,
+        native_sync_generation: HashMap<String, u64>,
     }
 
     #[derive(Default)]
@@ -111,6 +113,7 @@ mod controller {
 
     pub fn initialize(
         running_handler: RunningHandler,
+        startup_settings: Option<&serde_json::Value>,
     ) -> Result<(), desktop_core::error::AppError> {
         let _ = RUNNING_HANDLER.set(running_handler);
         let path = AgentSessionStore::default_path().ok_or_else(|| {
@@ -123,7 +126,7 @@ mod controller {
             trace::log(format!("agent_launcher:store_warning {warning}"));
         }
         let (render_keyboard_shortcuts, use_native_notifications, open_shortcut) =
-            launcher_settings();
+            launcher_settings_from(startup_settings);
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
             render_keyboard_shortcuts,
@@ -139,6 +142,8 @@ mod controller {
             history_limit: 0,
             history_cache: HistoryCache::default(),
             transcript_ack: None,
+            native_sync_inflight: HashSet::new(),
+            native_sync_generation: HashMap::new(),
         })));
         crate::launcher::swift_bridge::start_settings_observer(launcher_settings_changed);
         launcher_ui::initialize(
@@ -431,6 +436,7 @@ mod controller {
 
     fn follow_up(session_id: String, prompt: String, share_context: bool) {
         let request = lock_state().and_then(|mut state| {
+            invalidate_native_sync(&mut state, &session_id);
             let session = state.store.get(&session_id)?.clone();
             match state
                 .store
@@ -501,10 +507,42 @@ mod controller {
             state.transcript_ack = None;
         }
         refresh();
-        sync_native_session(session_id);
+        let sync_generation =
+            lock_state().and_then(|mut state| begin_native_sync(&mut state, &session_id));
+        if let Some(generation) = sync_generation {
+            sync_native_session(session_id, generation);
+        }
     }
 
-    fn sync_native_session(session_id: String) {
+    fn invalidate_native_sync(state: &mut State, session_id: &str) -> u64 {
+        let generation = state
+            .native_sync_generation
+            .entry(session_id.to_owned())
+            .or_default();
+        *generation = generation.wrapping_add(1);
+        *generation
+    }
+
+    fn begin_native_sync(state: &mut State, session_id: &str) -> Option<u64> {
+        let session = state.store.get(session_id)?;
+        if session.status == AgentSessionStatus::Running
+            || session.active_request_id.is_some()
+            || !state.native_sync_inflight.insert(session_id.to_owned())
+        {
+            return None;
+        }
+        Some(invalidate_native_sync(state, session_id))
+    }
+
+    fn finish_native_sync(state: &mut State, session_id: &str, generation: u64) -> bool {
+        state.native_sync_inflight.remove(session_id);
+        state.native_sync_generation.get(session_id) == Some(&generation)
+            && state.store.get(session_id).is_some_and(|session| {
+                session.status != AgentSessionStatus::Running && session.active_request_id.is_none()
+            })
+    }
+
+    fn sync_native_session(session_id: String, generation: u64) {
         let native = lock_state().and_then(|state| {
             let session = state.store.get(&session_id)?;
             if session.native_session_id.is_none() && session.native_session_path.is_none() {
@@ -517,42 +555,61 @@ mod controller {
             })
         });
         let Some(native) = native else {
+            if let Some(mut state) = lock_state() {
+                state.native_sync_inflight.remove(&session_id);
+            }
             return;
         };
-        thread::spawn(move || match load_native_transcript(&native) {
-            Ok((path, messages)) => {
-                let messages = messages
-                    .into_iter()
-                    .map(|message| SessionMessage {
-                        role: if message.user {
-                            SessionMessageRole::User
-                        } else {
-                            SessionMessageRole::Assistant
-                        },
-                        text: message.text,
-                        created_at_ms: message.timestamp_ms,
-                    })
-                    .collect();
-                let changed = if let Some(mut state) = lock_state() {
-                    match state.store.sync_native_transcript(
-                        &session_id,
-                        messages,
-                        Some(path.to_string_lossy().into_owned()),
-                    ) {
-                        Ok(changed) => changed,
-                        Err(error) => {
-                            trace::log(format!("agent_launcher:native_sync_error {error}"));
-                            false
+        thread::spawn(move || {
+            match std::panic::catch_unwind(|| load_native_transcript(&native)).unwrap_or_else(
+                |_| {
+                    Err(crate::agent_runner::AgentRunnerError::Process(
+                        "native transcript reader panicked".into(),
+                    ))
+                },
+            ) {
+                Ok((path, messages)) => {
+                    let messages = messages
+                        .into_iter()
+                        .map(|message| SessionMessage {
+                            role: if message.user {
+                                SessionMessageRole::User
+                            } else {
+                                SessionMessageRole::Assistant
+                            },
+                            text: message.text,
+                            created_at_ms: message.timestamp_ms,
+                        })
+                        .collect();
+                    let changed = if let Some(mut state) = lock_state() {
+                        if !finish_native_sync(&mut state, &session_id, generation) {
+                            return;
                         }
+                        match state.store.sync_native_transcript(
+                            &session_id,
+                            messages,
+                            Some(path.to_string_lossy().into_owned()),
+                        ) {
+                            Ok(changed) => changed,
+                            Err(error) => {
+                                trace::log(format!("agent_launcher:native_sync_error {error}"));
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if changed {
+                        refresh();
                     }
-                } else {
-                    false
-                };
-                if changed {
-                    refresh();
+                }
+                Err(error) => {
+                    if let Some(mut state) = lock_state() {
+                        state.native_sync_inflight.remove(&session_id);
+                    }
+                    trace::log(format!("agent_launcher:native_read_error {error}"));
                 }
             }
-            Err(error) => trace::log(format!("agent_launcher:native_read_error {error}")),
         });
     }
 
@@ -845,10 +902,10 @@ end run"#;
             timing.mark("pi_launch_start", format!("session={session_id}"));
             let result = match PiRunner::new()
                 .with_current_dir(workspace.clone())
+                .with_timing(Arc::clone(&timing))
                 .spawn(request)
             {
                 Ok(mut process) => {
-                    timing.mark("pi_spawned", format!("session={session_id}"));
                     let result = process.wait_with_cancellation(&cancellation);
                     match &result {
                         Ok(_) => {
@@ -1390,9 +1447,14 @@ end run"#;
     }
 
     fn launcher_settings() -> (bool, bool, launcher_ui::LauncherShortcut) {
-        crate::service_client::ServiceClient
-            .settings()
-            .ok()
+        let settings = crate::service_client::ServiceClient.settings().ok();
+        launcher_settings_from(settings.as_ref())
+    }
+
+    fn launcher_settings_from(
+        settings: Option<&serde_json::Value>,
+    ) -> (bool, bool, launcher_ui::LauncherShortcut) {
+        settings
             .and_then(|value| {
                 let launcher = value.get("launcher")?;
                 let render = launcher
@@ -1804,6 +1866,8 @@ end run"#;
                 history_limit: 0,
                 history_cache: super::HistoryCache::default(),
                 transcript_ack: None,
+                native_sync_inflight: Default::default(),
+                native_sync_generation: Default::default(),
             };
             let collapsed = super::snapshot(&mut state, 1);
             assert!(collapsed.all.is_empty());
@@ -1817,6 +1881,35 @@ end run"#;
             let expanded = super::snapshot(&mut state, 3);
             assert_eq!(expanded.all.len(), 60);
             assert!(expanded.all[0].unread);
+            // An active run never starts a native read; concurrent opens share
+            // one read, and a new run invalidates its eventual completion.
+            assert!(super::begin_native_sync(&mut state, &latest).is_none());
+            let request = state
+                .store
+                .get(&latest)
+                .unwrap()
+                .active_request_id
+                .clone()
+                .unwrap();
+            state
+                .store
+                .complete_request(&latest, &request, "done", now)
+                .unwrap();
+            let generation = super::begin_native_sync(&mut state, &latest).unwrap();
+            assert!(super::begin_native_sync(&mut state, &latest).is_none());
+            super::invalidate_native_sync(&mut state, &latest);
+            let request = state
+                .store
+                .begin_request(&latest, "follow-up", now + 1)
+                .unwrap();
+            state
+                .store
+                .complete_request(&latest, &request, "new answer", now + 2)
+                .unwrap();
+            assert!(!super::finish_native_sync(&mut state, &latest, generation));
+            let fresh = super::begin_native_sync(&mut state, &latest).unwrap();
+            assert!(super::finish_native_sync(&mut state, &latest, fresh));
+            assert!(super::begin_native_sync(&mut state, &latest).is_some());
             state.store.flush().unwrap();
             drop(state);
             fs::remove_dir_all(root).unwrap();

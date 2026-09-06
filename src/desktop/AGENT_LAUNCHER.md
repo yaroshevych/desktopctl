@@ -116,6 +116,22 @@ workspace; the launcher owns that invariant.
 
 ## Testing
 
+Startup reuses the successful service-readiness status and one settings snapshot
+across launcher, tray, and any automatically opened permissions dialog. Later
+settings opens/reloads still fetch current values. Repeated session opens share
+an in-flight native transcript read; active launcher runs skip native sync, and
+starting a follow-up invalidates any older read result.
+
+With `DESKTOPCTL_TRACE=1` or `DESKTOPCTL_TRACE_PATH` set, each launcher request
+also records `pi_spawned`, `pi_first_stdout_json`,
+`pi_first_assistant_text_delta`, `pi_assistant_complete`, `pi_agent_end`,
+`pi_process_exit`, `pi_output_drained`, and `pi_return`. Tool boundaries emit
+`pi_tool_start` / `pi_tool_end`. Events share the request's `e2e id`; subtract
+their `elapsed_ms` values to compare phases. If Pi supplies no text deltas,
+the first-text marker falls back to assistant text at `message_end`. Phase
+markers contain no message contents, tool names, or tool arguments. Normal
+answer delivery remains unchanged.
+
 Run focused launcher tests and the normal macOS gates:
 
 ```bash

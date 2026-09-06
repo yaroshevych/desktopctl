@@ -1,12 +1,12 @@
 use std::{path::PathBuf, process::Command, thread, time::Duration};
 
-use desktop_core::error::AppError;
+use desktop_core::{error::AppError, protocol::ServiceStatusPayload};
 
 use crate::service_client::ServiceClient;
 
-pub fn ensure_running() -> Result<(), AppError> {
-    if ServiceClient.status().is_ok() {
-        return Ok(());
+pub fn ensure_running() -> Result<ServiceStatusPayload, AppError> {
+    if let Ok(status) = ServiceClient.status() {
+        return Ok(status);
     }
     let binary = service_binary().ok_or_else(|| {
         AppError::daemon_not_running("desktopctld service binary was not found beside app")
@@ -18,8 +18,8 @@ pub fn ensure_running() -> Result<(), AppError> {
             AppError::backend_unavailable(format!("start {} failed: {error}", binary.display()))
         })?;
     for _ in 0..50 {
-        if ServiceClient.status().is_ok() {
-            return Ok(());
+        if let Ok(status) = ServiceClient.status() {
+            return Ok(status);
         }
         thread::sleep(Duration::from_millis(100));
     }

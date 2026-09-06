@@ -139,19 +139,23 @@ pub fn run() -> Result<(), AppError> {
     let ns_app = NSApplication::sharedApplication(mtm);
     let _ = ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    service_manager::ensure_running()?;
+    let status = service_manager::ensure_running()?;
     let client = ServiceClient;
-    let status = client.status()?;
     let permissions: desktop_core::protocol::PermissionsPayload =
         client.send_typed(Command::PermissionsCheck)?;
     let missing_permissions =
         !permissions.accessibility.granted || !permissions.screen_recording.granted;
-    agent_launcher::initialize(std::sync::Arc::new(set_agent_running))?;
+    // One startup settings snapshot serves both launcher and tray setup.
+    // Subsequent settings reloads continue to query the service normally.
+    let startup_settings = client.settings().ok();
+    agent_launcher::initialize(
+        std::sync::Arc::new(set_agent_running),
+        startup_settings.as_ref(),
+    )?;
     agent_launcher::show_fake_completion_if_requested();
 
-    let journal_enabled = client
-        .settings()
-        .ok()
+    let journal_enabled = startup_settings
+        .as_ref()
         .and_then(|value| value.pointer("/journal/enabled").and_then(|v| v.as_bool()))
         .unwrap_or(false);
     if journal_enabled && !permissions.screen_recording.granted {
@@ -318,7 +322,7 @@ pub fn run() -> Result<(), AppError> {
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     TRAY.with(|cell| *cell.borrow_mut() = Some(tray));
     if missing_permissions {
-        settings_dialog::show(Some("permissions"));
+        settings_dialog::show_with_settings(Some("permissions"), startup_settings);
     }
 
     ns_app.run();

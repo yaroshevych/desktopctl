@@ -1,7 +1,6 @@
 use std::{
     cell::RefCell,
     f64::consts::PI,
-    ffi::c_void,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -733,9 +732,9 @@ fn set_layer_background_clear(view: &NSBox) {
         return;
     }
     let clear = NSColor::clearColor();
-    let cg_color: *mut AnyObject = unsafe { msg_send![&*clear, CGColor] };
+    let cg_color = clear.CGColor();
     unsafe {
-        let _: () = msg_send![layer, setBackgroundColor: cg_color];
+        let _: () = msg_send![layer, setBackgroundColor: &*cg_color];
     }
 }
 
@@ -745,10 +744,10 @@ fn set_layer_border(view: &NSBox, width: f64, alpha: f64) {
         return;
     }
     let color = plasma_violet(alpha);
-    let cg_color: *mut AnyObject = unsafe { msg_send![&*color, CGColor] };
+    let cg_color = color.CGColor();
     unsafe {
         let _: () = msg_send![layer, setBorderWidth: width.max(0.0)];
-        let _: () = msg_send![layer, setBorderColor: cg_color];
+        let _: () = msg_send![layer, setBorderColor: &*cg_color];
     }
 }
 
@@ -758,13 +757,13 @@ fn set_layer_shadow(view: &NSBox, opacity: f64, radius: f64) {
         return;
     }
     let color = plasma_violet(1.0);
-    let cg_color: *mut AnyObject = unsafe { msg_send![&*color, CGColor] };
+    let cg_color = color.CGColor();
     unsafe {
         let _: () = msg_send![layer, setMasksToBounds: false];
         let _: () = msg_send![layer, setShadowOffset: NSSize::new(0.0, 0.0)];
         let _: () = msg_send![layer, setShadowOpacity: opacity.clamp(0.0, 1.0) as f32];
         let _: () = msg_send![layer, setShadowRadius: radius.max(0.0)];
-        let _: () = msg_send![layer, setShadowColor: cg_color];
+        let _: () = msg_send![layer, setShadowColor: &*cg_color];
     }
 }
 
@@ -781,7 +780,7 @@ fn set_layer_shadow_path(
     }
     unsafe {
         // Let CoreAnimation derive the shadow from composited alpha (border-only content).
-        let _: () = msg_send![layer, setShadowPath: std::ptr::null::<c_void>()];
+        let _: () = msg_send![layer, setShadowPath: std::ptr::null::<objc2_core_graphics::CGPath>()];
     }
 }
 

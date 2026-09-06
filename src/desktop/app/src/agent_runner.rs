@@ -488,6 +488,7 @@ pub trait AgentRunner: Send + Sync {
 pub struct PiRunner {
     executable: Option<PathBuf>,
     current_dir: Option<PathBuf>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
 }
 
 impl PiRunner {
@@ -499,11 +500,17 @@ impl PiRunner {
         Self {
             executable: Some(path.into()),
             current_dir: None,
+            timing: None,
         }
     }
 
     pub fn with_current_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.current_dir = Some(path.into());
+        self
+    }
+
+    pub fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
+        self.timing = Some(timing);
         self
     }
 
@@ -600,7 +607,11 @@ impl AgentRunner for PiRunner {
             executable: self.executable().ok(),
             source,
         })?;
-        Ok(AgentProcess::new(child))
+        let process = AgentProcess::new(child, self.timing.clone());
+        if let Some(timing) = process.timing.as_ref() {
+            timing.mark("pi_spawned", "");
+        }
+        Ok(process)
     }
 }
 
@@ -609,6 +620,7 @@ impl AgentRunner for PiRunner {
 /// Pi process behind.
 pub struct AgentProcess {
     child: Option<Child>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
 }
 
 impl fmt::Debug for AgentProcess {
@@ -620,8 +632,11 @@ impl fmt::Debug for AgentProcess {
 }
 
 impl AgentProcess {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
+    fn new(child: Child, timing: Option<Arc<crate::trace::E2eTiming>>) -> Self {
+        Self {
+            child: Some(child),
+            timing: timing.filter(|_| crate::trace::enabled()),
+        }
     }
 
     pub fn wait(mut self) -> Result<AgentResult, AgentRunnerError> {
@@ -650,12 +665,14 @@ impl AgentProcess {
             MAX_STDOUT_BYTES,
             "stdout",
             Arc::clone(&stop_readers),
+            self.timing.clone(),
         );
         let (stderr_rx, stderr_thread) = spawn_pipe_reader(
             stderr,
             MAX_STDERR_BYTES,
             "stderr",
             Arc::clone(&stop_readers),
+            None,
         );
 
         let status = loop {
@@ -668,7 +685,12 @@ impl AgentProcess {
                 return Err(AgentRunnerError::Cancelled);
             }
             match child.try_wait() {
-                Ok(Some(status)) => break status,
+                Ok(Some(status)) => {
+                    if let Some(timing) = self.timing.as_ref() {
+                        timing.mark("pi_process_exit", "");
+                    }
+                    break status;
+                }
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(source) => {
                     stop_readers.store(true, Ordering::Release);
@@ -687,6 +709,9 @@ impl AgentProcess {
         terminate_process_group(&mut child);
         let stdout = collect_pipe(stdout_rx, stdout_thread)?;
         let stderr = collect_pipe(stderr_rx, stderr_thread)?;
+        if let Some(timing) = self.timing.as_ref() {
+            timing.mark("pi_output_drained", "");
+        }
         if !status.success() {
             let detail = stderr.trim();
             return Err(if detail.is_empty() {
@@ -695,7 +720,11 @@ impl AgentProcess {
                 AgentRunnerError::Process(format!("Pi exited with {status}: {detail}"))
             });
         }
-        parse_pi_output(&stdout)
+        let result = parse_pi_output(&stdout);
+        if let Some(timing) = self.timing.as_ref() {
+            timing.mark("pi_return", "");
+        }
+        result
     }
 
     pub fn cancel(&mut self) -> Result<(), AgentRunnerError> {
@@ -773,6 +802,7 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
     limit: usize,
     stream: &'static str,
     stop: Arc<AtomicBool>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
 ) -> (
     Receiver<Result<String, AgentRunnerError>>,
     thread::JoinHandle<()>,
@@ -786,6 +816,10 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
         let mut bytes = Vec::with_capacity(limit.min(8192));
         let mut chunk = [0u8; 8192];
         let mut oversized = false;
+        let mut event_line = Vec::new();
+        let mut first_json = false;
+        let mut first_text_delta = false;
+        let mut assistant_complete = false;
         let mut stop_deadline = None;
         loop {
             if stop.load(Ordering::Acquire) {
@@ -798,6 +832,23 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
             match pipe.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => {
+                    if timing.is_some() {
+                        for byte in &chunk[..count] {
+                            event_line.push(*byte);
+                            if *byte == b'\n' {
+                                observe_timing_event(
+                                    timing.as_ref(),
+                                    &event_line,
+                                    &mut first_json,
+                                    &mut first_text_delta,
+                                    &mut assistant_complete,
+                                );
+                                event_line.clear();
+                            } else if event_line.len() > 1024 * 1024 {
+                                event_line.clear();
+                            }
+                        }
+                    }
                     let keep = if bytes.len() < limit {
                         let keep = count.min(limit - bytes.len());
                         bytes.extend_from_slice(&chunk[..keep]);
@@ -815,6 +866,15 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
                     return;
                 }
             }
+        }
+        if !event_line.is_empty() {
+            observe_timing_event(
+                timing.as_ref(),
+                &event_line,
+                &mut first_json,
+                &mut first_text_delta,
+                &mut assistant_complete,
+            );
         }
         let result = if oversized {
             Err(AgentRunnerError::Process(format!(
@@ -840,6 +900,87 @@ fn collect_pipe(
         .join()
         .map_err(|_| AgentRunnerError::Process("Pi output reader panicked".into()))?;
     result
+}
+
+fn observe_timing_event(
+    timing: Option<&Arc<crate::trace::E2eTiming>>,
+    line: &[u8],
+    first_json: &mut bool,
+    first_text_delta: &mut bool,
+    assistant_complete: &mut bool,
+) {
+    let Ok(line) = std::str::from_utf8(line) else {
+        return;
+    };
+    let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
+        return;
+    };
+    let Some(timing) = timing else {
+        return;
+    };
+    if !*first_json {
+        *first_json = true;
+        timing.mark("pi_first_stdout_json", "");
+    }
+    match event.get("type").and_then(Value::as_str) {
+        Some("tool_execution_start") => timing.mark("pi_tool_start", ""),
+        Some("tool_execution_end") => timing.mark("pi_tool_end", ""),
+        Some("agent_end") => timing.mark("pi_agent_end", ""),
+        _ => {}
+    }
+    if !*first_text_delta && is_assistant_text_delta(&event) {
+        *first_text_delta = true;
+        timing.mark("pi_first_assistant_text_delta", "");
+    }
+    if !*assistant_complete && is_assistant_completion(&event) {
+        *assistant_complete = true;
+        timing.mark("pi_assistant_complete", "");
+    }
+}
+
+fn is_assistant_text_delta(event: &Value) -> bool {
+    let event_type = event.get("type").and_then(Value::as_str);
+    if event_type == Some("message_update") {
+        return event
+            .get("assistantMessageEvent")
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str)
+            == Some("text_delta")
+            && event
+                .get("assistantMessageEvent")
+                .and_then(|value| value.get("delta"))
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty());
+    }
+    if matches!(event_type, Some("message_delta" | "text_delta")) {
+        return event
+            .get("delta")
+            .or_else(|| event.get("text"))
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty());
+    }
+    if event_type == Some("message_end") {
+        return event
+            .get("message")
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .and_then(extract_message_text)
+            .is_some_and(|text| !text.is_empty());
+    }
+    false
+}
+
+fn is_assistant_completion(event: &Value) -> bool {
+    match event.get("type").and_then(Value::as_str) {
+        Some("agent_end") => true,
+        Some("message_end") => event.get("message").is_some_and(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                && matches!(
+                    message.get("stopReason").and_then(Value::as_str),
+                    Some("stop" | "length")
+                )
+        }),
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -1151,6 +1292,32 @@ mod tests {
             "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":\"last\",\"stopReason\":\"stop\"}}\n"
         );
         assert_eq!(parse_pi_output(output).unwrap().final_answer, "last");
+    }
+
+    #[test]
+    fn timing_event_extractors_ignore_payloads_and_detect_phases() {
+        let delta: Value = serde_json::json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "hello"},
+            "prompt": "must not be logged"
+        });
+        let complete: Value = serde_json::json!({
+            "type": "message_end",
+            "message": {"role": "assistant", "content": "done", "stopReason": "stop"}
+        });
+        let tool: Value = serde_json::json!({
+            "type": "tool_execution_end",
+            "result": {"secret": "must not be logged"}
+        });
+        let tool_message_end: Value = serde_json::json!({
+            "type": "message_end",
+            "message": {"role": "assistant", "stopReason": "toolUse", "content": []}
+        });
+        assert!(is_assistant_text_delta(&delta));
+        assert!(is_assistant_completion(&complete));
+        assert!(!is_assistant_text_delta(&tool));
+        assert!(!is_assistant_completion(&tool));
+        assert!(!is_assistant_completion(&tool_message_end));
     }
 
     #[test]
@@ -1530,7 +1697,7 @@ mod tests {
                 .expect("spawn shell");
             let stdout = child.stdout.take().expect("stdout pipe");
             let (receiver, reader) =
-                spawn_pipe_reader(stdout, 3, "stdout", Arc::new(AtomicBool::new(false)));
+                spawn_pipe_reader(stdout, 3, "stdout", Arc::new(AtomicBool::new(false)), None);
             child.wait().expect("wait shell");
             let result = collect_pipe(receiver, reader);
             assert_eq!(result.is_err(), expected_error, "payload={payload}");
@@ -1548,7 +1715,7 @@ mod tests {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         configure_process_group(&mut command);
         let child = command.spawn().expect("spawn shell");
-        let mut process = AgentProcess::new(child);
+        let mut process = AgentProcess::new(child, None);
         let cancellation = AtomicBool::new(true);
         let started = std::time::Instant::now();
         let error = process

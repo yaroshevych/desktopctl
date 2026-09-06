@@ -3,7 +3,10 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Mutex, OnceLock, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
@@ -209,6 +212,13 @@ pub fn terminate_active() {
 }
 
 pub fn show(initial_tab: Option<&'static str>) {
+    show_with_settings(initial_tab, None);
+}
+
+pub fn show_with_settings(
+    initial_tab: Option<&'static str>,
+    startup_settings: Option<serde_json::Value>,
+) {
     if SETTINGS_DIALOG_ACTIVE.swap(true, Ordering::SeqCst) {
         activate_existing_dialog();
         return;
@@ -221,13 +231,16 @@ pub fn show(initial_tab: Option<&'static str>) {
         };
 
         let client = ServiceClient;
-        let stored: StoredSettings = match client.settings().and_then(|value| {
-            serde_json::from_value(value).map_err(|error| {
-                desktop_core::error::AppError::internal(format!(
-                    "decode settings response failed: {error}"
-                ))
-            })
-        }) {
+        let stored: StoredSettings = match startup_settings
+            .map(Ok)
+            .unwrap_or_else(|| client.settings())
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|error| {
+                    desktop_core::error::AppError::internal(format!(
+                        "decode settings response failed: {error}"
+                    ))
+                })
+            }) {
             Ok(settings) => settings,
             Err(error) => {
                 eprintln!("settings dialog: load service settings: {error}");

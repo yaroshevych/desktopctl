@@ -28,7 +28,7 @@ fn main() {
         } else {
             daemon::DaemonConfig::resident()
         };
-        daemon::run_blocking(config.with_background_input(background))
+        app_runtime::run(config.with_background_input(background))
     };
     #[cfg(not(target_os = "macos"))]
     let result = app_runtime::run();
