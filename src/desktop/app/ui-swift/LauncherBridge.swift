@@ -1727,7 +1727,7 @@ public func desktopctl_launcher_set_notification_action_callback(
 }
 
 public typealias LauncherSettingsChangedCallback =
-    @convention(c) (Int32, Int32, Int32, Int32) -> Void
+    @convention(c) (Int32, Int32, Int32, Int32, Int32) -> Void
 
 @_cdecl("desktopctl_launcher_start_settings_observer")
 public func desktopctl_launcher_start_settings_observer(
@@ -1749,9 +1749,10 @@ public func desktopctl_launcher_start_settings_observer(
               let renderKeyboardShortcuts =
                   (userInfo["render_keyboard_shortcuts"] as? NSNumber)?.int32Value,
               let useNativeNotifications =
-                  (userInfo["use_native_notifications"] as? NSNumber)?.int32Value
+                  (userInfo["use_native_notifications"] as? NSNumber)?.int32Value,
+              let agent = (userInfo["agent_code"] as? NSNumber)?.int32Value
         else { return }
-        callback?(keyCode, modifiers, renderKeyboardShortcuts, useNativeNotifications)
+        callback?(keyCode, modifiers, renderKeyboardShortcuts, useNativeNotifications, agent)
     }
 }
 

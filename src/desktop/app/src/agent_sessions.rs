@@ -712,6 +712,16 @@ impl AgentSessionStore {
         target_window: Option<TargetWindowMetadata>,
         now_ms: u64,
     ) -> Result<(String, String), SessionStoreError> {
+        self.create_running_with_agent(prompt, "pi", target_window, now_ms)
+    }
+
+    pub fn create_running_with_agent(
+        &mut self,
+        prompt: impl Into<String>,
+        agent: impl Into<String>,
+        target_window: Option<TargetWindowMetadata>,
+        now_ms: u64,
+    ) -> Result<(String, String), SessionStoreError> {
         let prompt = prompt.into();
         if prompt.trim().is_empty() {
             return Err(SessionStoreError::Invalid(
@@ -722,7 +732,7 @@ impl AgentSessionStore {
         let request_id = Uuid::now_v7().to_string();
         let session = AgentSession {
             id: id.clone(),
-            agent: "pi".to_string(),
+            agent: agent.into(),
             native_session_id: None,
             native_session_path: None,
             native_session_cwd: None,

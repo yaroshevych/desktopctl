@@ -147,12 +147,16 @@ private final class SettingsLauncherVM: ObservableObject {
 
     @Published var renderKeyboardShortcuts: Bool
     @Published var useNativeNotifications: Bool
+    @Published var agent: String
+    let agents: [LauncherAgentOption]
     @Published var openShortcut: LauncherShortcut
     @Published var isRecording = false
 
     private var monitor: Any?
 
     init(_ input: LauncherInput) {
+        agents = input.agents
+        agent = agents.contains { $0.key == input.agent } ? input.agent : "pi"
         renderKeyboardShortcuts = input.renderKeyboardShortcuts
         useNativeNotifications = input.useNativeNotifications
         openShortcut = input.openShortcut
@@ -165,6 +169,7 @@ private final class SettingsLauncherVM: ObservableObject {
     func buildOutput() -> LauncherOutput {
         LauncherOutput(
             saved: true,
+            agent: agent,
             renderKeyboardShortcuts: renderKeyboardShortcuts,
             useNativeNotifications: useNativeNotifications,
             openShortcut: openShortcut
@@ -174,13 +179,16 @@ private final class SettingsLauncherVM: ObservableObject {
     func saveLive() {
         let value = renderKeyboardShortcuts
         let nativeValue = useNativeNotifications
+        let selectedAgent = agent
         let shortcut = openShortcut
         DaemonIPC.notifyLauncherSettingsChanged(
+            agent: selectedAgent,
             renderKeyboardShortcuts: value,
             useNativeNotifications: nativeValue,
             openShortcut: shortcut)
         Self.saveQueue.async {
             _ = DaemonIPC.updateLauncherSettings(
+                agent: selectedAgent,
                 renderKeyboardShortcuts: value,
                 useNativeNotifications: nativeValue,
                 openShortcut: shortcut)
@@ -323,8 +331,10 @@ private struct LauncherTabContent: View {
                 }
             }
 
-            Picker("Agent:", selection: .constant("pi")) {
-                Text("Pi").tag("pi")
+            Picker("Agent:", selection: $vm.agent) {
+                ForEach(vm.agents, id: \.key) { agent in
+                    Text(agent.label).tag(agent.key)
+                }
             }
             .pickerStyle(.menu)
 

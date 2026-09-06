@@ -12,6 +12,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent_runner::{AgentKind, discover_agent_installations};
 use crate::service_client::ServiceClient;
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -57,6 +58,10 @@ impl Default for LauncherShortcut {
 
 #[derive(Deserialize, Serialize)]
 struct LauncherInput {
+    #[serde(default = "default_agent")]
+    agent: String,
+    #[serde(default)]
+    agents: Vec<LauncherAgentOption>,
     #[serde(default = "default_render_keyboard_shortcuts")]
     render_keyboard_shortcuts: bool,
     #[serde(default)]
@@ -68,11 +73,19 @@ struct LauncherInput {
 impl Default for LauncherInput {
     fn default() -> Self {
         Self {
+            agent: default_agent(),
+            agents: Vec::new(),
             render_keyboard_shortcuts: true,
             use_native_notifications: false,
             open_shortcut: LauncherShortcut::default(),
         }
     }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct LauncherAgentOption {
+    key: String,
+    label: String,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +143,7 @@ struct AppPolicyOutput {
 #[derive(Deserialize)]
 struct LauncherOutput {
     saved: bool,
+    agent: String,
     render_keyboard_shortcuts: bool,
     use_native_notifications: bool,
     open_shortcut: LauncherShortcut,
@@ -144,6 +158,10 @@ struct SettingsOutput {
 
 fn default_render_keyboard_shortcuts() -> bool {
     true
+}
+
+fn default_agent() -> String {
+    AgentKind::Pi.key().to_string()
 }
 
 fn default_launcher_key_code() -> u32 {
@@ -280,6 +298,14 @@ pub fn show_with_settings(
                     .collect(),
             },
             launcher: LauncherInput {
+                agent: stored.launcher.agent,
+                agents: discover_agent_installations()
+                    .into_iter()
+                    .map(|installation| LauncherAgentOption {
+                        key: installation.kind.key().to_string(),
+                        label: installation.kind.label().to_string(),
+                    })
+                    .collect(),
                 render_keyboard_shortcuts: stored.launcher.render_keyboard_shortcuts,
                 use_native_notifications: stored.launcher.use_native_notifications,
                 open_shortcut: LauncherShortcut {
@@ -359,6 +385,7 @@ pub fn show_with_settings(
         });
         let launcher = output.launcher.saved.then(|| {
             serde_json::json!({
+                "agent": output.launcher.agent,
                 "render_keyboard_shortcuts": output.launcher.render_keyboard_shortcuts,
                 "use_native_notifications": output.launcher.use_native_notifications,
                 "open_shortcut": {

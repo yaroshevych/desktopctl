@@ -16,8 +16,8 @@ mod controller {
     use crate::trace;
     use crate::{
         agent_runner::{
-            AgentRequest, AgentRunner, AgentSessionRef, PiRunner, TargetWindow,
-            discover_pi_executable, load_native_transcript,
+            AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, GooseRunner,
+            OpenCodeRunner, PiRunner, TargetWindow, discover_pi_executable, load_native_transcript,
         },
         agent_sessions::{
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
@@ -35,6 +35,7 @@ mod controller {
 
     struct State {
         store: AgentSessionStore,
+        agent: AgentKind,
         render_keyboard_shortcuts: bool,
         use_native_notifications: bool,
         open_shortcut: launcher_ui::LauncherShortcut,
@@ -125,10 +126,11 @@ mod controller {
         if let Some(warning) = warning {
             trace::log(format!("agent_launcher:store_warning {warning}"));
         }
-        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut) =
+        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut, agent) =
             launcher_settings_from(startup_settings);
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
+            agent,
             render_keyboard_shortcuts,
             use_native_notifications,
             open_shortcut,
@@ -191,6 +193,7 @@ mod controller {
         modifiers: i32,
         render_keyboard_shortcuts: i32,
         use_native_notifications: i32,
+        agent: i32,
     ) {
         let (Ok(key_code), Ok(modifiers)) = (u32::try_from(key_code), u32::try_from(modifiers))
         else {
@@ -200,6 +203,7 @@ mod controller {
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts != 0;
             state.use_native_notifications = use_native_notifications != 0;
+            state.agent = AgentKind::from_code(agent);
             state.open_shortcut = launcher_ui::LauncherShortcut {
                 key_code,
                 modifiers,
@@ -379,18 +383,21 @@ mod controller {
     fn start_new(prompt: String, share_context: bool) {
         let created = lock_state().and_then(|mut state| {
             let target = state.pending_target.take();
-            match state
-                .store
-                .create_running(&prompt, target.clone(), unix_now_ms())
-            {
-                Ok((session_id, request_id)) => Some((session_id, request_id, target)),
+            let agent = state.agent;
+            match state.store.create_running_with_agent(
+                &prompt,
+                agent.key(),
+                target.clone(),
+                unix_now_ms(),
+            ) {
+                Ok((session_id, request_id)) => Some((session_id, request_id, target, agent)),
                 Err(error) => {
                     trace::log(format!("agent_launcher:create_error {error}"));
                     None
                 }
             }
         });
-        if let Some((session_id, request_id, target)) = created {
+        if let Some((session_id, request_id, target, agent)) = created {
             let timing =
                 trace::take_launcher_timing().unwrap_or_else(|| trace::begin_launcher_timing());
             timing.mark(
@@ -420,11 +427,12 @@ mod controller {
                     return;
                 }
             };
-            run_pi(
+            run_agent(
                 session_id,
                 request_id,
                 prompt,
                 None,
+                agent,
                 target,
                 share_context,
                 preparation,
@@ -488,11 +496,13 @@ mod controller {
                 path: session.native_session_path.map(PathBuf::from),
                 cwd: session.native_session_cwd.map(PathBuf::from),
             });
-            run_pi(
+            let agent = AgentKind::from_key(&session.agent);
+            run_agent(
                 session_id,
                 request_id,
                 prompt,
                 native,
+                agent,
                 session.target_window,
                 share_context,
                 None,
@@ -553,6 +563,9 @@ mod controller {
     fn sync_native_session(session_id: String, generation: u64) {
         let native = lock_state().and_then(|state| {
             let session = state.store.get(&session_id)?;
+            if session.agent != AgentKind::Pi.key() {
+                return None;
+            }
             if session.native_session_id.is_none() && session.native_session_path.is_none() {
                 return None;
             }
@@ -626,6 +639,9 @@ mod controller {
         let Some(session) = session else {
             return;
         };
+        if session.agent != AgentKind::Pi.key() {
+            return;
+        }
         if session.status == AgentSessionStatus::Running
             || lock_state().is_some_and(|state| state.cancellations.contains_key(&session_id))
         {
@@ -710,11 +726,12 @@ end run"#;
         )
     }
 
-    fn run_pi(
+    fn run_agent(
         session_id: String,
         request_id: String,
         prompt: String,
         native_session: Option<AgentSessionRef>,
+        agent: AgentKind,
         target: Option<TargetWindowMetadata>,
         share_context: bool,
         preparation: Option<PreparationHandle>,
@@ -757,7 +774,8 @@ end run"#;
                 format!("session={} present={}", session_id, target.is_some()),
             );
             trace::agent_context(format!(
-                "run_pi session={} share_context={} prepared={} target={}",
+                "run_agent agent={} session={} share_context={} prepared={} target={}",
+                agent.key(),
                 session_id,
                 share_context,
                 prepared.is_some(),
@@ -913,13 +931,34 @@ end run"#;
                 );
                 return;
             }
-            timing.mark("pi_launch_start", format!("session={session_id}"));
+            timing.mark(
+                "agent_launch_start",
+                format!("agent={} session={session_id}", agent.key()),
+            );
             let mut early_published = false;
-            let result = match PiRunner::new()
-                .with_current_dir(workspace.clone())
-                .with_timing(Arc::clone(&timing))
-                .spawn(request)
-            {
+            let runner: Box<dyn AgentRunner> = match agent {
+                AgentKind::Pi => Box::new(
+                    PiRunner::new()
+                        .with_current_dir(workspace.clone())
+                        .with_timing(Arc::clone(&timing)),
+                ),
+                AgentKind::Codex => Box::new(
+                    CodexRunner::new()
+                        .with_current_dir(workspace.clone())
+                        .with_timing(Arc::clone(&timing)),
+                ),
+                AgentKind::Goose => Box::new(
+                    GooseRunner::new()
+                        .with_current_dir(workspace.clone())
+                        .with_timing(Arc::clone(&timing)),
+                ),
+                AgentKind::OpenCode => Box::new(
+                    OpenCodeRunner::new()
+                        .with_current_dir(workspace.clone())
+                        .with_timing(Arc::clone(&timing)),
+                ),
+            };
+            let result = match runner.spawn(request) {
                 Ok(mut process) => {
                     let result =
                         process.wait_with_cancellation_and_completion(&cancellation, |result| {
@@ -937,11 +976,11 @@ end run"#;
                         });
                     match &result {
                         Ok(_) => {
-                            timing.mark("pi_response_received", format!("session={session_id}"))
+                            timing.mark("agent_response_received", format!("session={session_id}"))
                         }
                         Err(error) => timing.mark(
-                            "pi_response_error",
-                            format!("session={} error={error}", session_id),
+                            "agent_response_error",
+                            format!("agent={} session={} error={error}", agent.key(), session_id),
                         ),
                     }
                     result
@@ -1511,14 +1550,14 @@ end run"#;
         }
     }
 
-    fn launcher_settings() -> (bool, bool, launcher_ui::LauncherShortcut) {
+    fn launcher_settings() -> (bool, bool, launcher_ui::LauncherShortcut, AgentKind) {
         let settings = crate::service_client::ServiceClient.settings().ok();
         launcher_settings_from(settings.as_ref())
     }
 
     fn launcher_settings_from(
         settings: Option<&serde_json::Value>,
-    ) -> (bool, bool, launcher_ui::LauncherShortcut) {
+    ) -> (bool, bool, launcher_ui::LauncherShortcut, AgentKind) {
         settings
             .and_then(|value| {
                 let launcher = value.get("launcher")?;
@@ -1535,9 +1574,21 @@ end run"#;
                     .cloned()
                     .and_then(|value| serde_json::from_value(value).ok())
                     .unwrap_or_default();
-                Some((render, use_native_notifications, shortcut))
+                let agent = launcher
+                    .get("agent")
+                    .and_then(serde_json::Value::as_str)
+                    .map(AgentKind::from_key)
+                    .unwrap_or(AgentKind::Pi);
+                Some((render, use_native_notifications, shortcut, agent))
             })
-            .unwrap_or_else(|| (true, false, launcher_ui::LauncherShortcut::default()))
+            .unwrap_or_else(|| {
+                (
+                    true,
+                    false,
+                    launcher_ui::LauncherShortcut::default(),
+                    AgentKind::Pi,
+                )
+            })
     }
 
     fn use_native_notifications() -> bool {
@@ -1547,12 +1598,13 @@ end run"#;
     }
 
     pub fn reload_keyboard_shortcuts_setting() {
-        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut) =
+        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut, agent) =
             launcher_settings();
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts;
             state.use_native_notifications = use_native_notifications;
             state.open_shortcut = open_shortcut;
+            state.agent = agent;
         }
         launcher_ui::reload_hotkey(open_shortcut);
         refresh();
@@ -1925,6 +1977,7 @@ end run"#;
             }
             let mut state = super::State {
                 store,
+                agent: super::AgentKind::Pi,
                 render_keyboard_shortcuts: true,
                 use_native_notifications: false,
                 open_shortcut: Default::default(),

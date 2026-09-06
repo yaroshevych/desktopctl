@@ -47,6 +47,8 @@ struct AppPolicyOutput: Codable {
 }
 
 struct LauncherInput: Codable {
+    var agent: String
+    var agents: [LauncherAgentOption]
     var renderKeyboardShortcuts: Bool
     var useNativeNotifications: Bool
     var openShortcut: LauncherShortcut
@@ -54,9 +56,15 @@ struct LauncherInput: Codable {
 
 struct LauncherOutput: Codable {
     var saved: Bool
+    var agent: String
     var renderKeyboardShortcuts: Bool
     var useNativeNotifications: Bool
     var openShortcut: LauncherShortcut
+}
+
+struct LauncherAgentOption: Codable, Hashable {
+    var key: String
+    var label: String
 }
 
 struct LauncherShortcut: Codable, Equatable {

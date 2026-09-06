@@ -25,6 +25,74 @@ use std::{
 
 use serde_json::Value;
 
+/// Agent CLIs supported by the launcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Pi,
+    Codex,
+    Goose,
+    OpenCode,
+}
+
+impl AgentKind {
+    pub const ALL: [Self; 4] = [Self::Pi, Self::Codex, Self::Goose, Self::OpenCode];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::Codex => "codex",
+            Self::Goose => "goose",
+            Self::OpenCode => "opencode",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pi => "Pi",
+            Self::Codex => "Codex",
+            Self::Goose => "Goose",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "codex" => Self::Codex,
+            "goose" => Self::Goose,
+            "opencode" => Self::OpenCode,
+            _ => Self::Pi,
+        }
+    }
+
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::Codex,
+            2 => Self::Goose,
+            3 => Self::OpenCode,
+            _ => Self::Pi,
+        }
+    }
+
+    fn executable_name(self) -> &'static str {
+        self.key()
+    }
+
+    fn environment_override(self) -> &'static str {
+        match self {
+            Self::Pi => "DESKTOPCTL_PI_PATH",
+            Self::Codex => "DESKTOPCTL_CODEX_PATH",
+            Self::Goose => "DESKTOPCTL_GOOSE_PATH",
+            Self::OpenCode => "DESKTOPCTL_OPENCODE_PATH",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInstallation {
+    pub kind: AgentKind,
+    pub executable: PathBuf,
+}
+
 /// Adapter-neutral request passed to an agent runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRequest {
@@ -482,6 +550,89 @@ pub trait AgentRunner: Send + Sync {
     fn spawn(&self, request: AgentRequest) -> Result<AgentProcess, AgentRunnerError>;
 }
 
+/// Resolve every supported CLI using both the GUI process PATH and the common
+/// package-manager locations used on macOS.
+pub fn discover_agent_installations() -> Vec<AgentInstallation> {
+    AgentKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            discover_executable(kind)
+                .ok()
+                .map(|executable| AgentInstallation { kind, executable })
+        })
+        .collect()
+}
+
+fn discover_executable(kind: AgentKind) -> Result<PathBuf, AgentRunnerError> {
+    let configured = env::var_os(kind.environment_override());
+    let path = env::var_os("PATH");
+    let home = env::var_os("HOME").map(PathBuf::from);
+    resolve_executable(
+        kind,
+        configured.as_deref(),
+        path.as_deref(),
+        home.as_deref(),
+    )
+}
+
+fn resolve_executable(
+    kind: AgentKind,
+    configured: Option<&std::ffi::OsStr>,
+    path: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+) -> Result<PathBuf, AgentRunnerError> {
+    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
+        let configured = PathBuf::from(configured);
+        if is_executable_file(&configured) {
+            return Ok(configured);
+        }
+        return Err(AgentRunnerError::MissingExecutable {
+            configured: Some(configured.clone()),
+            message: format!(
+                "{} was not found at {}={}; install {}, or configure {} to its executable",
+                kind.label(),
+                kind.environment_override(),
+                configured.display(),
+                kind.label(),
+                kind.environment_override()
+            ),
+        });
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(path) = path {
+        candidates.extend(env::split_paths(path).map(|dir| dir.join(kind.executable_name())));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin").join(kind.executable_name()),
+        PathBuf::from("/usr/local/bin").join(kind.executable_name()),
+        PathBuf::from("/usr/bin").join(kind.executable_name()),
+    ]);
+    if let Some(home) = home {
+        candidates.extend([
+            home.join(".local/bin").join(kind.executable_name()),
+            home.join(".npm-global/bin").join(kind.executable_name()),
+            home.join(".bun/bin").join(kind.executable_name()),
+            home.join(".volta/bin").join(kind.executable_name()),
+            home.join(".asdf/shims").join(kind.executable_name()),
+            home.join("bin").join(kind.executable_name()),
+        ]);
+    }
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
+        .ok_or_else(|| AgentRunnerError::MissingExecutable {
+            configured: None,
+            message: format!(
+                "{} executable not found. Install {}, or set {} to its full executable path",
+                kind.label(),
+                kind.label(),
+                kind.environment_override()
+            ),
+        })
+}
+
 /// Pi command runner.  The optional executable and cwd are useful for tests
 /// and for callers that expose explicit configuration.
 #[derive(Debug, Clone, Default)]
@@ -509,7 +660,7 @@ impl PiRunner {
         self
     }
 
-    pub fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
+    pub(crate) fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
         self.timing = Some(timing);
         self
     }
@@ -527,7 +678,7 @@ impl PiRunner {
                 ),
             });
         }
-        discover_pi_executable()
+        discover_executable(AgentKind::Pi)
     }
 
     /// Build the exact argv passed to Pi.  This is intentionally separate from
@@ -549,7 +700,7 @@ impl PiRunner {
         }
         if let Some(target) = request.target_window.as_ref() {
             args.push(OsString::from("--append-system-prompt"));
-            args.push(OsString::from(Self::target_window_instruction(target)));
+            args.push(OsString::from(target_window_instruction(target)));
         }
         if let Some(context) = request.window_context.as_deref() {
             args.push(OsString::from("--append-system-prompt"));
@@ -574,13 +725,6 @@ impl PiRunner {
             request.prompt.len()
         ));
         args
-    }
-
-    fn target_window_instruction(target: &TargetWindow) -> String {
-        format!(
-            "The launcher has already bound the target window as {id}. For every desktopctl command that supports a window target, put `--active-window {id}` after the subcommand and its arguments, never before the subcommand. When a detailed tokenized context file is provided, read that file first to inspect the window; do not call `desktopctl screen tokenize` just to rediscover the supplied snapshot. Use `desktopctl screen tokenize --active-window {id}` only when the file is unavailable or a fresh capture is explicitly needed. Example action: `desktopctl pointer click --id <element_id> --active-window {id}`. Do not probe `desktopctl --active-window ... --help`; that syntax is invalid. Use the bound window for this request even if another app becomes frontmost.",
-            id = target.id
-        )
     }
 
     fn command_for(&self, request: &AgentRequest) -> Result<Command, AgentRunnerError> {
@@ -615,12 +759,379 @@ impl AgentRunner for PiRunner {
     }
 }
 
+fn prompt_for_cli(request: &AgentRequest) -> String {
+    let mut prompt = String::new();
+    if let Some(target) = request.target_window.as_ref() {
+        prompt.push_str(&target_window_instruction(target));
+        prompt.push_str("\n\n");
+    }
+    if let Some(context) = request.window_context.as_deref() {
+        prompt.push_str(context);
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(&request.prompt);
+    prompt
+}
+
+fn target_window_instruction(target: &TargetWindow) -> String {
+    format!(
+        "The launcher has already bound the target window as {id}. For every desktopctl command that supports a window target, put `--active-window {id}` after the subcommand and its arguments, never before the subcommand. When a detailed tokenized context file is provided, read that file first to inspect the window; do not call `desktopctl screen tokenize` just to rediscover the supplied snapshot. Use `desktopctl screen tokenize --active-window {id}` only when the file is unavailable or a fresh capture is explicitly needed. Example action: `desktopctl pointer click --id <element_id> --active-window {id}`. Do not probe `desktopctl --active-window ... --help`; that syntax is invalid. Use the bound window for this request even if another app becomes frontmost.",
+        id = target.id
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexRunner {
+    executable: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
+}
+
+impl Default for CodexRunner {
+    fn default() -> Self {
+        Self {
+            executable: None,
+            current_dir: None,
+            timing: None,
+        }
+    }
+}
+
+impl CodexRunner {
+    pub const MODEL: &'static str = "gpt-5.6-luna";
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_executable(path: impl Into<PathBuf>) -> Self {
+        Self {
+            executable: Some(path.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_current_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(path.into());
+        self
+    }
+
+    pub(crate) fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
+        self.timing = Some(timing);
+        self
+    }
+
+    fn executable(&self) -> Result<PathBuf, AgentRunnerError> {
+        self.executable
+            .as_deref()
+            .map(|path| {
+                if is_executable_file(path) {
+                    Ok(path.to_path_buf())
+                } else {
+                    Err(AgentRunnerError::MissingExecutable {
+                        configured: Some(path.to_path_buf()),
+                        message: format!(
+                            "configured Codex executable is not executable: {}",
+                            path.display()
+                        ),
+                    })
+                }
+            })
+            .unwrap_or_else(|| discover_executable(AgentKind::Codex))
+    }
+
+    pub fn args_for(request: &AgentRequest) -> Vec<OsString> {
+        let mut args = vec![
+            OsString::from("--ask-for-approval"),
+            OsString::from("never"),
+            OsString::from("--sandbox"),
+            OsString::from("workspace-write"),
+            OsString::from("exec"),
+            OsString::from("--json"),
+            OsString::from("--model"),
+            OsString::from(Self::MODEL),
+        ];
+        if request
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.is_empty())
+        {
+            args.push(OsString::from("resume"));
+            args.push(OsString::from(
+                request
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.id.clone())
+                    .unwrap_or_default(),
+            ));
+        }
+        args.push(OsString::from(prompt_for_cli(request)));
+        args
+    }
+
+    fn command_for(&self, request: &AgentRequest) -> Result<Command, AgentRunnerError> {
+        let executable = self.executable()?;
+        let mut command = Command::new(&executable);
+        command.args(Self::args_for(request));
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        if let Some(dir) = self.current_dir.as_deref() {
+            command.current_dir(dir);
+        }
+        configure_process_group(&mut command);
+        Ok(command)
+    }
+}
+
+impl AgentRunner for CodexRunner {
+    fn spawn(&self, request: AgentRequest) -> Result<AgentProcess, AgentRunnerError> {
+        let executable = self.executable().ok();
+        let mut command = self.command_for(&request)?;
+        let child = command
+            .spawn()
+            .map_err(|source| AgentRunnerError::Spawn { executable, source })?;
+        Ok(AgentProcess::new_with_parser(
+            child,
+            self.timing.clone(),
+            parse_codex_output,
+            None,
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GooseRunner {
+    executable: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
+}
+
+impl Default for GooseRunner {
+    fn default() -> Self {
+        Self {
+            executable: None,
+            current_dir: None,
+            timing: None,
+        }
+    }
+}
+
+impl GooseRunner {
+    pub const MODEL: &'static str = "deepseek/deepseek-v4-flash-0731";
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_current_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(path.into());
+        self
+    }
+
+    pub(crate) fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
+        self.timing = Some(timing);
+        self
+    }
+
+    fn executable(&self) -> Result<PathBuf, AgentRunnerError> {
+        self.executable
+            .as_deref()
+            .map(|path| {
+                if is_executable_file(path) {
+                    Ok(path.to_path_buf())
+                } else {
+                    Err(AgentRunnerError::MissingExecutable {
+                        configured: Some(path.to_path_buf()),
+                        message: format!(
+                            "configured Goose executable is not executable: {}",
+                            path.display()
+                        ),
+                    })
+                }
+            })
+            .unwrap_or_else(|| discover_executable(AgentKind::Goose))
+    }
+
+    fn session_name(request: &AgentRequest) -> String {
+        request
+            .session
+            .as_ref()
+            .and_then(|session| session.id.clone())
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| format!("desktopctl-{}", uuid::Uuid::now_v7()))
+    }
+
+    fn command_for(
+        &self,
+        request: &AgentRequest,
+        session_name: &str,
+    ) -> Result<Command, AgentRunnerError> {
+        let executable = self.executable()?;
+        let mut command = Command::new(&executable);
+        let mut args = vec![
+            OsString::from("run"),
+            OsString::from("--output-format"),
+            OsString::from("json"),
+            OsString::from("--provider"),
+            OsString::from("openrouter"),
+            OsString::from("--model"),
+            OsString::from(Self::MODEL),
+            OsString::from("--max-turns"),
+            OsString::from("1000"),
+            OsString::from("--name"),
+            OsString::from(session_name),
+        ];
+        if request
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.is_empty())
+        {
+            args.push(OsString::from("--resume"));
+        }
+        args.extend([
+            OsString::from("--text"),
+            OsString::from(prompt_for_cli(request)),
+        ]);
+        command.args(args);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        if let Some(dir) = self.current_dir.as_deref() {
+            command.current_dir(dir);
+        }
+        configure_process_group(&mut command);
+        Ok(command)
+    }
+}
+
+impl AgentRunner for GooseRunner {
+    fn spawn(&self, request: AgentRequest) -> Result<AgentProcess, AgentRunnerError> {
+        let session_name = Self::session_name(&request);
+        let executable = self.executable().ok();
+        let mut command = self.command_for(&request, &session_name)?;
+        let child = command
+            .spawn()
+            .map_err(|source| AgentRunnerError::Spawn { executable, source })?;
+        Ok(AgentProcess::new_with_parser(
+            child,
+            self.timing.clone(),
+            parse_goose_output,
+            Some(AgentSessionRef::id(session_name)),
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenCodeRunner {
+    executable: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
+}
+
+impl Default for OpenCodeRunner {
+    fn default() -> Self {
+        Self {
+            executable: None,
+            current_dir: None,
+            timing: None,
+        }
+    }
+}
+
+impl OpenCodeRunner {
+    pub const MODEL: &'static str = "openrouter/deepseek/deepseek-v4-flash-0731";
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_current_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(path.into());
+        self
+    }
+
+    pub(crate) fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
+        self.timing = Some(timing);
+        self
+    }
+
+    fn executable(&self) -> Result<PathBuf, AgentRunnerError> {
+        self.executable
+            .as_deref()
+            .map(|path| {
+                if is_executable_file(path) {
+                    Ok(path.to_path_buf())
+                } else {
+                    Err(AgentRunnerError::MissingExecutable {
+                        configured: Some(path.to_path_buf()),
+                        message: format!(
+                            "configured OpenCode executable is not executable: {}",
+                            path.display()
+                        ),
+                    })
+                }
+            })
+            .unwrap_or_else(|| discover_executable(AgentKind::OpenCode))
+    }
+
+    fn command_for(&self, request: &AgentRequest) -> Result<Command, AgentRunnerError> {
+        let executable = self.executable()?;
+        let mut args = vec![
+            OsString::from("run"),
+            OsString::from("--format"),
+            OsString::from("json"),
+            OsString::from("--model"),
+            OsString::from(Self::MODEL),
+            OsString::from("--auto"),
+        ];
+        if let Some(session) = request
+            .session
+            .as_ref()
+            .filter(|session| !session.is_empty())
+        {
+            if let Some(id) = session.id.as_deref().filter(|id| !id.trim().is_empty()) {
+                args.extend([OsString::from("--session"), OsString::from(id)]);
+            }
+        }
+        args.push(OsString::from(prompt_for_cli(request)));
+        let mut command = Command::new(&executable);
+        command.args(args);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        if let Some(dir) = self.current_dir.as_deref() {
+            command.current_dir(dir);
+        }
+        configure_process_group(&mut command);
+        Ok(command)
+    }
+}
+
+impl AgentRunner for OpenCodeRunner {
+    fn spawn(&self, request: AgentRequest) -> Result<AgentProcess, AgentRunnerError> {
+        let executable = self.executable().ok();
+        let mut command = self.command_for(&request)?;
+        let child = command
+            .spawn()
+            .map_err(|source| AgentRunnerError::Spawn { executable, source })?;
+        Ok(AgentProcess::new_with_parser(
+            child,
+            self.timing.clone(),
+            parse_opencode_output,
+            None,
+        ))
+    }
+}
+
 /// A running adapter process.  `wait_with_cancellation` drains both output
 /// streams while polling the child, allowing cancellation without leaving a
 /// Pi process behind.
 pub struct AgentProcess {
     child: Option<Child>,
     timing: Option<Arc<crate::trace::E2eTiming>>,
+    parser: fn(&str) -> Result<AgentResult, AgentRunnerError>,
+    session_hint: Option<AgentSessionRef>,
 }
 
 impl fmt::Debug for AgentProcess {
@@ -633,9 +1144,20 @@ impl fmt::Debug for AgentProcess {
 
 impl AgentProcess {
     fn new(child: Child, timing: Option<Arc<crate::trace::E2eTiming>>) -> Self {
+        Self::new_with_parser(child, timing, parse_pi_output, None)
+    }
+
+    fn new_with_parser(
+        child: Child,
+        timing: Option<Arc<crate::trace::E2eTiming>>,
+        parser: fn(&str) -> Result<AgentResult, AgentRunnerError>,
+        session_hint: Option<AgentSessionRef>,
+    ) -> Self {
         Self {
             child: Some(child),
             timing: timing.filter(|_| crate::trace::enabled()),
+            parser,
+            session_hint,
         }
     }
 
@@ -662,11 +1184,11 @@ impl AgentProcess {
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| AgentRunnerError::Process("Pi stdout pipe was unavailable".into()))?;
+            .ok_or_else(|| AgentRunnerError::Process("agent stdout pipe was unavailable".into()))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| AgentRunnerError::Process("Pi stderr pipe was unavailable".into()))?;
+            .ok_or_else(|| AgentRunnerError::Process("agent stderr pipe was unavailable".into()))?;
         let stop_readers = Arc::new(AtomicBool::new(false));
         let (completion_tx, completion_rx) = mpsc::sync_channel(1);
         let (stdout_rx, stdout_thread) = spawn_pipe_reader(
@@ -737,7 +1259,18 @@ impl AgentProcess {
                 AgentRunnerError::Process(format!("Pi exited with {status}: {detail}"))
             });
         }
-        let result = parse_pi_output(&stdout);
+        let mut result = (self.parser)(&stdout);
+        if let (Ok(result), Some(hint)) = (&mut result, self.session_hint.as_ref()) {
+            if result.session.id.as_deref().is_none_or(str::is_empty) {
+                result.session.id = hint.id.clone();
+            }
+            if result.session.path.is_none() {
+                result.session.path = hint.path.clone();
+            }
+            if result.session.cwd.is_none() {
+                result.session.cwd = hint.cwd.clone();
+            }
+        }
         if let Some(timing) = self.timing.as_ref() {
             timing.mark("pi_return", "");
         }
@@ -1236,6 +1769,148 @@ pub fn parse_pi_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
     })
 }
 
+pub fn parse_codex_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
+    let mut session_id = None;
+    let mut final_answer = None;
+    let mut saw_event = false;
+    for (line_number, line) in output.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: Value = serde_json::from_str(line).map_err(|source| {
+            AgentRunnerError::Parse(format!(
+                "invalid Codex JSON on line {}: {source}",
+                line_number + 1
+            ))
+        })?;
+        saw_event = true;
+        if event.get("type").and_then(Value::as_str) == Some("thread.started") {
+            session_id = event
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        if matches!(
+            event.get("type").and_then(Value::as_str),
+            Some("error" | "turn.failed")
+        ) {
+            return Err(AgentRunnerError::Parse(
+                event
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .or_else(|| event.get("message").and_then(Value::as_str))
+                    .unwrap_or("Codex request failed")
+                    .to_string(),
+            ));
+        }
+        if event.get("type").and_then(Value::as_str) == Some("item.completed") {
+            let item = event.get("item").unwrap_or(&Value::Null);
+            if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+                final_answer = item.get("text").and_then(Value::as_str).map(str::to_owned);
+            }
+        }
+    }
+    if !saw_event {
+        return Err(AgentRunnerError::Parse(
+            "Codex produced no JSON events".into(),
+        ));
+    }
+    let final_answer = final_answer
+        .filter(|answer| !answer.trim().is_empty())
+        .ok_or_else(|| AgentRunnerError::Parse("Codex output contained no final answer".into()))?;
+    Ok(AgentResult {
+        session: AgentSessionRef::id(session_id.unwrap_or_default()),
+        final_answer,
+    })
+}
+
+pub fn parse_goose_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
+    let value: Value = serde_json::from_str(output.trim())
+        .map_err(|source| AgentRunnerError::Parse(format!("invalid Goose JSON: {source}")))?;
+    if value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("status"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| status != "completed")
+    {
+        return Err(AgentRunnerError::Parse(
+            value
+                .pointer("/metadata/status")
+                .and_then(Value::as_str)
+                .unwrap_or("Goose request failed")
+                .to_string(),
+        ));
+    }
+    let final_answer = value
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .filter_map(|message| extract_message_text(message))
+        .filter(|text| !text.trim().is_empty())
+        .next_back()
+        .ok_or_else(|| AgentRunnerError::Parse("Goose output contained no final answer".into()))?;
+    Ok(AgentResult {
+        session: AgentSessionRef {
+            id: None,
+            path: None,
+            cwd: None,
+        },
+        final_answer,
+    })
+}
+
+pub fn parse_opencode_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
+    let mut session_id = None;
+    let mut final_answer = String::new();
+    let mut saw_event = false;
+    for (line_number, line) in output.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: Value = serde_json::from_str(line).map_err(|source| {
+            AgentRunnerError::Parse(format!(
+                "invalid OpenCode JSON on line {}: {source}",
+                line_number + 1
+            ))
+        })?;
+        saw_event = true;
+        if let Some(id) = event.get("sessionID").and_then(Value::as_str) {
+            session_id = Some(id.to_owned());
+        }
+        if event.get("type").and_then(Value::as_str) == Some("error") {
+            return Err(AgentRunnerError::Parse(
+                event
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .or_else(|| event.get("message").and_then(Value::as_str))
+                    .unwrap_or("OpenCode request failed")
+                    .to_string(),
+            ));
+        }
+        if event.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(text) = event.get("text").and_then(Value::as_str) {
+                final_answer.push_str(text);
+            }
+        }
+    }
+    if !saw_event {
+        return Err(AgentRunnerError::Parse(
+            "OpenCode produced no JSON events".into(),
+        ));
+    }
+    if final_answer.trim().is_empty() {
+        return Err(AgentRunnerError::Parse(
+            "OpenCode output contained no final answer".into(),
+        ));
+    }
+    Ok(AgentResult {
+        session: AgentSessionRef::id(session_id.unwrap_or_default()),
+        final_answer,
+    })
+}
+
 /// Parse a completion only when the newly observed event is a valid, final
 /// agent_end. In particular, do not surface an earlier message_end answer if
 /// the agent_end reports an error, abort, or contains only tool messages.
@@ -1443,6 +2118,37 @@ mod tests {
     fn malformed_json_is_rejected() {
         let error = parse_pi_output("{\"type\":\"session\"}\nnot-json\n").unwrap_err();
         assert!(matches!(error, AgentRunnerError::Parse(_)));
+    }
+
+    #[test]
+    fn parses_codex_jsonl_agent_message() {
+        let output = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"codex-123\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Hello\"}}\n",
+            "{\"type\":\"turn.completed\"}\n",
+        );
+        let result = parse_codex_output(output).expect("valid Codex output");
+        assert_eq!(result.session.id.as_deref(), Some("codex-123"));
+        assert_eq!(result.final_answer, "Hello");
+    }
+
+    #[test]
+    fn parses_goose_json_messages_and_ignores_thinking() {
+        let output = r#"{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Hello"}]}],"metadata":{"status":"completed"}}"#;
+        let result = parse_goose_output(output).expect("valid Goose output");
+        assert_eq!(result.final_answer, "Hello");
+    }
+
+    #[test]
+    fn parses_opencode_json_events() {
+        let output = concat!(
+            "{\"type\":\"step-start\",\"sessionID\":\"opencode-123\"}\n",
+            "{\"type\":\"text\",\"sessionID\":\"opencode-123\",\"text\":\"Hello\"}\n",
+            "{\"type\":\"step-finish\",\"sessionID\":\"opencode-123\"}\n",
+        );
+        let result = parse_opencode_output(output).expect("valid OpenCode output");
+        assert_eq!(result.session.id.as_deref(), Some("opencode-123"));
+        assert_eq!(result.final_answer, "Hello");
     }
 
     #[test]

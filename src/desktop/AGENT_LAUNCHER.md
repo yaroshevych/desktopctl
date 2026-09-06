@@ -18,17 +18,18 @@ terminal process.
 - Each launcher session gets a private filesystem workspace at
   `<data-root>/workspaces/<session-guid>/`. Pi runs with that directory as its
   working directory, and `Open in Ghostty` reuses it.
-- `agent_runner` defines the adapter boundary and implements `PiRunner`. Runs
-  happen on worker threads and completion is dispatched back to AppKit's main
-  thread. One run per DesktopCtl session is permitted at a time.
+- `agent_runner` defines the adapter boundary and implements runners for Pi,
+  Codex, Goose, and OpenCode. Runs happen on worker threads and completion is
+  dispatched back to AppKit's main thread. One run per DesktopCtl session is
+  permitted at a time.
 
 While a session is running, its view shows a native activity spinner and a
-`Stop` button. The composer remains enabled: follow-ups typed while Pi is
-working are shown as queued user bubbles and sent together after Pi finishes.
+`Stop` button. The composer remains enabled: follow-ups typed while an agent is
+working are shown as queued user bubbles and sent together after it finishes.
 Stopping sets the request's cancellation token; the runner kills and reaps the
-Pi process group on Unix, then persists the session as cancelled. Output pipes
+agent process group on Unix, then persists the session as cancelled. Output pipes
 are bounded (8 MiB stdout, 256 KiB stderr); exceeding either limit reports an
-error. As soon as Pi emits a valid `agent_end`, DesktopCtl publishes and
+error. Once the selected CLI produces a valid final answer, DesktopCtl publishes and
 persists the final answer and sends its completion notification. The request
 keeps its cancellation/cleanup ownership until the process and output readers
 finish, so follow-ups, native transcript sync, and Ghostty cannot overlap that
@@ -52,10 +53,11 @@ list closes the overlay.
 
 ## Pi invocation
 
-The runner locates Pi from `DESKTOPCTL_PI_PATH`, the process `PATH`, and common
-GUI-install locations including `/opt/homebrew/bin/pi`, `/usr/local/bin/pi`,
-`~/.local/bin/pi`, and `~/bin/pi`. Missing Pi is reported in the launcher; it is
-never installed automatically.
+The runner locates each supported CLI from its `DESKTOPCTL_<AGENT>_PATH`
+override, the process `PATH`, and common GUI-install locations including
+`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, and `~/bin`. The launcher
+settings list is built dynamically from installed CLIs. Pi remains the default;
+missing agents are not silently substituted.
 
 Pi is invoked directly with an argument array in non-interactive JSON mode. No
 shell is involved and user input is not interpolated into a command string. The

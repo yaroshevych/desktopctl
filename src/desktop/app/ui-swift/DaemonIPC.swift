@@ -28,6 +28,7 @@ enum DaemonIPC {
     // Saves launcher preferences immediately, so they take effect without
     // waiting for the Settings window to close.
     static func updateLauncherSettings(
+        agent: String,
         renderKeyboardShortcuts: Bool,
         useNativeNotifications: Bool,
         openShortcut: LauncherShortcut
@@ -36,6 +37,7 @@ enum DaemonIPC {
         for path in paths {
             if tryUpdateLauncherSettings(
                 socketPath: path,
+                agent: agent,
                 renderKeyboardShortcuts: renderKeyboardShortcuts,
                 useNativeNotifications: useNativeNotifications,
                 openShortcut: openShortcut
@@ -49,6 +51,7 @@ enum DaemonIPC {
     // Tell the already-running launcher first. Persistence happens separately so a
     // slow daemon socket cannot delay the new hotkey.
     static func notifyLauncherSettingsChanged(
+        agent: String,
         renderKeyboardShortcuts: Bool,
         useNativeNotifications: Bool,
         openShortcut: LauncherShortcut
@@ -57,6 +60,7 @@ enum DaemonIPC {
             launcherSettingsChanged,
             object: nil,
             userInfo: [
+                "agent_code": agentCode(agent),
                 "key_code": openShortcut.keyCode,
                 "modifiers": openShortcut.modifiers,
                 "render_keyboard_shortcuts": renderKeyboardShortcuts,
@@ -130,6 +134,7 @@ enum DaemonIPC {
 
     private static func tryUpdateLauncherSettings(
         socketPath: String,
+        agent: String,
         renderKeyboardShortcuts: Bool,
         useNativeNotifications: Bool,
         openShortcut: LauncherShortcut
@@ -160,6 +165,7 @@ enum DaemonIPC {
             "command": [
                 "cmd": "settings_update",
                 "launcher": [
+                    "agent": agent,
                     "render_keyboard_shortcuts": renderKeyboardShortcuts,
                     "use_native_notifications": useNativeNotifications,
                     "open_shortcut": [
@@ -187,6 +193,15 @@ enum DaemonIPC {
         guard let json = try? JSONSerialization.jsonObject(with: Data(bodyBuf)) as? [String: Any]
         else { return false }
         return json["ok"] as? Bool ?? false
+    }
+
+    private static func agentCode(_ agent: String) -> Int {
+        switch agent {
+        case "codex": return 1
+        case "goose": return 2
+        case "opencode": return 3
+        default: return 0
+        }
     }
 
     private static func sendAll(_ sock: Int32, _ data: Data) -> Bool {

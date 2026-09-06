@@ -742,8 +742,10 @@ fn settings_update(
         crate::app_policy::set_current(&config);
     }
     if let Some(value) = launcher {
-        let config: crate::storage::LauncherConfig = serde_json::from_value(value)
-            .map_err(|error| AppError::invalid_argument(format!("invalid launcher settings: {error}")))?;
+        let config: crate::storage::LauncherConfig =
+            serde_json::from_value(value).map_err(|error| {
+                AppError::invalid_argument(format!("invalid launcher settings: {error}"))
+            })?;
         crate::storage::save_launcher(&config).map_err(AppError::internal)?;
     }
     Ok(json!({ "saved": true }))
