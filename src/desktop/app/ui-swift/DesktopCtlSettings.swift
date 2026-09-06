@@ -231,12 +231,12 @@ private final class SettingsLauncherVM: ObservableObject {
         isRecording = false
     }
 
-    var canResetShortcut: Bool {
-        openShortcut != Self.defaultShortcut
-    }
-
-    func resetShortcut() {
+    func resetSettings() {
         stopRecording()
+        agent = agents.contains { $0.key == "pi" } ? "pi" : (agents.first?.key ?? "pi")
+        terminal = "ghostty"
+        renderKeyboardShortcuts = true
+        useNativeNotifications = false
         openShortcut = Self.defaultShortcut
         saveLive()
     }
@@ -324,53 +324,102 @@ private struct LauncherTabContent: View {
     @ObservedObject var vm: SettingsLauncherVM
 
     var body: some View {
-        Form {
-            LabeledContent("App Launcher:") {
-                HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
+            Form {
+                LabeledContent("App Launcher:") {
                     LauncherShortcutRecorder(vm: vm)
-                    Button { vm.resetShortcut() } label: {
-                        Image(systemName: "arrow.counterclockwise")
+                }
+
+                Picker("Agent:", selection: $vm.agent) {
+                    ForEach(vm.agents, id: \.key) { agent in
+                        Text(agent.label).tag(agent.key)
                     }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .disabled(!vm.canResetShortcut)
-                    .help("Reset to Option–Space")
                 }
-            }
-
-            Picker("Agent:", selection: $vm.agent) {
-                ForEach(vm.agents, id: \.key) { agent in
-                    Text(agent.label).tag(agent.key)
-                }
-            }
-            .pickerStyle(.menu)
-            .onChange(of: vm.agent) { _ in
-                vm.saveLive()
-            }
-
-            Picker("Terminal:", selection: $vm.terminal) {
-                Text("Ghostty").tag("ghostty")
-                Text("Kitty").tag("kitty")
-                Text("Terminal").tag("terminal")
-            }
-            .pickerStyle(.menu)
-            .onChange(of: vm.terminal) { _ in
-                vm.saveLive()
-            }
-
-            Toggle("Render keyboard shortcuts", isOn: $vm.renderKeyboardShortcuts)
-                .onChange(of: vm.renderKeyboardShortcuts) { _ in
+                .pickerStyle(.menu)
+                .onChange(of: vm.agent) { _ in
                     vm.saveLive()
                 }
+
+                Picker("Terminal:", selection: $vm.terminal) {
+                    Text("Ghostty").tag("ghostty")
+                    Text("Kitty").tag("kitty")
+                    Text("Terminal").tag("terminal")
+                }
+                .pickerStyle(.menu)
+                .onChange(of: vm.terminal) { _ in
+                    vm.saveLive()
+                }
+
+                Toggle("Render keyboard shortcuts", isOn: $vm.renderKeyboardShortcuts)
+                    .onChange(of: vm.renderKeyboardShortcuts) { _ in
+                        vm.saveLive()
+                    }
 
             Toggle("Use native notifications", isOn: $vm.useNativeNotifications)
                 .onChange(of: vm.useNativeNotifications) { _ in
                     vm.saveLive()
                 }
+            }
+            .formStyle(.columns)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+
+            HStack {
+                Spacer()
+                Button("Reset settings") {
+                    vm.resetSettings()
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+
+            LauncherSettingsInfoPanel()
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
         }
-        .formStyle(.columns)
-        .padding(.horizontal, 20)
-        .padding(.top, 20)
+    }
+}
+
+private struct LauncherSettingsInfoPanel: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label("About launcher settings", systemImage: "info.circle")
+                .font(.headline)
+
+            launcherSettingExplanation(
+                title: "Share window context",
+                text: "Captures what is visible in the active window and shares it with the agent as Markdown, so it can immediately understand your current context and provide more relevant help."
+            )
+            launcherSettingExplanation(
+                title: "Read-only mode",
+                text: "The agent can read files and inspect the project, but cannot modify files. Available for Pi and Codex only."
+            )
+            launcherSettingExplanation(
+                title: "Use native notifications",
+                text: "Off by default to avoid notification issues when Do Not Disturb is enabled."
+            )
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private func launcherSettingExplanation(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
