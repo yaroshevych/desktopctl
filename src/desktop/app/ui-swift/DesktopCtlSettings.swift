@@ -337,6 +337,9 @@ private struct LauncherTabContent: View {
                 }
             }
             .pickerStyle(.menu)
+            .onChange(of: vm.agent) { _ in
+                vm.saveLive()
+            }
 
             Picker("Terminal:", selection: .constant("ghostty")) {
                 Text("Ghostty").tag("ghostty")
