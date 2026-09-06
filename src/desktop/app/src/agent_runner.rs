@@ -850,6 +850,9 @@ impl CodexRunner {
             OsString::from("--json"),
             OsString::from("--model"),
             OsString::from(Self::MODEL),
+            // Each DesktopCtl session runs in its own workspace directory,
+            // which is not necessarily a Git checkout.
+            OsString::from("--skip-git-repo-check"),
         ];
         if request
             .session
@@ -896,6 +899,7 @@ impl AgentRunner for CodexRunner {
             self.timing.clone(),
             parse_codex_output,
             None,
+            AgentKind::Codex.label(),
         ))
     }
 }
@@ -1022,6 +1026,7 @@ impl AgentRunner for GooseRunner {
             self.timing.clone(),
             parse_goose_output,
             Some(AgentSessionRef::id(session_name)),
+            AgentKind::Goose.label(),
         ))
     }
 }
@@ -1128,6 +1133,7 @@ impl AgentRunner for OpenCodeRunner {
             self.timing.clone(),
             parse_opencode_output,
             None,
+            AgentKind::OpenCode.label(),
         ))
     }
 }
@@ -1140,6 +1146,7 @@ pub struct AgentProcess {
     timing: Option<Arc<crate::trace::E2eTiming>>,
     parser: fn(&str) -> Result<AgentResult, AgentRunnerError>,
     session_hint: Option<AgentSessionRef>,
+    label: &'static str,
 }
 
 impl fmt::Debug for AgentProcess {
@@ -1152,7 +1159,7 @@ impl fmt::Debug for AgentProcess {
 
 impl AgentProcess {
     fn new(child: Child, timing: Option<Arc<crate::trace::E2eTiming>>) -> Self {
-        Self::new_with_parser(child, timing, parse_pi_output, None)
+        Self::new_with_parser(child, timing, parse_pi_output, None, AgentKind::Pi.label())
     }
 
     fn new_with_parser(
@@ -1160,12 +1167,14 @@ impl AgentProcess {
         timing: Option<Arc<crate::trace::E2eTiming>>,
         parser: fn(&str) -> Result<AgentResult, AgentRunnerError>,
         session_hint: Option<AgentSessionRef>,
+        label: &'static str,
     ) -> Self {
         Self {
             child: Some(child),
             timing: timing.filter(|_| crate::trace::enabled()),
             parser,
             session_hint,
+            label,
         }
     }
 
@@ -1262,9 +1271,9 @@ impl AgentProcess {
         if !status.success() {
             let detail = stderr.trim();
             return Err(if detail.is_empty() {
-                AgentRunnerError::Process(format!("Pi exited with {status}"))
+                AgentRunnerError::Process(format!("{} exited with {status}", self.label))
             } else {
-                AgentRunnerError::Process(format!("Pi exited with {status}: {detail}"))
+                AgentRunnerError::Process(format!("{} exited with {status}: {detail}", self.label))
             });
         }
         let mut result = (self.parser)(&stdout);
@@ -2138,6 +2147,12 @@ mod tests {
         let result = parse_codex_output(output).expect("valid Codex output");
         assert_eq!(result.session.id.as_deref(), Some("codex-123"));
         assert_eq!(result.final_answer, "Hello");
+    }
+
+    #[test]
+    fn codex_args_allow_non_git_session_workspaces() {
+        let args = CodexRunner::args_for(&AgentRequest::new("hello"));
+        assert!(args.iter().any(|arg| arg == "--skip-git-repo-check"));
     }
 
     #[test]
