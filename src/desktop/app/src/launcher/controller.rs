@@ -18,7 +18,7 @@ mod controller {
         agent_runner::{
             AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, GooseRunner,
             OpenCodeRunner, PiRunner, TargetWindow, discover_agent_installations,
-            load_native_transcript,
+            load_external_transcript, load_native_transcript,
         },
         agent_sessions::{
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
@@ -564,32 +564,35 @@ mod controller {
     fn sync_native_session(session_id: String, generation: u64) {
         let native = lock_state().and_then(|state| {
             let session = state.store.get(&session_id)?;
-            if session.agent != AgentKind::Pi.key() {
-                return None;
-            }
             if session.native_session_id.is_none() && session.native_session_path.is_none() {
                 return None;
             }
-            Some(AgentSessionRef {
-                id: session.native_session_id.clone(),
-                path: session.native_session_path.as_deref().map(PathBuf::from),
-                cwd: session.native_session_cwd.as_deref().map(PathBuf::from),
-            })
+            Some((
+                AgentKind::from_key(&session.agent),
+                AgentSessionRef {
+                    id: session.native_session_id.clone(),
+                    path: session.native_session_path.as_deref().map(PathBuf::from),
+                    cwd: session.native_session_cwd.as_deref().map(PathBuf::from),
+                },
+            ))
         });
-        let Some(native) = native else {
+        let Some((agent, native)) = native else {
             if let Some(mut state) = lock_state() {
                 state.native_sync_inflight.remove(&session_id);
             }
             return;
         };
         thread::spawn(move || {
-            match std::panic::catch_unwind(|| load_native_transcript(&native)).unwrap_or_else(
-                |_| {
-                    Err(crate::agent_runner::AgentRunnerError::Process(
-                        "native transcript reader panicked".into(),
-                    ))
-                },
-            ) {
+            let load = || match agent {
+                AgentKind::Pi => load_native_transcript(&native)
+                    .map(|(path, messages)| (Some(path), messages)),
+                _ => load_external_transcript(agent, &native),
+            };
+            match std::panic::catch_unwind(load).unwrap_or_else(|_| {
+                Err(crate::agent_runner::AgentRunnerError::Process(
+                    "native transcript reader panicked".into(),
+                ))
+            }) {
                 Ok((path, messages)) => {
                     let messages = messages
                         .into_iter()
@@ -610,7 +613,7 @@ mod controller {
                         match state.store.sync_native_transcript(
                             &session_id,
                             messages,
-                            Some(path.to_string_lossy().into_owned()),
+                            path.map(|path| path.to_string_lossy().into_owned()),
                         ) {
                             Ok(changed) => changed,
                             Err(error) => {

@@ -259,6 +259,287 @@ pub fn load_native_transcript(
     Ok((path, messages))
 }
 
+pub fn load_external_transcript(
+    kind: AgentKind,
+    session: &AgentSessionRef,
+) -> Result<(Option<PathBuf>, Vec<NativeTranscriptMessage>), AgentRunnerError> {
+    match kind {
+        AgentKind::Pi => Err(AgentRunnerError::Process(
+            "Pi uses its native transcript loader".into(),
+        )),
+        AgentKind::Codex => {
+            let path = resolve_codex_session_path(session)?;
+            let contents =
+                fs::read_to_string(&path).map_err(|source| AgentRunnerError::Io { source })?;
+            Ok((Some(path), parse_codex_transcript(&contents)?))
+        }
+        AgentKind::Goose => Ok((None, parse_goose_transcript(&run_history_export(
+            kind,
+            session,
+            &["session", "export", "--name", "--format", "json"],
+        )?)?)),
+        AgentKind::OpenCode => Ok((None, parse_opencode_transcript(&run_history_export(
+            kind,
+            session,
+            &["export"],
+        )?)?)),
+    }
+}
+
+fn resolve_codex_session_path(session: &AgentSessionRef) -> Result<PathBuf, AgentRunnerError> {
+    let id = session
+        .id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| AgentRunnerError::Process("Codex session has no native identity".into()))?;
+    let root = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .ok_or_else(|| AgentRunnerError::Process("unable to locate Codex home".into()))?;
+    let mut directories = vec![root.join("sessions"), root.join("archived_sessions")];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.map_err(|source| AgentRunnerError::Io { source })?.path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+                || !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(id))
+            {
+                continue;
+            }
+            return Ok(path);
+        }
+    }
+    Err(AgentRunnerError::Process(format!(
+        "Codex session {id} was not found under {}",
+        root.display()
+    )))
+}
+
+fn run_history_export(
+    kind: AgentKind,
+    session: &AgentSessionRef,
+    args: &[&str],
+) -> Result<String, AgentRunnerError> {
+    let executable = discover_executable(kind)?;
+    let mut command = Command::new(&executable);
+    let mut resolved_args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+    if kind == AgentKind::Goose {
+        let id = session
+            .id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| AgentRunnerError::Process("Goose session has no native identity".into()))?;
+        if let Some(name) = resolved_args.iter().position(|arg| arg == "--name") {
+            resolved_args.insert(name + 1, id.to_string());
+        }
+    } else if kind == AgentKind::OpenCode {
+        let id = session
+            .id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| AgentRunnerError::Process("OpenCode session has no native identity".into()))?;
+        resolved_args.push(id.to_string());
+    }
+    command.args(resolved_args);
+    command.stdin(Stdio::null());
+    if let Some(cwd) = session.cwd.as_deref().filter(|cwd| cwd.is_dir()) {
+        command.current_dir(cwd);
+    }
+    let output = command
+        .output()
+        .map_err(|source| AgentRunnerError::Spawn {
+            executable: Some(executable.clone()),
+            source,
+        })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(AgentRunnerError::Process(format!(
+            "{} history export exited with {}{}",
+            kind.label(),
+            output.status,
+            if detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", detail.trim())
+            }
+        )));
+    }
+    if output.stdout.len() > MAX_STDOUT_BYTES {
+        return Err(AgentRunnerError::Process(format!(
+            "{} history export exceeded the {} byte limit",
+            kind.label(),
+            MAX_STDOUT_BYTES
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|source| AgentRunnerError::Utf8 { source })
+}
+
+fn parse_codex_transcript(output: &str) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
+    let mut messages = Vec::new();
+    for (line_number, line) in output.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: Value = serde_json::from_str(line).map_err(|source| {
+            AgentRunnerError::Parse(format!(
+                "invalid Codex session JSON on line {}: {source}",
+                line_number + 1
+            ))
+        })?;
+        if event.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let payload = event.get("payload").unwrap_or(&Value::Null);
+        if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+            continue;
+        }
+        let item = payload.get("item").unwrap_or(&Value::Null);
+        let item_type = item.get("type").and_then(Value::as_str);
+        let (user, text) = match item_type {
+            Some("UserMessage") => (true, extract_codex_item_text(item)),
+            Some("AgentMessage")
+                if item.get("phase").and_then(Value::as_str) == Some("final_answer") =>
+            {
+                (false, extract_codex_item_text(item))
+            }
+            _ => (false, None),
+        };
+        let Some(mut text) = text.filter(|text| !text.trim().is_empty()) else {
+            continue;
+        };
+        if user {
+            text = strip_legacy_desktopctl_context(&text).to_string();
+        }
+        messages.push(NativeTranscriptMessage {
+            user,
+            text,
+            timestamp_ms: payload
+                .get("completed_at_ms")
+                .or_else(|| payload.get("started_at_ms"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        });
+    }
+    Ok(messages)
+}
+
+fn extract_codex_item_text(item: &Value) -> Option<String> {
+    let content = item.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let text = content
+        .as_array()?
+        .iter()
+        .filter(|piece| {
+            matches!(
+                piece.get("type").and_then(Value::as_str),
+                Some("Text" | "text")
+            )
+        })
+        .filter_map(|piece| piece.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.is_empty()).then_some(text)
+}
+
+fn parse_goose_transcript(output: &str) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
+    let value: Value = serde_json::from_str(output.trim())
+        .map_err(|source| AgentRunnerError::Parse(format!("invalid Goose session JSON: {source}")))?;
+    Ok(value
+        .get("conversation")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| {
+            message
+                .pointer("/metadata/userVisible")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        })
+        .filter_map(|message| {
+            let role = message.get("role").and_then(Value::as_str)?;
+            let user = match role {
+                "user" => true,
+                "assistant" => false,
+                _ => return None,
+            };
+            let text = message
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            (!text.trim().is_empty()).then_some(NativeTranscriptMessage {
+                user,
+                text: if user {
+                    strip_legacy_desktopctl_context(&text).to_string()
+                } else {
+                    text
+                },
+                timestamp_ms: message
+                    .get("created")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .saturating_mul(1000),
+            })
+        })
+        .collect())
+}
+
+fn parse_opencode_transcript(output: &str) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
+    let value: Value = serde_json::from_str(output.trim()).map_err(|source| {
+        AgentRunnerError::Parse(format!("invalid OpenCode session JSON: {source}"))
+    })?;
+    Ok(value
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|message| {
+            let info = message.get("info")?;
+            let role = info.get("role").and_then(Value::as_str)?;
+            let user = match role {
+                "user" => true,
+                "assistant" => false,
+                _ => return None,
+            };
+            let text = message
+                .get("parts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            (!text.trim().is_empty()).then_some(NativeTranscriptMessage {
+                user,
+                text: if user {
+                    strip_legacy_desktopctl_context(&text).to_string()
+                } else {
+                    text
+                },
+                timestamp_ms: info
+                    .pointer("/time/created")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            })
+        })
+        .collect())
+}
+
 fn append_native_entries(
     path: &Path,
     offset: u64,
@@ -2155,6 +2436,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_codex_native_transcript_messages() {
+        let output = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"UserMessage\",\"content\":[{\"type\":\"text\",\"text\":\"question\"}]},\"completed_at_ms\":1000}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"AgentMessage\",\"phase\":\"commentary\",\"content\":[{\"type\":\"Text\",\"text\":\"hidden\"}]},\"completed_at_ms\":2001}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"AgentMessage\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"Text\",\"text\":\"answer\"}]},\"completed_at_ms\":3000}}\n",
+        );
+        let messages = parse_codex_transcript(output).expect("valid Codex transcript");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "question");
+        assert!(messages[0].user);
+        assert_eq!(messages[0].timestamp_ms, 1000);
+        assert_eq!(messages[1].text, "answer");
+        assert!(!messages[1].user);
+    }
+
+    #[test]
     fn codex_args_allow_non_git_session_workspaces() {
         let args = CodexRunner::args_for(&AgentRequest::new("hello"));
         assert!(args.iter().any(|arg| arg == "--skip-git-repo-check"));
@@ -2165,6 +2462,17 @@ mod tests {
         let output = r#"{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Hello"}]}],"metadata":{"status":"completed"}}"#;
         let result = parse_goose_output(output).expect("valid Goose output");
         assert_eq!(result.final_answer, "Hello");
+    }
+
+    #[test]
+    fn parses_goose_export_and_ignores_hidden_turn_context() {
+        let output = r#"{"conversation":[{"role":"user","created":1,"metadata":{"userVisible":true},"content":[{"type":"text","text":"question"}]},{"role":"user","created":1,"metadata":{"userVisible":false},"content":[{"type":"text","text":"hidden"}]},{"role":"assistant","created":2,"metadata":{"userVisible":true},"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"answer"}]}]}"#;
+        let messages = parse_goose_transcript(output).expect("valid Goose transcript");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "question");
+        assert_eq!(messages[0].timestamp_ms, 1000);
+        assert_eq!(messages[1].text, "answer");
+        assert!(!messages[1].user);
     }
 
     #[test]
@@ -2198,6 +2506,16 @@ mod tests {
         let result = parse_opencode_output(output).expect("valid OpenCode output");
         assert_eq!(result.session.id.as_deref(), Some("opencode-123"));
         assert_eq!(result.final_answer, "Hello");
+    }
+
+    #[test]
+    fn parses_opencode_export_text_parts() {
+        let output = r#"{"messages":[{"info":{"role":"user","time":{"created":1000}},"parts":[{"type":"text","text":"question"}]},{"info":{"role":"assistant","time":{"created":2000}},"parts":[{"type":"reasoning","text":"hidden"},{"type":"text","text":"answer"}]}]}"#;
+        let messages = parse_opencode_transcript(output).expect("valid OpenCode transcript");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "question");
+        assert_eq!(messages[1].text, "answer");
+        assert_eq!(messages[1].timestamp_ms, 2000);
     }
 
     #[test]

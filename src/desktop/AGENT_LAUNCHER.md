@@ -13,8 +13,8 @@ terminal process.
   the active non-DesktopCtl window using the same opaque window-reference logic
   used by `desktopctl --active-window`.
 - `agent_sessions` contains the persisted UI model and state transitions. It
-  stores only user prompts and final assistant text. Pi's session remains the
-  authoritative full transcript.
+  stores only user prompts and final assistant text. Each supported CLI's native
+  session remains the authoritative full transcript.
 - Each launcher session gets a private filesystem workspace at
   `<data-root>/workspaces/<session-guid>/`. Pi runs with that directory as its
   working directory, and `Open in Ghostty` reuses it.
@@ -45,10 +45,13 @@ the session workspace: Pi uses `--session <path|id>`, Codex uses `resume
 `--session <id>`. The executable and session arguments are POSIX-quoted. macOS
 may ask the user to allow DesktopCtl to control Ghostty the first time this is
 used.
-When that session is opened in the launcher again, DesktopCtl reads Pi's native
-JSONL session, follows its active branch, and refreshes the short transcript
-with Ghostty-added user messages and final assistant answers. Thinking, tool
-calls, tool results, and incomplete or aborted assistant messages stay hidden.
+When that session is opened in the launcher again, DesktopCtl refreshes the
+short transcript from the native session. Pi reads its JSONL active branch;
+Codex reads its rollout JSONL; Goose uses session export --format json; and
+OpenCode uses export. Ghostty-added user messages and final assistant answers
+therefore appear in the launcher for every supported CLI. Thinking, tool calls,
+tool results, hidden context, and incomplete or aborted assistant messages stay
+hidden.
 
 Escape from a session returns to the launcher list. Escape from the launcher
 list closes the overlay.
@@ -109,11 +112,12 @@ batches of 50 rows. Session views send cumulative deltas from Swift's last
 acknowledged message count. Transcript replacement forces a full reset. Swift
 uses one parser and one replaceable pending snapshot, so bursts do not create
 parallel parsing work.
-Native transcripts use a bounded cache and parse appended JSONL records from
+Pi native transcripts use a bounded cache and parse appended JSONL records from
 the last complete offset; truncation/replacement rebuilds the cache, and cyclic
-parent links are rejected. A malformed file is left untouched and ignored with a
-diagnostic. Sessions left running by a process crash become failed during
-startup recovery.
+parent links are rejected. Codex rollouts and Goose/OpenCode exports are read
+when a session opens. A malformed or unavailable native transcript is left
+untouched and ignored with a diagnostic. Sessions left running by a process
+crash become failed during startup recovery.
 
 The per-session directories next to this file are agent-visible working
 directories; they are separate from Pi's native session database. If a

@@ -1,6 +1,6 @@
 //! DesktopCtl-owned metadata for the agent launcher.
 //!
-//! Pi remains the authority for its complete native transcript.  This module
+//! Native agent sessions remain the authority for their complete transcripts.  This module
 //! only stores the small amount of data needed to render the launcher and the
 //! user/final-answer transcript: prompts, final answers, session identity,
 //! state, and the target window bound when a run was started.
