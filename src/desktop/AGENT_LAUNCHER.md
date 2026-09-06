@@ -28,7 +28,13 @@ working are shown as queued user bubbles and sent together after Pi finishes.
 Stopping sets the request's cancellation token; the runner kills and reaps the
 Pi process group on Unix, then persists the session as cancelled. Output pipes
 are bounded (8 MiB stdout, 256 KiB stderr); exceeding either limit reports an
-error. Reader shutdown is bounded even when a descendant keeps a pipe open.
+error. As soon as Pi emits a valid `agent_end`, DesktopCtl publishes and
+persists the final answer and sends its completion notification. The request
+keeps its cancellation/cleanup ownership until the process and output readers
+finish, so follow-ups, native transcript sync, and Ghostty cannot overlap that
+cleanup window. Late cancellation or cleanup errors are logged without
+replacing the published answer. Reader shutdown is bounded even when a
+descendant keeps a pipe open.
 
 After Pi has produced a native session identity, the session view also offers
 `Open in Ghostty`. DesktopCtl activates Ghostty, creates a new window (never a

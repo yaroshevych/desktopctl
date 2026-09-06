@@ -436,6 +436,12 @@ mod controller {
 
     fn follow_up(session_id: String, prompt: String, share_context: bool) {
         let request = lock_state().and_then(|mut state| {
+            if state.cancellations.contains_key(&session_id) {
+                trace::log(format!(
+                    "agent_launcher:follow_up_busy_cleanup session={session_id}"
+                ));
+                return None;
+            }
             invalidate_native_sync(&mut state, &session_id);
             let session = state.store.get(&session_id)?.clone();
             match state
@@ -527,6 +533,7 @@ mod controller {
         let session = state.store.get(session_id)?;
         if session.status == AgentSessionStatus::Running
             || session.active_request_id.is_some()
+            || state.cancellations.contains_key(session_id)
             || !state.native_sync_inflight.insert(session_id.to_owned())
         {
             return None;
@@ -537,6 +544,7 @@ mod controller {
     fn finish_native_sync(state: &mut State, session_id: &str, generation: u64) -> bool {
         state.native_sync_inflight.remove(session_id);
         state.native_sync_generation.get(session_id) == Some(&generation)
+            && !state.cancellations.contains_key(session_id)
             && state.store.get(session_id).is_some_and(|session| {
                 session.status != AgentSessionStatus::Running && session.active_request_id.is_none()
             })
@@ -618,7 +626,9 @@ mod controller {
         let Some(session) = session else {
             return;
         };
-        if session.status == AgentSessionStatus::Running {
+        if session.status == AgentSessionStatus::Running
+            || lock_state().is_some_and(|state| state.cancellations.contains_key(&session_id))
+        {
             return;
         }
         let native_session = session
@@ -730,6 +740,8 @@ end run"#;
                     &workspace,
                     Err(crate::agent_runner::AgentRunnerError::Cancelled),
                     Arc::clone(&timing),
+                    false,
+                    false,
                 );
                 return;
             }
@@ -896,17 +908,33 @@ end run"#;
                     &workspace,
                     Err(crate::agent_runner::AgentRunnerError::Cancelled),
                     Arc::clone(&timing),
+                    false,
+                    false,
                 );
                 return;
             }
             timing.mark("pi_launch_start", format!("session={session_id}"));
+            let mut early_published = false;
             let result = match PiRunner::new()
                 .with_current_dir(workspace.clone())
                 .with_timing(Arc::clone(&timing))
                 .spawn(request)
             {
                 Ok(mut process) => {
-                    let result = process.wait_with_cancellation(&cancellation);
+                    let result =
+                        process.wait_with_cancellation_and_completion(&cancellation, |result| {
+                            if !early_published {
+                                early_published = finish_run(
+                                    &session_id,
+                                    &request_id,
+                                    &workspace,
+                                    Ok(result),
+                                    Arc::clone(&timing),
+                                    true,
+                                    false,
+                                );
+                            }
+                        });
                     match &result {
                         Ok(_) => {
                             timing.mark("pi_response_received", format!("session={session_id}"))
@@ -926,7 +954,15 @@ end run"#;
                     Err(error)
                 }
             };
-            finish_run(&session_id, &request_id, &workspace, result, timing);
+            finish_run(
+                &session_id,
+                &request_id,
+                &workspace,
+                result,
+                timing,
+                false,
+                early_published,
+            );
         });
     }
 
@@ -1288,19 +1324,44 @@ end run"#;
         workspace: &Path,
         result: Result<crate::agent_runner::AgentResult, crate::agent_runner::AgentRunnerError>,
         timing: Arc<crate::trace::E2eTiming>,
-    ) {
+        retain_ownership: bool,
+        already_completed: bool,
+    ) -> bool {
+        if already_completed {
+            if let Some(mut state) = lock_state() {
+                state.cancellations.remove(session_id);
+                set_running(!state.cancellations.is_empty());
+            }
+            refresh();
+            trace::log(format!(
+                "agent_launcher:late_runner_outcome session={} outcome={}",
+                session_id,
+                if result.is_ok() { "ok" } else { "error" }
+            ));
+            if let Err(error) = result {
+                trace::log(format!(
+                    "agent_launcher:cleanup_error session={session_id} error={error}"
+                ));
+            }
+            flush_pending_sessions();
+            return false;
+        }
         timing.mark(
             "controller_response_handling_start",
             format!("session={session_id}"),
         );
         let mut notice = None;
         let mut save_after_refresh = false;
+        let mut handled = false;
         if let Some(mut state) = lock_state() {
-            state.cancellations.remove(session_id);
+            if !retain_ownership {
+                state.cancellations.remove(session_id);
+            }
             let follow_up_shortcut = launcher_ui::shortcut_label(state.open_shortcut);
             set_running(!state.cancellations.is_empty());
             match result {
                 Ok(result) => {
+                    handled = true;
                     let native_path = result
                         .session
                         .path
@@ -1358,6 +1419,7 @@ end run"#;
                                     result.final_answer.len()
                                 ),
                             );
+                            timing.mark("pi_answer_published", format!("session={session_id}"));
                             notice = Some(completion_notice(
                                 session,
                                 &result.final_answer,
@@ -1368,11 +1430,13 @@ end run"#;
                     }
                 }
                 Err(crate::agent_runner::AgentRunnerError::Cancelled) => {
+                    handled = true;
                     let _ = state
                         .store
                         .cancel_request(session_id, request_id, unix_now_ms());
                 }
                 Err(error) => {
+                    handled = true;
                     let message = error.to_string();
                     let _ =
                         state
@@ -1415,6 +1479,7 @@ end run"#;
                 launcher_ui::show_completion(notice, use_native_notifications(), Some(timing));
             }
         }
+        handled
     }
 
     pub fn flush_pending_sessions() {
@@ -1591,6 +1656,7 @@ end run"#;
                     session,
                     state.store.transcript_epoch(&session.id),
                     state.transcript_ack.as_ref(),
+                    state.cancellations.contains_key(&session.id),
                 )
             })
             .unwrap_or(LauncherScreen::Launcher);
@@ -1631,6 +1697,7 @@ end run"#;
         session: &AgentSession,
         epoch: u64,
         ack: Option<&(String, u64, usize)>,
+        owned_until_cleanup: bool,
     ) -> LauncherScreen {
         let from = ack
             .filter(|(id, prior_epoch, count)| {
@@ -1640,13 +1707,18 @@ end run"#;
         LauncherScreen::Session {
             id: session.id.clone(),
             title: session.title.clone(),
-            status: match session.status {
-                AgentSessionStatus::Running => SessionStatus::Running,
-                AgentSessionStatus::Completed => SessionStatus::Completed,
-                AgentSessionStatus::Failed => SessionStatus::Failed,
-                AgentSessionStatus::Cancelled => SessionStatus::Cancelled,
+            status: if owned_until_cleanup {
+                SessionStatus::Running
+            } else {
+                match session.status {
+                    AgentSessionStatus::Running => SessionStatus::Running,
+                    AgentSessionStatus::Completed => SessionStatus::Completed,
+                    AgentSessionStatus::Failed => SessionStatus::Failed,
+                    AgentSessionStatus::Cancelled => SessionStatus::Cancelled,
+                }
             },
-            terminal_available: session.status != AgentSessionStatus::Running
+            terminal_available: !owned_until_cleanup
+                && session.status != AgentSessionStatus::Running
                 && (session.native_session_path.is_some() || session.native_session_id.is_some()),
             messages: session
                 .messages
@@ -1895,6 +1967,18 @@ end run"#;
                 .store
                 .complete_request(&latest, &request, "done", now)
                 .unwrap();
+            let owned_generation = super::begin_native_sync(&mut state, &latest).unwrap();
+            state.cancellations.insert(
+                latest.clone(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
+            assert!(super::begin_native_sync(&mut state, &latest).is_none());
+            assert!(!super::finish_native_sync(
+                &mut state,
+                &latest,
+                owned_generation
+            ));
+            state.cancellations.remove(&latest);
             let generation = super::begin_native_sync(&mut state, &latest).unwrap();
             assert!(super::begin_native_sync(&mut state, &latest).is_none());
             super::invalidate_native_sync(&mut state, &latest);
@@ -1925,7 +2009,7 @@ end run"#;
             store.complete_request(&id, &request, "answer", 2).unwrap();
             let session = store.get(&id).unwrap();
             let first_ack = (id.clone(), 0, 1);
-            let delta = super::session_screen(session, 0, Some(&first_ack));
+            let delta = super::session_screen(session, 0, Some(&first_ack), false);
             let super::LauncherScreen::Session {
                 messages_from,
                 messages,
@@ -1938,18 +2022,18 @@ end run"#;
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].text, "answer");
             // Repeated snapshots before acknowledgement resend the same suffix.
-            let repeated = super::session_screen(session, 0, Some(&first_ack));
+            let repeated = super::session_screen(session, 0, Some(&first_ack), false);
             let super::LauncherScreen::Session { messages, .. } = repeated else {
                 panic!("session")
             };
             assert_eq!(messages.len(), 1);
             let full_ack = (id.clone(), 0, 2);
-            let status_only = super::session_screen(session, 0, Some(&full_ack));
+            let status_only = super::session_screen(session, 0, Some(&full_ack), false);
             let super::LauncherScreen::Session { messages, .. } = status_only else {
                 panic!("session")
             };
             assert!(messages.is_empty());
-            let replaced = super::session_screen(session, 1, Some(&full_ack));
+            let replaced = super::session_screen(session, 1, Some(&full_ack), false);
             let super::LauncherScreen::Session {
                 messages_from,
                 messages,
@@ -1962,6 +2046,50 @@ end run"#;
             assert_eq!(messages.len(), 2);
             store.flush().unwrap();
             drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn early_answer_stays_busy_until_cleanup_ownership_is_released() {
+            let root = std::env::temp_dir()
+                .join(format!("desktopctl-early-answer-{}", uuid::Uuid::now_v7()));
+            let mut store =
+                crate::agent_sessions::AgentSessionStore::new(root.join("sessions.json"));
+            let (id, request) = store.create_running("question", None, 1).unwrap();
+            store
+                .bind_native_session_in_memory(&id, Some("native-test".into()), None, None)
+                .unwrap();
+            store.complete_request(&id, &request, "answer", 2).unwrap();
+            let session = store.get(&id).unwrap();
+            let owned = super::session_screen(session, 0, None, true);
+            let super::LauncherScreen::Session {
+                status,
+                terminal_available,
+                messages,
+                ..
+            } = owned
+            else {
+                panic!("session")
+            };
+            assert_eq!(status, super::SessionStatus::Running);
+            assert!(!terminal_available);
+            assert_eq!(
+                messages.last().map(|message| message.text.as_str()),
+                Some("answer")
+            );
+
+            let released = super::session_screen(session, 0, None, false);
+            let super::LauncherScreen::Session {
+                status,
+                terminal_available,
+                ..
+            } = released
+            else {
+                panic!("session")
+            };
+            assert_eq!(status, super::SessionStatus::Completed);
+            assert!(terminal_available);
+            store.flush().unwrap();
             fs::remove_dir_all(root).unwrap();
         }
 

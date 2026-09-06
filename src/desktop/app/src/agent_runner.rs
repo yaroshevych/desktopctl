@@ -17,7 +17,7 @@ use std::{
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, SyncSender},
     },
     thread,
     time::{Duration, Instant},
@@ -648,6 +648,14 @@ impl AgentProcess {
         &mut self,
         cancellation: &AtomicBool,
     ) -> Result<AgentResult, AgentRunnerError> {
+        self.wait_with_cancellation_and_completion(cancellation, |_| {})
+    }
+
+    pub fn wait_with_cancellation_and_completion(
+        &mut self,
+        cancellation: &AtomicBool,
+        mut on_completion: impl FnMut(AgentResult),
+    ) -> Result<AgentResult, AgentRunnerError> {
         let mut child = self.child.take().ok_or_else(|| {
             AgentRunnerError::Process("process was already waited or cancelled".into())
         })?;
@@ -660,18 +668,21 @@ impl AgentProcess {
             .take()
             .ok_or_else(|| AgentRunnerError::Process("Pi stderr pipe was unavailable".into()))?;
         let stop_readers = Arc::new(AtomicBool::new(false));
+        let (completion_tx, completion_rx) = mpsc::sync_channel(1);
         let (stdout_rx, stdout_thread) = spawn_pipe_reader(
             stdout,
             MAX_STDOUT_BYTES,
             "stdout",
             Arc::clone(&stop_readers),
             self.timing.clone(),
+            Some(completion_tx),
         );
         let (stderr_rx, stderr_thread) = spawn_pipe_reader(
             stderr,
             MAX_STDERR_BYTES,
             "stderr",
             Arc::clone(&stop_readers),
+            None,
             None,
         );
 
@@ -684,8 +695,14 @@ impl AgentProcess {
                 let _ = collect_pipe(stderr_rx, stderr_thread);
                 return Err(AgentRunnerError::Cancelled);
             }
+            if let Ok(result) = completion_rx.try_recv() {
+                on_completion(result);
+            }
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    if let Ok(result) = completion_rx.try_recv() {
+                        on_completion(result);
+                    }
                     if let Some(timing) = self.timing.as_ref() {
                         timing.mark("pi_process_exit", "");
                     }
@@ -803,6 +820,7 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
     stream: &'static str,
     stop: Arc<AtomicBool>,
     timing: Option<Arc<crate::trace::E2eTiming>>,
+    completion_sender: Option<SyncSender<AgentResult>>,
 ) -> (
     Receiver<Result<String, AgentRunnerError>>,
     thread::JoinHandle<()>,
@@ -821,6 +839,9 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
         let mut first_text_delta = false;
         let mut assistant_complete = false;
         let mut stop_deadline = None;
+        let mut completion_output = Vec::new();
+        let mut completion_sent = false;
+        let mut completion_prefix_valid = true;
         loop {
             if stop.load(Ordering::Acquire) {
                 let deadline =
@@ -832,7 +853,7 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
             match pipe.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if timing.is_some() {
+                    if timing.is_some() || completion_sender.is_some() {
                         for byte in &chunk[..count] {
                             event_line.push(*byte);
                             if *byte == b'\n' {
@@ -843,8 +864,45 @@ fn spawn_pipe_reader<R: Read + PipeNonblocking + Send + 'static>(
                                     &mut first_text_delta,
                                     &mut assistant_complete,
                                 );
+                                if completion_sender.is_some()
+                                    && !completion_sent
+                                    && completion_prefix_valid
+                                {
+                                    if completion_output.len().saturating_add(event_line.len())
+                                        > limit
+                                    {
+                                        completion_prefix_valid = false;
+                                    } else {
+                                        completion_output.extend_from_slice(&event_line);
+                                        let is_agent_end =
+                                            serde_json::from_slice::<Value>(&event_line)
+                                                .ok()
+                                                .and_then(|event| {
+                                                    event
+                                                        .get("type")
+                                                        .and_then(Value::as_str)
+                                                        .map(str::to_owned)
+                                                })
+                                                .as_deref()
+                                                == Some("agent_end");
+                                        if is_agent_end {
+                                            // agent_end is terminal. Do not repeatedly reparse
+                                            // growing prefixes if a malformed producer repeats it.
+                                            completion_prefix_valid = false;
+                                            if let Ok(result) =
+                                                is_valid_agent_end_completion(&completion_output)
+                                            {
+                                                completion_sent = true;
+                                                if let Some(sender) = completion_sender.as_ref() {
+                                                    let _ = sender.try_send(result);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 event_line.clear();
                             } else if event_line.len() > 1024 * 1024 {
+                                completion_prefix_valid = false;
                                 event_line.clear();
                             }
                         }
@@ -1178,6 +1236,67 @@ pub fn parse_pi_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
     })
 }
 
+/// Parse a completion only when the newly observed event is a valid, final
+/// agent_end. In particular, do not surface an earlier message_end answer if
+/// the agent_end reports an error, abort, or contains only tool messages.
+fn is_valid_agent_end_completion(output: &[u8]) -> Result<AgentResult, AgentRunnerError> {
+    let text =
+        String::from_utf8(output.to_vec()).map_err(|source| AgentRunnerError::Utf8 { source })?;
+    let event: Value = serde_json::from_str(
+        text.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| AgentRunnerError::Parse("Pi produced no JSON events".into()))?,
+    )
+    .map_err(|source| AgentRunnerError::Parse(format!("invalid Pi JSON: {source}")))?;
+    if event.get("type").and_then(Value::as_str) != Some("agent_end") {
+        return Err(AgentRunnerError::Parse(
+            "Pi output did not end with agent_end".into(),
+        ));
+    }
+    let messages = event
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AgentRunnerError::Parse("Pi agent_end had no messages".into()))?;
+    let mut final_assistant = None;
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if is_failed_message(message) {
+            return Err(AgentRunnerError::Parse(
+                message
+                    .get("errorMessage")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Pi assistant turn failed")
+                    .to_string(),
+            ));
+        }
+        final_assistant = Some(message);
+    }
+    let Some(final_assistant) = final_assistant else {
+        return Err(AgentRunnerError::Parse(
+            "Pi agent_end contained no final assistant answer".into(),
+        ));
+    };
+    if extract_message_text(final_assistant).is_none_or(|text| text.trim().is_empty()) {
+        return Err(AgentRunnerError::Parse(
+            "Pi agent_end final assistant answer was empty".into(),
+        ));
+    }
+    if !matches!(
+        final_assistant.get("stopReason").and_then(Value::as_str),
+        Some("stop" | "length")
+    ) {
+        return Err(AgentRunnerError::Parse(
+            "Pi agent_end final assistant answer was not completed".into(),
+        ));
+    }
+    let mut result = parse_pi_output(&text)?;
+    result.final_answer = extract_message_text(final_assistant).expect("validated final text");
+    Ok(result)
+}
+
 fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| {
         value
@@ -1330,6 +1449,60 @@ mod tests {
     fn failed_assistant_message_is_rejected() {
         let output = r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"aborted"}}"#;
         assert!(parse_pi_output(output).is_err());
+    }
+
+    #[test]
+    fn agent_end_completion_validation_rejects_non_final_answers() {
+        let cases = [
+            (
+                "valid",
+                r#"{"type":"agent_end","messages":[{"role":"assistant","content":"final","stopReason":"stop"}]}"#,
+                true,
+            ),
+            (
+                "error",
+                r#"{"type":"agent_end","messages":[{"role":"assistant","content":"x","stopReason":"error"}]}"#,
+                false,
+            ),
+            (
+                "aborted",
+                r#"{"type":"agent_end","messages":[{"role":"assistant","content":"x","stopReason":"aborted"}]}"#,
+                false,
+            ),
+            (
+                "tool use",
+                r#"{"type":"agent_end","messages":[{"role":"assistant","content":"x","stopReason":"toolUse"}]}"#,
+                false,
+            ),
+            (
+                "empty",
+                r#"{"type":"agent_end","messages":[{"role":"assistant","content":"","stopReason":"stop"}]}"#,
+                false,
+            ),
+            ("malformed", "{not-json}", false),
+        ];
+        for (name, event, valid) in cases {
+            assert_eq!(
+                is_valid_agent_end_completion(event.as_bytes()).is_ok(),
+                valid,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_end_text_overrides_earlier_message_end() {
+        let output = concat!(
+            r#"{"type":"message_end","message":{"role":"assistant","content":"stale","stopReason":"stop"}}"#,
+            "\n",
+            r#"{"type":"agent_end","messages":[{"role":"assistant","content":"final","stopReason":"stop"}]}"#,
+        );
+        assert_eq!(
+            is_valid_agent_end_completion(output.as_bytes())
+                .unwrap()
+                .final_answer,
+            "final"
+        );
     }
 
     #[test]
@@ -1696,8 +1869,14 @@ mod tests {
                 .spawn()
                 .expect("spawn shell");
             let stdout = child.stdout.take().expect("stdout pipe");
-            let (receiver, reader) =
-                spawn_pipe_reader(stdout, 3, "stdout", Arc::new(AtomicBool::new(false)), None);
+            let (receiver, reader) = spawn_pipe_reader(
+                stdout,
+                3,
+                "stdout",
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+            );
             child.wait().expect("wait shell");
             let result = collect_pipe(receiver, reader);
             assert_eq!(result.is_err(), expected_error, "payload={payload}");
@@ -1723,5 +1902,117 @@ mod tests {
             .expect_err("cancelled process");
         assert!(matches!(error, AgentRunnerError::Cancelled));
         assert!(started.elapsed() < PIPE_DRAIN_TIMEOUT + Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_completion_prefix_never_publishes() {
+        let mut child = Command::new("sh")
+            .args(["-c", r#"printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":"done","stopReason":"stop"}]}'"#])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (completion_tx, completion_rx) = mpsc::sync_channel(1);
+        let (receiver, reader) = spawn_pipe_reader(
+            child.stdout.take().unwrap(),
+            16,
+            "stdout",
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(completion_tx),
+        );
+        child.wait().unwrap();
+        assert!(collect_pipe(receiver, reader).is_err());
+        assert!(completion_rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_callback_arrives_before_delayed_process_exit_without_trace() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '%s\\n' '{\"type\":\"session\",\"id\":\"early\"}' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":\"done\",\"stopReason\":\"stop\"}]}' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":\"done\",\"stopReason\":\"stop\"}]}' ; sleep 2"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        configure_process_group(&mut command);
+        let child = command.spawn().expect("spawn shell");
+        let mut process = AgentProcess::new(child, None);
+        let callback = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&callback);
+        let callback_at = Arc::new(Mutex::new(None));
+        let observed_at = Arc::clone(&callback_at);
+        let started = Instant::now();
+        let result = process
+            .wait_with_cancellation_and_completion(&AtomicBool::new(false), move |result| {
+                observed.lock().unwrap().push(result);
+                *observed_at.lock().unwrap() = Some(started.elapsed());
+            })
+            .expect("agent result");
+        assert_eq!(result.final_answer, "done");
+        assert_eq!(callback.lock().unwrap().len(), 1);
+        assert!(callback_at.lock().unwrap().unwrap() < Duration::from_secs(1));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_callback_precedes_late_nonzero_exit() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '%s\\n' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":\"done\",\"stopReason\":\"stop\"}]}' ; sleep 1; exit 7"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        configure_process_group(&mut command);
+        let child = command.spawn().unwrap();
+        let mut process = AgentProcess::new(child, None);
+        let count = Arc::new(Mutex::new(0));
+        let observed = Arc::clone(&count);
+        let error = process
+            .wait_with_cancellation_and_completion(&AtomicBool::new(false), move |_| {
+                *observed.lock().unwrap() += 1;
+            })
+            .unwrap_err();
+        assert!(matches!(error, AgentRunnerError::Process(_)));
+        assert_eq!(*count.lock().unwrap(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_callback_can_cancel_running_process() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '%s\\n' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":\"done\",\"stopReason\":\"stop\"}]}' ; sleep 30"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        configure_process_group(&mut command);
+        let child = command.spawn().unwrap();
+        let mut process = AgentProcess::new(child, None);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let observed_cancel = Arc::clone(&cancellation);
+        let count = Arc::new(Mutex::new(0));
+        let observed_count = Arc::clone(&count);
+        let error = process
+            .wait_with_cancellation_and_completion(&cancellation, move |_| {
+                *observed_count.lock().unwrap() += 1;
+                observed_cancel.store(true, Ordering::Release);
+            })
+            .unwrap_err();
+        assert!(matches!(error, AgentRunnerError::Cancelled));
+        assert_eq!(*count.lock().unwrap(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_cancelled_process_never_calls_completion() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        configure_process_group(&mut command);
+        let child = command.spawn().unwrap();
+        let mut process = AgentProcess::new(child, None);
+        let count = Arc::new(Mutex::new(0));
+        let observed = Arc::clone(&count);
+        let cancellation = AtomicBool::new(true);
+        assert!(matches!(
+            process.wait_with_cancellation_and_completion(&cancellation, move |_| {
+                *observed.lock().unwrap() += 1;
+            }),
+            Err(AgentRunnerError::Cancelled)
+        ));
+        assert_eq!(*count.lock().unwrap(), 0);
     }
 }
