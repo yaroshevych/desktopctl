@@ -31,6 +31,7 @@ private struct LauncherRenderState {
     var sessionTitle = ""
     var sessionStatus = ""
     var terminalAvailable = false
+    var continueLabel = "Pi"
     var messages: [(user: Bool, text: String)] = []
     var messagesFrom = 0
     var transcriptEpoch: UInt64 = 0
@@ -122,6 +123,7 @@ private final class LauncherModel: ObservableObject {
             next.sessionTitle = session["title"] as? String ?? "Session"
             next.sessionStatus = session["status"] as? String ?? ""
             next.terminalAvailable = session["terminal_available"] as? Bool ?? false
+            next.continueLabel = session["continue_label"] as? String ?? "Pi"
             next.messagesFrom = session["messages_from"] as? Int ?? 0
             next.transcriptEpoch = (session["transcript_epoch"] as? NSNumber)?.uint64Value ?? 0
             next.messages = (session["messages"] as? [[String: Any]] ?? []).compactMap { message in
@@ -1026,7 +1028,7 @@ private struct LauncherRootView: View {
                 if model.renderState.terminalAvailable {
                     LauncherPillButton(action: model.openInGhostty) {
                         HStack(spacing: LauncherTheme.Spacing.md) {
-                            Text("Continue in Pi")
+                            Text("Continue in \(model.renderState.continueLabel)")
                                 .font(.system(size: 13, weight: .regular))
                                 .foregroundStyle(LauncherTheme.textSecondary)
                             if model.renderState.renderKeyboardShortcuts {
@@ -1039,7 +1041,7 @@ private struct LauncherRootView: View {
                         .foregroundStyle(LauncherTheme.textSecondary)
                     }
                         .keyboardShortcut(.return, modifiers: .command)
-                        .accessibilityHint("Continue this session in Pi")
+                        .accessibilityHint("Continue this session in \(model.renderState.continueLabel)")
                 }
             }
             .frame(height: 50)
@@ -1090,7 +1092,7 @@ private struct LauncherRootView: View {
                             .padding(.trailing, message.user ? LauncherTheme.Spacing.xs : 0)
                             .id(index)
                             .accessibilityElement(children: .combine)
-                            .accessibilityLabel("\(message.user ? "You" : "Pi"): \(message.text)")
+                            .accessibilityLabel("\(message.user ? "You" : model.renderState.continueLabel): \(message.text)")
                         }
                         if model.renderState.sessionStatus == "Running" {
                             let workingBubbleColor = Color.primary
@@ -1098,7 +1100,7 @@ private struct LauncherRootView: View {
                                 HStack(spacing: 8) {
                                     ProgressView()
                                         .controlSize(.small)
-                                    Text("Pi is working…")
+                                    Text("\(model.renderState.continueLabel) is working…")
                                         .foregroundColor(.primary)
                                 }
                                 .padding(.horizontal, 13)

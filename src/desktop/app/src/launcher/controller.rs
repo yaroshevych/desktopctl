@@ -17,7 +17,8 @@ mod controller {
     use crate::{
         agent_runner::{
             AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, GooseRunner,
-            OpenCodeRunner, PiRunner, TargetWindow, discover_pi_executable, load_native_transcript,
+            OpenCodeRunner, PiRunner, TargetWindow, discover_agent_installations,
+            load_native_transcript,
         },
         agent_sessions::{
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
@@ -639,21 +640,15 @@ mod controller {
         let Some(session) = session else {
             return;
         };
-        if session.agent != AgentKind::Pi.key() {
-            return;
-        }
         if session.status == AgentSessionStatus::Running
             || lock_state().is_some_and(|state| state.cancellations.contains_key(&session_id))
         {
             return;
         }
-        let native_session = session
-            .native_session_path
-            .clone()
-            .or(session.native_session_id.clone());
-        let Some(native_session) = native_session else {
+        let agent = AgentKind::from_key(&session.agent);
+        if !session_can_continue_in_terminal(&session, agent) {
             return;
-        };
+        }
         let follow_up_shortcut = lock_state()
             .map(|state| launcher_ui::shortcut_label(state.open_shortcut))
             .unwrap_or_else(|| {
@@ -661,9 +656,8 @@ mod controller {
             });
         thread::spawn(move || {
             let result = (|| -> Result<(), String> {
-                let pi = discover_pi_executable().map_err(|error| error.to_string())?;
                 let cwd = session_workspace(&session.id)?;
-                let command = ghostty_command(&pi, &native_session);
+                let command = terminal_command_for_session(&session, agent)?;
                 let script = r#"on run argv
 set commandText to item 1 of argv
 set cwdText to item 2 of argv
@@ -689,7 +683,8 @@ end run"#;
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     Err(format!(
-                        "Ghostty could not open the Pi session: {}",
+                        "Ghostty could not open the {} session: {}",
+                        agent.label(),
                         stderr.trim()
                     ))
                 }
@@ -709,7 +704,11 @@ end run"#;
     }
 
     fn ghostty_command(pi: &Path, native_session: &str) -> String {
-        let mut paths = pi
+        command_for_terminal(pi, &["--session".to_string(), native_session.to_string()])
+    }
+
+    fn command_for_terminal(executable: &Path, args: &[String]) -> String {
+        let mut paths = executable
             .parent()
             .map(PathBuf::from)
             .into_iter()
@@ -718,12 +717,82 @@ end run"#;
             paths.extend(std::env::split_paths(&current_path));
         }
         let path = std::env::join_paths(paths).unwrap_or_else(|_| "/usr/bin:/bin".into());
-        format!(
-            "/usr/bin/env {} {} --session {}",
+        let mut command = format!(
+            "/usr/bin/env {} {}",
             posix_quote(&format!("PATH={}", path.to_string_lossy())),
-            posix_quote(&pi.to_string_lossy()),
-            posix_quote(native_session)
-        )
+            posix_quote(&executable.to_string_lossy())
+        );
+        for arg in args {
+            command.push(' ');
+            command.push_str(&posix_quote(arg));
+        }
+        command
+    }
+
+    fn session_can_continue_in_terminal(session: &AgentSession, agent: AgentKind) -> bool {
+        match agent {
+            AgentKind::Pi => {
+                session
+                    .native_session_path
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || session
+                        .native_session_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            }
+            AgentKind::Codex | AgentKind::Goose | AgentKind::OpenCode => session
+                .native_session_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+        }
+    }
+
+    fn terminal_command_for_session(
+        session: &AgentSession,
+        agent: AgentKind,
+    ) -> Result<String, String> {
+        let executable = discover_agent_installations()
+            .into_iter()
+            .find(|installation| installation.kind == agent)
+            .map(|installation| installation.executable)
+            .ok_or_else(|| format!("{} executable is no longer installed", agent.label()))?;
+        let native_id = || {
+            session
+                .native_session_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| format!("{} session has no native session ID", agent.label()))
+        };
+        if agent == AgentKind::Pi {
+            let native_session = session
+                .native_session_path
+                .clone()
+                .or(session.native_session_id.clone())
+                .ok_or_else(|| "Pi session has no native session identity".to_string())?;
+            return Ok(ghostty_command(&executable, &native_session));
+        }
+        let args = match agent {
+            AgentKind::Pi => unreachable!("Pi terminal command returned above"),
+            AgentKind::Codex => vec!["resume".to_string(), native_id()?],
+            AgentKind::Goose => vec![
+                "session".to_string(),
+                "--resume".to_string(),
+                "--name".to_string(),
+                native_id()?,
+                "--provider".to_string(),
+                "openrouter".to_string(),
+                "--model".to_string(),
+                GooseRunner::MODEL.to_string(),
+            ],
+            AgentKind::OpenCode => vec![
+                "--session".to_string(),
+                native_id()?,
+                "--model".to_string(),
+                OpenCodeRunner::MODEL.to_string(),
+            ],
+        };
+        Ok(command_for_terminal(&executable, &args))
     }
 
     fn run_agent(
@@ -1771,7 +1840,8 @@ end run"#;
             },
             terminal_available: !owned_until_cleanup
                 && session.status != AgentSessionStatus::Running
-                && (session.native_session_path.is_some() || session.native_session_id.is_some()),
+                && session_can_continue_in_terminal(session, AgentKind::from_key(&session.agent)),
+            continue_label: AgentKind::from_key(&session.agent).label().to_string(),
             messages: session
                 .messages
                 .iter()
@@ -1850,9 +1920,9 @@ end run"#;
                 "/tmp/session file.jsonl",
             );
             assert!(command.starts_with("/usr/bin/env 'PATH=/opt/homebrew/bin:"));
-            assert!(
-                command.ends_with("' '/opt/homebrew/bin/pi' --session '/tmp/session file.jsonl'")
-            );
+            assert!(command.ends_with(
+                "' '/opt/homebrew/bin/pi' '--session' '/tmp/session file.jsonl'"
+            ));
             assert!(!command.contains(" exec "));
         }
 

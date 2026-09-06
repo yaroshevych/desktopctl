@@ -37,10 +37,12 @@ cleanup window. Late cancellation or cleanup errors are logged without
 replacing the published answer. Reader shutdown is bounded even when a
 descendant keeps a pipe open.
 
-After Pi has produced a native session identity, the session view also offers
-`Open in Ghostty`. DesktopCtl activates Ghostty, creates a new window (never a
-tab), and starts interactive Pi with `--session <path|id>` from the original Pi
-working directory. The executable and session arguments are POSIX-quoted. macOS
+After an agent has produced a native session identity, the session view also
+offers `Continue in <agent>`. DesktopCtl activates Ghostty, creates a new
+window (never a tab), and starts the agent's interactive resume command from
+the session workspace: Pi uses `--session <path|id>`, Codex uses `resume
+<id>`, Goose uses `session --resume --name <name>`, and OpenCode uses
+`--session <id>`. The executable and session arguments are POSIX-quoted. macOS
 may ask the user to allow DesktopCtl to control Ghostty the first time this is
 used.
 When that session is opened in the launcher again, DesktopCtl reads Pi's native

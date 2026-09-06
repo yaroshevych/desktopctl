@@ -35,6 +35,7 @@ pub enum LauncherScreen {
         title: String,
         status: SessionStatus,
         terminal_available: bool,
+        continue_label: String,
         messages: Vec<TranscriptMessage>,
         messages_from: usize,
         transcript_epoch: u64,
