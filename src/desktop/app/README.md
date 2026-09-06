@@ -68,8 +68,8 @@ immediately, so the Settings window does not need to close or reload manually.
 - Settings opens on the Launcher tab from both the menu and Cmd-comma.
   Repeated Cmd-comma activates the existing Settings window instead of making
   duplicates.
-- Launcher controls currently expose Pi and Ghostty as the only Agent and
-  Terminal choices.
+- Launcher controls expose the installed agents and Ghostty, Kitty, and
+  Terminal as terminal choices.
 - `render_keyboard_shortcuts` controls all shortcut keycap/chip visibility.
   Default is `true` for backward-compatible decoding.
 - Session message bubbles are in `LauncherBridge.swift`. User and agent tails

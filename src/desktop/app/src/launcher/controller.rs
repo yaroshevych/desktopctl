@@ -37,6 +37,7 @@ mod controller {
     struct State {
         store: AgentSessionStore,
         agent: AgentKind,
+        terminal: TerminalKind,
         render_keyboard_shortcuts: bool,
         use_native_notifications: bool,
         open_shortcut: launcher_ui::LauncherShortcut,
@@ -52,6 +53,54 @@ mod controller {
         transcript_ack: Option<(String, u64, usize)>,
         native_sync_inflight: HashSet<String>,
         native_sync_generation: HashMap<String, u64>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TerminalKind {
+        Ghostty,
+        Kitty,
+        Terminal,
+    }
+
+    impl TerminalKind {
+        fn from_key(key: &str) -> Self {
+            match key {
+                "kitty" => Self::Kitty,
+                "terminal" => Self::Terminal,
+                _ => Self::Ghostty,
+            }
+        }
+
+        fn from_code(code: i32) -> Self {
+            match code {
+                1 => Self::Kitty,
+                2 => Self::Terminal,
+                _ => Self::Ghostty,
+            }
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Self::Ghostty => "Ghostty",
+                Self::Kitty => "Kitty",
+                Self::Terminal => "Terminal",
+            }
+        }
+    }
+
+    fn preferred_terminal(terminal: TerminalKind) -> TerminalKind {
+        if terminal == TerminalKind::Ghostty && !application_is_available("Ghostty") {
+            TerminalKind::Terminal
+        } else {
+            terminal
+        }
+    }
+
+    fn application_is_available(name: &str) -> bool {
+        std::process::Command::new("/usr/bin/open")
+            .args(["-Ra", name])
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     #[derive(Default)]
@@ -127,11 +176,12 @@ mod controller {
         if let Some(warning) = warning {
             trace::log(format!("agent_launcher:store_warning {warning}"));
         }
-        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut, agent) =
+        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut, agent, terminal) =
             launcher_settings_from(startup_settings);
         let _ = STATE.set(Arc::new(Mutex::new(State {
             store,
             agent,
+            terminal,
             render_keyboard_shortcuts,
             use_native_notifications,
             open_shortcut,
@@ -195,6 +245,7 @@ mod controller {
         render_keyboard_shortcuts: i32,
         use_native_notifications: i32,
         agent: i32,
+        terminal: i32,
     ) {
         let (Ok(key_code), Ok(modifiers)) = (u32::try_from(key_code), u32::try_from(modifiers))
         else {
@@ -205,6 +256,7 @@ mod controller {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts != 0;
             state.use_native_notifications = use_native_notifications != 0;
             state.agent = AgentKind::from_code(agent);
+            state.terminal = TerminalKind::from_code(terminal);
             state.open_shortcut = launcher_ui::LauncherShortcut {
                 key_code,
                 modifiers,
@@ -370,7 +422,7 @@ mod controller {
             } => follow_up(session_id, prompt, share_context),
             LauncherAction::OpenSession { session_id } => open_session(session_id),
             LauncherAction::CancelSession { session_id } => cancel(&session_id),
-            LauncherAction::OpenInGhostty { session_id } => open_in_ghostty(session_id),
+            LauncherAction::OpenInTerminal { session_id } => open_in_terminal(session_id),
         }
     }
 
@@ -584,8 +636,9 @@ mod controller {
         };
         thread::spawn(move || {
             let load = || match agent {
-                AgentKind::Pi => load_native_transcript(&native)
-                    .map(|(path, messages)| (Some(path), messages)),
+                AgentKind::Pi => {
+                    load_native_transcript(&native).map(|(path, messages)| (Some(path), messages))
+                }
                 _ => load_external_transcript(agent, &native),
             };
             match std::panic::catch_unwind(load).unwrap_or_else(|_| {
@@ -638,7 +691,7 @@ mod controller {
         });
     }
 
-    fn open_in_ghostty(session_id: String) {
+    fn open_in_terminal(session_id: String) {
         let session = lock_state().and_then(|state| state.store.get(&session_id).cloned());
         let Some(session) = session else {
             return;
@@ -649,6 +702,9 @@ mod controller {
             return;
         }
         let agent = AgentKind::from_key(&session.agent);
+        let terminal = lock_state()
+            .map(|state| state.terminal)
+            .unwrap_or(TerminalKind::Ghostty);
         if !session_can_continue_in_terminal(&session, agent) {
             return;
         }
@@ -660,8 +716,11 @@ mod controller {
         thread::spawn(move || {
             let result = (|| -> Result<(), String> {
                 let cwd = session_workspace(&session.id)?;
-                let command = terminal_command_for_session(&session, agent)?;
-                let script = r#"on run argv
+                let (executable, args) = agent_command_for_session(&session, agent)?;
+                match terminal {
+                    TerminalKind::Ghostty => {
+                        let command = command_for_terminal(&executable, &args);
+                        let script = r#"on run argv
 set commandText to item 1 of argv
 set cwdText to item 2 of argv
 tell application "Ghostty"
@@ -677,19 +736,53 @@ tell application "Ghostty"
 end tell
 return "ok"
 end run"#;
-                let output = std::process::Command::new("/usr/bin/osascript")
-                    .args(["-e", script, "--", &command, &cwd.to_string_lossy()])
-                    .output()
-                    .map_err(|error| format!("failed to open Ghostty: {error}"))?;
-                if output.status.success() {
-                    Ok(())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!(
-                        "Ghostty could not open the {} session: {}",
-                        agent.label(),
-                        stderr.trim()
-                    ))
+                        run_osascript(
+                            script,
+                            &[command, cwd.to_string_lossy().into_owned()],
+                            terminal,
+                            agent,
+                        )
+                    }
+                    TerminalKind::Terminal => {
+                        let command =
+                            terminal_shell_command(&cwd, &command_for_terminal(&executable, &args));
+                        let script = r#"on run argv
+set commandText to item 1 of argv
+tell application "Terminal"
+    activate
+    set targetTab to do script ""
+    delay 0.5
+    do script commandText in targetTab
+end tell
+return "ok"
+end run"#;
+                        run_osascript(script, &[command], terminal, agent)
+                    }
+                    TerminalKind::Kitty => {
+                        let mut command = std::process::Command::new("/usr/bin/open");
+                        command.args(["-a", "Kitty", "-n", "--args", "--directory"]);
+                        command.arg(&cwd);
+                        command.arg("/usr/bin/env");
+                        command.arg(format!(
+                            "PATH={}",
+                            terminal_path(&executable).to_string_lossy()
+                        ));
+                        command.arg(&executable);
+                        command.args(&args);
+                        let output = command
+                            .output()
+                            .map_err(|error| format!("failed to open Kitty: {error}"))?;
+                        if output.status.success() {
+                            Ok(())
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            Err(format!(
+                                "Kitty could not open the {} session: {}",
+                                agent.label(),
+                                stderr.trim()
+                            ))
+                        }
+                    }
                 }
             })();
             if let Err(error) = result {
@@ -702,24 +795,45 @@ end run"#;
         });
     }
 
+    fn run_osascript(
+        script: &str,
+        args: &[String],
+        terminal: TerminalKind,
+        agent: AgentKind,
+    ) -> Result<(), String> {
+        let mut command = std::process::Command::new("/usr/bin/osascript");
+        command.arg("-e").arg(script).arg("--").args(args);
+        let output = command
+            .output()
+            .map_err(|error| format!("failed to open {}: {error}", terminal.label()))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "{} could not open the {} session: {}",
+                terminal.label(),
+                agent.label(),
+                stderr.trim()
+            ))
+        }
+    }
+
     fn posix_quote(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
 
+    #[cfg(test)]
     fn ghostty_command(pi: &Path, native_session: &str) -> String {
         command_for_terminal(pi, &["--session".to_string(), native_session.to_string()])
     }
 
+    fn terminal_shell_command(cwd: &Path, command: &str) -> String {
+        format!("cd {} && {command}", posix_quote(&cwd.to_string_lossy()))
+    }
+
     fn command_for_terminal(executable: &Path, args: &[String]) -> String {
-        let mut paths = executable
-            .parent()
-            .map(PathBuf::from)
-            .into_iter()
-            .collect::<Vec<_>>();
-        if let Some(current_path) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&current_path));
-        }
-        let path = std::env::join_paths(paths).unwrap_or_else(|_| "/usr/bin:/bin".into());
+        let path = terminal_path(executable);
         let mut command = format!(
             "/usr/bin/env {} {}",
             posix_quote(&format!("PATH={}", path.to_string_lossy())),
@@ -730,6 +844,18 @@ end run"#;
             command.push_str(&posix_quote(arg));
         }
         command
+    }
+
+    fn terminal_path(executable: &Path) -> std::ffi::OsString {
+        let mut paths = executable
+            .parent()
+            .map(PathBuf::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Some(current_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current_path));
+        }
+        std::env::join_paths(paths).unwrap_or_else(|_| "/usr/bin:/bin".into())
     }
 
     fn session_can_continue_in_terminal(session: &AgentSession, agent: AgentKind) -> bool {
@@ -751,10 +877,10 @@ end run"#;
         }
     }
 
-    fn terminal_command_for_session(
+    fn agent_command_for_session(
         session: &AgentSession,
         agent: AgentKind,
-    ) -> Result<String, String> {
+    ) -> Result<(PathBuf, Vec<String>), String> {
         let executable = discover_agent_installations()
             .into_iter()
             .find(|installation| installation.kind == agent)
@@ -773,7 +899,7 @@ end run"#;
                 .clone()
                 .or(session.native_session_id.clone())
                 .ok_or_else(|| "Pi session has no native session identity".to_string())?;
-            return Ok(ghostty_command(&executable, &native_session));
+            return Ok((executable, vec!["--session".to_string(), native_session]));
         }
         let args = match agent {
             AgentKind::Pi => unreachable!("Pi terminal command returned above"),
@@ -795,7 +921,7 @@ end run"#;
                 OpenCodeRunner::MODEL.to_string(),
             ],
         };
-        Ok(command_for_terminal(&executable, &args))
+        Ok((executable, args))
     }
 
     fn run_agent(
@@ -1622,14 +1748,26 @@ end run"#;
         }
     }
 
-    fn launcher_settings() -> (bool, bool, launcher_ui::LauncherShortcut, AgentKind) {
+    fn launcher_settings() -> (
+        bool,
+        bool,
+        launcher_ui::LauncherShortcut,
+        AgentKind,
+        TerminalKind,
+    ) {
         let settings = crate::service_client::ServiceClient.settings().ok();
         launcher_settings_from(settings.as_ref())
     }
 
     fn launcher_settings_from(
         settings: Option<&serde_json::Value>,
-    ) -> (bool, bool, launcher_ui::LauncherShortcut, AgentKind) {
+    ) -> (
+        bool,
+        bool,
+        launcher_ui::LauncherShortcut,
+        AgentKind,
+        TerminalKind,
+    ) {
         settings
             .and_then(|value| {
                 let launcher = value.get("launcher")?;
@@ -1651,7 +1789,18 @@ end run"#;
                     .and_then(serde_json::Value::as_str)
                     .map(AgentKind::from_key)
                     .unwrap_or(AgentKind::Pi);
-                Some((render, use_native_notifications, shortcut, agent))
+                let terminal = launcher
+                    .get("terminal")
+                    .and_then(serde_json::Value::as_str)
+                    .map(TerminalKind::from_key)
+                    .unwrap_or(TerminalKind::Ghostty);
+                Some((
+                    render,
+                    use_native_notifications,
+                    shortcut,
+                    agent,
+                    preferred_terminal(terminal),
+                ))
             })
             .unwrap_or_else(|| {
                 (
@@ -1659,6 +1808,7 @@ end run"#;
                     false,
                     launcher_ui::LauncherShortcut::default(),
                     AgentKind::Pi,
+                    preferred_terminal(TerminalKind::Ghostty),
                 )
             })
     }
@@ -1670,13 +1820,14 @@ end run"#;
     }
 
     pub fn reload_keyboard_shortcuts_setting() {
-        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut, agent) =
+        let (render_keyboard_shortcuts, use_native_notifications, open_shortcut, agent, terminal) =
             launcher_settings();
         if let Some(mut state) = lock_state() {
             state.render_keyboard_shortcuts = render_keyboard_shortcuts;
             state.use_native_notifications = use_native_notifications;
             state.open_shortcut = open_shortcut;
             state.agent = agent;
+            state.terminal = terminal;
         }
         launcher_ui::reload_hotkey(open_shortcut);
         refresh();
@@ -1898,9 +2049,10 @@ end run"#;
     #[cfg(test)]
     mod tests {
         use super::{
-            CONTEXT_MAX_AGE_MS, MAX_CONTEXT_FILES, ghostty_command, native_session_path_is_safe,
-            posix_quote, prune_window_context, target_matches_window,
-            timestamped_context_file_name, wait_for_preparation, window_context_prompt,
+            CONTEXT_MAX_AGE_MS, MAX_CONTEXT_FILES, TerminalKind, ghostty_command,
+            native_session_path_is_safe, posix_quote, prune_window_context, target_matches_window,
+            terminal_shell_command, timestamped_context_file_name, wait_for_preparation,
+            window_context_prompt,
         };
         use crate::agent_sessions::TargetWindowMetadata;
         use desktop_core::protocol::{Bounds, WindowSummary};
@@ -1923,10 +2075,33 @@ end run"#;
                 "/tmp/session file.jsonl",
             );
             assert!(command.starts_with("/usr/bin/env 'PATH=/opt/homebrew/bin:"));
-            assert!(command.ends_with(
-                "' '/opt/homebrew/bin/pi' '--session' '/tmp/session file.jsonl'"
-            ));
+            assert!(
+                command.ends_with("' '/opt/homebrew/bin/pi' '--session' '/tmp/session file.jsonl'")
+            );
             assert!(!command.contains(" exec "));
+        }
+
+        #[test]
+        fn terminal_command_changes_directory_before_resume() {
+            let command = terminal_shell_command(
+                Path::new("/tmp/session workspace"),
+                "'agent' '--session' 'native'",
+            );
+            assert_eq!(
+                command,
+                "cd '/tmp/session workspace' && 'agent' '--session' 'native'"
+            );
+        }
+
+        #[test]
+        fn terminal_settings_have_stable_keys_and_codes() {
+            assert_eq!(TerminalKind::from_key("ghostty"), TerminalKind::Ghostty);
+            assert_eq!(TerminalKind::from_key("kitty"), TerminalKind::Kitty);
+            assert_eq!(TerminalKind::from_key("terminal"), TerminalKind::Terminal);
+            assert_eq!(TerminalKind::from_key("unknown"), TerminalKind::Ghostty);
+            assert_eq!(TerminalKind::from_code(1), TerminalKind::Kitty);
+            assert_eq!(TerminalKind::from_code(2), TerminalKind::Terminal);
+            assert_eq!(TerminalKind::from_code(99), TerminalKind::Ghostty);
         }
 
         #[test]
@@ -2051,6 +2226,7 @@ end run"#;
             let mut state = super::State {
                 store,
                 agent: super::AgentKind::Pi,
+                terminal: super::TerminalKind::Ghostty,
                 render_keyboard_shortcuts: true,
                 use_native_notifications: false,
                 open_shortcut: Default::default(),

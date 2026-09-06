@@ -33,6 +33,8 @@ impl Default for LauncherShortcut {
 pub struct LauncherConfig {
     #[serde(default = "default_agent")]
     pub agent: String,
+    #[serde(default = "default_terminal")]
+    pub terminal: String,
     #[serde(default = "default_render_keyboard_shortcuts")]
     pub render_keyboard_shortcuts: bool,
     #[serde(default)]
@@ -45,6 +47,7 @@ impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
             agent: default_agent(),
+            terminal: default_terminal(),
             render_keyboard_shortcuts: true,
             use_native_notifications: false,
             open_shortcut: LauncherShortcut::default(),
@@ -125,6 +128,10 @@ fn default_render_keyboard_shortcuts() -> bool {
 
 fn default_agent() -> String {
     "pi".to_string()
+}
+
+fn default_terminal() -> String {
+    "ghostty".to_string()
 }
 
 fn default_launcher_key_code() -> u32 {
@@ -462,9 +469,11 @@ mod tests {
     fn launcher_notifications_default_to_custom_ui() {
         assert!(!LauncherConfig::default().use_native_notifications);
         assert_eq!(LauncherConfig::default().agent, "pi");
+        assert_eq!(LauncherConfig::default().terminal, "ghostty");
         let legacy: LauncherConfig = toml::from_str("render_keyboard_shortcuts = true").unwrap();
         assert!(!legacy.use_native_notifications);
         assert_eq!(legacy.agent, "pi");
+        assert_eq!(legacy.terminal, "ghostty");
     }
 
     #[test]

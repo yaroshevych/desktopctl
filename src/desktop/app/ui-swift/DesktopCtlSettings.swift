@@ -148,6 +148,7 @@ private final class SettingsLauncherVM: ObservableObject {
     @Published var renderKeyboardShortcuts: Bool
     @Published var useNativeNotifications: Bool
     @Published var agent: String
+    @Published var terminal: String
     let agents: [LauncherAgentOption]
     @Published var openShortcut: LauncherShortcut
     @Published var isRecording = false
@@ -157,6 +158,8 @@ private final class SettingsLauncherVM: ObservableObject {
     init(_ input: LauncherInput) {
         agents = input.agents
         agent = agents.contains { $0.key == input.agent } ? input.agent : "pi"
+        terminal = ["ghostty", "kitty", "terminal"].contains(input.terminal)
+            ? input.terminal : "ghostty"
         renderKeyboardShortcuts = input.renderKeyboardShortcuts
         useNativeNotifications = input.useNativeNotifications
         openShortcut = input.openShortcut
@@ -170,6 +173,7 @@ private final class SettingsLauncherVM: ObservableObject {
         LauncherOutput(
             saved: true,
             agent: agent,
+            terminal: terminal,
             renderKeyboardShortcuts: renderKeyboardShortcuts,
             useNativeNotifications: useNativeNotifications,
             openShortcut: openShortcut
@@ -180,15 +184,18 @@ private final class SettingsLauncherVM: ObservableObject {
         let value = renderKeyboardShortcuts
         let nativeValue = useNativeNotifications
         let selectedAgent = agent
+        let selectedTerminal = terminal
         let shortcut = openShortcut
         DaemonIPC.notifyLauncherSettingsChanged(
             agent: selectedAgent,
+            terminal: selectedTerminal,
             renderKeyboardShortcuts: value,
             useNativeNotifications: nativeValue,
             openShortcut: shortcut)
         Self.saveQueue.async {
             _ = DaemonIPC.updateLauncherSettings(
                 agent: selectedAgent,
+                terminal: selectedTerminal,
                 renderKeyboardShortcuts: value,
                 useNativeNotifications: nativeValue,
                 openShortcut: shortcut)
@@ -341,10 +348,15 @@ private struct LauncherTabContent: View {
                 vm.saveLive()
             }
 
-            Picker("Terminal:", selection: .constant("ghostty")) {
+            Picker("Terminal:", selection: $vm.terminal) {
                 Text("Ghostty").tag("ghostty")
+                Text("Kitty").tag("kitty")
+                Text("Terminal").tag("terminal")
             }
             .pickerStyle(.menu)
+            .onChange(of: vm.terminal) { _ in
+                vm.saveLive()
+            }
 
             Toggle("Render keyboard shortcuts", isOn: $vm.renderKeyboardShortcuts)
                 .onChange(of: vm.renderKeyboardShortcuts) { _ in

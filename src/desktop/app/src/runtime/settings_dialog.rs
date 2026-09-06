@@ -60,6 +60,8 @@ impl Default for LauncherShortcut {
 struct LauncherInput {
     #[serde(default = "default_agent")]
     agent: String,
+    #[serde(default = "default_terminal")]
+    terminal: String,
     #[serde(default)]
     agents: Vec<LauncherAgentOption>,
     #[serde(default = "default_render_keyboard_shortcuts")]
@@ -74,6 +76,7 @@ impl Default for LauncherInput {
     fn default() -> Self {
         Self {
             agent: default_agent(),
+            terminal: default_terminal(),
             agents: Vec::new(),
             render_keyboard_shortcuts: true,
             use_native_notifications: false,
@@ -144,6 +147,7 @@ struct AppPolicyOutput {
 struct LauncherOutput {
     saved: bool,
     agent: String,
+    terminal: String,
     render_keyboard_shortcuts: bool,
     use_native_notifications: bool,
     open_shortcut: LauncherShortcut,
@@ -162,6 +166,25 @@ fn default_render_keyboard_shortcuts() -> bool {
 
 fn default_agent() -> String {
     AgentKind::Pi.key().to_string()
+}
+
+fn default_terminal() -> String {
+    "ghostty".to_string()
+}
+
+fn preferred_terminal(terminal: String) -> String {
+    if terminal == "ghostty" && !terminal_app_is_available("Ghostty") {
+        "terminal".to_string()
+    } else {
+        terminal
+    }
+}
+
+fn terminal_app_is_available(name: &str) -> bool {
+    Command::new("/usr/bin/open")
+        .args(["-Ra", name])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn default_launcher_key_code() -> u32 {
@@ -299,6 +322,7 @@ pub fn show_with_settings(
             },
             launcher: LauncherInput {
                 agent: stored.launcher.agent,
+                terminal: preferred_terminal(stored.launcher.terminal),
                 agents: discover_agent_installations()
                     .into_iter()
                     .map(|installation| LauncherAgentOption {
@@ -386,6 +410,7 @@ pub fn show_with_settings(
         let launcher = output.launcher.saved.then(|| {
             serde_json::json!({
                 "agent": output.launcher.agent,
+                "terminal": output.launcher.terminal,
                 "render_keyboard_shortcuts": output.launcher.render_keyboard_shortcuts,
                 "use_native_notifications": output.launcher.use_native_notifications,
                 "open_shortcut": {

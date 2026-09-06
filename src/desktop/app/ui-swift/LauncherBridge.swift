@@ -334,9 +334,9 @@ private final class LauncherModel: ObservableObject {
         emit(["type": "cancel_session", "session_id": renderState.sessionID])
     }
 
-    func openInGhostty() {
+    func openInTerminal() {
         guard !renderState.sessionID.isEmpty else { return }
-        emit(["type": "open_in_ghostty", "session_id": renderState.sessionID])
+        emit(["type": "open_in_terminal", "session_id": renderState.sessionID])
     }
 
     func toggleActionsMenuFromMouse() {
@@ -1026,7 +1026,7 @@ private struct LauncherRootView: View {
                     .accessibilityLabel("Back to sessions")
                 Spacer()
                 if model.renderState.terminalAvailable {
-                    LauncherPillButton(action: model.openInGhostty) {
+                    LauncherPillButton(action: model.openInTerminal) {
                         HStack(spacing: LauncherTheme.Spacing.md) {
                             Text("Continue in \(model.renderState.continueLabel)")
                                 .font(.system(size: 13, weight: .regular))
@@ -1040,8 +1040,8 @@ private struct LauncherRootView: View {
                         }
                         .foregroundStyle(LauncherTheme.textSecondary)
                     }
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .accessibilityHint("Continue this session in \(model.renderState.continueLabel)")
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .accessibilityHint("Continue this session in \(model.renderState.continueLabel)")
                 }
             }
             .frame(height: 50)
@@ -1224,7 +1224,7 @@ private struct LauncherRootView: View {
                     text: $model.prompt,
                     isFocused: $promptFocused,
                     onSubmit: { model.sendPrompt() },
-                    onCommandReturn: model.openInGhostty
+                    onCommandReturn: model.openInTerminal
                 )
                 .frame(maxWidth: .infinity)
                 .frame(height: LauncherTheme.controlHeight)
@@ -1494,7 +1494,7 @@ private func handleActionMenuKeyEvent(_ event: NSEvent, model: LauncherModel) ->
         return true
     }
     if modifiers == .command, [36, 76].contains(event.keyCode) {
-        model.openInGhostty()
+        model.openInTerminal()
         return true
     }
     if modifiers.isEmpty, characters == "s" {
@@ -1729,7 +1729,7 @@ public func desktopctl_launcher_set_notification_action_callback(
 }
 
 public typealias LauncherSettingsChangedCallback =
-    @convention(c) (Int32, Int32, Int32, Int32, Int32) -> Void
+    @convention(c) (Int32, Int32, Int32, Int32, Int32, Int32) -> Void
 
 @_cdecl("desktopctl_launcher_start_settings_observer")
 public func desktopctl_launcher_start_settings_observer(
@@ -1752,9 +1752,10 @@ public func desktopctl_launcher_start_settings_observer(
                   (userInfo["render_keyboard_shortcuts"] as? NSNumber)?.int32Value,
               let useNativeNotifications =
                   (userInfo["use_native_notifications"] as? NSNumber)?.int32Value,
-              let agent = (userInfo["agent_code"] as? NSNumber)?.int32Value
+              let agent = (userInfo["agent_code"] as? NSNumber)?.int32Value,
+              let terminal = (userInfo["terminal_code"] as? NSNumber)?.int32Value
         else { return }
-        callback?(keyCode, modifiers, renderKeyboardShortcuts, useNativeNotifications, agent)
+        callback?(keyCode, modifiers, renderKeyboardShortcuts, useNativeNotifications, agent, terminal)
     }
 }
 

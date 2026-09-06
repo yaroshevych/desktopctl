@@ -647,9 +647,9 @@ fn parse_swift_action(bytes: &[u8]) -> Option<(LauncherAction, bool)> {
                 session_id: session_id.to_owned(),
             }
         }
-        Some("open_in_ghostty") => {
+        Some("open_in_terminal") | Some("open_in_ghostty") => {
             let session_id = action.get("session_id").and_then(|value| value.as_str())?;
-            LauncherAction::OpenInGhostty {
+            LauncherAction::OpenInTerminal {
                 session_id: session_id.to_owned(),
             }
         }
@@ -1401,7 +1401,7 @@ fn handle_key_event(event: &NSEvent) -> bool {
         if let Some(session_id) = session_id {
             DispatchQueue::main().exec_async(move || {
                 if let Some(callbacks) = CALLBACKS.get() {
-                    (callbacks.on_action)(LauncherAction::OpenInGhostty { session_id });
+                    (callbacks.on_action)(LauncherAction::OpenInTerminal { session_id });
                 }
             });
             return true;

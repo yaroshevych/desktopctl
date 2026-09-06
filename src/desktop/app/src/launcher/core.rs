@@ -113,7 +113,7 @@ pub enum LauncherAction {
     CancelSession {
         session_id: String,
     },
-    OpenInGhostty {
+    OpenInTerminal {
         session_id: String,
     },
 }

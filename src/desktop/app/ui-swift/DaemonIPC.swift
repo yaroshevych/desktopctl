@@ -29,6 +29,7 @@ enum DaemonIPC {
     // waiting for the Settings window to close.
     static func updateLauncherSettings(
         agent: String,
+        terminal: String,
         renderKeyboardShortcuts: Bool,
         useNativeNotifications: Bool,
         openShortcut: LauncherShortcut
@@ -38,6 +39,7 @@ enum DaemonIPC {
             if tryUpdateLauncherSettings(
                 socketPath: path,
                 agent: agent,
+                terminal: terminal,
                 renderKeyboardShortcuts: renderKeyboardShortcuts,
                 useNativeNotifications: useNativeNotifications,
                 openShortcut: openShortcut
@@ -52,6 +54,7 @@ enum DaemonIPC {
     // slow daemon socket cannot delay the new hotkey.
     static func notifyLauncherSettingsChanged(
         agent: String,
+        terminal: String,
         renderKeyboardShortcuts: Bool,
         useNativeNotifications: Bool,
         openShortcut: LauncherShortcut
@@ -61,6 +64,7 @@ enum DaemonIPC {
             object: nil,
             userInfo: [
                 "agent_code": agentCode(agent),
+                "terminal_code": terminalCode(terminal),
                 "key_code": openShortcut.keyCode,
                 "modifiers": openShortcut.modifiers,
                 "render_keyboard_shortcuts": renderKeyboardShortcuts,
@@ -79,6 +83,14 @@ enum DaemonIPC {
         let tmp = FileManager.default.temporaryDirectory.path
         let primary = (tmp as NSString).appendingPathComponent("desktopctl/desktopctl.sock")
         return [primary, "/tmp/desktopctl.sock"]
+    }
+
+    private static func terminalCode(_ terminal: String) -> Int {
+        switch terminal {
+        case "kitty": return 1
+        case "terminal": return 2
+        default: return 0
+        }
     }
 
     private static func tryCheckPermissions(socketPath: String) -> PermissionsResult? {
@@ -135,6 +147,7 @@ enum DaemonIPC {
     private static func tryUpdateLauncherSettings(
         socketPath: String,
         agent: String,
+        terminal: String,
         renderKeyboardShortcuts: Bool,
         useNativeNotifications: Bool,
         openShortcut: LauncherShortcut
@@ -166,6 +179,7 @@ enum DaemonIPC {
                 "cmd": "settings_update",
                 "launcher": [
                     "agent": agent,
+                    "terminal": terminal,
                     "render_keyboard_shortcuts": renderKeyboardShortcuts,
                     "use_native_notifications": useNativeNotifications,
                     "open_shortcut": [

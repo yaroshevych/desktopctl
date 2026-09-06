@@ -17,7 +17,8 @@ terminal process.
   session remains the authoritative full transcript.
 - Each launcher session gets a private filesystem workspace at
   `<data-root>/workspaces/<session-guid>/`. Pi runs with that directory as its
-  working directory, and `Open in Ghostty` reuses it.
+  working directory, and `Continue in <agent>` reuses it in the selected
+  terminal.
 - `agent_runner` defines the adapter boundary and implements runners for Pi,
   Codex, Goose, and OpenCode. Runs happen on worker threads and completion is
   dispatched back to AppKit's main thread. One run per DesktopCtl session is
@@ -38,17 +39,17 @@ replacing the published answer. Reader shutdown is bounded even when a
 descendant keeps a pipe open.
 
 After an agent has produced a native session identity, the session view also
-offers `Continue in <agent>`. DesktopCtl activates Ghostty, creates a new
-window (never a tab), and starts the agent's interactive resume command from
-the session workspace: Pi uses `--session <path|id>`, Codex uses `resume
+offers `Continue in <agent>`. The launcher settings select Ghostty, Kitty, or
+Terminal. DesktopCtl creates a new window and starts the agent's interactive
+resume command from the session workspace: Pi uses `--session <path|id>`, Codex uses `resume
 <id>`, Goose uses `session --resume --name <name>`, and OpenCode uses
 `--session <id>`. The executable and session arguments are POSIX-quoted. macOS
-may ask the user to allow DesktopCtl to control Ghostty the first time this is
-used.
+may ask the user to allow DesktopCtl to control the selected terminal the first
+time this is used.
 When that session is opened in the launcher again, DesktopCtl refreshes the
 short transcript from the native session. Pi reads its JSONL active branch;
 Codex reads its rollout JSONL; Goose uses session export --format json; and
-OpenCode uses export. Ghostty-added user messages and final assistant answers
+OpenCode uses export. Terminal-added user messages and final assistant answers
 therefore appear in the launcher for every supported CLI. Thinking, tool calls,
 tool results, hidden context, and incomplete or aborted assistant messages stay
 hidden.
