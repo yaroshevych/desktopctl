@@ -969,6 +969,18 @@ impl GooseRunner {
     ) -> Result<Command, AgentRunnerError> {
         let executable = self.executable()?;
         let mut command = Command::new(&executable);
+        command.args(Self::args_for(request, session_name));
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        if let Some(dir) = self.current_dir.as_deref() {
+            command.current_dir(dir);
+        }
+        configure_process_group(&mut command);
+        Ok(command)
+    }
+
+    pub fn args_for(request: &AgentRequest, session_name: &str) -> Vec<OsString> {
         let mut args = vec![
             OsString::from("run"),
             OsString::from("--output-format"),
@@ -993,15 +1005,7 @@ impl GooseRunner {
             OsString::from("--text"),
             OsString::from(prompt_for_cli(request)),
         ]);
-        command.args(args);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        if let Some(dir) = self.current_dir.as_deref() {
-            command.current_dir(dir);
-        }
-        configure_process_group(&mut command);
-        Ok(command)
+        args
     }
 }
 
@@ -2137,6 +2141,26 @@ mod tests {
         let output = r#"{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Hello"}]}],"metadata":{"status":"completed"}}"#;
         let result = parse_goose_output(output).expect("valid Goose output");
         assert_eq!(result.final_answer, "Hello");
+    }
+
+    #[test]
+    fn goose_args_resume_named_session_with_requested_model() {
+        let mut request = AgentRequest::new("follow up");
+        request.session = Some(AgentSessionRef::id("desktopctl-session"));
+        let args = GooseRunner::args_for(&request, "desktopctl-session");
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("--model"),
+                OsString::from(GooseRunner::MODEL),
+            ]
+        }));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("--name"),
+                OsString::from("desktopctl-session"),
+            ]
+        }));
+        assert!(args.iter().any(|arg| arg == "--resume"));
     }
 
     #[test]
