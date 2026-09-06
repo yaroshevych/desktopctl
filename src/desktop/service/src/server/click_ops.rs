@@ -53,6 +53,7 @@ pub(super) fn click_text_target(
             id,
             title,
             app,
+            document_url: None,
             bounds,
             pid: native_window_id.and_then(|_| {
                 explicit_target
@@ -292,6 +293,7 @@ pub(super) fn click_element_id_target(
         id,
         title,
         app,
+        document_url: None,
         bounds,
         pid: native_window_id.and_then(|_| {
             explicit_target
@@ -506,6 +508,7 @@ pub(super) fn resolve_element_id_target(
         id,
         title,
         app,
+        document_url: None,
         bounds,
         pid: native_window_id.and_then(|_| {
             resolved_target
@@ -756,6 +759,7 @@ pub(super) fn tokenize_click_text_candidate(
         id: "frontmost:1".to_string(),
         title: app.clone().unwrap_or_else(|| "active_window".to_string()),
         app,
+        document_url: None,
         bounds,
         pid: None,
         native_window_id: None,

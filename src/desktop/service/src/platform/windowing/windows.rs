@@ -101,6 +101,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, AppError> {
             index: *index,
             app,
             title: row.title,
+            document_url: None,
             bounds: row.bounds,
             frontmost: row.hwnd == frontmost_hwnd,
             visible: row.visible,

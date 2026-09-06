@@ -201,6 +201,7 @@ pub fn window_info_from_dict(dict: &WindowDict) -> Option<WindowInfo> {
         index,
         app,
         title,
+        document_url: None,
         bounds: bounds_from_dict(dict),
         frontmost,
         visible,

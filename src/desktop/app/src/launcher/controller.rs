@@ -2121,6 +2121,7 @@ end run"#;
                 pid: 123,
                 app: "Mail".into(),
                 title: "Inbox".into(),
+                document_url: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,

@@ -25,6 +25,8 @@ pub struct WindowSummary {
     pub pid: i64,
     pub app: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_url: Option<String>,
     pub bounds: Bounds,
     pub frontmost: bool,
     pub visible: bool,
@@ -115,6 +117,8 @@ pub struct TokenizeWindow {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_url: Option<String>,
     pub bounds: Bounds,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os_bounds: Option<Bounds>,
@@ -140,6 +144,8 @@ pub struct TokenizeElement {
     pub scrollable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checked: Option<ToggleState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub source: String,
 }
 

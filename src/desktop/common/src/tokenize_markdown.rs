@@ -100,6 +100,13 @@ pub fn render_tokenize_markdown(value: &Value, include_all_hint: bool) -> String
         {
             push_kv(&mut lines, "window_id", text.trim());
         }
+        if let Some(text) = window
+            .get("document_url")
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+        {
+            push_kv(&mut lines, "document_url", text.trim());
+        }
     }
     if truncated {
         push_kv(
@@ -138,6 +145,13 @@ pub fn render_tokenize_markdown(value: &Value, include_all_hint: bool) -> String
             push_section(&mut lines, &format!("Window {}", window_idx + 1));
             push_kv(&mut lines, "window_title", title);
             push_kv(&mut lines, "window_id", id);
+            if let Some(text) = window
+                .get("document_url")
+                .and_then(Value::as_str)
+                .filter(|v| !v.trim().is_empty())
+            {
+                push_kv(&mut lines, "document_url", text.trim());
+            }
         }
         let mut entries: Vec<Entry> = window
             .get("elements")
@@ -256,6 +270,7 @@ struct Entry {
     height: f64,
     scrollable: bool,
     checked: Option<String>,
+    url: Option<String>,
     visible: bool,
 }
 
@@ -267,6 +282,9 @@ impl Entry {
         }
         if let Some(checked) = self.checked.as_deref().filter(|v| !v.is_empty()) {
             line.push_str(&format!(" [checked={checked}]"));
+        }
+        if let Some(url) = self.url.as_deref().filter(|v| !v.is_empty()) {
+            line.push_str(&format!(" [url={url}]"));
         }
         line
     }
@@ -299,7 +317,15 @@ fn entry_from_value(element: &Value) -> Option<Entry> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_ascii_lowercase();
-    let visible = !(label.eq_ignore_ascii_case("element") && element.get("checked").is_none());
+    let url = element
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let visible = !(label.eq_ignore_ascii_case("element")
+        && element.get("checked").is_none()
+        && url.is_none());
     Some(Entry {
         label,
         id: element
@@ -324,6 +350,7 @@ fn entry_from_value(element: &Value) -> Option<Entry> {
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(str::to_string),
+        url,
         visible,
     })
 }
@@ -346,6 +373,7 @@ fn is_ocr(id: Option<&str>) -> bool {
 fn duplicate(a: &Entry, b: &Entry) -> bool {
     normalize(&a.label).eq_ignore_ascii_case(&normalize(&b.label))
         && a.checked.as_deref().unwrap_or_default() == b.checked.as_deref().unwrap_or_default()
+        && a.url.as_deref().unwrap_or_default() == b.url.as_deref().unwrap_or_default()
         && overlap(a, b)
 }
 
@@ -359,4 +387,37 @@ fn overlap(a: &Entry, b: &Entry) -> bool {
                 .max(1.0)
                 .min((b.width.max(0.0) * b.height.max(0.0)).max(1.0))
             >= 0.5
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_tokenize_markdown;
+    use serde_json::json;
+
+    #[test]
+    fn renders_window_and_element_urls() {
+        let value = json!({
+            "ok": true,
+            "request_id": "req-1",
+            "result": {
+                "windows": [{
+                    "id": "window-1",
+                    "title": "Document",
+                    "document_url": "file:///tmp/document.md",
+                    "bounds": {"width": 800, "height": 600},
+                    "elements": [{
+                        "id": "link-1",
+                        "type": "link",
+                        "bbox": [10, 20, 100, 30],
+                        "text": "Open document",
+                        "url": "https://example.com/document"
+                    }]
+                }]
+            }
+        });
+
+        let markdown = render_tokenize_markdown(&value, false);
+        assert!(markdown.contains("- document_url: file:///tmp/document.md"));
+        assert!(markdown.contains("Open document #link-1 [url=https://example.com/document]"));
+    }
 }

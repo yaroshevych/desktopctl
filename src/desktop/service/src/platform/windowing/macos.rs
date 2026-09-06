@@ -190,6 +190,7 @@ fn list_windows_coregraphics() -> Result<Vec<WindowInfo>, AppError> {
             index,
             app: app.clone(),
             title,
+            document_url: None,
             bounds,
             frontmost: frontmost_app.as_deref() == Some(app.as_str()),
             visible,
@@ -210,6 +211,7 @@ pub fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
         None => return Ok(Vec::new()),
     };
     let mut windows = list_cg_windows_for_pid(pid)?;
+    augment_with_ax_metadata(&mut windows);
     for window in windows.iter_mut() {
         window.frontmost = true;
     }
@@ -219,6 +221,7 @@ pub fn list_frontmost_app_windows() -> Result<Vec<WindowInfo>, AppError> {
 
 pub fn list_windows_for_pid(pid: i64) -> Result<Vec<WindowInfo>, AppError> {
     let mut windows = list_cg_windows_for_pid(pid)?;
+    augment_with_ax_metadata(&mut windows);
     let frontmost = crate::platform::ax::frontmost_app_pid() == Some(pid);
     for window in windows.iter_mut() {
         window.frontmost = frontmost;
@@ -337,6 +340,7 @@ fn list_cg_windows_for_pid(target_pid: i64) -> Result<Vec<WindowInfo>, AppError>
             index,
             app,
             title,
+            document_url: None,
             bounds,
             frontmost: false,
             visible,
@@ -410,14 +414,15 @@ fn merge_frontmost_windows(
 fn augment_with_ax_metadata(windows: &mut [WindowInfo]) {
     use accessibility::{AXAttribute, AXUIElement, AXUIElementAttributes};
     use accessibility_sys::{
-        AXValueGetType, AXValueGetValue, AXValueRef, kAXPositionAttribute, kAXSizeAttribute,
-        kAXValueTypeCGPoint, kAXValueTypeCGSize,
+        AXValueGetType, AXValueGetValue, AXValueRef, kAXDocumentAttribute, kAXPositionAttribute,
+        kAXSizeAttribute, kAXURLAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize,
     };
     use core_foundation::{
         base::{CFType, TCFType},
         boolean::CFBoolean,
         number::CFNumber,
         string::CFString,
+        url::CFURL,
     };
     use std::{
         collections::{HashMap, HashSet},
@@ -446,6 +451,7 @@ fn augment_with_ax_metadata(windows: &mut [WindowInfo]) {
     struct AxWindowMeta {
         title: String,
         bounds: Bounds,
+        document_url: Option<String>,
         modal: Option<bool>,
         parent_window: Option<AxRefMeta>,
         sheet_children: Vec<AxRefMeta>,
@@ -523,6 +529,28 @@ fn augment_with_ax_metadata(windows: &mut [WindowInfo]) {
                 .to_i64()
                 .or_else(|| v.to_f64().map(|f| f.round() as i64))?;
             return Some(n > 0);
+        }
+        None
+    }
+
+    fn ax_document_url(window: &AXUIElement) -> Option<String> {
+        for name in [kAXDocumentAttribute, kAXURLAttribute] {
+            let attr = AXAttribute::<CFType>::new(&CFString::from_static_string(name));
+            let Ok(value) = window.attribute(&attr) else {
+                continue;
+            };
+            if value.instance_of::<CFURL>() {
+                let url = unsafe { CFURL::wrap_under_get_rule(value.as_CFTypeRef() as _) };
+                let url = url.get_string().to_string();
+                if !url.trim().is_empty() {
+                    return Some(url);
+                }
+            } else if let Some(url) = value.downcast::<CFString>() {
+                let url = url.to_string();
+                if !url.trim().is_empty() {
+                    return Some(url);
+                }
+            }
         }
         None
     }
@@ -620,6 +648,7 @@ fn augment_with_ax_metadata(windows: &mut [WindowInfo]) {
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
                 bounds,
+                document_url: ax_document_url(&window),
                 modal: ax_modal_attr(&window),
                 parent_window,
                 sheet_children,
@@ -711,6 +740,7 @@ fn augment_with_ax_metadata(windows: &mut [WindowInfo]) {
                 ax_to_cg.insert(ax_idx, cg_idx);
                 let ax = &ax_windows[ax_idx];
                 windows[cg_idx].modal = ax.modal;
+                windows[cg_idx].document_url = ax.document_url.clone();
             }
         }
 

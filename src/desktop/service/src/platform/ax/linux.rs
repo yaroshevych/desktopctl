@@ -34,6 +34,7 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub url: Option<String>,
     pub truncated: bool,
 }
 
@@ -295,6 +296,7 @@ mod imp {
             bounds: bounds_of(conn, obj),
             ax_identifier: identifier_of(obj, &acc),
             checked: toggle_state(state, role),
+            url: None,
             truncated: false,
         };
         Some((element, state))
@@ -477,6 +479,7 @@ mod imp {
                 },
                 ax_identifier: None,
                 checked: None,
+                url: None,
                 truncated: true,
             });
         }
@@ -547,6 +550,7 @@ mod imp {
                 },
                 ax_identifier: None,
                 checked: None,
+                url: None,
                 truncated: true,
             });
         }

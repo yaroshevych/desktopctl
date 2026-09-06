@@ -10,6 +10,7 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub url: Option<String>,
     pub truncated: bool,
 }
 
@@ -20,8 +21,8 @@ use accessibility_sys::{
     AXValueRef, kAXChildrenAttribute, kAXDescriptionAttribute, kAXErrorSuccess,
     kAXFocusedApplicationAttribute, kAXFocusedUIElementAttribute, kAXIdentifierAttribute,
     kAXLabelValueAttribute, kAXPositionAttribute, kAXRoleAttribute, kAXSizeAttribute,
-    kAXTitleAttribute, kAXValueAttribute, kAXValueTypeAXError, kAXValueTypeCGPoint,
-    kAXValueTypeCGSize,
+    kAXTitleAttribute, kAXURLAttribute, kAXValueAttribute, kAXValueTypeAXError,
+    kAXValueTypeCGPoint, kAXValueTypeCGSize,
 };
 use core_foundation::{
     array::{CFArray, CFArrayRef},
@@ -30,6 +31,7 @@ use core_foundation::{
     boolean::CFBoolean,
     number::CFNumber,
     string::CFString,
+    url::CFURL,
 };
 use std::cell::OnceCell;
 use std::ffi::c_void;
@@ -199,6 +201,7 @@ fn collect_window_tree_elements(
                 },
                 ax_identifier: None,
                 checked: None,
+                url: None,
                 truncated: true,
             });
         } else {
@@ -260,6 +263,7 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
         bounds,
         ax_identifier,
         checked,
+        url: None,
         truncated: false,
     }))
 }
@@ -317,6 +321,7 @@ const BATCH_ATTRS: &[&str] = &[
     kAXDescriptionAttribute,
     kAXLabelValueAttribute,
     kAXIdentifierAttribute,
+    kAXURLAttribute,
 ];
 const IDX_ROLE: usize = 0;
 const IDX_CHILDREN: usize = 1;
@@ -327,6 +332,7 @@ const IDX_VALUE: usize = 5;
 const IDX_DESCRIPTION: usize = 6;
 const IDX_LABEL_VALUE: usize = 7;
 const IDX_IDENTIFIER: usize = 8;
+const IDX_URL: usize = 9;
 
 thread_local! {
     static BATCH_ATTRS_CF: OnceCell<CFArray<CFString>> = const { OnceCell::new() };
@@ -507,6 +513,7 @@ fn emit_element_from_batch(
             bounds: bounds.clone(),
             ax_identifier,
             checked,
+            url: batch_url_at(&batch),
             truncated: false,
         });
     } else {
@@ -516,10 +523,12 @@ fn emit_element_from_batch(
             text_budget,
             truncated,
         );
+        let url = batch_url_at(batch);
         if text
             .as_deref()
             .map(str::trim)
             .is_some_and(|t| !t.is_empty())
+            || url.is_some()
         {
             out.push(AxElement {
                 role: role.to_string(),
@@ -527,6 +536,7 @@ fn emit_element_from_batch(
                 bounds: bounds.clone(),
                 ax_identifier: None,
                 checked: None,
+                url,
                 truncated: false,
             });
         }
@@ -615,6 +625,16 @@ fn batch_text_at(batch: &[Option<CFType>], idx: usize) -> Option<String> {
         let trimmed = s.trim().to_string();
         (!trimmed.is_empty()).then_some(trimmed)
     })
+}
+
+fn batch_url_at(batch: &[Option<CFType>]) -> Option<String> {
+    let value = batch.get(IDX_URL).and_then(|v| v.as_ref())?;
+    if value.instance_of::<CFURL>() {
+        let url = unsafe { CFURL::wrap_under_get_rule(value.as_CFTypeRef() as _) };
+        let value = url.get_string().to_string();
+        return (!value.trim().is_empty()).then_some(value);
+    }
+    batch_text_at(batch, IDX_URL)
 }
 
 fn batch_text_bearing_label(batch: &[Option<CFType>], role: &str) -> Option<String> {

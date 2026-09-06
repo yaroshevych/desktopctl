@@ -364,6 +364,7 @@ mod tests {
             bounds: b,
             ax_identifier: None,
             checked: None,
+            url: None,
             truncated: false,
         }
     }

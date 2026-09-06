@@ -18,6 +18,7 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub url: Option<String>,
     pub truncated: bool,
 }
 
@@ -151,6 +152,7 @@ fn to_ax_element(element: &UIElement) -> Option<AxElement> {
         bounds,
         ax_identifier: map_identifier_for_element(element),
         checked: map_toggle_state_for_element(element, control_type),
+        url: None,
         truncated: false,
     })
 }
@@ -171,6 +173,7 @@ fn to_ax_fallback_element(element: &UIElement) -> Option<AxElement> {
         bounds,
         ax_identifier: map_identifier_for_element(element),
         checked: control_type.and_then(|ty| map_toggle_state_for_element(element, ty)),
+        url: None,
         truncated: false,
     })
 }
@@ -349,6 +352,7 @@ mod tests {
             bounds,
             ax_identifier: Some("uia-save-button".to_string()),
             checked: None,
+            url: None,
             truncated: false,
         }
     }

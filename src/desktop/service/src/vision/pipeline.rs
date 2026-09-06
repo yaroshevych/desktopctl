@@ -42,6 +42,7 @@ pub struct TokenizeWindowMeta {
     pub id: String,
     pub title: String,
     pub app: Option<String>,
+    pub document_url: Option<String>,
     pub bounds: Bounds,
     pub pid: Option<i32>,
     pub native_window_id: Option<u32>,
@@ -524,10 +525,11 @@ fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
         .map(format_bounds_for_cache_key)
         .unwrap_or_else(|| "-".to_string());
     format!(
-        "{}|{}|{}|pid={}|bounds={}|capture_bounds={}|native={:?}|all={}",
+        "{}|{}|{}|document={}|pid={}|bounds={}|capture_bounds={}|native={:?}|all={}",
         meta.id,
         meta.title,
         meta.app.as_deref().unwrap_or_default(),
+        meta.document_url.as_deref().unwrap_or_default(),
         meta.pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "-".to_string()),
@@ -540,12 +542,13 @@ fn tokenize_cache_key(meta: &TokenizeWindowMeta) -> String {
 
 fn tokenize_target_key(meta: &TokenizeWindowMeta) -> String {
     format!(
-        "{}|pid={}|native={:?}|bounds={}",
+        "{}|pid={}|native={:?}|document={}|bounds={}",
         meta.id,
         meta.pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "-".to_string()),
         meta.native_window_id,
+        meta.document_url.as_deref().unwrap_or_default(),
         format_bounds_for_cache_key(&meta.bounds)
     )
 }
@@ -807,6 +810,9 @@ fn build_window_elements(
         window_ref: None,
         title,
         app,
+        document_url: window_meta
+            .as_ref()
+            .and_then(|meta| meta.document_url.clone()),
         bounds,
         os_bounds,
         elements,
@@ -835,7 +841,8 @@ fn append_offscreen_ax_elements(
                 .as_deref()
                 .map(str::trim)
                 .is_some_and(|text| !text.is_empty())
-                || ax.checked.is_some();
+                || ax.checked.is_some()
+                || ax.url.is_some();
             actionable.then(|| {
                 super::ax_merge::stable_offscreen_id_for_ax(
                     ax,
@@ -854,7 +861,7 @@ fn append_offscreen_ax_elements(
             .as_deref()
             .map(str::trim)
             .filter(|text| !text.is_empty());
-        if text.is_none() && ax.checked.is_none() {
+        if text.is_none() && ax.checked.is_none() && ax.url.is_none() {
             continue;
         }
         let actionable = ax
@@ -862,7 +869,8 @@ fn append_offscreen_ax_elements(
             .as_deref()
             .map(str::trim)
             .is_some_and(|text| !text.is_empty())
-            || ax.checked.is_some();
+            || ax.checked.is_some()
+            || ax.url.is_some();
         if !actionable {
             continue;
         }
@@ -884,6 +892,7 @@ fn append_offscreen_ax_elements(
             confidence: None,
             scrollable: matches!(ax.role.as_str(), "AXScrollArea" | "AXScrollBar").then_some(true),
             checked: ax.checked,
+            url: ax.url.clone(),
             source: format!("accessibility_ax:{}", ax.role),
         });
     }
@@ -1450,6 +1459,7 @@ mod tests {
             id: "pid:7".to_string(),
             title: "Sample".to_string(),
             app: Some("TestApp".to_string()),
+            document_url: None,
             bounds: Bounds {
                 x: 150.0,
                 y: 90.0,
@@ -1528,6 +1538,7 @@ mod tests {
             id: "abc:1".to_string(),
             title: "Determinism".to_string(),
             app: Some("Determinism".to_string()),
+            document_url: None,
             bounds: Bounds {
                 x: 400.0,
                 y: 200.0,
@@ -1595,6 +1606,7 @@ mod tests {
                 window_ref: None,
                 title: "Sample".to_string(),
                 app: Some("Sample".to_string()),
+                document_url: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,
@@ -1613,6 +1625,7 @@ mod tests {
                         confidence: Some(0.99),
                         scrollable: None,
                         checked: None,
+                        url: None,
                         source: "vision_ocr".to_string(),
                     },
                     TokenizeElement {
@@ -1625,6 +1638,7 @@ mod tests {
                         confidence: Some(1.0),
                         scrollable: None,
                         checked: None,
+                        url: None,
                         source: "sat_control_v1".to_string(),
                     },
                 ],
@@ -1668,6 +1682,7 @@ mod tests {
                 window_ref: None,
                 title: "Sample".to_string(),
                 app: Some("Sample".to_string()),
+                document_url: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,
@@ -1686,6 +1701,7 @@ mod tests {
                         confidence: Some(1.0),
                         scrollable: None,
                         checked: None,
+                        url: None,
                         source: "sat_control_v1".to_string(),
                     },
                     TokenizeElement {
@@ -1698,6 +1714,7 @@ mod tests {
                         confidence: Some(1.0),
                         scrollable: None,
                         checked: None,
+                        url: None,
                         source: "vision_ocr".to_string(),
                     },
                 ],
@@ -1725,6 +1742,7 @@ mod tests {
             id: "native:1".to_string(),
             title: "Window".to_string(),
             app: Some("App".to_string()),
+            document_url: None,
             bounds: Bounds {
                 x: 10.0,
                 y: 20.0,
@@ -1791,6 +1809,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            url: None,
             truncated: false,
         }];
         let mut elements = Vec::new();
@@ -1809,6 +1828,7 @@ mod tests {
             id: "frontmost:1".to_string(),
             title: "active_window".to_string(),
             app: None,
+            document_url: None,
             bounds: Bounds {
                 x: 0.0,
                 y: 0.0,
@@ -1833,6 +1853,7 @@ mod tests {
             id: "target-without-native-id".to_string(),
             title: "Window".to_string(),
             app: Some("App".to_string()),
+            document_url: None,
             bounds: Bounds {
                 x: 10.0,
                 y: 20.0,

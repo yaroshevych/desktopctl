@@ -1035,6 +1035,7 @@ mod tests {
             window_ref: None,
             title: "t".to_string(),
             app: None,
+            document_url: None,
             bounds: Bounds {
                 x: 0.0,
                 y: 0.0,
@@ -1053,6 +1054,7 @@ mod tests {
                     confidence: Some(1.0),
                     scrollable: None,
                     checked: None,
+                    url: None,
                     source: "sat_control_v1".to_string(),
                 },
                 TokenizeElement {
@@ -1065,6 +1067,7 @@ mod tests {
                     confidence: Some(1.0),
                     scrollable: None,
                     checked: None,
+                    url: None,
                     source: "vision_ocr".to_string(),
                 },
                 TokenizeElement {
@@ -1077,6 +1080,7 @@ mod tests {
                     confidence: Some(1.0),
                     scrollable: None,
                     checked: None,
+                    url: None,
                     source: "vision_ocr".to_string(),
                 },
             ],

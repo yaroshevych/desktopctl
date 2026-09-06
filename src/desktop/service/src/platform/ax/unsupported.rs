@@ -10,6 +10,7 @@ pub struct AxElement {
     pub bounds: Bounds,
     pub ax_identifier: Option<String>,
     pub checked: Option<ToggleState>,
+    pub url: Option<String>,
     pub truncated: bool,
 }
 

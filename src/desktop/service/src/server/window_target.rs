@@ -309,6 +309,7 @@ mod tests {
             index,
             app: app.to_string(),
             title: title.to_string(),
+            document_url: None,
             bounds: Bounds {
                 x: 0.0,
                 y: 0.0,

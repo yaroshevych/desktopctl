@@ -33,7 +33,7 @@ pub fn merge_elements(
         if should_skip_ax_element(&ax.role, merged_text.as_deref()) {
             continue;
         }
-        if merged_text.is_none() && ax.checked.is_none() {
+        if merged_text.is_none() && ax.checked.is_none() && ax.url.is_none() {
             continue;
         }
         let ax_primary_id = Some(stable_id_for_ax(ax, &ax.bounds, &mut fallback_id_counts));
@@ -93,6 +93,7 @@ pub fn merge_elements(
                 .text(merged_text.or(existing_text))
                 .confidence(None)
                 .checked(ax.checked)
+                .url(ax.url.clone())
                 .source(format!("accessibility_ax:{}", ax.role))
                 .build();
             metrics.ax_replaced += 1;
@@ -113,6 +114,7 @@ pub fn merge_elements(
                 .text(merged_text)
                 .confidence(None)
                 .checked(ax.checked)
+                .url(ax.url.clone())
                 .source(format!("accessibility_ax:{}", ax.role))
                 .build(),
         );
@@ -418,6 +420,7 @@ mod tests {
             confidence: None,
             scrollable: None,
             checked: None,
+            url: None,
             source: source.to_string(),
         }
     }
@@ -462,6 +465,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            url: None,
             truncated: false,
         }];
         let coord_map = CoordMap::new(
@@ -513,6 +517,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            url: None,
             truncated: false,
         }];
         let coord_map = CoordMap::new(
@@ -557,6 +562,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            url: None,
             truncated: false,
         }];
         let coord_map = CoordMap::new(
@@ -597,6 +603,7 @@ mod tests {
             },
             ax_identifier: None,
             checked: None,
+            url: None,
             truncated: false,
         }];
         let coord_map = CoordMap::new(
@@ -632,6 +639,7 @@ mod tests {
             },
             ax_identifier: Some("SaveButtonMain".to_string()),
             checked: None,
+            url: None,
             truncated: false,
         };
         let id = primary_id_for_ax(&ax).expect("id");

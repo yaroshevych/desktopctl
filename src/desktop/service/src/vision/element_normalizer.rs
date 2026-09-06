@@ -23,6 +23,7 @@ impl ElementBuilder {
                 confidence: None,
                 scrollable: None,
                 checked: None,
+                url: None,
                 source: String::new(),
             },
         }
@@ -78,6 +79,11 @@ impl ElementBuilder {
 
     pub fn checked(mut self, checked: Option<ToggleState>) -> Self {
         self.element.checked = checked;
+        self
+    }
+
+    pub fn url(mut self, url: Option<String>) -> Self {
+        self.element.url = url;
         self
     }
 
@@ -495,6 +501,7 @@ mod tests {
             confidence: None,
             scrollable: None,
             checked: None,
+            url: None,
             source: source.to_string(),
         }
     }
