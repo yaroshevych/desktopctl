@@ -296,6 +296,9 @@ pub fn run() -> Result<(), AppError> {
         if event.id == quit_id {
             settings_dialog::terminate_active();
             crate::launcher::controller::flush_pending_sessions();
+            if let Err(error) = ServiceClient.shutdown() {
+                trace::log(format!("menubar:shutdown_daemon_failed {error}"));
+            }
             std::process::exit(0);
         }
     }));

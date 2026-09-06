@@ -22,6 +22,10 @@ impl ServiceClient {
         self.send_typed(Command::ServiceStatus)
     }
 
+    pub fn shutdown(&self) -> Result<(), AppError> {
+        self.send(Command::Shutdown).map(|_| ())
+    }
+
     pub fn active_window(&self) -> Result<ActiveWindowPayload, AppError> {
         self.send_typed(Command::ActiveWindowDescribe)
     }

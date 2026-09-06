@@ -92,6 +92,7 @@ static PRIVACY_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 static COMMAND_EXECUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static BACKGROUND_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 // Last known mouse position packed as (x << 32) | y, updated after every move.
 static LAST_MOUSE_POS: AtomicU64 = AtomicU64::new(0);
 
@@ -377,17 +378,13 @@ fn bind_listener() -> Result<IpcListener, AppError> {
 }
 
 fn accept_loop(listener: IpcListener, config: DaemonConfig) -> Result<(), AppError> {
-    if config.idle_timeout.is_none() {
-        listener
-            .set_nonblocking(ListenerNonblockingMode::Neither)
-            .map_err(|err| {
-                AppError::backend_unavailable(format!("set listener blocking mode failed: {err}"))
-            })?;
-    }
     let mut last_activity = Instant::now();
     let active_clients = Arc::new(AtomicUsize::new(0));
 
     loop {
+        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) && active_clients.load(Ordering::SeqCst) == 0 {
+            break;
+        }
         match listener.accept() {
             Ok(stream) => {
                 last_activity = Instant::now();
@@ -659,6 +656,7 @@ fn command_is_allowed_when_gui_disabled(command: &Command) -> bool {
         command,
         Command::Ping
             | Command::ServiceStatus
+            | Command::Shutdown
             | Command::ActiveWindowDescribe
             | Command::ActiveAppPid
             | Command::WindowDescribeForPid { .. }
@@ -821,6 +819,10 @@ fn execute_with_context(
                 overlay_running: crate::overlay::is_active(),
             })
             .map_err(|error| AppError::internal(format!("encode service status failed: {error}")))
+        }
+        Command::Shutdown => {
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+            Ok(json!({ "shutting_down": true }))
         }
         Command::ActiveWindowDescribe => active_window_description(),
         Command::ActiveAppPid => serde_json::to_value(capture_active_window_for_agent_launcher())
@@ -1249,6 +1251,15 @@ mod tests {
         assert_eq!(result, serde_json::json!({}));
         assert!(super::GUI_OPS_DISABLED.load(std::sync::atomic::Ordering::SeqCst));
         super::GUI_OPS_DISABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn shutdown_requests_listener_exit() {
+        super::SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+        let result = execute(desktop_core::protocol::Command::Shutdown).expect("shutdown");
+        assert_eq!(result, serde_json::json!({ "shutting_down": true }));
+        assert!(super::SHUTDOWN_REQUESTED.load(Ordering::SeqCst));
+        super::SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     }
 
     #[test]

@@ -59,6 +59,7 @@ pub struct RequestOptions {
 pub enum Command {
     Ping,
     ServiceStatus,
+    Shutdown,
     ActiveWindowDescribe,
     ActiveAppPid,
     WindowDescribeForPid {
@@ -330,6 +331,7 @@ impl Command {
         match self {
             Command::Ping => "ping",
             Command::ServiceStatus => "service_status",
+            Command::Shutdown => "shutdown",
             Command::ActiveWindowDescribe => "active_window_describe",
             Command::ActiveAppPid => "active_app_pid",
             Command::WindowDescribeForPid { .. } => "window_describe_for_pid",
@@ -389,6 +391,13 @@ mod tests {
         let value = serde_json::to_value(Command::ServiceStatus).expect("serialize command");
         assert_eq!(value, serde_json::json!({ "cmd": "service_status" }));
         assert_eq!(Command::ServiceStatus.name(), "service_status");
+    }
+
+    #[test]
+    fn shutdown_has_stable_wire_name() {
+        let value = serde_json::to_value(Command::Shutdown).expect("serialize command");
+        assert_eq!(value, serde_json::json!({ "cmd": "shutdown" }));
+        assert_eq!(Command::Shutdown.name(), "shutdown");
     }
 
     #[test]
