@@ -995,6 +995,7 @@ impl GooseRunner {
             OsString::from(Self::MODEL),
             OsString::from("--max-turns"),
             OsString::from("1000"),
+            OsString::from("--quiet"),
             OsString::from("--name"),
             OsString::from(session_name),
         ];
@@ -1907,7 +1908,11 @@ pub fn parse_opencode_output(output: &str) -> Result<AgentResult, AgentRunnerErr
             ));
         }
         if event.get("type").and_then(Value::as_str) == Some("text") {
-            if let Some(text) = event.get("text").and_then(Value::as_str) {
+            if let Some(text) = event
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| event.pointer("/part/text").and_then(Value::as_str))
+            {
                 final_answer.push_str(text);
             }
         }
@@ -2054,19 +2059,19 @@ impl fmt::Display for AgentRunnerError {
             Self::MissingExecutable { message, .. } => f.write_str(message),
             Self::Spawn { executable, source } => write!(
                 f,
-                "failed to start Pi{}: {source}",
+                "failed to start agent{}: {source}",
                 executable
                     .as_ref()
                     .map(|path| format!(" ({})", path.display()))
                     .unwrap_or_default()
             ),
-            Self::Io { source } => write!(f, "failed reading Pi output: {source}"),
-            Self::Utf8 { source } => write!(f, "Pi output was not valid UTF-8: {source}"),
-            Self::Wait { source } => write!(f, "failed waiting for Pi: {source}"),
-            Self::Kill { source } => write!(f, "failed cancelling Pi: {source}"),
-            Self::Parse(message) => write!(f, "invalid Pi output: {message}"),
+            Self::Io { source } => write!(f, "failed reading agent output: {source}"),
+            Self::Utf8 { source } => write!(f, "agent output was not valid UTF-8: {source}"),
+            Self::Wait { source } => write!(f, "failed waiting for agent: {source}"),
+            Self::Kill { source } => write!(f, "failed cancelling agent: {source}"),
+            Self::Parse(message) => write!(f, "invalid agent output: {message}"),
             Self::Process(message) => f.write_str(message),
-            Self::Cancelled => f.write_str("Pi request cancelled"),
+            Self::Cancelled => f.write_str("agent request cancelled"),
         }
     }
 }
@@ -2180,14 +2185,15 @@ mod tests {
             ]
         }));
         assert!(args.iter().any(|arg| arg == "--resume"));
+        assert!(args.iter().any(|arg| arg == "--quiet"));
     }
 
     #[test]
     fn parses_opencode_json_events() {
         let output = concat!(
-            "{\"type\":\"step-start\",\"sessionID\":\"opencode-123\"}\n",
-            "{\"type\":\"text\",\"sessionID\":\"opencode-123\",\"text\":\"Hello\"}\n",
-            "{\"type\":\"step-finish\",\"sessionID\":\"opencode-123\"}\n",
+            "{\"type\":\"step_start\",\"sessionID\":\"opencode-123\"}\n",
+            "{\"type\":\"text\",\"sessionID\":\"opencode-123\",\"part\":{\"text\":\"Hello\"}}\n",
+            "{\"type\":\"step_finish\",\"sessionID\":\"opencode-123\"}\n",
         );
         let result = parse_opencode_output(output).expect("valid OpenCode output");
         assert_eq!(result.session.id.as_deref(), Some("opencode-123"));
