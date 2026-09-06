@@ -1081,6 +1081,19 @@ impl OpenCodeRunner {
 
     fn command_for(&self, request: &AgentRequest) -> Result<Command, AgentRunnerError> {
         let executable = self.executable()?;
+        let mut command = Command::new(&executable);
+        command.args(Self::args_for(request));
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        if let Some(dir) = self.current_dir.as_deref() {
+            command.current_dir(dir);
+        }
+        configure_process_group(&mut command);
+        Ok(command)
+    }
+
+    pub fn args_for(request: &AgentRequest) -> Vec<OsString> {
         let mut args = vec![
             OsString::from("run"),
             OsString::from("--format"),
@@ -1099,16 +1112,7 @@ impl OpenCodeRunner {
             }
         }
         args.push(OsString::from(prompt_for_cli(request)));
-        let mut command = Command::new(&executable);
-        command.args(args);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        if let Some(dir) = self.current_dir.as_deref() {
-            command.current_dir(dir);
-        }
-        configure_process_group(&mut command);
-        Ok(command)
+        args
     }
 }
 
@@ -2173,6 +2177,26 @@ mod tests {
         let result = parse_opencode_output(output).expect("valid OpenCode output");
         assert_eq!(result.session.id.as_deref(), Some("opencode-123"));
         assert_eq!(result.final_answer, "Hello");
+    }
+
+    #[test]
+    fn opencode_args_resume_with_openrouter_model() {
+        let mut request = AgentRequest::new("follow up");
+        request.session = Some(AgentSessionRef::id("opencode-session"));
+        let args = OpenCodeRunner::args_for(&request);
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("--model"),
+                OsString::from(OpenCodeRunner::MODEL),
+            ]
+        }));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("--session"),
+                OsString::from("opencode-session"),
+            ]
+        }));
+        assert!(args.iter().any(|arg| arg == "--auto"));
     }
 
     #[test]
