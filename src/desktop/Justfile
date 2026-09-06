@@ -5,6 +5,9 @@ dist_dir := workspace_dir + "/dist"
 app_dir := dist_dir + "/DesktopCtl.app"
 contents_dir := app_dir + "/Contents"
 macos_dir := contents_dir + "/MacOS"
+swift_dialog_cache_dir := dist_dir + "/.swift-dialogs-cache"
+swift_dialog_cache_path := swift_dialog_cache_dir + "/desktopctl-dialogs"
+swift_dialog_cache_stamp := swift_dialog_cache_dir + "/fingerprint"
 cli_path := macos_dir + "/desktopctl"
 legacy_cli_path := dist_dir + "/desktopctl"
 stable_runtime_dir := workspace_dir + "/runtime-stable"
@@ -36,22 +39,47 @@ build:
   echo "Linked: {{legacy_cli_path}} -> ./DesktopCtl.app/Contents/MacOS/desktopctl"
 
 build-swift-dialogs:
-  mkdir -p {{macos_dir}}
-  swiftc \
-    -O \
-    -sdk "$(xcrun --show-sdk-path)" \
-    -target arm64-apple-macosx13.0 \
-    -framework AppKit \
-    -framework Foundation \
-    -framework SwiftUI \
-    {{workspace_dir}}/app/ui-swift/Models.swift \
-    {{workspace_dir}}/app/ui-swift/DaemonIPC.swift \
-    {{workspace_dir}}/app/ui-swift/JournalDialog.swift \
-    {{workspace_dir}}/app/ui-swift/AppPolicyDialog.swift \
-    {{workspace_dir}}/app/ui-swift/SetupAccessDialog.swift \
-    {{workspace_dir}}/app/ui-swift/DesktopCtlSettings.swift \
-    {{workspace_dir}}/app/ui-swift/main.swift \
-    -o {{macos_dir}}/desktopctl-dialogs
+  mkdir -p {{macos_dir}} {{swift_dialog_cache_dir}}
+  swift_sources=( \
+    "{{workspace_dir}}/app/ui-swift/Models.swift" \
+    "{{workspace_dir}}/app/ui-swift/DaemonIPC.swift" \
+    "{{workspace_dir}}/app/ui-swift/JournalDialog.swift" \
+    "{{workspace_dir}}/app/ui-swift/AppPolicyDialog.swift" \
+    "{{workspace_dir}}/app/ui-swift/SetupAccessDialog.swift" \
+    "{{workspace_dir}}/app/ui-swift/DesktopCtlSettings.swift" \
+    "{{workspace_dir}}/app/ui-swift/main.swift" \
+  ); \
+  swift_sdk="$(xcrun --show-sdk-path)"; \
+  swift_fingerprint="$({ \
+    printf '%s\n' \
+      '-O' \
+      '-target arm64-apple-macosx13.0' \
+      '-framework AppKit' \
+      '-framework Foundation' \
+      '-framework SwiftUI' \
+      "$swift_sdk" \
+      "$(swiftc --version)"; \
+    shasum "${swift_sources[@]}"; \
+  } | shasum | cut -d ' ' -f 1)"; \
+  if [[ -x "{{swift_dialog_cache_path}}" && -f "{{swift_dialog_cache_stamp}}" && "$swift_fingerprint" == "$(< "{{swift_dialog_cache_stamp}}")" ]]; then \
+    echo "Swift dialogs unchanged; using cached binary"; \
+  else \
+    tmp_output="{{swift_dialog_cache_path}}.tmp.$$"; \
+    swiftc \
+      -O \
+      -sdk "$swift_sdk" \
+      -target arm64-apple-macosx13.0 \
+      -framework AppKit \
+      -framework Foundation \
+      -framework SwiftUI \
+      "${swift_sources[@]}" \
+      -o "$tmp_output"; \
+    mv "$tmp_output" "{{swift_dialog_cache_path}}"; \
+    printf '%s\n' "$swift_fingerprint" > "{{swift_dialog_cache_stamp}}.tmp.$$"; \
+    mv "{{swift_dialog_cache_stamp}}.tmp.$$" "{{swift_dialog_cache_stamp}}"; \
+    echo "Compiled Swift dialogs"; \
+  fi
+  cp "{{swift_dialog_cache_path}}" "{{macos_dir}}/desktopctl-dialogs"
   echo "Built: {{macos_dir}}/desktopctl-dialogs"
 
 build-swift-dialogs-dev:
