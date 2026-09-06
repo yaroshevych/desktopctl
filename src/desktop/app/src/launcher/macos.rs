@@ -252,11 +252,34 @@ define_class!(
     }
 );
 
+#[derive(Default)]
+struct CompletionViewIvars;
+
+define_class!(
+    // SAFETY: NSView has no subclassing requirements beyond NSObject's normal
+    // object lifetime, and this class is only used on the AppKit main thread.
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = CompletionViewIvars]
+    struct CompletionView;
+
+    // SAFETY: NSObjectProtocol has no additional subclassing requirements.
+    unsafe impl NSObjectProtocol for CompletionView {}
+
+    impl CompletionView {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            completion_clicked_on_main();
+        }
+    }
+);
+
 struct UiState {
     panel: Option<Retained<LauncherPanel>>,
     content: Option<Retained<NSView>>,
     show_all: bool,
     completion_panel: Option<Retained<NSPanel>>,
+    completion_session_id: Option<String>,
     completion_prompt_label: Option<Retained<NSTextField>>,
     completion_answer_label: Option<Retained<NSTextField>>,
     completion_follow_up_label: Option<Retained<NSTextField>>,
@@ -277,6 +300,7 @@ impl Default for UiState {
             content: None,
             show_all: false,
             completion_panel: None,
+            completion_session_id: None,
             completion_prompt_label: None,
             completion_answer_label: None,
             completion_follow_up_label: None,
@@ -480,14 +504,32 @@ pub(crate) unsafe extern "C" fn notification_action_callback(
         return;
     }
     DispatchQueue::main().exec_async(move || {
-        clear_notification_session(&session_id);
-        show();
-        if let Some(on_action) = CALLBACKS.get().map(|callbacks| callbacks.on_action.clone()) {
-            thread::spawn(move || {
-                on_action(LauncherAction::OpenSession { session_id });
-            });
-        }
+        open_notification_session(session_id);
     });
+}
+
+fn open_notification_session(session_id: String) {
+    clear_notification_session(&session_id);
+    show();
+    if let Some(on_action) = CALLBACKS.get().map(|callbacks| callbacks.on_action.clone()) {
+        thread::spawn(move || {
+            on_action(LauncherAction::OpenSession { session_id });
+        });
+    }
+}
+
+fn completion_clicked_on_main() {
+    let session_id = UI.with(|cell| {
+        let mut ui = cell.borrow_mut();
+        ui.completion_generation = ui.completion_generation.wrapping_add(1);
+        if let Some(panel) = ui.completion_panel.as_ref() {
+            panel.orderOut(None);
+        }
+        ui.completion_session_id.take()
+    });
+    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+        open_notification_session(session_id);
+    }
 }
 
 fn create_panel(mtm: MainThreadMarker) -> Result<(), AppError> {
@@ -694,7 +736,7 @@ fn show_completion_on_main(
                     | NSWindowCollectionBehavior::FullScreenAuxiliary
                     | NSWindowCollectionBehavior::Stationary,
             );
-            panel.setIgnoresMouseEvents(true);
+            panel.setIgnoresMouseEvents(false);
             panel.setLevel(NSFloatingWindowLevel);
 
             let container = NSView::initWithFrame(
@@ -775,6 +817,14 @@ fn show_completion_on_main(
             surface.addSubview(&answer_label);
             surface.addSubview(&follow_up_label);
             container.addSubview(&surface);
+            let click_overlay: Retained<CompletionView> = unsafe {
+                let allocated = CompletionView::alloc(mtm).set_ivars(CompletionViewIvars);
+                msg_send![super(allocated), initWithFrame: NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(COMPLETION_WIDTH, COMPLETION_HEIGHT),
+                )]
+            };
+            container.addSubview(&click_overlay);
             panel.setContentView(Some(&container));
             ui.completion_prompt_label = Some(prompt_label);
             ui.completion_answer_label = Some(answer_label);
@@ -785,6 +835,7 @@ fn show_completion_on_main(
         }
 
         ui.completion_generation = ui.completion_generation.wrapping_add(1);
+        ui.completion_session_id = Some(notice.session_id.clone());
         let generation = ui.completion_generation;
         let panel = ui.completion_panel.as_ref().unwrap();
         let context_pill_width = if let (Some(pill), Some(label)) = (
@@ -1179,6 +1230,7 @@ fn dismiss_completion_on_main() {
     let panel = UI.with(|cell| {
         let mut ui = cell.borrow_mut();
         ui.completion_generation = ui.completion_generation.wrapping_add(1);
+        ui.completion_session_id = None;
         ui.completion_panel.as_ref().cloned()
     });
     if let Some(panel) = panel.as_ref() {
