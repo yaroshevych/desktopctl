@@ -47,6 +47,7 @@ static ICON_AGENT_FRAMES: OnceLock<Vec<tray_icon::Icon>> = OnceLock::new();
 #[derive(Clone)]
 struct MenuState {
     toggle_cli_gui_ops: tray_icon::menu::MenuItem,
+    stop_all_active_agents: tray_icon::menu::MenuItem,
 }
 
 fn on_gui_ops_state_changed(disabled: bool) {
@@ -64,6 +65,13 @@ fn on_gui_ops_state_changed(disabled: bool) {
 pub(crate) fn set_agent_running(running: bool) {
     let generation = AGENT_ICON_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     AGENT_ICON_RUNNING.store(running, Ordering::SeqCst);
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        MENU_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                state.stop_all_active_agents.set_enabled(running);
+            }
+        });
+    });
     if !running {
         restore_tray_icon(generation);
         return;
@@ -168,6 +176,7 @@ pub fn run() -> Result<(), AppError> {
         true,
         None,
     );
+    let stop_all_active_agents = MenuItem::new("Stop All Active Agents", false, None);
     let settings_item = MenuItem::new("Settings…", true, None);
     let agent_launcher_item = MenuItem::new("Agent Launcher…", true, None);
     let toggle_overlay = MenuItem::new("Toggle Overlay", true, None);
@@ -175,6 +184,8 @@ pub fn run() -> Result<(), AppError> {
     let quit = MenuItem::new("Exit", true, None);
     let overlay_enabled = std::env::var("DESKTOPCTL_OVERLAY_MENU").is_ok();
     menu.append(&agent_launcher_item)
+        .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
+    menu.append(&stop_all_active_agents)
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     menu.append(&PredefinedMenuItem::separator())
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
@@ -199,11 +210,13 @@ pub fn run() -> Result<(), AppError> {
     let toggle_overlay_id = toggle_overlay.id().clone();
     let settings_id = settings_item.id().clone();
     let agent_launcher_id = agent_launcher_item.id().clone();
+    let stop_all_active_agents_id = stop_all_active_agents.id().clone();
     let about_id = about.id().clone();
     let quit_id = quit.id().clone();
     MENU_STATE.with(|cell| {
         *cell.borrow_mut() = Some(MenuState {
             toggle_cli_gui_ops: toggle_cli_gui_ops.clone(),
+            stop_all_active_agents: stop_all_active_agents.clone(),
         });
     });
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -217,6 +230,10 @@ pub fn run() -> Result<(), AppError> {
         }
         if event.id == agent_launcher_id {
             agent_launcher::toggle();
+            return;
+        }
+        if event.id == stop_all_active_agents_id {
+            agent_launcher::cancel_all();
             return;
         }
         if event.id == toggle_cli_gui_ops_id {

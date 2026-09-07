@@ -1746,6 +1746,20 @@ end run"#;
         }
     }
 
+    fn cancel_all_in(cancellations: &HashMap<String, Arc<AtomicBool>>) -> usize {
+        for cancellation in cancellations.values() {
+            cancellation.store(true, Ordering::Release);
+        }
+        cancellations.len()
+    }
+
+    pub fn cancel_all() {
+        let count = lock_state().map(|state| cancel_all_in(&state.cancellations));
+        if let Some(count) = count {
+            trace::log(format!("agent_launcher:cancel_all count={count}"));
+        }
+    }
+
     fn refresh() {
         let snapshot = lock_state().map(|mut state| {
             state.snapshot_revision = state.snapshot_revision.wrapping_add(1);
@@ -2061,7 +2075,7 @@ end run"#;
             CONTEXT_MAX_AGE_MS, MAX_CONTEXT_FILES, TerminalKind, ghostty_command,
             native_session_path_is_safe, posix_quote, prune_window_context, target_matches_window,
             terminal_shell_command, timestamped_context_file_name, wait_for_preparation,
-            window_context_prompt,
+            window_context_prompt, cancel_all_in,
         };
         use crate::agent_sessions::TargetWindowMetadata;
         use desktop_core::protocol::{Bounds, WindowSummary};
@@ -2217,6 +2231,19 @@ end run"#;
             let started = std::time::Instant::now();
             assert!(wait_for_preparation(&handle, &cancelled).0.is_none());
             assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        }
+
+        #[test]
+        fn cancel_all_marks_every_registered_request() {
+            let first = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let second = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut cancellations = std::collections::HashMap::new();
+            cancellations.insert("first".to_string(), first.clone());
+            cancellations.insert("second".to_string(), second.clone());
+
+            assert_eq!(cancel_all_in(&cancellations), 2);
+            assert!(first.load(std::sync::atomic::Ordering::Acquire));
+            assert!(second.load(std::sync::atomic::Ordering::Acquire));
         }
 
         #[test]
@@ -2434,5 +2461,5 @@ end run"#;
 #[cfg(target_os = "macos")]
 pub use controller::{
     RunningHandler, flush_pending_sessions, initialize, reload_keyboard_shortcuts_setting,
-    show_fake_completion_if_requested, toggle,
+    show_fake_completion_if_requested, toggle, cancel_all,
 };
