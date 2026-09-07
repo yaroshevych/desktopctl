@@ -1167,8 +1167,17 @@ end run"#;
             };
             let result = match runner.spawn(request) {
                 Ok(mut process) => {
-                    let result =
-                        process.wait_with_cancellation_and_completion(&cancellation, |result| {
+                    let result = process.wait_with_cancellation_and_session(
+                        &cancellation,
+                        |session| {
+                            persist_native_session_identity(
+                                &session_id,
+                                &workspace,
+                                agent,
+                                session,
+                            );
+                        },
+                        |result| {
                             if !early_published {
                                 early_published = finish_run(
                                     &session_id,
@@ -1180,7 +1189,8 @@ end run"#;
                                     false,
                                 );
                             }
-                        });
+                        },
+                    );
                     match &result {
                         Ok(_) => {
                             timing.mark("agent_response_received", format!("session={session_id}"))
@@ -1234,6 +1244,48 @@ end run"#;
             }
         }
         refresh();
+    }
+
+    fn persist_native_session_identity(
+        session_id: &str,
+        workspace: &Path,
+        agent: AgentKind,
+        native: AgentSessionRef,
+    ) {
+        if native.id.as_deref().is_none_or(str::is_empty) && native.path.is_none() {
+            return;
+        }
+        if agent != AgentKind::Pi {
+            return;
+        }
+        let native_path = native.path.and_then(|path| {
+            if native_session_path_is_safe(&path, workspace).is_ok() {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                trace::log(format!(
+                    "agent_launcher:native_session_path_unavailable session={session_id} path={}",
+                    path.display()
+                ));
+                None
+            }
+        });
+        if native.id.as_deref().is_none_or(str::is_empty) && native_path.is_none() {
+            return;
+        }
+        if let Some(mut state) = lock_state()
+            && let Err(error) = state.store.bind_native_session(
+                session_id,
+                native.id,
+                native_path,
+                native
+                    .cwd
+                    .map(|path| path.to_string_lossy().into_owned()),
+            )
+        {
+            trace::log(format!(
+                "agent_launcher:native_session_identity_error session={session_id} error={error}"
+            ));
+        }
     }
 
     fn native_session_path_is_safe(path: &Path, workspace: &Path) -> Result<(), String> {

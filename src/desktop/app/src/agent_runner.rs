@@ -1512,6 +1512,15 @@ impl AgentProcess {
     pub fn wait_with_cancellation_and_completion(
         &mut self,
         cancellation: &AtomicBool,
+        on_completion: impl FnMut(AgentResult),
+    ) -> Result<AgentResult, AgentRunnerError> {
+        self.wait_with_cancellation_and_session(cancellation, |_| {}, on_completion)
+    }
+
+    pub fn wait_with_cancellation_and_session(
+        &mut self,
+        cancellation: &AtomicBool,
+        mut on_session: impl FnMut(AgentSessionRef),
         mut on_completion: impl FnMut(AgentResult),
     ) -> Result<AgentResult, AgentRunnerError> {
         let mut child = self.child.take().ok_or_else(|| {
@@ -1549,8 +1558,14 @@ impl AgentProcess {
                 stop_readers.store(true, Ordering::Release);
                 terminate_process_group(&mut child);
                 let _ = child.wait();
-                let _ = collect_pipe(stdout_rx, stdout_thread);
+                let stdout = collect_pipe(stdout_rx, stdout_thread);
                 let _ = collect_pipe(stderr_rx, stderr_thread);
+                if self.label == AgentKind::Pi.label()
+                    && let Ok(stdout) = stdout
+                    && let Some(session) = parse_pi_session_identity(&stdout)
+                {
+                    on_session(session);
+                }
                 return Err(AgentRunnerError::Cancelled);
             }
             if let Ok(result) = completion_rx.try_recv() {
@@ -2105,6 +2120,45 @@ pub fn parse_pi_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
     })
 }
 
+fn parse_pi_session_identity(output: &str) -> Option<AgentSessionRef> {
+    let mut session_id = None;
+    let mut session_path = None;
+    let mut session_cwd = None;
+
+    for line in output.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let event_type = event.get("type").and_then(Value::as_str);
+        if let Some(id) = string_field(&event, &["id", "sessionId", "session_id"]).filter(
+            |_| {
+                event_type == Some("session")
+                    || event.get("sessionId").is_some()
+                    || event.get("session_id").is_some()
+            },
+        ) {
+            session_id = Some(id.to_string());
+        }
+        if let Some(path) = string_field(
+            &event,
+            &["sessionFile", "session_file", "sessionPath", "session_path"],
+        ) {
+            session_path = Some(PathBuf::from(path));
+        }
+        if event_type == Some("session") {
+            if let Some(cwd) = event.get("cwd").and_then(Value::as_str) {
+                session_cwd = Some(PathBuf::from(cwd));
+            }
+        }
+    }
+
+    (session_id.is_some() || session_path.is_some()).then_some(AgentSessionRef {
+        id: session_id,
+        path: session_path,
+        cwd: session_cwd,
+    })
+}
+
 pub fn parse_codex_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
     let mut session_id = None;
     let mut final_answer = None;
@@ -2426,6 +2480,18 @@ mod tests {
             "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":\"last\",\"stopReason\":\"stop\"}}\n"
         );
         assert_eq!(parse_pi_output(output).unwrap().final_answer, "last");
+    }
+
+    #[test]
+    fn partial_pi_output_preserves_session_identity() {
+        let output = concat!(
+            "{\"type\":\"session\",\"id\":\"pi-cancelled\",\"cwd\":\"/project\"}\n",
+            "{\"type\":\"message_start\"}\n",
+            "{\"type\":\"incomplete\"",
+        );
+        let session = parse_pi_session_identity(output).expect("session identity");
+        assert_eq!(session.id.as_deref(), Some("pi-cancelled"));
+        assert_eq!(session.cwd.as_deref(), Some(Path::new("/project")));
     }
 
     #[test]
@@ -3075,17 +3141,36 @@ mod tests {
     #[test]
     fn cancellation_kills_process_group_with_descendant() {
         let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30 & wait"]);
+        command.args([
+            "-c",
+            "printf '%s\\n' '{\"type\":\"session\",\"id\":\"pi-cancelled\",\"cwd\":\"/project\"}'; sleep 30 & wait",
+        ]);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         configure_process_group(&mut command);
         let child = command.spawn().expect("spawn shell");
         let mut process = AgentProcess::new(child, None);
-        let cancellation = AtomicBool::new(true);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation_trigger = Arc::clone(&cancellation);
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            cancellation_trigger.store(true, Ordering::Release);
+        });
+        let session = Arc::new(Mutex::new(None));
+        let observed_session = Arc::clone(&session);
         let started = std::time::Instant::now();
         let error = process
-            .wait_with_cancellation(&cancellation)
+            .wait_with_cancellation_and_session(
+                &cancellation,
+                move |session| *observed_session.lock().unwrap() = Some(session),
+                |_| {},
+            )
             .expect_err("cancelled process");
+        trigger.join().expect("cancellation trigger");
         assert!(matches!(error, AgentRunnerError::Cancelled));
+        assert_eq!(
+            session.lock().unwrap().as_ref().and_then(|session| session.id.as_deref()),
+            Some("pi-cancelled")
+        );
         assert!(started.elapsed() < PIPE_DRAIN_TIMEOUT + Duration::from_secs(1));
     }
 
