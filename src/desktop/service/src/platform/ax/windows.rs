@@ -104,6 +104,10 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
     })
 }
 
+pub fn focused_frontmost_selected_text() -> Result<Option<String>, AppError> {
+    Ok(None)
+}
+
 pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     let hwnd = frontmost_hwnd();
     if hwnd == 0 {

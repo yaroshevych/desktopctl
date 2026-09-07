@@ -813,6 +813,7 @@ fn build_window_elements(
         document_url: window_meta
             .as_ref()
             .and_then(|meta| meta.document_url.clone()),
+        selected_text: None,
         bounds,
         os_bounds,
         elements,
@@ -1607,6 +1608,7 @@ mod tests {
                 title: "Sample".to_string(),
                 app: Some("Sample".to_string()),
                 document_url: None,
+                selected_text: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,
@@ -1683,6 +1685,7 @@ mod tests {
                 title: "Sample".to_string(),
                 app: Some("Sample".to_string()),
                 document_url: None,
+                selected_text: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,

@@ -614,6 +614,10 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
     imp::focused_frontmost_element()
 }
 
+pub fn focused_frontmost_selected_text() -> Result<Option<String>, AppError> {
+    Ok(None)
+}
+
 pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     imp::focused_frontmost_window_bounds()
 }

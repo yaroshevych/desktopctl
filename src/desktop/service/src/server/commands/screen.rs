@@ -716,6 +716,11 @@ pub(crate) fn tokenize(
     } else {
         trace::log("execute:screen_tokenize:overlay_update_skipped transient_privacy");
     }
+    if let Some(selected_text) = current_selected_text_for_payload(&payload, screenshot_mode) {
+        if let Some(window) = payload.windows.first_mut() {
+            window.selected_text = Some(selected_text);
+        }
+    }
     let element_count: usize = payload.windows.iter().map(|w| w.elements.len()).sum();
     trace::log(format!(
         "execute:screen_tokenize:ok snapshot_id={} elements={}",
@@ -799,6 +804,28 @@ pub(crate) fn tokenize(
         }
     }
     Ok(value)
+}
+
+fn current_selected_text_for_payload(
+    payload: &desktop_core::protocol::TokenizePayload,
+    screenshot_mode: bool,
+) -> Option<String> {
+    if screenshot_mode {
+        return None;
+    }
+    let window = payload.windows.first()?;
+    let focused_bounds = platform::ax::focused_frontmost_window_bounds()
+        .ok()
+        .flatten()?;
+    let target_bounds = window.os_bounds.as_ref().unwrap_or(&window.bounds);
+    if !bounds_match_with_tolerance(&focused_bounds, target_bounds, 8.0) {
+        return None;
+    }
+    platform::ax::focused_frontmost_selected_text()
+        .ok()
+        .flatten()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn apply_journal_redaction(value: &mut Value) {

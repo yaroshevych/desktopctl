@@ -1036,6 +1036,7 @@ mod tests {
             title: "t".to_string(),
             app: None,
             document_url: None,
+            selected_text: None,
             bounds: Bounds {
                 x: 0.0,
                 y: 0.0,

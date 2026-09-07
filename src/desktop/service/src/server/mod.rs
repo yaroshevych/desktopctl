@@ -1419,6 +1419,7 @@ mod tests {
                 title: "Calculator".to_string(),
                 app: Some("Calculator".to_string()),
                 document_url: None,
+                selected_text: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,
@@ -1475,6 +1476,7 @@ mod tests {
                 title: "Calculator".to_string(),
                 app: Some("Calculator".to_string()),
                 document_url: None,
+                selected_text: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,
@@ -1532,6 +1534,7 @@ mod tests {
                 title: "Notes".to_string(),
                 app: Some("Notes".to_string()),
                 document_url: None,
+                selected_text: None,
                 bounds: Bounds {
                     x: 0.0,
                     y: 0.0,

@@ -268,6 +268,29 @@ pub fn focused_frontmost_element() -> Result<Option<AxElement>, AppError> {
     }))
 }
 
+pub fn focused_frontmost_selected_text() -> Result<Option<String>, AppError> {
+    let system = AXUIElement::system_wide();
+    let focused_app_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(
+        kAXFocusedApplicationAttribute,
+    ));
+    let app_cf = system.attribute(&focused_app_attr).map_err(ax_err)?;
+    if !app_cf.instance_of::<AXUIElement>() {
+        return Ok(None);
+    }
+    let app = unsafe { AXUIElement::wrap_under_get_rule(app_cf.as_CFTypeRef() as _) };
+    let focused_element_attr =
+        AXAttribute::<CFType>::new(&CFString::from_static_string(kAXFocusedUIElementAttribute));
+    let focused_cf = match app.attribute(&focused_element_attr) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if !focused_cf.instance_of::<AXUIElement>() {
+        return Ok(None);
+    }
+    let focused = unsafe { AXUIElement::wrap_under_get_rule(focused_cf.as_CFTypeRef() as _) };
+    Ok(attribute_text_by_name(&focused, "AXSelectedText"))
+}
+
 pub fn frontmost_app_pid() -> Option<i64> {
     use accessibility_sys::{AXUIElementGetPid, pid_t};
     let system = AXUIElement::system_wide();

@@ -119,6 +119,8 @@ pub struct TokenizeWindow {
     pub app: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_text: Option<String>,
     pub bounds: Bounds,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os_bounds: Option<Bounds>,

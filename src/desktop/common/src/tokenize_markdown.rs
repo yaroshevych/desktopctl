@@ -107,6 +107,14 @@ pub fn render_tokenize_markdown(value: &Value, include_all_hint: bool) -> String
         {
             push_kv(&mut lines, "document_url", text.trim());
         }
+        if let Some(text) = window
+            .get("selected_text")
+            .and_then(Value::as_str)
+            .map(normalize)
+            .filter(|v| !v.trim().is_empty())
+        {
+            push_kv(&mut lines, "selected_text", text);
+        }
     }
     if truncated {
         push_kv(
@@ -411,13 +419,15 @@ mod tests {
                         "bbox": [10, 20, 100, 30],
                         "text": "Open document",
                         "url": "https://example.com/document"
-                    }]
+                    }],
+                    "selected_text": "selected\ntext"
                 }]
             }
         });
 
         let markdown = render_tokenize_markdown(&value, false);
         assert!(markdown.contains("- document_url: file:///tmp/document.md"));
+        assert!(markdown.contains("- selected_text: selected\\ntext"));
         assert!(markdown.contains("Open document #link-1 [url=https://example.com/document]"));
     }
 }
