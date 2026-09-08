@@ -257,11 +257,16 @@ pre {
   margin-bottom: 20px;
 }
 
-#demo video {
+#demo video,
+.demo-video {
   display: block;
   width: calc(100% - 60px);
   max-width: 800px;
   margin: 0 auto;
+}
+
+.demo-video {
+  margin-bottom: 2rem;
 }
 
 .code-block-wrap {
@@ -430,7 +435,8 @@ footer .container {
   }
 
   .demo-caption,
-  #demo video {
+  #demo video,
+  .demo-video {
     width: 100%;
     margin-left: 0;
     margin-right: 0;

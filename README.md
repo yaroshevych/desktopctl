@@ -6,6 +6,8 @@ Runs fully local. No screenshots sent to the cloud.
 
 Learn more at https://desktopctl.com
 
+https://github.com/user-attachments/assets/9531cee0-5dae-4542-bfba-dd8b05805088
+
 https://github.com/user-attachments/assets/4321b23e-6706-4792-a911-89e13766ebc0
 
 ## Why DesktopCtl
