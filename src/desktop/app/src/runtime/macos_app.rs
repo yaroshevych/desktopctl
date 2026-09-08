@@ -275,7 +275,11 @@ pub fn run() -> Result<(), AppError> {
             return;
         }
         if event.id == agent_launcher_id {
-            agent_launcher::toggle();
+            // Let AppKit finish dismissing the status-item menu before showing
+            // the launcher. Otherwise the menu's deactivation can immediately
+            // hide the panel, leaving REQUESTED_VISIBLE set until the next
+            // click.
+            dispatch2::DispatchQueue::main().exec_async(agent_launcher::toggle);
             return;
         }
         if event.id == stop_all_active_agents_id {
