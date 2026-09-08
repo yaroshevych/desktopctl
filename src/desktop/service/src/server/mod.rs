@@ -125,16 +125,37 @@ fn command_execution_lock() -> &'static Mutex<()> {
     COMMAND_EXECUTION_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn acquire_command_execution_slot() -> Result<CommandExecutionGuard<'static>, AppError> {
+fn acquire_command_execution_slot(
+    request_id: &str,
+    command_name: &str,
+) -> Result<CommandExecutionGuard<'static>, AppError> {
     let lock = command_execution_lock();
     let queued_at = Instant::now();
+    let mut logged_wait = false;
     loop {
         match lock.try_lock() {
-            Ok(guard) => return Ok(CommandExecutionGuard { _guard: guard }),
+            Ok(guard) => {
+                if logged_wait {
+                    trace::log(format!(
+                        "client:command_slot_acquired request_id={} command={} queue_wait_ms={}",
+                        request_id,
+                        command_name,
+                        queued_at.elapsed().as_millis()
+                    ));
+                }
+                return Ok(CommandExecutionGuard { _guard: guard });
+            }
             Err(std::sync::TryLockError::Poisoned(_)) => {
                 return Err(AppError::internal("command execution lock poisoned"));
             }
             Err(std::sync::TryLockError::WouldBlock) => {
+                if !logged_wait {
+                    logged_wait = true;
+                    trace::log(format!(
+                        "client:command_slot_wait request_id={} command={}",
+                        request_id, command_name
+                    ));
+                }
                 if queued_at.elapsed() >= COMMAND_QUEUE_TIMEOUT {
                     return Err(AppError::timeout(format!(
                         "command queue timeout after {} ms; another command is still running",
@@ -485,8 +506,13 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
         ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
     } else {
         let runtime_state = platform_runtime::begin_command(&command, &request_context);
-        let response = match acquire_command_execution_slot() {
+        let response = match acquire_command_execution_slot(&request_id, &command_name) {
             Ok(_slot) => {
+                trace::log(format!(
+                    "client:execute_start request_id={} command={}",
+                    request_id, command_name
+                ));
+                let execute_started = Instant::now();
                 let _background_input_mode =
                     BackgroundInputModeGuard::set(request.options.background_input);
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -497,13 +523,22 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
                     )
                 })) {
                     Ok(Ok(result)) => {
-                        trace::log("client:execute_ok");
+                        trace::log(format!(
+                            "client:execute_ok request_id={} command={} elapsed_ms={}",
+                            request_id,
+                            command_name,
+                            execute_started.elapsed().as_millis()
+                        ));
                         ResponseEnvelope::success(request_id.clone(), result)
                     }
                     Ok(Err(err)) => {
                         trace::log(format!(
-                            "client:execute_err code={:?} msg={}",
-                            err.code, err.message
+                            "client:execute_err request_id={} command={} elapsed_ms={} code={:?} msg={}",
+                            request_id,
+                            command_name,
+                            execute_started.elapsed().as_millis(),
+                            err.code,
+                            err.message
                         ));
                         ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
                     }
@@ -515,7 +550,13 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
                         } else {
                             "non-string panic payload".to_string()
                         };
-                        trace::log(format!("client:execute_panic {panic_message}"));
+                        trace::log(format!(
+                            "client:execute_panic request_id={} command={} elapsed_ms={} msg={}",
+                            request_id,
+                            command_name,
+                            execute_started.elapsed().as_millis(),
+                            panic_message
+                        ));
                         let err = AppError::internal(format!(
                             "daemon panic during command execution: {panic_message}"
                         ));

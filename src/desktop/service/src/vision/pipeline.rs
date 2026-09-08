@@ -369,8 +369,11 @@ fn tokenize_window_internal(
     window_meta: TokenizeWindowMeta,
     allow_cache: bool,
 ) -> Result<TokenizePayload, AppError> {
-    trace::log("pipeline:tokenize:window_mode");
     let tokenize_started = Instant::now();
+    trace::log(format!(
+        "pipeline:tokenize:start target_id={} native_window_id={:?} include_offscreen_ax={} allow_cache={}",
+        window_meta.id, window_meta.native_window_id, window_meta.include_offscreen_ax, allow_cache
+    ));
     let cache_key = tokenize_cache_key(&window_meta);
     let capture_started = Instant::now();
     let captured = if let (Some(native_window_id), Some(capture_bounds)) = (
@@ -419,23 +422,57 @@ fn tokenize_window_internal(
         if let Some(cached_payload) = with_state(|state| {
             state.cached_tokenize_payload_if_fingerprint(&cache_key, fingerprint)
         })? {
-            trace::log("pipeline:tokenize:window_fastpath cache_hit fingerprint_equal");
+            trace::log(format!(
+                "pipeline:tokenize:cache_hit target_id={} elapsed_ms={}",
+                window_meta.id,
+                tokenize_started.elapsed().as_millis()
+            ));
             return Ok((*cached_payload).clone());
         }
     }
-    trace::log("pipeline:tokenize:window_fastpath cache_miss");
+    trace::log(format!(
+        "pipeline:tokenize:cache_miss target_id={} elapsed_ms={}",
+        window_meta.id,
+        tokenize_started.elapsed().as_millis()
+    ));
 
     let ax_meta = window_meta.clone();
+    let ax_started = Instant::now();
+    trace::log(format!(
+        "pipeline:tokenize:ax_spawn_start target_id={}",
+        window_meta.id
+    ));
     let ax_handle = thread::spawn(move || detect_ax_elements(Some(&ax_meta)));
+    trace::log(format!(
+        "pipeline:tokenize:ax_spawned target_id={} elapsed_ms={}",
+        window_meta.id,
+        ax_started.elapsed().as_millis()
+    ));
     let ocr_started = Instant::now();
+    trace::log(format!(
+        "pipeline:tokenize:ocr_start target_id={}",
+        window_meta.id
+    ));
     let texts = recognize_text(&captured.image)?;
     let ocr_elapsed = ocr_started.elapsed().as_millis();
+    trace::log(format!(
+        "pipeline:tokenize:ocr_done target_id={} elapsed_ms={} texts={}",
+        window_meta.id,
+        ocr_elapsed,
+        texts.len()
+    ));
     if ocr_elapsed > OCR_BUDGET_MS {
         trace::log(format!(
             "perf:warn tokenize_window ocr_ms={} budget_ms={}",
             ocr_elapsed, OCR_BUDGET_MS
         ));
     }
+    let ax_join_started = Instant::now();
+    trace::log(format!(
+        "pipeline:tokenize:ax_join_start target_id={} worker_elapsed_ms={}",
+        window_meta.id,
+        ax_started.elapsed().as_millis()
+    ));
     let ax_elements = ax_handle.join().unwrap_or_else(|panic| {
         let reason = panic
             .downcast_ref::<&str>()
@@ -445,6 +482,12 @@ fn tokenize_window_internal(
         trace::log(format!("pipeline:tokenize:ax_thread_panic reason={reason}"));
         Vec::new()
     });
+    trace::log(format!(
+        "pipeline:tokenize:ax_join_done target_id={} elapsed_ms={} elements={}",
+        window_meta.id,
+        ax_join_started.elapsed().as_millis(),
+        ax_elements.len()
+    ));
     let frame = captured.frame;
     let image = captured.image;
     let image_path = frame.image_path.clone();
@@ -501,6 +544,16 @@ fn tokenize_window_internal(
     }
     let payload = std::sync::Arc::try_unwrap(payload_arc).unwrap_or_else(|arc| (*arc).clone());
     let total_elapsed = tokenize_started.elapsed().as_millis();
+    trace::log(format!(
+        "pipeline:tokenize:done target_id={} total_ms={} elements={}",
+        window_meta.id,
+        total_elapsed,
+        payload
+            .windows
+            .iter()
+            .map(|window| window.elements.len())
+            .sum::<usize>()
+    ));
     if total_elapsed > TOKENIZE_BUDGET_MS {
         trace::log(format!(
             "perf:warn tokenize_window total_ms={} budget_ms={}",
