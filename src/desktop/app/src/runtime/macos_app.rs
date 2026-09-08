@@ -19,10 +19,15 @@ use crate::{
 };
 
 const OVERLAY_LIVE_INTERVAL_MS: u64 = 200;
+const OVERLAY_LIVE_DURATION_MS: u64 = 30_000;
+const OVERLAY_ICON_RECHECK_DELAY_MS: u64 = 2_500;
+const TRAY_ICON_RECONCILE_INTERVAL_MS: u64 = 1_000;
 static OVERLAY_LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
 static OVERLAY_LIVE_SEQ: AtomicU64 = AtomicU64::new(1);
+static OVERLAY_LIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AGENT_ICON_RUNNING: AtomicBool = AtomicBool::new(false);
 static AGENT_ICON_GENERATION: AtomicU64 = AtomicU64::new(0);
+static TRAY_ICON_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn cli_gui_toggle_menu_label(disabled: bool) -> &'static str {
     if disabled {
@@ -64,6 +69,7 @@ fn on_gui_ops_state_changed(disabled: bool) {
 
 pub(crate) fn set_agent_running(running: bool) {
     let generation = AGENT_ICON_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let tray_generation = TRAY_ICON_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     AGENT_ICON_RUNNING.store(running, Ordering::SeqCst);
     dispatch2::DispatchQueue::main().exec_async(move || {
         MENU_STATE.with(|cell| {
@@ -73,7 +79,7 @@ pub(crate) fn set_agent_running(running: bool) {
         });
     });
     if !running {
-        restore_tray_icon(generation);
+        reconcile_tray_icon(tray_generation);
         return;
     }
     thread::spawn(move || {
@@ -102,35 +108,75 @@ pub(crate) fn set_agent_running(running: bool) {
             frame = frame.wrapping_add(1);
             thread::sleep(Duration::from_millis(120));
         }
-        if AGENT_ICON_GENERATION.load(Ordering::SeqCst) == generation {
-            restore_tray_icon(generation);
+    });
+}
+
+fn reconcile_tray_icon(generation: u64) {
+    thread::spawn(move || {
+        for attempt in 0..2 {
+            if attempt > 0 {
+                thread::sleep(Duration::from_millis(OVERLAY_ICON_RECHECK_DELAY_MS));
+            }
+            let overlay_running = ServiceClient
+                .status()
+                .map(|status| status.overlay_running)
+                .unwrap_or(false);
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                if AGENT_ICON_RUNNING.load(Ordering::SeqCst)
+                    || TRAY_ICON_GENERATION.load(Ordering::SeqCst) != generation
+                {
+                    return;
+                }
+                let icon = if overlay_running {
+                    ICON_ACTIVE.get().cloned()
+                } else {
+                    ICON_IDLE.get().cloned()
+                };
+                TRAY.with(|cell| {
+                    if let Some(tray) = cell.borrow().as_ref() {
+                        let _ = tray.set_icon_with_as_template(icon, true);
+                    }
+                });
+            });
+            if !overlay_running {
+                break;
+            }
         }
     });
 }
 
-fn restore_tray_icon(generation: u64) {
-    thread::spawn(move || {
-        let overlay_running = ServiceClient
+fn set_non_agent_tray_icon(active: bool) {
+    let generation = TRAY_ICON_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        if AGENT_ICON_RUNNING.load(Ordering::SeqCst)
+            || TRAY_ICON_GENERATION.load(Ordering::SeqCst) != generation
+        {
+            return;
+        }
+        let icon = if active {
+            ICON_ACTIVE.get().cloned()
+        } else {
+            ICON_IDLE.get().cloned()
+        };
+        TRAY.with(|cell| {
+            if let Some(tray) = cell.borrow().as_ref() {
+                let _ = tray.set_icon_with_as_template(icon, true);
+            }
+        });
+    });
+}
+
+fn start_tray_icon_reconciler() {
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_millis(TRAY_ICON_RECONCILE_INTERVAL_MS));
+        if AGENT_ICON_RUNNING.load(Ordering::SeqCst) {
+            continue;
+        }
+        let active = ServiceClient
             .status()
             .map(|status| status.overlay_running)
             .unwrap_or(false);
-        dispatch2::DispatchQueue::main().exec_async(move || {
-            if AGENT_ICON_RUNNING.load(Ordering::SeqCst)
-                || AGENT_ICON_GENERATION.load(Ordering::SeqCst) != generation
-            {
-                return;
-            }
-            let icon = if overlay_running {
-                ICON_ACTIVE.get().cloned()
-            } else {
-                ICON_IDLE.get().cloned()
-            };
-            TRAY.with(|cell| {
-                if let Some(tray) = cell.borrow().as_ref() {
-                    let _ = tray.set_icon_with_as_template(icon, true);
-                }
-            });
-        });
+        set_non_agent_tray_icon(active);
     });
 }
 
@@ -138,7 +184,7 @@ pub fn run() -> Result<(), AppError> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use tray_icon::{
-        TrayIconBuilder,
+        TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
 
@@ -252,14 +298,7 @@ pub fn run() -> Result<(), AppError> {
                 }
                 if disabled && current.is_some_and(|status| status.overlay_running) {
                     stop_overlay_live_loop();
-                    dispatch2::DispatchQueue::main().exec_async(|| {
-                        TRAY.with(|cell| {
-                            if let Some(tray) = cell.borrow().as_ref() {
-                                let _ =
-                                    tray.set_icon_with_as_template(ICON_IDLE.get().cloned(), true);
-                            }
-                        });
-                    });
+                    set_non_agent_tray_icon(false);
                 }
             });
             return;
@@ -278,7 +317,9 @@ pub fn run() -> Result<(), AppError> {
                     }
                     result
                 } else {
-                    let result = ServiceClient.send(Command::OverlayStart { duration_ms: None });
+                    let result = ServiceClient.send(Command::OverlayStart {
+                        duration_ms: Some(OVERLAY_LIVE_DURATION_MS),
+                    });
                     if result.is_ok() {
                         start_overlay_live_loop();
                     }
@@ -293,19 +334,7 @@ pub fn run() -> Result<(), AppError> {
                         .map(|status| status.overlay_running)
                         .unwrap_or(!was_active);
                     trace::log(format!("menubar:toggle_overlay ok active={is_active}"));
-                    // Update icon on the main thread (TrayIcon is !Send).
-                    dispatch2::DispatchQueue::main().exec_async(move || {
-                        let icon = if is_active {
-                            ICON_ACTIVE.get().cloned()
-                        } else {
-                            ICON_IDLE.get().cloned()
-                        };
-                        TRAY.with(|cell| {
-                            if let Some(tray) = cell.borrow().as_ref() {
-                                let _ = tray.set_icon_with_as_template(icon, true);
-                            }
-                        });
-                    });
+                    set_non_agent_tray_icon(is_active);
                 }
             });
             return;
@@ -319,6 +348,11 @@ pub fn run() -> Result<(), AppError> {
             std::process::exit(0);
         }
     }));
+
+    // DesktopCtl does not consume tray mouse events. Register a no-op handler
+    // so tray-icon drops Enter/Move/Leave events instead of retaining them in
+    // its unbounded default channel while the pointer is over the status item.
+    TrayIconEvent::set_event_handler(Some(|_| {}));
 
     // Pre-render both icons; fall back gracefully if SF symbol rendering fails.
     let idle = icon_idle().unwrap_or_else(|e| {
@@ -341,6 +375,7 @@ pub fn run() -> Result<(), AppError> {
         .build()
         .map_err(|e| AppError::backend_unavailable(e.to_string()))?;
     TRAY.with(|cell| *cell.borrow_mut() = Some(tray));
+    start_tray_icon_reconciler();
     if missing_permissions {
         settings_dialog::show_with_settings(Some("permissions"), startup_settings);
     }
@@ -541,6 +576,17 @@ fn placeholder_icon() -> tray_icon::Icon {
     tray_icon::Icon::from_rgba(rgba, w, w).expect("placeholder icon")
 }
 
+fn stop_overlay_live_loop_after_expiry(generation: u64) {
+    if OVERLAY_LIVE_GENERATION.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    OVERLAY_LIVE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    OVERLAY_LIVE_ENABLED.store(false, Ordering::SeqCst);
+    let _ = ServiceClient.send(Command::OverlayStop);
+    set_non_agent_tray_icon(false);
+    trace::log("overlay:live_loop auto_stop");
+}
+
 fn start_overlay_live_loop() {
     if OVERLAY_LIVE_ENABLED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -549,10 +595,21 @@ fn start_overlay_live_loop() {
         trace::log("overlay:live_loop already_running");
         return;
     }
+    let generation = OVERLAY_LIVE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if !OVERLAY_LIVE_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
     trace::log("overlay:live_loop start");
-    thread::spawn(|| {
+    thread::spawn(move || {
         let mut consecutive_errors: usize = 0;
-        while OVERLAY_LIVE_ENABLED.load(Ordering::SeqCst) {
+        let deadline = Instant::now() + Duration::from_millis(OVERLAY_LIVE_DURATION_MS);
+        while OVERLAY_LIVE_ENABLED.load(Ordering::SeqCst)
+            && OVERLAY_LIVE_GENERATION.load(Ordering::SeqCst) == generation
+        {
+            if Instant::now() >= deadline {
+                stop_overlay_live_loop_after_expiry(generation);
+                return;
+            }
             let tick_start = Instant::now();
             let request_id = format!(
                 "overlay-live-{}-{}",
@@ -606,11 +663,14 @@ fn start_overlay_live_loop() {
             ));
             thread::sleep(Duration::from_millis(OVERLAY_LIVE_INTERVAL_MS));
         }
-        trace::log("overlay:live_loop stop");
+        if OVERLAY_LIVE_GENERATION.load(Ordering::SeqCst) == generation {
+            trace::log("overlay:live_loop stop");
+        }
     });
 }
 
 fn stop_overlay_live_loop() {
+    OVERLAY_LIVE_GENERATION.fetch_add(1, Ordering::SeqCst);
     if OVERLAY_LIVE_ENABLED.swap(false, Ordering::SeqCst) {
         trace::log("overlay:live_loop stop_requested");
     } else {

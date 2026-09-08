@@ -242,18 +242,31 @@ fn maybe_start_privacy_overlay(command: &Command, context: &RequestContext) -> b
 #[cfg(target_os = "macos")]
 fn schedule_transient_overlay_stop() {
     thread::spawn(|| {
-        thread::sleep(Duration::from_millis(PRIVACY_OVERLAY_STOP_DELAY_MS));
-        if overlay::is_agent_active() || !overlay::is_active() {
-            return;
-        }
-        match overlay::stop_overlay() {
-            Ok(stopped) => {
-                if stopped {
-                    super::PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
-                }
-                trace::log(format!("overlay:privacy_auto_stop stopped={stopped}"));
+        loop {
+            thread::sleep(Duration::from_millis(PRIVACY_OVERLAY_STOP_DELAY_MS));
+            // An explicit overlay start/stop supersedes this transient cleanup.
+            if !super::PRIVACY_OVERLAY_ACTIVE.load(Ordering::SeqCst) {
+                return;
             }
-            Err(err) => trace::log(format!("overlay:privacy_auto_stop_warn {err}")),
+            if !overlay::is_active() {
+                super::PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
+                return;
+            }
+            // A later command may still be using the transient overlay. Keep
+            // waiting; dropping this cleanup attempt would strand the overlay.
+            if overlay::is_agent_active() {
+                continue;
+            }
+            match overlay::stop_overlay() {
+                Ok(stopped) => {
+                    if stopped {
+                        super::PRIVACY_OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
+                    }
+                    trace::log(format!("overlay:privacy_auto_stop stopped={stopped}"));
+                    return;
+                }
+                Err(err) => trace::log(format!("overlay:privacy_auto_stop_warn {err}")),
+            }
         }
     });
 }
