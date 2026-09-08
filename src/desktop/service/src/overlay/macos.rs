@@ -780,7 +780,8 @@ fn set_layer_shadow_path(
     }
     unsafe {
         // Let CoreAnimation derive the shadow from composited alpha (border-only content).
-        let _: () = msg_send![layer, setShadowPath: std::ptr::null::<objc2_core_graphics::CGPath>()];
+        let _: () =
+            msg_send![layer, setShadowPath: std::ptr::null::<objc2_core_graphics::CGPath>()];
     }
 }
 

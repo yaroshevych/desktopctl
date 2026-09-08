@@ -167,16 +167,18 @@ fn set_non_agent_tray_icon(active: bool) {
 }
 
 fn start_tray_icon_reconciler() {
-    thread::spawn(|| loop {
-        thread::sleep(Duration::from_millis(TRAY_ICON_RECONCILE_INTERVAL_MS));
-        if AGENT_ICON_RUNNING.load(Ordering::SeqCst) {
-            continue;
+    thread::spawn(|| {
+        loop {
+            thread::sleep(Duration::from_millis(TRAY_ICON_RECONCILE_INTERVAL_MS));
+            if AGENT_ICON_RUNNING.load(Ordering::SeqCst) {
+                continue;
+            }
+            let active = ServiceClient
+                .status()
+                .map(|status| status.overlay_running)
+                .unwrap_or(false);
+            set_non_agent_tray_icon(active);
         }
-        let active = ServiceClient
-            .status()
-            .map(|status| status.overlay_running)
-            .unwrap_or(false);
-        set_non_agent_tray_icon(active);
     });
 }
 

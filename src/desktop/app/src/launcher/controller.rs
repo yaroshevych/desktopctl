@@ -1277,9 +1277,7 @@ end run"#;
                 session_id,
                 native.id,
                 native_path,
-                native
-                    .cwd
-                    .map(|path| path.to_string_lossy().into_owned()),
+                native.cwd.map(|path| path.to_string_lossy().into_owned()),
             )
         {
             trace::log(format!(
@@ -2124,10 +2122,10 @@ end run"#;
     #[cfg(test)]
     mod tests {
         use super::{
-            CONTEXT_MAX_AGE_MS, MAX_CONTEXT_FILES, TerminalKind, ghostty_command,
+            CONTEXT_MAX_AGE_MS, MAX_CONTEXT_FILES, TerminalKind, cancel_all_in, ghostty_command,
             native_session_path_is_safe, posix_quote, prune_window_context, target_matches_window,
             terminal_shell_command, timestamped_context_file_name, wait_for_preparation,
-            window_context_prompt, cancel_all_in,
+            window_context_prompt,
         };
         use crate::agent_sessions::TargetWindowMetadata;
         use desktop_core::protocol::{Bounds, WindowSummary};
@@ -2512,6 +2510,6 @@ end run"#;
 
 #[cfg(target_os = "macos")]
 pub use controller::{
-    RunningHandler, flush_pending_sessions, initialize, reload_keyboard_shortcuts_setting,
-    show_fake_completion_if_requested, toggle, cancel_all,
+    RunningHandler, cancel_all, flush_pending_sessions, initialize,
+    reload_keyboard_shortcuts_setting, show_fake_completion_if_requested, toggle,
 };

@@ -48,10 +48,10 @@ fn main() {
         "-framework",
         "Foundation",
         "-framework",
-            "SwiftUI",
+        "SwiftUI",
         "-framework",
         "UserNotifications",
-        ]);
+    ]);
     if env::var("PROFILE").as_deref() == Ok("release") {
         swiftc.arg("-O");
     }

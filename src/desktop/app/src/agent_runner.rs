@@ -275,16 +275,18 @@ pub fn load_external_transcript(
                 fs::read_to_string(&path).map_err(|source| AgentRunnerError::Io { source })?;
             Ok((Some(path), parse_codex_transcript(&contents)?))
         }
-        AgentKind::Goose => Ok((None, parse_goose_transcript(&run_history_export(
-            kind,
-            session,
-            &["session", "export", "--name", "--format", "json"],
-        )?)?)),
-        AgentKind::OpenCode => Ok((None, parse_opencode_transcript(&run_history_export(
-            kind,
-            session,
-            &["export"],
-        )?)?)),
+        AgentKind::Goose => Ok((
+            None,
+            parse_goose_transcript(&run_history_export(
+                kind,
+                session,
+                &["session", "export", "--name", "--format", "json"],
+            )?)?,
+        )),
+        AgentKind::OpenCode => Ok((
+            None,
+            parse_opencode_transcript(&run_history_export(kind, session, &["export"])?)?,
+        )),
     }
 }
 
@@ -304,7 +306,9 @@ fn resolve_codex_session_path(session: &AgentSessionRef) -> Result<PathBuf, Agen
             continue;
         };
         for entry in entries {
-            let path = entry.map_err(|source| AgentRunnerError::Io { source })?.path();
+            let path = entry
+                .map_err(|source| AgentRunnerError::Io { source })?
+                .path();
             if path.is_dir() {
                 directories.push(path);
                 continue;
@@ -332,13 +336,18 @@ fn run_history_export(
 ) -> Result<String, AgentRunnerError> {
     let executable = discover_executable(kind)?;
     let mut command = Command::new(&executable);
-    let mut resolved_args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+    let mut resolved_args = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
     if kind == AgentKind::Goose {
         let id = session
             .id
             .as_deref()
             .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| AgentRunnerError::Process("Goose session has no native identity".into()))?;
+            .ok_or_else(|| {
+                AgentRunnerError::Process("Goose session has no native identity".into())
+            })?;
         if let Some(name) = resolved_args.iter().position(|arg| arg == "--name") {
             resolved_args.insert(name + 1, id.to_string());
         }
@@ -347,7 +356,9 @@ fn run_history_export(
             .id
             .as_deref()
             .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| AgentRunnerError::Process("OpenCode session has no native identity".into()))?;
+            .ok_or_else(|| {
+                AgentRunnerError::Process("OpenCode session has no native identity".into())
+            })?;
         resolved_args.push(id.to_string());
     }
     command.args(resolved_args);
@@ -355,12 +366,10 @@ fn run_history_export(
     if let Some(cwd) = session.cwd.as_deref().filter(|cwd| cwd.is_dir()) {
         command.current_dir(cwd);
     }
-    let output = command
-        .output()
-        .map_err(|source| AgentRunnerError::Spawn {
-            executable: Some(executable.clone()),
-            source,
-        })?;
+    let output = command.output().map_err(|source| AgentRunnerError::Spawn {
+        executable: Some(executable.clone()),
+        source,
+    })?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         return Err(AgentRunnerError::Process(format!(
@@ -454,8 +463,9 @@ fn extract_codex_item_text(item: &Value) -> Option<String> {
 }
 
 fn parse_goose_transcript(output: &str) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
-    let value: Value = serde_json::from_str(output.trim())
-        .map_err(|source| AgentRunnerError::Parse(format!("invalid Goose session JSON: {source}")))?;
+    let value: Value = serde_json::from_str(output.trim()).map_err(|source| {
+        AgentRunnerError::Parse(format!("invalid Goose session JSON: {source}"))
+    })?;
     Ok(value
         .get("conversation")
         .and_then(Value::as_array)
@@ -500,7 +510,9 @@ fn parse_goose_transcript(output: &str) -> Result<Vec<NativeTranscriptMessage>, 
         .collect())
 }
 
-fn parse_opencode_transcript(output: &str) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
+fn parse_opencode_transcript(
+    output: &str,
+) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
     let value: Value = serde_json::from_str(output.trim()).map_err(|source| {
         AgentRunnerError::Parse(format!("invalid OpenCode session JSON: {source}"))
     })?;
@@ -2130,13 +2142,11 @@ fn parse_pi_session_identity(output: &str) -> Option<AgentSessionRef> {
             continue;
         };
         let event_type = event.get("type").and_then(Value::as_str);
-        if let Some(id) = string_field(&event, &["id", "sessionId", "session_id"]).filter(
-            |_| {
-                event_type == Some("session")
-                    || event.get("sessionId").is_some()
-                    || event.get("session_id").is_some()
-            },
-        ) {
+        if let Some(id) = string_field(&event, &["id", "sessionId", "session_id"]).filter(|_| {
+            event_type == Some("session")
+                || event.get("sessionId").is_some()
+                || event.get("session_id").is_some()
+        }) {
             session_id = Some(id.to_string());
         }
         if let Some(path) = string_field(
@@ -2566,9 +2576,8 @@ mod tests {
         request.read_only = true;
         let args = CodexRunner::args_for(&request);
         assert!(
-            args.windows(2).any(|pair| {
-                pair == [OsString::from("--sandbox"), OsString::from("read-only")]
-            })
+            args.windows(2)
+                .any(|pair| { pair == [OsString::from("--sandbox"), OsString::from("read-only")] })
         );
     }
 
@@ -3168,7 +3177,11 @@ mod tests {
         trigger.join().expect("cancellation trigger");
         assert!(matches!(error, AgentRunnerError::Cancelled));
         assert_eq!(
-            session.lock().unwrap().as_ref().and_then(|session| session.id.as_deref()),
+            session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|session| session.id.as_deref()),
             Some("pi-cancelled")
         );
         assert!(started.elapsed() < PIPE_DRAIN_TIMEOUT + Duration::from_secs(1));
