@@ -183,6 +183,20 @@ fn result_value(raw: &Value) -> &Value {
     raw.get("result").unwrap_or(raw)
 }
 
+pub fn focused_element_id(raw: &Value) -> Option<String> {
+    let result = result_value(raw);
+    result
+        .get("focused_element_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            result
+                .get("observe")
+                .and_then(|value| value.get("focused_element_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
+}
+
 fn normalize_observation(raw: Value) -> Observation {
     let result = result_value(&raw);
     let windows = result.get("windows").and_then(Value::as_array);
@@ -211,17 +225,7 @@ fn normalize_observation(raw: Value) -> Observation {
             .get("active_window_id")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        focused_element_id: result
-            .get("focused_element_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                result
-                    .get("observe")
-                    .and_then(|v| v.get("focused_element_id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }),
+        focused_element_id: focused_element_id(&raw),
         window,
         elements,
         menus: Vec::new(),
@@ -295,6 +299,10 @@ fn collect_menus(value: &Value, out: &mut Vec<MenuItem>, parent: Option<&str>) {
                         .get("enabled")
                         .and_then(Value::as_bool)
                         .unwrap_or(true),
+                    action_supported: object
+                        .get("action_supported")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
                 });
                 if let Some(children) = object.get("items").or_else(|| object.get("children")) {
                     collect_menus(children, out, Some(&path));
@@ -320,5 +328,14 @@ mod tests {
         );
         assert_eq!(observation.window.id.as_deref(), Some("w1"));
         assert_eq!(observation.elements[0].id, "e1");
+    }
+
+    #[test]
+    fn extracts_focused_element_from_action_observation() {
+        let raw = serde_json::json!({
+            "ok": true,
+            "result": {"observe": {"focused_element_id": "search-field"}}
+        });
+        assert_eq!(focused_element_id(&raw).as_deref(), Some("search-field"));
     }
 }

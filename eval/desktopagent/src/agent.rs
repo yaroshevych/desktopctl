@@ -9,7 +9,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::candidates::{generate, CandidateContext};
-use crate::desktopctl::{DesktopCtl, DesktopCtlError};
+use crate::desktopctl::{focused_element_id, DesktopCtl, DesktopCtlError};
 use crate::jev::{JevClient, JevError};
 use crate::model::{ActionKind, Candidate, Observation, TerminalStatus};
 
@@ -179,11 +179,15 @@ impl Agent {
         let mut previous = CandidateContext::default();
         let mut steps = 0;
         let mut history = Vec::new();
+        let mut carried_focus = None;
         while steps < self.config.max_steps {
             if started.elapsed() >= self.config.run_timeout {
                 return Ok(self.blocked(steps, started, "run_timeout"));
             }
-            let observation = self.desktopctl.observe()?;
+            let mut observation = self.desktopctl.observe()?;
+            if observation.focused_element_id.is_none() {
+                observation.focused_element_id = carried_focus.clone();
+            }
             let current_fingerprint = fingerprint(&observation);
             let mut candidates = generate(goal, &observation, &previous);
             let decision = self.choose_with_history(goal, &observation, &candidates, &history)?;
@@ -225,17 +229,23 @@ impl Agent {
                     .or(candidate.literal.clone())
                     .unwrap_or_default()
             );
-            self.desktopctl.execute(&candidate)?;
+            let action_result = self.desktopctl.execute(&candidate)?;
+            carried_focus = focused_element_id(&action_result);
             steps += 1;
             history.push(candidate.description.clone());
             if history.len() > 6 {
                 history.remove(0);
             }
-            let next = self.desktopctl.observe()?;
+            let mut next = self.desktopctl.observe()?;
+            if next.focused_element_id.is_none() {
+                next.focused_element_id = carried_focus.clone();
+            }
             let next_fingerprint = fingerprint(&next);
             let changed = next_fingerprint != current_fingerprint;
             if !changed {
                 previous.repeated_actions.insert(action_key);
+            } else {
+                previous.repeated_actions.clear();
             }
             previous.previously_clicked_editable = clicked_editable && changed;
             previous.previous_kind = Some(candidate.kind.clone());

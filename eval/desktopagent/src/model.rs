@@ -96,6 +96,8 @@ pub struct MenuItem {
     pub title: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub action_supported: bool,
 }
 
 fn default_true() -> bool {

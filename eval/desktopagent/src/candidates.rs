@@ -97,7 +97,11 @@ pub fn generate(
         }
     }
 
-    for menu in observation.menus.iter().filter(|menu| menu.enabled) {
+    for menu in observation
+        .menus
+        .iter()
+        .filter(|menu| menu.enabled && menu.action_supported)
+    {
         if destructive
             .iter()
             .any(|word| menu.title.to_ascii_lowercase().contains(word))
@@ -116,21 +120,26 @@ pub fn generate(
         add(candidate);
     }
 
-    let can_scroll = observation
+    let scroll_target = observation
         .elements
         .iter()
-        .any(|element| element.scrollable);
-    if can_scroll {
-        add(Candidate::action(
+        .find(|element| element.scrollable)
+        .map(|element| element.id.clone());
+    if let Some(target) = scroll_target {
+        let mut scroll_up = Candidate::action(
             ActionKind::ScrollUp,
             "Scroll the current content upward.".into(),
             "Choose this when content above the current viewport is needed.".into(),
-        ));
-        add(Candidate::action(
+        );
+        scroll_up.target = Some(target.clone());
+        add(scroll_up);
+        let mut scroll_down = Candidate::action(
             ActionKind::ScrollDown,
             "Scroll the current content downward.".into(),
             "Choose this when content below the current viewport is needed.".into(),
-        ));
+        );
+        scroll_down.target = Some(target);
+        add(scroll_down);
     }
 
     let focused = observation
@@ -284,5 +293,20 @@ mod tests {
             && candidate.status == Some(crate::model::TerminalStatus::Done)));
         assert!(candidates.iter().any(|candidate| candidate.terminal
             && candidate.status == Some(crate::model::TerminalStatus::Blocked)));
+    }
+
+    #[test]
+    fn scroll_candidates_target_the_scrollable_element() {
+        let mut observation = Observation::default();
+        observation.elements.push(Element {
+            id: "scroll-area".into(),
+            scrollable: true,
+            ..Default::default()
+        });
+        let candidates = generate("scroll down", &observation, &Default::default());
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == ActionKind::ScrollDown
+                && candidate.target.as_deref() == Some("scroll-area")
+        }));
     }
 }
