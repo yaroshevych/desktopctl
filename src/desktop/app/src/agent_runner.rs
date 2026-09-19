@@ -32,10 +32,17 @@ pub enum AgentKind {
     Codex,
     Goose,
     OpenCode,
+    DesktopAgent,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 4] = [Self::Pi, Self::Codex, Self::Goose, Self::OpenCode];
+    pub const ALL: [Self; 5] = [
+        Self::Pi,
+        Self::Codex,
+        Self::Goose,
+        Self::OpenCode,
+        Self::DesktopAgent,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -43,6 +50,7 @@ impl AgentKind {
             Self::Codex => "codex",
             Self::Goose => "goose",
             Self::OpenCode => "opencode",
+            Self::DesktopAgent => "desktopagent",
         }
     }
 
@@ -52,6 +60,7 @@ impl AgentKind {
             Self::Codex => "Codex",
             Self::Goose => "Goose",
             Self::OpenCode => "OpenCode",
+            Self::DesktopAgent => "Desktop Agent",
         }
     }
 
@@ -60,6 +69,7 @@ impl AgentKind {
             "codex" => Self::Codex,
             "goose" => Self::Goose,
             "opencode" => Self::OpenCode,
+            "desktopagent" => Self::DesktopAgent,
             _ => Self::Pi,
         }
     }
@@ -69,6 +79,7 @@ impl AgentKind {
             1 => Self::Codex,
             2 => Self::Goose,
             3 => Self::OpenCode,
+            4 => Self::DesktopAgent,
             _ => Self::Pi,
         }
     }
@@ -83,6 +94,7 @@ impl AgentKind {
             Self::Codex => "DESKTOPCTL_CODEX_PATH",
             Self::Goose => "DESKTOPCTL_GOOSE_PATH",
             Self::OpenCode => "DESKTOPCTL_OPENCODE_PATH",
+            Self::DesktopAgent => "DESKTOPCTL_DESKTOP_AGENT_PATH",
         }
     }
 }
@@ -100,6 +112,11 @@ pub struct AgentRequest {
     pub session: Option<AgentSessionRef>,
     pub target_window: Option<TargetWindow>,
     pub window_context: Option<String>,
+    /// Absolute path to the launcher-created tokenized snapshot, when one was
+    /// captured. Desktop Agent receives this as its explicit --context arg.
+    pub context_path: Option<PathBuf>,
+    /// Session workspace passed to adapters that require an explicit path.
+    pub workspace: Option<PathBuf>,
     pub read_only: bool,
 }
 
@@ -110,6 +127,8 @@ impl AgentRequest {
             session: None,
             target_window: None,
             window_context: None,
+            context_path: None,
+            workspace: None,
             read_only: false,
         }
     }
@@ -286,6 +305,9 @@ pub fn load_external_transcript(
         AgentKind::OpenCode => Ok((
             None,
             parse_opencode_transcript(&run_history_export(kind, session, &["export"])?)?,
+        )),
+        AgentKind::DesktopAgent => Err(AgentRunnerError::Process(
+            "Desktop Agent does not expose native transcripts".into(),
         )),
     }
 }
@@ -1469,6 +1491,117 @@ impl AgentRunner for OpenCodeRunner {
     }
 }
 
+/// Stateless Jev-backed Desktop Agent runner. Each launcher prompt is an
+/// independent process; DesktopCtl owns the visible launcher transcript.
+#[derive(Debug, Clone, Default)]
+pub struct DesktopAgentRunner {
+    executable: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
+}
+
+impl DesktopAgentRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_executable(path: impl Into<PathBuf>) -> Self {
+        Self {
+            executable: Some(path.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_current_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(path.into());
+        self
+    }
+
+    pub(crate) fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
+        self.timing = Some(timing);
+        self
+    }
+
+    fn executable(&self) -> Result<PathBuf, AgentRunnerError> {
+        self.executable
+            .as_deref()
+            .map(|path| {
+                if is_executable_file(path) {
+                    Ok(path.to_path_buf())
+                } else {
+                    Err(AgentRunnerError::MissingExecutable {
+                        configured: Some(path.to_path_buf()),
+                        message: format!(
+                            "configured Desktop Agent executable is not executable: {}",
+                            path.display()
+                        ),
+                    })
+                }
+            })
+            .unwrap_or_else(|| discover_executable(AgentKind::DesktopAgent))
+    }
+
+    /// Build the direct argv used by the launcher. No shell interpolation is
+    /// involved, and absent window/snapshot metadata is simply omitted.
+    pub fn args_for(request: &AgentRequest) -> Vec<OsString> {
+        let mut args = vec![OsString::from("run")];
+        if let Some(target) = request.target_window.as_ref() {
+            args.extend([
+                OsString::from("--active-window"),
+                OsString::from(&target.id),
+            ]);
+        }
+        if let Some(path) = request.context_path.as_ref() {
+            args.extend([OsString::from("--context"), path.as_os_str().to_os_string()]);
+        }
+        if let Some(workspace) = request.workspace.as_ref() {
+            args.extend([
+                OsString::from("--workspace"),
+                workspace.as_os_str().to_os_string(),
+            ]);
+        } else if let Some(workspace) = request.context_path.as_ref().and_then(|path| path.parent())
+        {
+            args.extend([
+                OsString::from("--workspace"),
+                workspace.as_os_str().to_os_string(),
+            ]);
+        }
+        args.extend([OsString::from("--json"), OsString::from(&request.prompt)]);
+        args
+    }
+
+    fn command_for(&self, request: &AgentRequest) -> Result<Command, AgentRunnerError> {
+        let executable = self.executable()?;
+        let mut command = Command::new(&executable);
+        command.args(Self::args_for(request));
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        if let Some(dir) = self.current_dir.as_deref() {
+            command.current_dir(dir);
+        }
+        configure_process_group(&mut command);
+        Ok(command)
+    }
+}
+
+impl AgentRunner for DesktopAgentRunner {
+    fn spawn(&self, request: AgentRequest) -> Result<AgentProcess, AgentRunnerError> {
+        let executable = self.executable().ok();
+        let mut command = self.command_for(&request)?;
+        let child = command
+            .spawn()
+            .map_err(|source| AgentRunnerError::Spawn { executable, source })?;
+        Ok(AgentProcess::new_with_parser(
+            child,
+            self.timing.clone(),
+            parse_desktop_agent_output,
+            None,
+            AgentKind::DesktopAgent.label(),
+        ))
+    }
+}
+
 /// A running adapter process.  `wait_with_cancellation` drains both output
 /// streams while polling the child, allowing cancellation without leaving a
 /// Pi process behind.
@@ -2038,6 +2171,39 @@ fn is_executable_file(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     true
+}
+
+/// Parse Desktop Agent's single final JSON response. `blocked` is deliberately
+/// returned as a successful launcher result so its deterministic message is
+/// rendered like any other completed response; `error` follows normal runner
+/// failure handling.
+pub fn parse_desktop_agent_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
+    let value: Value = serde_json::from_str(output.trim()).map_err(|source| {
+        AgentRunnerError::Parse(format!("invalid Desktop Agent JSON: {source}"))
+    })?;
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AgentRunnerError::Parse("Desktop Agent response has no status".into()))?;
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .ok_or_else(|| AgentRunnerError::Parse("Desktop Agent response has no message".into()))?;
+    match status {
+        "done" | "blocked" => Ok(AgentResult {
+            session: AgentSessionRef {
+                id: None,
+                path: None,
+                cwd: None,
+            },
+            final_answer: message.to_owned(),
+        }),
+        "error" => Err(AgentRunnerError::Process(message.to_owned())),
+        other => Err(AgentRunnerError::Parse(format!(
+            "Desktop Agent response has unknown status {other:?}"
+        ))),
+    }
 }
 
 /// Parse Pi's `--mode json` JSONL stream.  Only the final assistant text is
@@ -2826,6 +2992,50 @@ mod tests {
         let args = PiRunner::args_for(&request);
         assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
         assert_eq!(args.last(), Some(&OsString::from("summarize")));
+    }
+
+    #[test]
+    fn desktop_agent_args_use_explicit_window_context_and_workspace() {
+        let mut request = AgentRequest::new("find the setting");
+        request.target_window = Some(TargetWindow {
+            id: "settings_abc123".into(),
+            app: Some("System Settings".into()),
+            title: Some("General".into()),
+        });
+        request.context_path = Some(PathBuf::from("/tmp/workspace/snapshot.md"));
+        request.workspace = Some(PathBuf::from("/tmp/workspace"));
+        let args = DesktopAgentRunner::args_for(&request);
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("run"),
+                OsString::from("--active-window"),
+                OsString::from("settings_abc123"),
+                OsString::from("--context"),
+                OsString::from("/tmp/workspace/snapshot.md"),
+                OsString::from("--workspace"),
+                OsString::from("/tmp/workspace"),
+                OsString::from("--json"),
+                OsString::from("find the setting"),
+            ]
+        );
+    }
+
+    #[test]
+    fn desktop_agent_parser_accepts_done_and_blocked_messages() {
+        assert_eq!(
+            parse_desktop_agent_output(r#"{"status":"done","message":"Clicked it"}"#)
+                .unwrap()
+                .final_answer,
+            "Clicked it"
+        );
+        assert_eq!(
+            parse_desktop_agent_output(r#"{"status":"blocked","message":"Need confirmation"}"#)
+                .unwrap()
+                .final_answer,
+            "Need confirmation"
+        );
+        assert!(parse_desktop_agent_output(r#"{"status":"error","message":"boom"}"#).is_err());
     }
 
     #[test]

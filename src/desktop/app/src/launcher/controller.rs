@@ -16,8 +16,8 @@ mod controller {
     use crate::trace;
     use crate::{
         agent_runner::{
-            AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, GooseRunner,
-            OpenCodeRunner, PiRunner, TargetWindow, discover_agent_installations,
+            AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, DesktopAgentRunner,
+            GooseRunner, OpenCodeRunner, PiRunner, TargetWindow, discover_agent_installations,
             load_external_transcript, load_native_transcript,
         },
         agent_sessions::{
@@ -645,6 +645,9 @@ mod controller {
                 AgentKind::Pi => {
                     load_native_transcript(&native).map(|(path, messages)| (Some(path), messages))
                 }
+                AgentKind::DesktopAgent => Err(crate::agent_runner::AgentRunnerError::Process(
+                    "Desktop Agent does not expose native transcripts".into(),
+                )),
                 _ => load_external_transcript(agent, &native),
             };
             match std::panic::catch_unwind(load).unwrap_or_else(|_| {
@@ -880,6 +883,7 @@ end run"#;
                 .native_session_id
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty()),
+            AgentKind::DesktopAgent => false,
         }
     }
 
@@ -926,6 +930,7 @@ end run"#;
                 "--model".to_string(),
                 OpenCodeRunner::MODEL.to_string(),
             ],
+            AgentKind::DesktopAgent => unreachable!("Desktop Agent has no native terminal session"),
         };
         Ok((executable, args))
     }
@@ -999,6 +1004,7 @@ end run"#;
             }
             let mut request = AgentRequest::new(prompt);
             request.read_only = read_only;
+            request.workspace = Some(workspace.clone());
             request.session = native_session.filter(|session| {
                 session.id.as_deref().is_some_and(|id| !id.is_empty()) || session.path.is_some()
             });
@@ -1097,6 +1103,7 @@ end run"#;
                                     workspace.join(&file_name).display()
                                 ));
                                 request.window_context = Some(window_context_prompt(&file_name));
+                                request.context_path = Some(workspace.join(&file_name));
                                 trace::agent_context(format!(
                                     "request context_prompt attached session={} file={}",
                                     session_id, file_name
@@ -1161,6 +1168,11 @@ end run"#;
                 ),
                 AgentKind::OpenCode => Box::new(
                     OpenCodeRunner::new()
+                        .with_current_dir(workspace.clone())
+                        .with_timing(Arc::clone(&timing)),
+                ),
+                AgentKind::DesktopAgent => Box::new(
+                    DesktopAgentRunner::new()
                         .with_current_dir(workspace.clone())
                         .with_timing(Arc::clone(&timing)),
                 ),

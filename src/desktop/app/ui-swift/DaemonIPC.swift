@@ -214,6 +214,7 @@ enum DaemonIPC {
         case "codex": return 1
         case "goose": return 2
         case "opencode": return 3
+        case "desktopagent": return 4
         default: return 0
         }
     }
