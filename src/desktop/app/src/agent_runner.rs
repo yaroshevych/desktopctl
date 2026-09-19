@@ -1574,6 +1574,15 @@ impl DesktopAgentRunner {
         let executable = self.executable()?;
         let mut command = Command::new(&executable);
         command.args(Self::args_for(request));
+        if env::var_os("DESKTOPCTL_PATH").is_none()
+            && let Ok(current_executable) = env::current_exe()
+            && let Some(directory) = current_executable.parent()
+        {
+            let bundled_cli = directory.join("desktopctl");
+            if is_executable_file(&bundled_cli) {
+                command.env("DESKTOPCTL_PATH", bundled_cli);
+            }
+        }
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
