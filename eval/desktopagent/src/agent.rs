@@ -295,7 +295,7 @@ impl Agent {
             message: candidate.description.clone(),
             steps,
             elapsed_ms: started.elapsed().as_millis(),
-            reason: Some(status.into()),
+            reason: (status == "blocked").then(|| "blocked".into()),
             choice: Some(candidate.id.clone()),
             confidence: None,
             probabilities: BTreeMap::new(),

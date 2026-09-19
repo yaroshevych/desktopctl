@@ -131,7 +131,12 @@ impl Candidate {
     }
 
     pub fn terminal(status: TerminalStatus, description: impl Into<String>) -> Self {
-        let description = description.into();
+        let criteria = description.into();
+        let description = match status {
+            TerminalStatus::Done => "The requested goal is complete.",
+            TerminalStatus::Blocked => "The goal cannot be advanced using the available actions.",
+        }
+        .to_string();
         Self {
             id: String::new(),
             kind: match status {
@@ -142,7 +147,7 @@ impl Candidate {
             literal: None,
             terminal: true,
             status: Some(status),
-            criteria: description.clone(),
+            criteria,
             description,
         }
     }
