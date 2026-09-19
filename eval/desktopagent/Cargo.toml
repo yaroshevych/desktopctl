@@ -1,0 +1,21 @@
+[package]
+name = "desktopagent"
+version = "0.1.0"
+edition = "2021"
+description = "A small Jev-driven DesktopCtl experiment"
+
+[[bin]]
+name = "desktopagent"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+mockito = "1"
