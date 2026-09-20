@@ -18,7 +18,6 @@ use core_foundation::{
 use desktop_core::error::{AppError, ErrorCode};
 use std::cell::OnceCell;
 use std::collections::HashMap;
-use std::thread;
 use unicode_normalization::UnicodeNormalization;
 
 const MENU_CHILD_TRAVERSAL_LIMIT: usize = 15;
@@ -27,21 +26,13 @@ const MENU_CHILD_TRUNCATION_THRESHOLD: usize = 20;
 #[derive(Clone, Copy)]
 struct MenuOptions {
     early_prune: bool,
-    parallelism: usize,
     batch_attributes: bool,
 }
 
 fn menu_options() -> MenuOptions {
     let env_flag = |name: &str| std::env::var(name).ok().as_deref() == Some("1");
-    let parallelism = std::env::var("DESKTOPCTL_MENU_PARALLELISM")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 1)
-        .unwrap_or(1)
-        .min(16);
     MenuOptions {
         early_prune: env_flag("DESKTOPCTL_MENU_EARLY_PRUNE"),
-        parallelism,
         batch_attributes: env_flag("DESKTOPCTL_MENU_BATCH_ATTRIBUTES"),
     }
 }
@@ -61,7 +52,7 @@ struct InternalNode {
 pub fn list(pid: i64, app_name: &str, system: bool, all: bool) -> Result<MenuSnapshot, AppError> {
     let mut options = menu_options();
     options.early_prune &= !all;
-    let (items, _) = build_tree(pid, app_name, system, options, false)?;
+    let (items, _) = build_tree(pid, app_name, system, options)?;
     let mut items = items;
     if !options.early_prune {
         for item in &mut items {
@@ -80,9 +71,9 @@ pub fn click(
     // Click resolution includes system nodes; `--system` controls list output only.
     let mut options = menu_options();
     // A click must always be able to resolve an item omitted from a bounded
-    // list response. The parallel and batched paths are still safe to use.
+    // list response.
     options.early_prune = false;
-    let (_, internals) = build_tree(pid, app_name, true, options, true)?;
+    let (_, internals) = build_tree(pid, app_name, true, options)?;
     let matches: Vec<&InternalNode> = if let Some(id) = id {
         internals.iter().filter(|node| node.id == id).collect()
     } else {
@@ -115,7 +106,7 @@ pub fn click(
         }
         matches[0]
     };
-    if node.structural || node.title.trim().is_empty() || !node.action_supported {
+    if node.structural || node.title.trim().is_empty() {
         return Err(AppError::new(
             ErrorCode::MenuActionUnsupported,
             "menu item does not support AXPress",
@@ -125,6 +116,12 @@ pub fn click(
         return Err(AppError::new(
             ErrorCode::MenuItemDisabled,
             "menu item is disabled",
+        ));
+    }
+    if !node.action_supported {
+        return Err(AppError::new(
+            ErrorCode::MenuActionUnsupported,
+            "menu item does not support AXPress",
         ));
     }
     if crate::platform::ax::frontmost_app_pid() != Some(pid) {
@@ -153,7 +150,6 @@ fn build_tree(
     app_name: &str,
     include_system: bool,
     options: MenuOptions,
-    include_internals: bool,
 ) -> Result<(Vec<MenuNode>, Vec<InternalNode>), AppError> {
     if pid <= 0 {
         return Err(AppError::new(
@@ -194,11 +190,7 @@ fn build_tree(
         indices
     };
     let initial_counts = root_sibling_counts(&children, &child_indices, options.batch_attributes);
-    let branches = if options.parallelism > 1 && child_indices.len() > 1 && !include_internals {
-        build_branches_parallel(pid, &child_indices, &initial_counts, options)?
-    } else {
-        build_branches_serial(&children, &child_indices, &initial_counts, options)?
-    };
+    let branches = build_branches_serial(&children, &child_indices, &initial_counts, options)?;
     let mut items = Vec::new();
     let mut internals = Vec::new();
     for (branch_items, branch_internals) in branches {
@@ -214,8 +206,6 @@ fn build_tree(
     let _ = app_name;
     Ok((items, internals))
 }
-
-type BranchResult = Result<Vec<MenuNode>, AppError>;
 
 fn root_sibling_counts(
     children: &CFArray<AXUIElement>,
@@ -278,96 +268,6 @@ fn build_branches_serial(
         .collect()
 }
 
-fn build_branches_parallel(
-    pid: i64,
-    indices: &[usize],
-    initial_counts: &[HashMap<String, usize>],
-    options: MenuOptions,
-) -> Result<Vec<(Vec<MenuNode>, Vec<InternalNode>)>, AppError> {
-    let worker_count = options.parallelism.min(indices.len()).max(1);
-    let mut output: Vec<Option<BranchResult>> = (0..indices.len()).map(|_| None).collect();
-    thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for chunk in indices
-            .iter()
-            .copied()
-            .enumerate()
-            .collect::<Vec<_>>()
-            .chunks((indices.len() + worker_count - 1) / worker_count)
-        {
-            // AXUIElement is intentionally not moved across threads. Each
-            // worker reacquires the application and branch by index.
-            let chunk = chunk.to_vec();
-            handles.push(scope.spawn(move || {
-                let mut results = Vec::new();
-                for (position, index) in chunk {
-                    let result = (|| {
-                        let app = AXUIElement::application(pid as _);
-                        let menu_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(
-                            kAXMenuBarAttribute,
-                        ));
-                        let menu_value = app
-                            .attribute(&menu_attr)
-                            .map_err(|err| map_ax_error(err, "menu bar unavailable"))?;
-                        let menu_bar = if menu_value.instance_of::<AXUIElement>() {
-                            unsafe {
-                                AXUIElement::wrap_under_get_rule(menu_value.as_CFTypeRef() as _)
-                            }
-                        } else {
-                            return Err(AppError::new(
-                                ErrorCode::MenuBarUnavailable,
-                                "menu bar unavailable",
-                            ));
-                        };
-                        let children = menu_bar
-                            .attribute(&AXAttribute::children())
-                            .map_err(|err| map_ax_error(err, "menu bar unavailable"))?;
-                        let child = children.get(index as isize).ok_or_else(|| {
-                            AppError::new(ErrorCode::MenuBarUnavailable, "menu child unavailable")
-                        })?;
-                        let mut items = Vec::new();
-                        let mut internals = Vec::new();
-                        let mut sibling_counts = initial_counts[index].clone();
-                        append_public(
-                            &child,
-                            &[],
-                            &mut sibling_counts,
-                            &mut items,
-                            &mut internals,
-                            options,
-                        );
-                        drop(internals);
-                        Ok(items)
-                    })();
-                    results.push((position, result));
-                }
-                results
-            }));
-        }
-        for handle in handles {
-            for (position, result) in handle.join().unwrap_or_else(|_| {
-                vec![(
-                    0,
-                    Err(AppError::new(
-                        ErrorCode::MenuBarUnavailable,
-                        "menu worker panicked",
-                    )),
-                )]
-            }) {
-                output[position] = Some(result);
-            }
-        }
-    });
-    output
-        .into_iter()
-        .map(|result| {
-            result
-                .expect("parallel menu branch missing")
-                .map(|items| (items, Vec::new()))
-        })
-        .collect()
-}
-
 fn append_public(
     element: &AXUIElement,
     ancestors: &[String],
@@ -415,7 +315,6 @@ fn append_public(
         title.as_str()
     };
     let enabled = attrs.enabled.unwrap_or(true);
-    let action_supported = action_supported(element);
     let base = format!(
         "menu_{}",
         slug(
@@ -438,7 +337,10 @@ fn append_public(
     let mark = attrs.mark.filter(|s| !s.is_empty());
     let mut child_nodes = Vec::new();
     let mut child_counts = HashMap::new();
-    if let Some(children) = children(element) {
+    // Fetch children once. The same snapshot determines traversal, submenu
+    // classification, and early-prune omission metadata.
+    let child_elements = children(element);
+    if let Some(children) = child_elements.as_ref() {
         let limit = child_limit(children.len(), options.early_prune);
         for (index, child) in children.iter().enumerate() {
             if index >= limit {
@@ -454,9 +356,15 @@ fn append_public(
             );
         }
     }
-    let kind = classify_kind(&title, enabled, action_supported, !child_nodes.is_empty());
+    let has_children = !child_nodes.is_empty();
+    let kind = classify_kind(&title, enabled, has_children);
+    let is_leaf = child_elements
+        .as_ref()
+        .map_or(true, |children| children.is_empty());
+    let action_supported = menu_item_action_supported(&role, enabled, is_leaf);
     let (truncated, omitted_count) = if options.early_prune {
-        let full_count = children(element)
+        let full_count = child_elements
+            .as_ref()
             .map(|value| value.len() as usize)
             .unwrap_or(0);
         if full_count > MENU_CHILD_TRUNCATION_THRESHOLD {
@@ -517,19 +425,18 @@ fn annotate_node(node: &mut MenuNode, all: bool) {
     }
 }
 
-fn classify_kind(
-    title: &str,
-    enabled: bool,
-    action_supported: bool,
-    has_children: bool,
-) -> &'static str {
+fn classify_kind(title: &str, enabled: bool, has_children: bool) -> &'static str {
     if has_children {
         "submenu"
-    } else if !title.trim().is_empty() && !enabled && !action_supported {
+    } else if !title.trim().is_empty() && !enabled {
         "group"
     } else {
         "item"
     }
+}
+
+fn menu_item_action_supported(role: &str, enabled: bool, is_leaf: bool) -> bool {
+    role == "AXMenuItem" && enabled && is_leaf
 }
 
 fn is_separator(role: &str, title: &str) -> bool {
@@ -692,15 +599,6 @@ fn attr_u32(element: &AXUIElement, name: &str) -> Option<u32> {
         .and_then(|n| n.to_i64().map(|v| v as u32))
 }
 
-fn action_supported(element: &AXUIElement) -> bool {
-    let Ok(actions) = element.action_names() else {
-        return false;
-    };
-    actions
-        .iter()
-        .any(|name| name.to_string() == kAXPressAction)
-}
-
 fn shortcut(element: &AXUIElement) -> Option<String> {
     let key = attr_string(element, kAXMenuItemCmdCharAttribute)
         .filter(|v| !v.is_empty())
@@ -855,7 +753,7 @@ fn slug(value: &str) -> String {
 mod tests {
     use super::{
         MENU_CHILD_TRUNCATION_THRESHOLD, annotate_node, child_limit, classify_kind,
-        format_shortcut, glyph_key_value, is_separator, slug,
+        format_shortcut, glyph_key_value, is_separator, menu_item_action_supported, slug,
     };
     use crate::platform::menu::MenuNode;
     use accessibility_sys::{
@@ -902,12 +800,17 @@ mod tests {
 
     #[test]
     fn classifies_noninteractive_titled_nodes_as_groups() {
-        assert_eq!(classify_kind("Halves", false, false, false), "group");
-        assert_eq!(
-            classify_kind("Move & Resize", false, false, true),
-            "submenu"
-        );
-        assert_eq!(classify_kind("Open", true, true, false), "item");
+        assert_eq!(classify_kind("Halves", false, false), "group");
+        assert_eq!(classify_kind("Move & Resize", false, true), "submenu");
+        assert_eq!(classify_kind("Open", true, false), "item");
+    }
+
+    #[test]
+    fn supports_actions_only_for_enabled_leaf_menu_items() {
+        assert!(menu_item_action_supported("AXMenuItem", true, true));
+        assert!(!menu_item_action_supported("AXMenuItem", false, true));
+        assert!(!menu_item_action_supported("AXMenuItem", true, false));
+        assert!(!menu_item_action_supported("AXMenuBarItem", true, true));
     }
 
     #[test]
