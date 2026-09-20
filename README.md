@@ -83,6 +83,24 @@ Repository layout:
 - Accessibility permission for `DesktopCtl.app`
 - Screen Recording permission for `DesktopCtl.app`
 
+## Installation
+
+DesktopCtl currently supports macOS on Apple Silicon only. Install the latest
+release with:
+
+```bash
+curl -fsSL https://desktopctl.com/install.sh | bash
+```
+
+The installer places the CLI at `~/.local/bin/desktopctl` and the app at
+`~/Applications/DesktopCtl.app`. It does not modify shell startup files; add
+`~/.local/bin` to your `PATH` if needed.
+
+Release builds carry a local ad-hoc signature, but the app is not Developer ID
+signed or notarized. The installer removes the `com.apple.quarantine` attribute
+only from the installed DesktopCtl app and CLI, so macOS can launch these local
+artifacts without changing global Gatekeeper or other system security settings.
+
 ## Quick Start
 
 ```bash

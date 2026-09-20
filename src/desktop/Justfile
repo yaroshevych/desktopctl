@@ -15,6 +15,8 @@ stable_app_dir := stable_runtime_dir + "/DesktopCtl.app"
 stable_cli_path := stable_app_dir + "/Contents/MacOS/desktopctl"
 stable_legacy_cli_path := stable_runtime_dir + "/desktopctl"
 manifest_path := workspace_dir + "/Cargo.toml"
+macos_release_stage_dir := dist_dir + "/release/desktopctl-darwin-arm64"
+macos_release_tarball := dist_dir + "/release/desktopctl-darwin-arm64.tar.gz"
 windows_msvc_target := "x86_64-pc-windows-msvc"
 windows_gnu_target := "x86_64-pc-windows-gnu"
 windows_arm64_target := "aarch64-pc-windows-gnullvm"
@@ -32,8 +34,8 @@ build:
   swift {{workspace_dir}}/scripts/gen_icns.swift {{contents_dir}}/Resources/AppIcon.icns
   just -f {{workspace_dir}}/Justfile build-swift-dialogs
   chmod +x {{macos_dir}}/desktopctl-app {{macos_dir}}/desktopctld {{cli_path}} {{macos_dir}}/desktopctl-dialogs
-  codesign --force --sign - {{cli_path}} >/dev/null 2>&1 || true
-  codesign --force --deep --sign - {{app_dir}} >/dev/null 2>&1 || true
+  codesign --force --sign - {{cli_path}} >/dev/null 2>&1
+  codesign --force --deep --sign - {{app_dir}} >/dev/null 2>&1
   echo "Built: {{app_dir}}"
   echo "Built: {{cli_path}}"
   echo "Linked: {{legacy_cli_path}} -> ./DesktopCtl.app/Contents/MacOS/desktopctl"
@@ -134,7 +136,17 @@ package-macos-arm64 tag:
   just -f {{workspace_dir}}/Justfile build
   mkdir -p {{dist_dir}}/release
   cd {{dist_dir}} && ditto -c -k --sequesterRsrc --keepParent DesktopCtl.app release/DesktopCtl-{{tag}}-macos-arm64.zip
+  rm -rf {{macos_release_stage_dir}} {{macos_release_tarball}}
+  mkdir -p {{macos_release_stage_dir}}
+  cp -R {{app_dir}} {{macos_release_stage_dir}}/DesktopCtl.app
+  cp {{cli_path}} {{macos_release_stage_dir}}/desktopctl
+  chmod +x {{macos_release_stage_dir}}/desktopctl
+  cd {{macos_release_stage_dir}} && COPYFILE_DISABLE=1 tar -czf ../desktopctl-darwin-arm64.tar.gz DesktopCtl.app desktopctl
+  tar -tzf {{macos_release_tarball}} >/dev/null
+  if ! tar -tzf {{macos_release_tarball}} | awk 'BEGIN { app = cli = bad = 0 } { if (++seen[$$0] > 1) bad = 1; if ($$0 == "DesktopCtl.app/") app++; if ($$0 == "desktopctl") cli++; if ($$0 ~ /^\// || $$0 ~ /(^|\/)\.\.(\/|$$)/ || $$0 ~ /(^|\/)\.\/(\/|$$)/) bad = 1; split($$0, parts, "/"); if (parts[1] != "DesktopCtl.app" && $$0 != "desktopctl") bad = 1 } END { exit !(app == 1 && cli == 1 && !bad) }'; then echo "invalid macOS release archive layout"; exit 1; fi
+  if ! tar -tvzf {{macos_release_tarball}} | awk '$$1 !~ /^[-d]/ { bad = 1 } END { exit bad }'; then echo "release archive contains a non-file or non-directory member"; exit 1; fi
   echo "Built: {{dist_dir}}/release/DesktopCtl-{{tag}}-macos-arm64.zip"
+  echo "Built: {{macos_release_tarball}}"
 
 package-windows-x64 tag target="x86_64-pc-windows-gnu":
   if [[ -z "{{tag}}" ]]; then echo "usage: just package-windows-x64 <tag> [target]"; exit 2; fi
@@ -172,7 +184,7 @@ release-all tag target="main" repo="yaroshevych/desktopctl":
   if [[ -z "{{tag}}" ]]; then echo "usage: just release-all <tag> [target] [repo]"; exit 2; fi
   if ! command -v gh >/dev/null 2>&1; then echo "gh CLI is required. Install with: brew install gh"; exit 1; fi
   just -f {{workspace_dir}}/Justfile package-release-assets "{{tag}}"
-  assets=( {{dist_dir}}/release/DesktopCtl-{{tag}}-*.zip ); \
+  assets=( {{dist_dir}}/release/DesktopCtl-{{tag}}-*.zip {{macos_release_tarball}} ); \
   if [[ ! -e "${assets[0]}" ]]; then echo "no release assets found in {{dist_dir}}/release"; exit 1; fi; \
   if gh release view "{{tag}}" --repo "{{repo}}" >/dev/null 2>&1; then \
     gh release upload "{{tag}}" "${assets[@]}" --repo "{{repo}}" --clobber; \
@@ -256,14 +268,13 @@ release-gates-strict:
 release tag target="main" repo="yaroshevych/desktopctl" demo_asset="":
   if [[ -z "{{tag}}" ]]; then echo "usage: just release <tag> [target] [repo] [demo_asset]"; exit 2; fi
   if ! command -v gh >/dev/null 2>&1; then echo "gh CLI is required. Install with: brew install gh"; exit 1; fi
-  just -f {{workspace_dir}}/Justfile build
-  cd {{dist_dir}} && ditto -c -k --sequesterRsrc --keepParent DesktopCtl.app "/tmp/DesktopCtl-{{tag}}-macos.zip"
-  assets=("/tmp/DesktopCtl-{{tag}}-macos.zip"); if [[ -n "{{demo_asset}}" ]]; then assets+=("{{demo_asset}}"); fi; gh release create "{{tag}}" "${assets[@]}" --repo "{{repo}}" --target "{{target}}" --title "{{tag}}" --generate-notes
+  just -f {{workspace_dir}}/Justfile package-macos-arm64 "{{tag}}"
+  assets=("{{dist_dir}}/release/DesktopCtl-{{tag}}-macos-arm64.zip" "{{macos_release_tarball}}"); if [[ -n "{{demo_asset}}" ]]; then assets+=("{{demo_asset}}"); fi; gh release create "{{tag}}" "${assets[@]}" --repo "{{repo}}" --target "{{target}}" --title "{{tag}}" --generate-notes
   echo "Release created:"
   echo "  tag: {{tag}}"
   echo "  repo: {{repo}}"
   echo "  target: {{target}}"
-  echo "  asset: /tmp/DesktopCtl-{{tag}}-macos.zip"
+  echo "  assets: {{dist_dir}}/release/DesktopCtl-{{tag}}-macos-arm64.zip and {{macos_release_tarball}}"
 
 check-cli-reference:
   "{{workspace_dir}}/scripts/dev/check_cli_reference.sh"
