@@ -7,6 +7,7 @@ pub(crate) fn list(
     active_window_id: Option<String>,
     system: bool,
     all: bool,
+    prefetched_active_window: Option<&platform::windowing::WindowInfo>,
 ) -> Result<serde_json::Value, AppError> {
     if !active_window {
         return Err(AppError::new(
@@ -14,17 +15,28 @@ pub(crate) fn list(
             "menu commands require --active-window",
         ));
     }
-    let guard = guards::prepare_active_window(true, active_window_id.as_deref())?;
-    let target = guard.bound_active_window.as_ref().ok_or_else(|| {
-        AppError::new(
-            ErrorCode::ActiveWindowRequired,
-            "menu commands require --active-window",
-        )
-    })?;
+    let target = if let Some(target) = prefetched_active_window {
+        #[cfg(target_os = "macos")]
+        if platform::ax::frontmost_app_pid() != Some(target.pid) {
+            return Err(AppError::new(
+                ErrorCode::MenuActionUnsupported,
+                "active window owner changed before menu list",
+            ));
+        }
+        target.clone()
+    } else {
+        let guard = guards::prepare_active_window(true, active_window_id.as_deref())?;
+        guard.bound_active_window.ok_or_else(|| {
+            AppError::new(
+                ErrorCode::ActiveWindowRequired,
+                "menu commands require --active-window",
+            )
+        })?
+    };
     let snapshot = platform::menu::list(target.pid, &target.app, system, all)?;
     Ok(json!({
         "active_window": true,
-        "active_window_id": guard.bound_active_window_id,
+        "active_window_id": target.window_ref,
         "app": target.app,
         "window_title": target.title,
         "pid": target.pid,

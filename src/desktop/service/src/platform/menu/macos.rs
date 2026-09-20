@@ -18,6 +18,7 @@ use core_foundation::{
 use desktop_core::error::{AppError, ErrorCode};
 use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use unicode_normalization::UnicodeNormalization;
 
 const MENU_CHILD_TRAVERSAL_LIMIT: usize = 15;
@@ -37,6 +38,108 @@ fn menu_options() -> MenuOptions {
     }
 }
 
+const MENU_PROFILE_SLOW_AX_MS: u128 = 2;
+const MENU_PROFILE_MAX_SAMPLES: usize = 20;
+
+struct MenuProfile {
+    started: Instant,
+    menu_bar_lookup: Duration,
+    root_children: Duration,
+    tree: Duration,
+    annotation: Duration,
+    attrs_calls: usize,
+    batch_attrs_calls: usize,
+    scalar_attrs_calls: usize,
+    attrs_time: Duration,
+    children_calls: usize,
+    children_time: Duration,
+    visited_nodes: usize,
+    output_nodes: usize,
+    omitted_nodes: usize,
+    samples: Vec<String>,
+}
+
+impl MenuProfile {
+    fn from_env() -> Option<Self> {
+        (std::env::var("DESKTOPCTL_MENU_PROFILE").ok().as_deref() == Some("1")).then(|| Self {
+            started: Instant::now(),
+            menu_bar_lookup: Duration::ZERO,
+            root_children: Duration::ZERO,
+            tree: Duration::ZERO,
+            annotation: Duration::ZERO,
+            attrs_calls: 0,
+            batch_attrs_calls: 0,
+            scalar_attrs_calls: 0,
+            attrs_time: Duration::ZERO,
+            children_calls: 0,
+            children_time: Duration::ZERO,
+            visited_nodes: 0,
+            output_nodes: 0,
+            omitted_nodes: 0,
+            samples: Vec::new(),
+        })
+    }
+
+    fn record_ax(&mut self, operation: &str, elapsed: Duration, path: &str) {
+        if elapsed.as_millis() < MENU_PROFILE_SLOW_AX_MS
+            || self.samples.len() >= MENU_PROFILE_MAX_SAMPLES
+        {
+            return;
+        }
+        self.samples.push(format!(
+            "op={operation} ms={:.1} path={}",
+            elapsed.as_secs_f64() * 1000.0,
+            safe_profile_label(path),
+        ));
+    }
+
+    fn phase(name: &str, elapsed: Duration) {
+        crate::trace::log(format!(
+            "menu_profile:phase name={name} ms={:.1}",
+            elapsed.as_secs_f64() * 1000.0
+        ));
+    }
+
+    fn finish(self) {
+        crate::trace::log(format!(
+            "menu_profile:summary total_ms={:.1} tree_ms={:.1} annotate_ms={:.1} nodes={} visited={} omitted={} attrs={} batch_attrs={} scalar_attrs={} attrs_ms={:.1} children={} children_ms={:.1} samples={}",
+            self.started.elapsed().as_secs_f64() * 1000.0,
+            self.tree.as_secs_f64() * 1000.0,
+            self.annotation.as_secs_f64() * 1000.0,
+            self.output_nodes,
+            self.visited_nodes,
+            self.omitted_nodes,
+            self.attrs_calls,
+            self.batch_attrs_calls,
+            self.scalar_attrs_calls,
+            self.attrs_time.as_secs_f64() * 1000.0,
+            self.children_calls,
+            self.children_time.as_secs_f64() * 1000.0,
+            self.samples.len(),
+        ));
+        for sample in self.samples {
+            crate::trace::log(format!("menu_profile:slow_ax {sample}"));
+        }
+    }
+}
+
+fn safe_profile_label(value: &str) -> String {
+    let mut label = value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .map(|ch| if ch == '=' { '_' } else { ch })
+        .collect::<String>();
+    if label.len() > 100 {
+        label.truncate(100);
+        label.push('…');
+    }
+    if label.is_empty() {
+        "<root>".to_string()
+    } else {
+        label
+    }
+}
+
 #[derive(Clone)]
 struct InternalNode {
     id: String,
@@ -52,12 +155,31 @@ struct InternalNode {
 pub fn list(pid: i64, app_name: &str, system: bool, all: bool) -> Result<MenuSnapshot, AppError> {
     let mut options = menu_options();
     options.early_prune &= !all;
-    let (items, _) = build_tree(pid, app_name, system, options)?;
+    let mut profile = MenuProfile::from_env();
+    if profile.is_some() {
+        crate::trace::log(format!(
+            "menu_profile:start pid={pid} system={system} all={all}"
+        ));
+    }
+    let tree_started = profile.as_ref().map(|_| Instant::now());
+    let (items, _) = build_tree(pid, app_name, system, options, &mut profile)?;
+    if let (Some(profile), Some(started)) = (profile.as_mut(), tree_started) {
+        profile.tree = started.elapsed();
+        MenuProfile::phase("tree", profile.tree);
+    }
     let mut items = items;
+    let annotation_started = profile.as_ref().map(|_| Instant::now());
     if !options.early_prune {
         for item in &mut items {
-            annotate_node(item, all);
+            annotate_node(item, all, &mut profile);
         }
+    }
+    if let (Some(profile), Some(started)) = (profile.as_mut(), annotation_started) {
+        profile.annotation = started.elapsed();
+        MenuProfile::phase("annotation", profile.annotation);
+    }
+    if let Some(profile) = profile {
+        profile.finish();
     }
     Ok(MenuSnapshot { items })
 }
@@ -73,7 +195,8 @@ pub fn click(
     // A click must always be able to resolve an item omitted from a bounded
     // list response.
     options.early_prune = false;
-    let (_, internals) = build_tree(pid, app_name, true, options)?;
+    let mut no_profile = None;
+    let (_, internals) = build_tree(pid, app_name, true, options, &mut no_profile)?;
     let matches: Vec<&InternalNode> = if let Some(id) = id {
         internals.iter().filter(|node| node.id == id).collect()
     } else {
@@ -150,6 +273,7 @@ fn build_tree(
     app_name: &str,
     include_system: bool,
     options: MenuOptions,
+    profile: &mut Option<MenuProfile>,
 ) -> Result<(Vec<MenuNode>, Vec<InternalNode>), AppError> {
     if pid <= 0 {
         return Err(AppError::new(
@@ -159,9 +283,15 @@ fn build_tree(
     }
     let app = AXUIElement::application(pid as _);
     let menu_attr = AXAttribute::<CFType>::new(&CFString::from_static_string(kAXMenuBarAttribute));
+    let menu_started = profile.as_ref().map(|_| Instant::now());
     let menu_value = app
         .attribute(&menu_attr)
         .map_err(|err| map_ax_error(err, "menu bar unavailable"))?;
+    if let (Some(profile), Some(started)) = (profile.as_mut(), menu_started) {
+        profile.menu_bar_lookup = started.elapsed();
+        MenuProfile::phase("menu_bar_lookup", profile.menu_bar_lookup);
+        profile.record_ax("menu_bar_lookup", profile.menu_bar_lookup, "<app>");
+    }
     if !menu_value.instance_of::<AXUIElement>() {
         return Err(AppError::new(
             ErrorCode::MenuBarUnavailable,
@@ -169,9 +299,15 @@ fn build_tree(
         ));
     }
     let menu_bar = unsafe { AXUIElement::wrap_under_get_rule(menu_value.as_CFTypeRef() as _) };
+    let root_started = profile.as_ref().map(|_| Instant::now());
     let children = menu_bar
         .attribute(&AXAttribute::children())
         .map_err(|err| map_ax_error(err, "menu bar unavailable"))?;
+    if let (Some(profile), Some(started)) = (profile.as_mut(), root_started) {
+        profile.root_children = started.elapsed();
+        MenuProfile::phase("root_children", profile.root_children);
+        profile.record_ax("root_children", profile.root_children, "<menu_bar>");
+    }
     let child_indices: Vec<usize> = if include_system {
         (0..children.len() as usize).collect()
     } else {
@@ -189,8 +325,10 @@ fn build_tree(
         }
         indices
     };
-    let initial_counts = root_sibling_counts(&children, &child_indices, options.batch_attributes);
-    let branches = build_branches_serial(&children, &child_indices, &initial_counts, options)?;
+    let initial_counts =
+        root_sibling_counts(&children, &child_indices, options.batch_attributes, profile);
+    let branches =
+        build_branches_serial(&children, &child_indices, &initial_counts, options, profile)?;
     let mut items = Vec::new();
     let mut internals = Vec::new();
     for (branch_items, branch_internals) in branches {
@@ -211,6 +349,7 @@ fn root_sibling_counts(
     children: &CFArray<AXUIElement>,
     indices: &[usize],
     batch_attributes: bool,
+    profile: &mut Option<MenuProfile>,
 ) -> Vec<HashMap<String, usize>> {
     let mut counts = HashMap::new();
     let mut initial = vec![HashMap::new(); children.len() as usize];
@@ -219,7 +358,7 @@ fn root_sibling_counts(
             continue;
         };
         initial[*index] = counts.clone();
-        let attrs = read_node_attributes(&child, batch_attributes);
+        let attrs = read_node_attributes(&child, batch_attributes, profile, "<root>");
         let role = attrs.role.as_deref().unwrap_or("AXUnknown");
         let title = attrs.title.as_deref().unwrap_or_default();
         if is_separator(role, title) {
@@ -245,6 +384,7 @@ fn build_branches_serial(
     indices: &[usize],
     initial_counts: &[HashMap<String, usize>],
     options: MenuOptions,
+    profile: &mut Option<MenuProfile>,
 ) -> Result<Vec<(Vec<MenuNode>, Vec<InternalNode>)>, AppError> {
     indices
         .iter()
@@ -255,6 +395,11 @@ fn build_branches_serial(
             let mut items = Vec::new();
             let mut internals = Vec::new();
             let mut sibling_counts = initial_counts[*index].clone();
+            let branch_started = profile.as_ref().map(|_| Instant::now());
+            let attrs_before = profile.as_ref().map_or(0, |profile| profile.attrs_calls);
+            let children_before = profile
+                .as_ref()
+                .map_or(0, |profile| profile.children_calls);
             append_public(
                 &child,
                 &[],
@@ -262,7 +407,21 @@ fn build_branches_serial(
                 &mut items,
                 &mut internals,
                 options,
+                profile,
             );
+            if let (Some(profile), Some(started)) = (profile.as_mut(), branch_started) {
+                let title = items
+                    .first()
+                    .map(|item| safe_profile_label(&item.title))
+                    .unwrap_or_else(|| format!("<branch_{index}>"));
+                crate::trace::log(format!(
+                    "menu_profile:branch index={index} title={title} ms={:.1} nodes={} attrs={} children={}",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    internals.len(),
+                    profile.attrs_calls.saturating_sub(attrs_before),
+                    profile.children_calls.saturating_sub(children_before),
+                ));
+            }
             Ok((items, internals))
         })
         .collect()
@@ -275,14 +434,19 @@ fn append_public(
     output: &mut Vec<MenuNode>,
     internals: &mut Vec<InternalNode>,
     options: MenuOptions,
+    profile: &mut Option<MenuProfile>,
 ) {
-    let attrs = read_node_attributes(element, options.batch_attributes);
+    let path_hint = ancestors.join(" > ");
+    let attrs = read_node_attributes(element, options.batch_attributes, profile, &path_hint);
+    if let Some(profile) = profile.as_mut() {
+        profile.visited_nodes += 1;
+    }
     let role = attrs
         .role
         .clone()
         .unwrap_or_else(|| "AXUnknown".to_string());
     if role == "AXMenu" {
-        if let Some(children) = children(element) {
+        if let Some(children) = children(element, profile, &path_hint) {
             let limit = child_limit(children.len(), options.early_prune);
             for (index, child) in children.iter().enumerate() {
                 if index >= limit {
@@ -295,6 +459,7 @@ fn append_public(
                     output,
                     internals,
                     options,
+                    profile,
                 );
             }
         }
@@ -339,7 +504,7 @@ fn append_public(
     let mut child_counts = HashMap::new();
     // Fetch children once. The same snapshot determines traversal, submenu
     // classification, and early-prune omission metadata.
-    let child_elements = children(element);
+    let child_elements = children(element, profile, &path);
     if let Some(children) = child_elements.as_ref() {
         let limit = child_limit(children.len(), options.early_prune);
         for (index, child) in children.iter().enumerate() {
@@ -353,6 +518,7 @@ fn append_public(
                 &mut child_nodes,
                 internals,
                 options,
+                profile,
             );
         }
     }
@@ -375,6 +541,10 @@ fn append_public(
     } else {
         (false, 0)
     };
+    if let Some(profile) = profile.as_mut() {
+        profile.output_nodes += 1;
+        profile.omitted_nodes += omitted_count;
+    }
     let node = InternalNode {
         id: id.clone(),
         title: title.clone(),
@@ -410,18 +580,21 @@ fn child_limit(child_count: isize, early_prune: bool) -> usize {
     }
 }
 
-fn annotate_node(node: &mut MenuNode, all: bool) {
+fn annotate_node(node: &mut MenuNode, all: bool, profile: &mut Option<MenuProfile>) {
     let full_count = node.children.len();
     if !all && full_count > 20 {
         node.children.truncate(15);
         node.truncated = true;
         node.omitted_count = full_count - 15;
+        if let Some(profile) = profile.as_mut() {
+            profile.omitted_nodes += node.omitted_count;
+        }
     } else {
         node.truncated = false;
         node.omitted_count = 0;
     }
     for child in &mut node.children {
-        annotate_node(child, all);
+        annotate_node(child, all, profile);
     }
 }
 
@@ -451,9 +624,24 @@ fn ancestors_with(ancestors: &[String], title: &str) -> Vec<String> {
     out
 }
 
-fn children(element: &AXUIElement) -> Option<CFArray<AXUIElement>> {
+fn children(
+    element: &AXUIElement,
+    profile: &mut Option<MenuProfile>,
+    path: &str,
+) -> Option<CFArray<AXUIElement>> {
     let attr = AXAttribute::children();
-    element.attribute(&attr).ok()
+    if profile.is_none() {
+        return element.attribute(&attr).ok();
+    }
+    let started = Instant::now();
+    let result = element.attribute(&attr).ok();
+    let elapsed = started.elapsed();
+    if let Some(profile) = profile.as_mut() {
+        profile.children_calls += 1;
+        profile.children_time += elapsed;
+        profile.record_ax("children", elapsed, path);
+    }
+    result
 }
 
 #[derive(Default)]
@@ -497,9 +685,22 @@ fn batch_attribute_array() -> CFArrayRef {
     })
 }
 
-fn read_node_attributes(element: &AXUIElement, batch: bool) -> NodeAttributes {
+fn read_node_attributes(
+    element: &AXUIElement,
+    batch: bool,
+    profile: &mut Option<MenuProfile>,
+    path: &str,
+) -> NodeAttributes {
+    let started = profile.as_ref().map(|_| Instant::now());
     if batch {
         if let Some(values) = batch_node_attributes(element) {
+            if let (Some(profile), Some(started)) = (profile.as_mut(), started) {
+                let elapsed = started.elapsed();
+                profile.attrs_calls += 1;
+                profile.batch_attrs_calls += 1;
+                profile.attrs_time += elapsed;
+                profile.record_ax("batch_attributes", elapsed, path);
+            }
             return NodeAttributes {
                 role: values
                     .get(0)
@@ -531,7 +732,7 @@ fn read_node_attributes(element: &AXUIElement, batch: bool) -> NodeAttributes {
             };
         }
     }
-    NodeAttributes {
+    let attrs = NodeAttributes {
         role: attr_string(element, kAXRoleAttribute),
         title: attr_string(element, kAXTitleAttribute),
         enabled: attr_bool(element, kAXEnabledAttribute),
@@ -541,7 +742,15 @@ fn read_node_attributes(element: &AXUIElement, batch: bool) -> NodeAttributes {
         cmd_modifiers: attr_u32(element, kAXMenuItemCmdModifiersAttribute),
         cmd_virtual_key: attr_u32(element, kAXMenuItemCmdVirtualKeyAttribute),
         mark: attr_string(element, kAXMenuItemMarkCharAttribute),
+    };
+    if let (Some(profile), Some(started)) = (profile.as_mut(), started) {
+        let elapsed = started.elapsed();
+        profile.attrs_calls += 1;
+        profile.scalar_attrs_calls += 1;
+        profile.attrs_time += elapsed;
+        profile.record_ax("scalar_attributes", elapsed, path);
     }
+    attrs
 }
 
 fn batch_node_attributes(element: &AXUIElement) -> Option<Vec<Option<CFType>>> {
@@ -752,14 +961,49 @@ fn slug(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MENU_CHILD_TRUNCATION_THRESHOLD, annotate_node, child_limit, classify_kind,
-        format_shortcut, glyph_key_value, is_separator, menu_item_action_supported, slug,
+        MENU_CHILD_TRUNCATION_THRESHOLD, MENU_PROFILE_MAX_SAMPLES, MenuProfile, annotate_node,
+        child_limit, classify_kind, format_shortcut, glyph_key_value, is_separator,
+        menu_item_action_supported, safe_profile_label, slug,
     };
     use crate::platform::menu::MenuNode;
     use accessibility_sys::{
         kAXMenuItemModifierControl, kAXMenuItemModifierNoCommand, kAXMenuItemModifierOption,
         kAXMenuItemModifierShift,
     };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn profile_labels_are_bounded_and_log_safe() {
+        let label = safe_profile_label("a=b\n\t".repeat(40).as_str());
+        assert!(!label.contains('='));
+        assert!(!label.chars().any(char::is_control));
+        assert!(label.chars().count() <= 101);
+    }
+
+    #[test]
+    fn profile_slow_samples_are_bounded() {
+        let mut profile = MenuProfile {
+            started: Instant::now(),
+            menu_bar_lookup: Duration::ZERO,
+            root_children: Duration::ZERO,
+            tree: Duration::ZERO,
+            annotation: Duration::ZERO,
+            attrs_calls: 0,
+            batch_attrs_calls: 0,
+            scalar_attrs_calls: 0,
+            attrs_time: Duration::ZERO,
+            children_calls: 0,
+            children_time: Duration::ZERO,
+            visited_nodes: 0,
+            output_nodes: 0,
+            omitted_nodes: 0,
+            samples: Vec::new(),
+        };
+        for _ in 0..(MENU_PROFILE_MAX_SAMPLES + 5) {
+            profile.record_ax("children", Duration::from_millis(3), "item");
+        }
+        assert_eq!(profile.samples.len(), MENU_PROFILE_MAX_SAMPLES);
+    }
 
     #[test]
     fn formats_shortcuts_with_inverted_command_modifier() {
@@ -853,13 +1097,14 @@ mod tests {
     #[test]
     fn truncates_children_at_boundary_and_recurses() {
         let mut twenty = node_with_children(20);
-        annotate_node(&mut twenty, false);
+        let mut no_profile = None;
+        annotate_node(&mut twenty, false, &mut no_profile);
         assert_eq!(twenty.children.len(), 20);
         assert!(!twenty.truncated);
         assert_eq!(twenty.omitted_count, 0);
 
         let mut twenty_one = node_with_children(21);
-        annotate_node(&mut twenty_one, false);
+        annotate_node(&mut twenty_one, false, &mut no_profile);
         assert_eq!(twenty_one.children.len(), 15);
         assert!(twenty_one.truncated);
         assert_eq!(twenty_one.omitted_count, 6);
@@ -878,11 +1123,12 @@ mod tests {
     #[test]
     fn all_keeps_full_recursive_children() {
         let mut node = node_with_children(21);
+        let mut no_profile = None;
         node.children[0].children = (0..21)
             .map(|i| node_with_children(i).children)
             .flatten()
             .collect();
-        annotate_node(&mut node, true);
+        annotate_node(&mut node, true, &mut no_profile);
         assert_eq!(node.children.len(), 21);
         assert!(!node.truncated);
         assert_eq!(node.omitted_count, 0);

@@ -372,6 +372,34 @@ pub(super) fn resolve_active_window_for_guard(
     Ok(Some(target))
 }
 
+pub(super) fn resolve_menu_list_target(
+    active_window_id: Option<&str>,
+) -> Result<Option<platform::windowing::WindowInfo>, AppError> {
+    if let Some(reference) = active_window_id {
+        #[cfg(target_os = "macos")]
+        if let Some(target) = resolve_cached_frontmost_menu_target(reference) {
+            trace::log("active_window_id_match:menu_cached_ref_fastpath");
+            return Ok(Some(target));
+        }
+    }
+    resolve_active_window_for_guard(true, active_window_id)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_cached_frontmost_menu_target(
+    reference: &str,
+) -> Option<platform::windowing::WindowInfo> {
+    let mut target = window_refs::resolve_window_for_ref(reference)?;
+    if !is_targetable_window(&target) {
+        return None;
+    }
+    if crate::platform::ax::frontmost_app_pid() != Some(target.pid) {
+        return None;
+    }
+    target.frontmost = true;
+    Some(target)
+}
+
 pub(super) fn attach_window_ref_to_payload(payload: &mut desktop_core::protocol::TokenizePayload) {
     let Some(first) = payload.windows.first_mut() else {
         return;

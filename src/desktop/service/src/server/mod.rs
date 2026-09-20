@@ -76,7 +76,7 @@ use window_context::{
     collect_tokenize_new_window_hint_snapshot,
     collect_tokenize_new_window_hint_snapshot_from_windows, enrich_window_refs,
     explicit_background_capture_window_id, remap_tokenize_window_id_field,
-    resolve_active_window_for_guard, resolve_active_window_target,
+    resolve_active_window_for_guard, resolve_active_window_target, resolve_menu_list_target,
 };
 
 #[cfg(target_os = "macos")]
@@ -223,6 +223,10 @@ pub(crate) struct TokenizeHintSnapshot {
 #[derive(Debug, Clone, Default)]
 struct RequestContext {
     frontmost: Option<window_target::FrontmostSnapshot>,
+    // Menu list is a read-only command, but it still requires an active-window
+    // binding. Resolve that binding once during request setup and reuse it at
+    // execution time instead of enumerating the frontmost app twice.
+    menu_list_target: Option<platform::windowing::WindowInfo>,
     human: Option<HumanOptions>,
 }
 
@@ -484,17 +488,57 @@ fn handle_client(mut stream: IpcStream) -> Result<(), AppError> {
         "client:request_start request_id={} command={}",
         request_id, command_name
     ));
-    let request_context = RequestContext {
+    let mut request_context = RequestContext {
         frontmost: if platform_runtime::command_requires_frontmost_snapshot(&command) {
             Some(window_target::resolve_frontmost_snapshot())
         } else {
             None
         },
+        menu_list_target: None,
         human: request.options.human,
     };
-    let response = if let Err(err) = enforce_gui_ops_enabled(&command) {
+    let gui_ops_error = enforce_gui_ops_enabled(&command).err();
+    let menu_target_started = matches!(
+        &command,
+        Command::MenuList {
+            active_window: true,
+            ..
+        }
+    )
+    .then(Instant::now);
+    let menu_target_result = if gui_ops_error.is_none() {
+        if let Command::MenuList {
+            active_window: true,
+            active_window_id,
+            ..
+        } = &command
+        {
+            resolve_menu_list_target(active_window_id.as_deref())
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    };
+    if let Some(started) = menu_target_started {
+        trace::log(format!(
+            "client:menu_target_resolve request_id={} elapsed_ms={}",
+            request_id,
+            started.elapsed().as_millis()
+        ));
+    }
+    if let Ok(Some(target)) = &menu_target_result {
+        request_context.menu_list_target = Some(target.clone());
+    }
+    let response = if let Some(err) = gui_ops_error {
         trace::log(format!(
             "client:gui_disabled_block request_id={} command={} msg={}",
+            request_id, command_name, err.message
+        ));
+        ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
+    } else if let Err(err) = menu_target_result {
+        trace::log(format!(
+            "client:menu_target_block request_id={} command={} msg={}",
             request_id, command_name, err.message
         ));
         ResponseEnvelope::from_error(request_id.clone(), command_name.clone(), err)
@@ -1054,7 +1098,13 @@ fn execute_with_context(
             active_window_id,
             system,
             all,
-        } => commands::menu::list(active_window, active_window_id, system, all),
+        } => commands::menu::list(
+            active_window,
+            active_window_id,
+            system,
+            all,
+            request_context.menu_list_target.as_ref(),
+        ),
         Command::MenuClick {
             id,
             path,

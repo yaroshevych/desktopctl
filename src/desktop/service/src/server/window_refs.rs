@@ -15,6 +15,9 @@ const WINDOW_APP_PREFIX_MAX_LEN: usize = 32;
 struct Entry {
     pid: i64,
     window_id: String,
+    // Keep the last validated metadata with the opaque ref so menu-list can
+    // bind a known target without re-enumerating the WindowServer.
+    window: WindowInfo,
     touched_at: Instant,
 }
 
@@ -74,6 +77,9 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
     let native_key = key(window.pid, &window.id);
     if let Some(existing) = store.by_key.get(&native_key).cloned() {
         if let Some(entry) = store.by_ref.get_mut(&existing) {
+            let mut snapshot = window.clone();
+            snapshot.window_ref = Some(existing.clone());
+            entry.window = snapshot;
             entry.touched_at = Instant::now();
         }
         return existing;
@@ -89,12 +95,15 @@ pub(crate) fn issue_for_window(window: &WindowInfo) -> String {
         }
         attempt = attempt.wrapping_add(1);
     };
+    let mut snapshot = window.clone();
+    snapshot.window_ref = Some(ref_id.clone());
     store.by_key.insert(native_key, ref_id.clone());
     store.by_ref.insert(
         ref_id.clone(),
         Entry {
             pid: window.pid,
             window_id: window.id.clone(),
+            window: snapshot,
             touched_at: Instant::now(),
         },
     );
@@ -111,6 +120,18 @@ pub(crate) fn resolve_native_for_ref(reference: &str) -> Option<(i64, String)> {
     let entry = store.by_ref.get_mut(trimmed)?;
     entry.touched_at = Instant::now();
     Some((entry.pid, entry.window_id.clone()))
+}
+
+pub(crate) fn resolve_window_for_ref(reference: &str) -> Option<WindowInfo> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut store = lock_store();
+    purge_expired(&mut store);
+    let entry = store.by_ref.get_mut(trimmed)?;
+    entry.touched_at = Instant::now();
+    Some(entry.window.clone())
 }
 
 fn normalized_app_prefix(app: &str) -> String {
@@ -223,5 +244,17 @@ mod tests {
         let issued = issue_for_window(&window);
         let resolved = resolve_native_for_ref(&issued);
         assert_eq!(resolved, Some((123, "native-1".to_string())));
+    }
+
+    #[test]
+    fn resolves_cached_window_metadata_from_ref() {
+        let window = sample_window("System Settings");
+        let issued = issue_for_window(&window);
+        let resolved = resolve_window_for_ref(&issued).expect("issued ref should resolve");
+        assert_eq!(resolved.pid, window.pid);
+        assert_eq!(resolved.id, window.id);
+        assert_eq!(resolved.app, window.app);
+        assert_eq!(resolved.title, window.title);
+        assert_eq!(resolved.window_ref.as_deref(), Some(issued.as_str()));
     }
 }

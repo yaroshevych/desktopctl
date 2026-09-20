@@ -76,6 +76,17 @@ fn start_overlay_watch_tracker() {
 
 #[cfg(target_os = "macos")]
 pub(super) fn command_requires_frontmost_snapshot(command: &Command) -> bool {
+    if matches!(
+        command,
+        Command::MenuList {
+            active_window: true,
+            ..
+        }
+    ) {
+        // The request context resolves and binds the active menu window once;
+        // use its app for policy instead of a second frontmost query.
+        return false;
+    }
     if matches!(command, Command::ScreenTokenize { .. }) {
         // Tokenize resolves the active window in its own execution path.
         // Avoid expensive pre-execute frontmost snapshot here.
@@ -101,9 +112,15 @@ pub(super) fn request_frontmost_bounds(
 
 pub(super) fn request_frontmost_app(context: &RequestContext) -> Option<String> {
     context
-        .frontmost
+        .menu_list_target
         .as_ref()
-        .and_then(|snapshot| snapshot.app.clone())
+        .map(|target| target.app.clone())
+        .or_else(|| {
+            context
+                .frontmost
+                .as_ref()
+                .and_then(|snapshot| snapshot.app.clone())
+        })
         .or_else(window_target::frontmost_app_name)
 }
 
@@ -125,7 +142,10 @@ pub(super) fn begin_command(command: &Command, context: &RequestContext) -> Comm
             None,
             Duration::from_millis(OVERLAY_SCREEN_CAPTURE_MODE_LOCK_MS),
         );
-    } else if !matches!(command, Command::ScreenTokenize { .. }) {
+    } else if !matches!(
+        command,
+        Command::ScreenTokenize { .. } | Command::MenuList { .. }
+    ) {
         if let Some(bounds) = request_frontmost_bounds(context) {
             let _ = overlay::watch_mode_changed(overlay::WatchMode::WindowMode, Some(bounds));
         }
