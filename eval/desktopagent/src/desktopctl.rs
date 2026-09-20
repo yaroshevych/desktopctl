@@ -66,9 +66,8 @@ impl DesktopCtl {
                 "--active-window".into(),
                 self.active_window.clone().unwrap(),
             ]);
-            if let Ok(menu_raw) = self.invoke(&menu_args) {
-                observation.menus = extract_menus(&menu_raw);
-            }
+            let menu_raw = self.invoke(&menu_args)?;
+            observation.menus = extract_menus(&menu_raw);
         }
         Ok(observation)
     }
@@ -92,13 +91,7 @@ impl DesktopCtl {
                 let window = self.active_window.as_ref().ok_or_else(|| {
                     DesktopCtlError::Failed("menu action has no active window".into())
                 })?;
-                self.invoke(&[
-                    "--json".into(),
-                    "window".into(),
-                    "focus".into(),
-                    "--id".into(),
-                    window.clone(),
-                ])?;
+                self.focus_window(window)?;
                 args.extend([
                     "menu".into(),
                     "click".into(),
@@ -150,6 +143,27 @@ impl DesktopCtl {
             args.extend(["--active-window".into(), window.clone()]);
         }
         self.invoke(&args)
+    }
+
+    fn focus_window(&self, window: &str) -> Result<(), DesktopCtlError> {
+        let args = [
+            "--json".into(),
+            "window".into(),
+            "focus".into(),
+            "--id".into(),
+            window.to_owned(),
+        ];
+        let mut last_error = None;
+        for _ in 0..3 {
+            match self.invoke(&args) {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| DesktopCtlError::Failed("window focus failed".into())))
     }
 
     fn invoke(&self, args: &[String]) -> Result<Value, DesktopCtlError> {

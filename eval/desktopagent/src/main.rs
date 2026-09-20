@@ -46,7 +46,7 @@ struct RunArgs {
     json: bool,
     #[arg(long, default_value_t = 15)]
     max_steps: u32,
-    #[arg(long, default_value_t = 0.40)]
+    #[arg(long, default_value_t = 0.30)]
     confidence_threshold: f64,
     #[arg(long, default_value_t = 10)]
     desktopctl_timeout: u64,
