@@ -2,6 +2,13 @@ use std::collections::HashSet;
 
 use crate::model::{ActionKind, Candidate, Element, Observation};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactMenuMatch {
+    None,
+    Ambiguous,
+    Unique,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CandidateContext {
     pub previously_clicked_editable: bool,
@@ -31,6 +38,95 @@ pub fn extract_literals(goal: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Normalize the small, user-visible part of a menu label used by the local
+/// fast path. In particular, macOS often renders a trailing ellipsis as the
+/// single Unicode `…` character while a goal uses three ASCII dots.
+pub fn normalize_menu_text(text: &str) -> String {
+    text.replace('…', "")
+        .replace("...", "")
+        .chars()
+        .map(|character| {
+            if character == '>' {
+                '>'
+            } else if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split('>')
+        .map(|part| part.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" > ")
+        .trim()
+        .to_string()
+}
+
+fn explicit_menu_request(goal: &str) -> Option<String> {
+    let goal = goal.trim().trim_end_matches(['.', '!', '?']);
+    ["click ", "choose ", "select ", "open "]
+        .iter()
+        .find_map(|prefix| {
+            goal.get(..prefix.len())
+                .filter(|head| head.eq_ignore_ascii_case(prefix))
+                .and_then(|_| goal.get(prefix.len()..))
+                .map(str::trim)
+        })
+        .filter(|request| !request.is_empty())
+        .map(normalize_menu_text)
+        .filter(|request| !request.is_empty())
+}
+
+fn menu_is_safe(menu: &crate::model::MenuItem) -> bool {
+    [
+        "delete", "erase", "remove", "purchase", "pay", "send", "submit",
+    ]
+    .iter()
+    .all(|word| !menu.title.to_ascii_lowercase().contains(word))
+}
+
+fn menu_candidate(menu: &crate::model::MenuItem) -> Candidate {
+    let mut candidate = Candidate::action(
+        ActionKind::Menu,
+        format!("Select menu item {:?}.", menu.path),
+        format!(
+            "Select the available enabled menu command {:?}. Its title matches words explicitly requested in the user's goal. Choose this when invoking that named command advances the goal.",
+            menu.path
+        ),
+    );
+    candidate.id = "a0".into();
+    candidate.target = Some(menu.id.clone());
+    candidate
+}
+
+/// Return a candidate only when an explicit menu request has one safe exact
+/// match. Ambiguous labels deliberately never guess.
+pub fn exact_menu_match(
+    goal: &str,
+    observation: &Observation,
+) -> (ExactMenuMatch, Option<Candidate>) {
+    let Some(request) = explicit_menu_request(goal) else {
+        return (ExactMenuMatch::None, None);
+    };
+    let matches = observation
+        .menus
+        .iter()
+        .filter(|menu| menu.enabled && menu.action_supported && menu_is_safe(menu))
+        .filter(|menu| {
+            let title = normalize_menu_text(&menu.title);
+            let path = normalize_menu_text(&menu.path);
+            let leaf = path.rsplit(" > ").next().unwrap_or(&path);
+            request == title || request == path || request == leaf
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [menu] => (ExactMenuMatch::Unique, Some(menu_candidate(menu))),
+        [] => (ExactMenuMatch::None, None),
+        _ => (ExactMenuMatch::Ambiguous, None),
+    }
 }
 
 pub fn generate(
@@ -157,16 +253,7 @@ pub fn generate(
         relevant_menus
     };
     for menu in menus {
-        let mut candidate = Candidate::action(
-            ActionKind::Menu,
-            format!("Select menu item {:?}.", menu.path),
-            format!(
-                "Select the available enabled menu command {:?}. Its title matches words explicitly requested in the user's goal. Choose this when invoking that named command advances the goal.",
-                menu.path
-            ),
-        );
-        candidate.target = Some(menu.id.clone());
-        add(candidate);
+        add(menu_candidate(menu));
     }
 
     let scroll_target = observation
@@ -416,5 +503,45 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|candidate| candidate.target.as_deref() == Some("reply")));
+    }
+
+    fn menu(id: &str, path: &str, title: &str) -> crate::model::MenuItem {
+        crate::model::MenuItem {
+            id: id.into(),
+            path: path.into(),
+            title: title.into(),
+            enabled: true,
+            action_supported: true,
+        }
+    }
+
+    #[test]
+    fn normalizes_menu_ellipsis_and_paths() {
+        assert_eq!(normalize_menu_text("Settings…"), "settings");
+        assert_eq!(normalize_menu_text("File > Settings..."), "file > settings");
+    }
+
+    #[test]
+    fn exact_menu_match_requires_a_unique_safe_action() {
+        let mut observation = Observation::default();
+        observation.menus = vec![menu("settings", "File > Settings", "Settings…")];
+        let (status, candidate) = exact_menu_match("Click Settings", &observation);
+        assert_eq!(status, ExactMenuMatch::Unique);
+        assert_eq!(
+            candidate.and_then(|item| item.target),
+            Some("settings".into())
+        );
+    }
+
+    #[test]
+    fn exact_menu_match_rejects_ambiguous_labels() {
+        let mut observation = Observation::default();
+        observation.menus = vec![
+            menu("one", "File > Settings", "Settings"),
+            menu("two", "View > Settings", "Settings…"),
+        ];
+        let (status, candidate) = exact_menu_match("Click Settings", &observation);
+        assert_eq!(status, ExactMenuMatch::Ambiguous);
+        assert!(candidate.is_none());
     }
 }

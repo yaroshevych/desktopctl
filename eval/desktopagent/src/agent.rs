@@ -8,10 +8,11 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::candidates::{generate, CandidateContext};
+use crate::candidates::{exact_menu_match, generate, CandidateContext, ExactMenuMatch};
 use crate::desktopctl::{focused_element_id, DesktopCtl, DesktopCtlError};
 use crate::jev::{JevClient, JevError};
 use crate::model::{ActionKind, Candidate, Observation, TerminalStatus};
+use serde_json::Value;
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -76,6 +77,21 @@ pub struct Agent {
     jev: JevClient,
     initial_context: Option<String>,
     run_id: String,
+}
+
+struct SpeculativeTiming {
+    menu_ms: u128,
+    tokenize_ms: Option<u128>,
+    jev_ms: u128,
+    path: &'static str,
+}
+
+struct SpeculativeDecision {
+    observation: Observation,
+    candidates: Vec<Candidate>,
+    decision: crate::model::JevDecision,
+    action_result: Option<Value>,
+    timing: SpeculativeTiming,
 }
 
 impl Agent {
@@ -150,10 +166,11 @@ impl Agent {
 
     pub fn step(&self, goal: &str) -> Result<RunResult, AgentError> {
         let started = Instant::now();
-        let observation = self.desktopctl.observe()?;
-        let context = CandidateContext::default();
-        let candidates = generate(goal, &observation, &context);
-        let decision = self.choose(goal, &observation, &candidates)?;
+        let selected = self.speculative_decision(goal, &CandidateContext::default(), &[], 0)?;
+        self.trace_speculative(0, &selected.timing);
+        let candidates = selected.candidates;
+        let decision = selected.decision;
+        let action_result = selected.action_result;
         let selected = find_candidate(&candidates, &decision.choice);
         self.trace_event(
             0,
@@ -174,7 +191,9 @@ impl Agent {
         if candidate.terminal {
             return Ok(self.terminal_result(candidate, 0, started));
         }
-        self.desktopctl.execute(candidate)?;
+        if action_result.is_none() {
+            self.desktopctl.execute(candidate)?;
+        }
         Ok(RunResult {
             status: "step".into(),
             message: format!("Executed {}.", candidate.description),
@@ -197,13 +216,16 @@ impl Agent {
             if started.elapsed() >= self.config.run_timeout {
                 return Ok(self.blocked(steps, started, "run_timeout"));
             }
-            let mut observation = self.desktopctl.observe()?;
+            let speculative = self.speculative_decision(goal, &previous, &history, steps)?;
+            self.trace_speculative(steps, &speculative.timing);
+            let mut observation = speculative.observation;
             if observation.focused_element_id.is_none() {
                 observation.focused_element_id = carried_focus.clone();
             }
             let current_fingerprint = fingerprint(&observation);
-            let mut candidates = generate(goal, &observation, &previous);
-            let decision = self.choose_with_history(goal, &observation, &candidates, &history)?;
+            let mut candidates = speculative.candidates;
+            let decision = speculative.decision;
+            let action_result = speculative.action_result;
             self.trace_event(
                 steps,
                 "decision",
@@ -243,7 +265,10 @@ impl Agent {
                     .or(candidate.literal.clone())
                     .unwrap_or_default()
             );
-            let action_result = self.desktopctl.execute(&candidate)?;
+            let action_result = match action_result {
+                Some(result) => result,
+                None => self.desktopctl.execute(&candidate)?,
+            };
             carried_focus = focused_element_id(&action_result);
             steps += 1;
             history.push(candidate.description.clone());
@@ -297,6 +322,106 @@ impl Agent {
                 criteria,
             )
             .map_err(AgentError::from)
+    }
+
+    fn speculative_decision(
+        &self,
+        goal: &str,
+        context: &CandidateContext,
+        history: &[String],
+        _step: u32,
+    ) -> Result<SpeculativeDecision, AgentError> {
+        let menu_started = Instant::now();
+        let menus = self.desktopctl.observe_menu_only()?;
+        let menu_ms = menu_started.elapsed().as_millis();
+        let mut menu_observation = Observation::default();
+        menu_observation.active_window_id = self.config.active_window.clone();
+        menu_observation.menus = menus.clone();
+
+        let (exact_match, exact_candidate) = exact_menu_match(goal, &menu_observation);
+        if exact_match == ExactMenuMatch::Unique {
+            let candidate = exact_candidate.expect("unique exact menu match has a candidate");
+            let action_result = self.desktopctl.execute(&candidate)?;
+            return Ok(SpeculativeDecision {
+                observation: menu_observation,
+                candidates: vec![candidate.clone()],
+                decision: crate::model::JevDecision {
+                    choice: candidate.id.clone(),
+                    confidence: 1.0,
+                    probabilities: [(candidate.id.clone(), 1.0)].into_iter().collect(),
+                    model: None,
+                },
+                action_result: Some(action_result),
+                timing: SpeculativeTiming {
+                    menu_ms,
+                    tokenize_ms: None,
+                    jev_ms: 0,
+                    path: "deterministic_menu",
+                },
+            });
+        }
+
+        let menu_candidates = generate(goal, &menu_observation, context);
+        let screen = self.desktopctl.start_screen_tokenize();
+        let jev_started = Instant::now();
+        let menu_decision =
+            self.choose_with_history(goal, &menu_observation, &menu_candidates, history);
+        let menu_jev_ms = jev_started.elapsed().as_millis();
+        if let Ok(decision) = &menu_decision {
+            if decision.confidence >= self.config.confidence_threshold {
+                if let Some(candidate) = find_candidate(&menu_candidates, &decision.choice)
+                    .filter(|candidate| candidate.kind == ActionKind::Menu && !candidate.terminal)
+                {
+                    let candidate = candidate.clone();
+                    // The daemon serializes commands and killing this client
+                    // would not cancel daemon-side work. Join the worker so
+                    // menu execution is not queued behind tokenization.
+                    let screen_started = screen.started;
+                    let _ = screen.join();
+                    let tokenize_ms = Some(screen_started.elapsed().as_millis());
+                    let action_result = self.desktopctl.execute(&candidate)?;
+                    return Ok(SpeculativeDecision {
+                        observation: menu_observation,
+                        candidates: menu_candidates,
+                        decision: decision.clone(),
+                        action_result: Some(action_result),
+                        timing: SpeculativeTiming {
+                            menu_ms,
+                            tokenize_ms,
+                            jev_ms: menu_jev_ms,
+                            path: "menu_jev",
+                        },
+                    });
+                }
+            }
+        }
+
+        let screen_started = screen.started;
+        let mut observation = screen.join()??;
+        let tokenize_ms = screen_started.elapsed().as_millis();
+        observation.menus = menus;
+        let candidates = generate(goal, &observation, context);
+        let jev_started = Instant::now();
+        let decision = self.choose_with_history(goal, &observation, &candidates, history)?;
+        let full_jev_ms = jev_started.elapsed().as_millis();
+        Ok(SpeculativeDecision {
+            observation,
+            candidates,
+            decision,
+            action_result: None,
+            timing: SpeculativeTiming {
+                menu_ms,
+                tokenize_ms: Some(tokenize_ms),
+                jev_ms: menu_jev_ms + full_jev_ms,
+                path: if menu_decision.is_err() {
+                    "full_retry_after_menu_error"
+                } else if exact_match == ExactMenuMatch::Ambiguous {
+                    "full_after_ambiguous_exact"
+                } else {
+                    "full_after_menu_jev"
+                },
+            },
+        })
     }
 
     fn terminal_result(&self, candidate: &Candidate, steps: u32, started: Instant) -> RunResult {
@@ -387,6 +512,33 @@ impl Agent {
             }
         }
     }
+
+    fn trace_speculative(&self, step: u32, timing: &SpeculativeTiming) {
+        if !self.config.trace && self.config.trace_file.is_none() {
+            return;
+        }
+        let event = serde_json::json!({
+            "run_id": self.run_id,
+            "step": step,
+            "event": "speculative",
+            "path": timing.path,
+            "menu_ms": timing.menu_ms,
+            "tokenize_ms": timing.tokenize_ms,
+            "jev_ms": timing.jev_ms,
+        });
+        let line = format!("{}\n", event);
+        if self.config.trace {
+            eprint!("{line}");
+        }
+        if let Some(path) = &self.config.trace_file {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+    }
 }
 
 fn find_candidate<'a>(candidates: &'a [Candidate], id: &str) -> Option<&'a Candidate> {
@@ -442,6 +594,15 @@ fn build_state(
             element.role,
             element.text.as_deref().unwrap_or_default(),
             element.id
+        ));
+    }
+    state.push_str("\nAVAILABLE MENUS\n");
+    for menu in observation.menus.iter().take(120) {
+        state.push_str(&format!(
+            "- {} [{}] ({})\n",
+            menu.path,
+            if menu.enabled { "enabled" } else { "disabled" },
+            menu.id
         ));
     }
     state.push_str("\nRECENT ACTIONS\n");

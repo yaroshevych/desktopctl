@@ -28,6 +28,21 @@ pub struct DesktopCtl {
     active_window: Option<String>,
 }
 
+/// A screen tokenization worker. Dropping the handle intentionally detaches
+/// the worker; the worker still reaps its child process in `invoke`.
+pub struct ScreenObservation {
+    handle: thread::JoinHandle<Result<Observation, DesktopCtlError>>,
+    pub started: Instant,
+}
+
+impl ScreenObservation {
+    pub fn join(self) -> Result<Result<Observation, DesktopCtlError>, DesktopCtlError> {
+        self.handle
+            .join()
+            .map_err(|_| DesktopCtlError::Failed("screen observation thread panicked".into()))
+    }
+}
+
 impl DesktopCtl {
     pub fn new(timeout: Duration, active_window: Option<String>) -> Result<Self, DesktopCtlError> {
         let binary = std::env::var_os("DESKTOPCTL_PATH")
@@ -51,6 +66,25 @@ impl DesktopCtl {
     }
 
     pub fn observe(&self) -> Result<Observation, DesktopCtlError> {
+        let mut observation = self.observe_screen()?;
+        observation.menus = self.observe_menu_only()?;
+        Ok(observation)
+    }
+
+    pub fn observe_menu_only(&self) -> Result<Vec<MenuItem>, DesktopCtlError> {
+        self.observe_menu()
+    }
+
+    /// Start tokenization after menu discovery. This ordering matters because
+    /// the DesktopCtl daemon serializes commands globally.
+    pub fn start_screen_tokenize(&self) -> ScreenObservation {
+        let client = self.clone();
+        let started = Instant::now();
+        let handle = thread::spawn(move || client.observe_screen());
+        ScreenObservation { handle, started }
+    }
+
+    fn observe_screen(&self) -> Result<Observation, DesktopCtlError> {
         let mut args = vec!["--json".to_string(), "screen".into(), "tokenize".into()];
         if let Some(window) = &self.active_window {
             args.extend(["--active-window".into(), window.clone()]);
@@ -60,16 +94,22 @@ impl DesktopCtl {
         if let Some(window) = &self.active_window {
             observation.active_window_id = Some(window.clone());
         }
-        if self.active_window.is_some() {
-            let mut menu_args = vec!["--json".into(), "menu".into(), "list".into()];
-            menu_args.extend([
-                "--active-window".into(),
-                self.active_window.clone().unwrap(),
-            ]);
-            let menu_raw = self.invoke(&menu_args)?;
-            observation.menus = extract_menus(&menu_raw);
-        }
         Ok(observation)
+    }
+
+    fn observe_menu(&self) -> Result<Vec<MenuItem>, DesktopCtlError> {
+        let Some(window) = &self.active_window else {
+            return Ok(Vec::new());
+        };
+        let menu_args = vec![
+            "--json".into(),
+            "menu".into(),
+            "list".into(),
+            "--active-window".into(),
+            window.clone(),
+        ];
+        let menu_raw = self.invoke(&menu_args)?;
+        Ok(extract_menus(&menu_raw))
     }
 
     pub fn execute(&self, action: &crate::model::Candidate) -> Result<Value, DesktopCtlError> {
@@ -88,10 +128,9 @@ impl DesktopCtl {
                 ]);
             }
             ActionKind::Menu => {
-                let window = self.active_window.as_ref().ok_or_else(|| {
+                let _ = self.active_window.as_ref().ok_or_else(|| {
                     DesktopCtlError::Failed("menu action has no active window".into())
                 })?;
-                self.focus_window(window)?;
                 args.extend([
                     "menu".into(),
                     "click".into(),
@@ -143,27 +182,6 @@ impl DesktopCtl {
             args.extend(["--active-window".into(), window.clone()]);
         }
         self.invoke(&args)
-    }
-
-    fn focus_window(&self, window: &str) -> Result<(), DesktopCtlError> {
-        let args = [
-            "--json".into(),
-            "window".into(),
-            "focus".into(),
-            "--id".into(),
-            window.to_owned(),
-        ];
-        let mut last_error = None;
-        for _ in 0..3 {
-            match self.invoke(&args) {
-                Ok(_) => return Ok(()),
-                Err(error) => {
-                    last_error = Some(error);
-                    thread::sleep(Duration::from_millis(50));
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| DesktopCtlError::Failed("window focus failed".into())))
     }
 
     fn invoke(&self, args: &[String]) -> Result<Value, DesktopCtlError> {
