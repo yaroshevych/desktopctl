@@ -8,6 +8,7 @@ struct DesktopCtlSettingsInput: Codable {
     var journal: JournalInput
     var appPolicy: AppPolicyInput
     var setupAccess: SetupAccessInput
+    var agent: AgentInput
     var launcher: LauncherInput
     var initialTab: String?
 }
@@ -138,6 +139,37 @@ private final class SettingsPermissionsVM: ObservableObject {
         try? p.run(); p.waitUntilExit()
         if p.terminationStatus == 0 { return true }
         return candidateCliDirs.contains { FileManager.default.fileExists(atPath: ($0 as NSString).appendingPathComponent("desktopctl")) }
+    }
+}
+
+private final class SettingsAgentVM: ObservableObject {
+    let skillsDir: String
+    let instructionsFile: String
+
+    init(_ input: AgentInput) {
+        skillsDir = input.skillsDir
+        instructionsFile = input.instructionsFile
+    }
+
+    func openSkillsFolder() {
+        openTarget(path: skillsDir, description: "shared skills folder")
+    }
+
+    func openInstructions() {
+        openTarget(path: instructionsFile, description: "shared AGENTS.md")
+    }
+
+    private func openTarget(path: String, description: String) {
+        let url = URL(fileURLWithPath: path)
+        guard NSWorkspace.shared.open(url) else {
+            fputs("desktopctl settings: failed to open \(description): \(path)\n", stderr)
+            let alert = NSAlert()
+            alert.messageText = "Unable to open \(description)"
+            alert.informativeText = path
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
     }
 }
 
@@ -467,6 +499,38 @@ private struct JournalTabContent: View {
     }
 }
 
+private struct AgentTabContent: View {
+    @ObservedObject var vm: SettingsAgentVM
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Form {
+                Section("Agent") {
+                    LabeledContent("Skills") {
+                        Button("Open Skills Folder") {
+                            vm.openSkillsFolder()
+                        }
+                    }
+
+                    LabeledContent("Agent Instructions") {
+                        Button("Open AGENTS.md") {
+                            vm.openInstructions()
+                        }
+                    }
+                }
+            }
+            .formStyle(.columns)
+            .padding(20)
+
+            Text("Shared files are used by each agent session through workspace links. Edit them with Finder or your normal editor.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 20)
+        }
+    }
+}
+
 private struct PolicyTabContent: View {
     @ObservedObject var vm: SettingsPolicyVM
 
@@ -620,6 +684,7 @@ private struct DesktopCtlSettingsView: View {
     @ObservedObject var journalVM: SettingsJournalVM
     @ObservedObject var policyVM: SettingsPolicyVM
     @ObservedObject var permissionsVM: SettingsPermissionsVM
+    @ObservedObject var agentVM: SettingsAgentVM
     @ObservedObject var launcherVM: SettingsLauncherVM
     @State var selectedTab: String
 
@@ -627,6 +692,7 @@ private struct DesktopCtlSettingsView: View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
                 SettingsTabButton(title: "Launcher",     icon: "command",          tag: "launcher",    selected: $selectedTab)
+                SettingsTabButton(title: "Agent",        icon: "wand.and.stars",   tag: "agent",       selected: $selectedTab)
                 SettingsTabButton(title: "Journal",     icon: "book",             tag: "journal",     selected: $selectedTab)
                 SettingsTabButton(title: "Applications", icon: "macwindow",       tag: "policy",      selected: $selectedTab)
                 SettingsTabButton(title: "Permissions", icon: "checkmark.shield", tag: "permissions", selected: $selectedTab)
@@ -641,6 +707,7 @@ private struct DesktopCtlSettingsView: View {
             Group {
                 switch selectedTab {
                 case "launcher":    LauncherTabContent(vm: launcherVM)
+                case "agent":       AgentTabContent(vm: agentVM)
                 case "policy":      PolicyTabContent(vm: policyVM)
                 case "permissions": PermissionsTabContent(vm: permissionsVM)
                 default:            JournalTabContent(vm: journalVM)
@@ -706,6 +773,7 @@ enum DesktopCtlSettings {
         let journalVM = SettingsJournalVM(input.journal)
         let policyVM = SettingsPolicyVM(input.appPolicy)
         let permissionsVM = SettingsPermissionsVM(input.setupAccess)
+        let agentVM = SettingsAgentVM(input.agent)
         let launcherVM = SettingsLauncherVM(input.launcher)
         var didWrite = false
 
@@ -729,6 +797,7 @@ enum DesktopCtlSettings {
             journalVM: journalVM,
             policyVM: policyVM,
             permissionsVM: permissionsVM,
+            agentVM: agentVM,
             launcherVM: launcherVM,
             selectedTab: input.initialTab ?? "journal"
         )

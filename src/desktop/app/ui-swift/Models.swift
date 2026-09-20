@@ -81,3 +81,8 @@ struct SetupAccessInput: Codable {
     var cliSource: String?
     var candidateCliDirs: [String]
 }
+
+struct AgentInput: Codable {
+    var skillsDir: String
+    var instructionsFile: String
+}

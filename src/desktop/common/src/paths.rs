@@ -2,16 +2,28 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use uuid::Uuid;
 
 pub const APP_DIR_NAME: &str = "desktopctl";
 
+const DEFAULT_AGENT_INSTRUCTIONS: &str = include_str!("../../../../agent/AGENTS.md");
+const OBSIDIAN_SKILL: &str = include_str!("../../../../agent/skills/obsidian/SKILL.md");
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSupportPaths {
+    pub agent_dir: PathBuf,
+    pub skills_dir: PathBuf,
+    pub instructions_file: PathBuf,
+    pub instructions_created: bool,
+    pub obsidian_skill_created: bool,
 }
 
 impl AppPaths {
@@ -82,6 +94,45 @@ impl AppPaths {
         self.root.join("workspaces")
     }
 
+    pub fn agent_dir(&self) -> PathBuf {
+        self.root.join("agent")
+    }
+
+    pub fn skills_dir(&self) -> PathBuf {
+        self.agent_dir().join("skills")
+    }
+
+    pub fn agent_instructions_file(&self) -> PathBuf {
+        self.agent_dir().join("AGENTS.md")
+    }
+
+    /// Create the shared agent instructions and skills locations, preserving
+    /// any files that already exist there as user-owned content.
+    pub fn ensure_agent_support(&self) -> io::Result<AgentSupportPaths> {
+        self.ensure_root()?;
+        let agent_dir = self.agent_dir();
+        let skills_dir = self.skills_dir();
+        ensure_private_dir_without_symlink(&agent_dir)?;
+        ensure_private_dir_without_symlink(&skills_dir)?;
+
+        let instructions_file = self.agent_instructions_file();
+        let instructions_created =
+            ensure_user_file(&instructions_file, DEFAULT_AGENT_INSTRUCTIONS.as_bytes())?;
+
+        let obsidian_dir = skills_dir.join("obsidian");
+        ensure_private_dir_without_symlink(&obsidian_dir)?;
+        let obsidian_skill_created =
+            ensure_user_file(&obsidian_dir.join("SKILL.md"), OBSIDIAN_SKILL.as_bytes())?;
+
+        Ok(AgentSupportPaths {
+            agent_dir,
+            skills_dir,
+            instructions_file,
+            instructions_created,
+            obsidian_skill_created,
+        })
+    }
+
     /// Filesystem workspace assigned to one DesktopCtl agent session.
     pub fn agent_workspace_dir(&self, session_id: &str) -> io::Result<PathBuf> {
         let id = Uuid::parse_str(session_id).map_err(|error| {
@@ -100,9 +151,12 @@ impl AppPaths {
     }
 
     pub fn ensure_agent_workspace_dir(&self, session_id: &str) -> io::Result<PathBuf> {
+        let support = self.ensure_agent_support()?;
         self.ensure_workspaces_dir()?;
         let path = self.agent_workspace_dir(session_id)?;
         ensure_private_dir_without_symlink(&path)?;
+        ensure_workspace_link(&path.join("AGENTS.md"), &support.instructions_file, false)?;
+        ensure_workspace_link(&path.join("skills"), &support.skills_dir, true)?;
         Ok(path)
     }
 
@@ -160,6 +214,179 @@ fn nonempty(value: Option<OsString>) -> Option<OsString> {
     value.filter(|value| !value.is_empty() && value != OsStr::new(""))
 }
 
+fn ensure_user_file(path: &Path, contents: &[u8]) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("expected a file but found a directory: {}", path.display()),
+                ));
+            }
+            if metadata.file_type().is_symlink() {
+                match fs::metadata(path) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("user file symlink is broken: {}", path.display()),
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(false)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            use std::io::Write;
+            file.write_all(contents)?;
+            file.sync_all()?;
+            set_private_file_permissions(&file)?;
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_workspace_link(link: &Path, target: &Path, target_is_dir: bool) -> io::Result<()> {
+    let desired = relative_path(link.parent().unwrap_or_else(|| Path::new(".")), target)?;
+    match fs::symlink_metadata(link) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if workspace_link_points_to(link, target) {
+                return Ok(());
+            }
+            match fs::metadata(link) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::remove_file(link)?;
+                    create_symlink(&desired, link, target_is_dir)?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "workspace symlink points to a different target: {}",
+                    link.display()
+                ),
+            ))
+        }
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("workspace path is already occupied: {}", link.display()),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_symlink(&desired, link, target_is_dir)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn workspace_link_points_to(link: &Path, target: &Path) -> bool {
+    let Ok(destination) = fs::read_link(link) else {
+        return false;
+    };
+    let resolved = if destination.is_absolute() {
+        destination
+    } else {
+        link.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(destination)
+    };
+    normalize_path(&resolved) == normalize_path(target)
+}
+
+fn relative_path(from: &Path, to: &Path) -> io::Result<PathBuf> {
+    let from = normalize_path(from);
+    let to = normalize_path(to);
+    let from_components: Vec<_> = from.components().collect();
+    let to_components: Vec<_> = to.components().collect();
+    let from_prefix = from_components
+        .iter()
+        .find_map(|component| match component {
+            Component::Prefix(prefix) => Some(prefix),
+            _ => None,
+        });
+    let to_prefix = to_components.iter().find_map(|component| match component {
+        Component::Prefix(prefix) => Some(prefix),
+        _ => None,
+    });
+    if from_prefix != to_prefix || from.is_absolute() != to.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot make relative symlink from {} to {}",
+                from.display(),
+                to.display()
+            ),
+        ));
+    }
+    let common = from_components
+        .iter()
+        .zip(&to_components)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for component in &from_components[common..] {
+        if matches!(component, Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    for component in &to_components[common..] {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+    Ok(relative)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !matches!(
+                    normalized.components().next_back(),
+                    Some(Component::RootDir)
+                ) {
+                    normalized.pop();
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path, _target_is_dir: bool) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path, target_is_dir: bool) -> io::Result<()> {
+    if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &Path, _link: &Path, _target_is_dir: bool) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "workspace symlinks are unsupported on this platform",
+    ))
+}
+
 pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     set_private_dir_permissions(path)
@@ -190,6 +417,17 @@ fn ensure_private_dir_without_symlink(path: &Path) -> io::Result<()> {
         ));
     }
     set_private_dir_permissions(path)
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(file: &fs::File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_file: &fs::File) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -341,6 +579,171 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn support_test_paths(name: &str) -> (AppPaths, PathBuf) {
+        let root = env::temp_dir().join(format!(
+            "desktopctl-agent-support-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        (AppPaths { root: root.clone() }, root)
+    }
+
+    #[test]
+    fn fresh_agent_support_install_creates_defaults() {
+        let (paths, root) = support_test_paths("fresh");
+        let support = paths.ensure_agent_support().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(support.instructions_file).unwrap(),
+            DEFAULT_AGENT_INSTRUCTIONS
+        );
+        assert_eq!(
+            fs::read_to_string(paths.skills_dir().join("obsidian/SKILL.md")).unwrap(),
+            OBSIDIAN_SKILL
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_support_initialization_is_idempotent() {
+        let (paths, root) = support_test_paths("idempotent");
+        paths.ensure_agent_support().unwrap();
+        let instructions_mtime = fs::metadata(paths.agent_instructions_file())
+            .unwrap()
+            .modified()
+            .unwrap();
+        paths.ensure_agent_support().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(paths.agent_instructions_file()).unwrap(),
+            DEFAULT_AGENT_INSTRUCTIONS
+        );
+        assert_eq!(
+            fs::metadata(paths.agent_instructions_file())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            instructions_mtime
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn user_changes_to_shared_files_are_preserved() {
+        let (paths, root) = support_test_paths("preserve");
+        paths.ensure_agent_support().unwrap();
+        let instructions = "# My instructions\n";
+        let skill = "# My Obsidian workflow\n";
+        fs::write(paths.agent_instructions_file(), instructions).unwrap();
+        fs::write(paths.skills_dir().join("obsidian/SKILL.md"), skill).unwrap();
+
+        paths.ensure_agent_support().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(paths.agent_instructions_file()).unwrap(),
+            instructions
+        );
+        assert_eq!(
+            fs::read_to_string(paths.skills_dir().join("obsidian/SKILL.md")).unwrap(),
+            skill
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_gets_relative_shared_links_and_keeps_correct_links() {
+        let (paths, root) = support_test_paths("links");
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        let workspace = paths.ensure_agent_workspace_dir(session_id).unwrap();
+        let agents_link = workspace.join("AGENTS.md");
+        let skills_link = workspace.join("skills");
+        let agents_destination = fs::read_link(&agents_link).unwrap();
+        let skills_destination = fs::read_link(&skills_link).unwrap();
+
+        assert_eq!(
+            fs::canonicalize(&agents_link).unwrap(),
+            fs::canonicalize(paths.agent_instructions_file()).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(&skills_link).unwrap(),
+            fs::canonicalize(paths.skills_dir()).unwrap()
+        );
+        paths.ensure_agent_workspace_dir(session_id).unwrap();
+        assert_eq!(fs::read_link(agents_link).unwrap(), agents_destination);
+        assert_eq!(fs::read_link(skills_link).unwrap(), skills_destination);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_workspace_links_are_repaired() {
+        use std::os::unix::fs::symlink;
+
+        let (paths, root) = support_test_paths("broken");
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        paths.ensure_agent_support().unwrap();
+        let workspace = paths.ensure_workspaces_dir().unwrap().join(session_id);
+        fs::create_dir(&workspace).unwrap();
+        symlink("missing-agents", workspace.join("AGENTS.md")).unwrap();
+        symlink("missing-skills", workspace.join("skills")).unwrap();
+
+        paths.ensure_agent_workspace_dir(session_id).unwrap();
+
+        assert_eq!(
+            fs::canonicalize(workspace.join("AGENTS.md")).unwrap(),
+            fs::canonicalize(paths.agent_instructions_file()).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(workspace.join("skills")).unwrap(),
+            fs::canonicalize(paths.skills_dir()).unwrap()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_workspace_file_is_not_deleted() {
+        let (paths, root) = support_test_paths("file-conflict");
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        paths.ensure_agent_support().unwrap();
+        let workspace = paths.ensure_workspaces_dir().unwrap().join(session_id);
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("AGENTS.md"), "keep me").unwrap();
+
+        let error = paths.ensure_agent_workspace_dir(session_id).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(workspace.join("AGENTS.md")).unwrap(),
+            "keep me"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_workspace_directory_is_not_deleted() {
+        let (paths, root) = support_test_paths("directory-conflict");
+        let session_id = "550e8400-e29b-41d4-a716-446655440000";
+        paths.ensure_agent_support().unwrap();
+        let workspace = paths.ensure_workspaces_dir().unwrap().join(session_id);
+        fs::create_dir_all(workspace.join("skills")).unwrap();
+
+        let error = paths.ensure_agent_workspace_dir(session_id).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            fs::symlink_metadata(workspace.join("skills"))
+                .unwrap()
+                .is_dir()
         );
         let _ = fs::remove_dir_all(root);
     }

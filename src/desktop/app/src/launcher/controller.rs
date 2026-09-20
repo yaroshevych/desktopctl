@@ -172,6 +172,30 @@ mod controller {
                 "unable to resolve DesktopCtl workspace directory",
             )
         })?;
+        let agent_support = desktop_core::paths::AppPaths::resolve()
+            .map_err(|error| {
+                desktop_core::error::AppError::backend_unavailable(format!(
+                    "unable to resolve DesktopCtl data root: {error}"
+                ))
+            })?
+            .ensure_agent_support()
+            .map_err(|error| {
+                trace::log(format!("agent_launcher:shared_agent_support_error {error}"));
+                desktop_core::error::AppError::backend_unavailable(format!(
+                    "unable to initialize shared agent instructions and skills: {error}"
+                ))
+            })?;
+        if agent_support.instructions_created {
+            trace::log("agent_launcher:default_agent_instructions_installed");
+        }
+        if agent_support.obsidian_skill_created {
+            trace::log("agent_launcher:builtin_skill_installed skill=obsidian");
+        }
+        trace::log(format!(
+            "agent_launcher:shared_agent_support_ready agent={} skills={}",
+            agent_support.agent_dir.display(),
+            agent_support.skills_dir.display()
+        ));
         let (store, warning) = AgentSessionStore::load_or_empty_at(path, unix_now_ms());
         if let Some(warning) = warning {
             trace::log(format!("agent_launcher:store_warning {warning}"));
@@ -1235,12 +1259,18 @@ end run"#;
     }
 
     fn session_workspace(session_id: &str) -> Result<PathBuf, String> {
-        desktop_core::paths::AppPaths::resolve()
+        let workspace = desktop_core::paths::AppPaths::resolve()
             .map_err(|error| format!("unable to resolve DesktopCtl data root: {error}"))?
             .ensure_agent_workspace_dir(session_id)
             .map_err(|error| {
                 format!("unable to create workspace for session {session_id}: {error}")
-            })
+            })?;
+        trace::log(format!(
+            "agent_launcher:workspace_shared_links_ready session={} workspace={}",
+            session_id,
+            workspace.display()
+        ));
+        Ok(workspace)
     }
 
     fn fail_request(session_id: &str, request_id: &str, error: String) {

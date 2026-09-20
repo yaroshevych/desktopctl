@@ -118,10 +118,17 @@ struct SetupAccessInput {
 }
 
 #[derive(Serialize)]
+struct AgentInput {
+    skills_dir: String,
+    instructions_file: String,
+}
+
+#[derive(Serialize)]
 struct SettingsInput {
     journal: JournalInput,
     app_policy: AppPolicyInput,
     setup_access: SetupAccessInput,
+    agent: AgentInput,
     launcher: LauncherInput,
     initial_tab: Option<String>,
 }
@@ -297,6 +304,16 @@ pub fn show_with_settings(
                 }
             };
 
+        let agent_support = match desktop_core::paths::AppPaths::resolve()
+            .and_then(|paths| paths.ensure_agent_support())
+        {
+            Ok(paths) => paths,
+            Err(error) => {
+                eprintln!("settings dialog: initialize shared agent files: {error}");
+                return;
+            }
+        };
+
         let input = SettingsInput {
             journal: JournalInput {
                 enabled: stored.journal.enabled,
@@ -319,6 +336,10 @@ pub fn show_with_settings(
                     .into_iter()
                     .map(|p| p.display().to_string())
                     .collect(),
+            },
+            agent: AgentInput {
+                skills_dir: agent_support.skills_dir.display().to_string(),
+                instructions_file: agent_support.instructions_file.display().to_string(),
             },
             launcher: LauncherInput {
                 agent: stored.launcher.agent,
