@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -88,6 +89,16 @@ impl DesktopCtl {
                 ]);
             }
             ActionKind::Menu => {
+                let window = self.active_window.as_ref().ok_or_else(|| {
+                    DesktopCtlError::Failed("menu action has no active window".into())
+                })?;
+                self.invoke(&[
+                    "--json".into(),
+                    "window".into(),
+                    "focus".into(),
+                    "--id".into(),
+                    window.clone(),
+                ])?;
                 args.extend([
                     "menu".into(),
                     "click".into(),
@@ -149,22 +160,41 @@ impl DesktopCtl {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| DesktopCtlError::Failed(error.to_string()))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DesktopCtlError::Failed("desktopctl stdout was not captured".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| DesktopCtlError::Failed("desktopctl stderr was not captured".into()))?;
+        let stdout_reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout.read_to_end(&mut bytes);
+            (result, bytes)
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stderr.read_to_end(&mut bytes);
+            (result, bytes)
+        });
         let started = Instant::now();
         loop {
-            if child
+            if let Some(status) = child
                 .try_wait()
                 .map_err(|error| DesktopCtlError::Failed(error.to_string()))?
-                .is_some()
             {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|error| DesktopCtlError::Failed(error.to_string()))?;
-                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !output.status.success() {
-                    return Err(DesktopCtlError::Failed(if text.is_empty() {
-                        "command failed".into()
-                    } else {
+                let stdout = join_reader(stdout_reader, "stdout")?;
+                let stderr = join_reader(stderr_reader, "stderr")?;
+                let text = String::from_utf8_lossy(&stdout).trim().to_string();
+                if !status.success() {
+                    let error = String::from_utf8_lossy(&stderr).trim().to_string();
+                    return Err(DesktopCtlError::Failed(if !text.is_empty() {
                         text
+                    } else if !error.is_empty() {
+                        error
+                    } else {
+                        "command failed".into()
                     }));
                 }
                 return Ok(serde_json::from_str(&text)?);
@@ -172,11 +202,24 @@ impl DesktopCtl {
             if started.elapsed() >= self.timeout {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(DesktopCtlError::Timeout(started.elapsed().as_millis()));
             }
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<(std::io::Result<usize>, Vec<u8>)>,
+    stream: &str,
+) -> Result<Vec<u8>, DesktopCtlError> {
+    let (result, bytes) = reader
+        .join()
+        .map_err(|_| DesktopCtlError::Failed(format!("desktopctl {stream} reader panicked")))?;
+    result.map_err(|error| DesktopCtlError::Failed(error.to_string()))?;
+    Ok(bytes)
 }
 
 fn result_value(raw: &Value) -> &Value {

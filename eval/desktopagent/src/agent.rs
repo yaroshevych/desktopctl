@@ -112,6 +112,7 @@ impl Agent {
         let observation = self.desktopctl.observe()?;
         let candidates = generate(goal, &observation, &CandidateContext::default());
         let decision = self.choose(goal, &observation, &candidates)?;
+        let selected = find_candidate(&candidates, &decision.choice);
         self.trace_event(
             0,
             "inspect",
@@ -121,13 +122,23 @@ impl Agent {
             decision.confidence,
             &decision.probabilities,
             None,
+            selected,
         );
         Ok(RunResult {
             status: "inspect".into(),
-            message: format!(
-                "Jev chose {} (confidence {:.2}).",
-                decision.choice, decision.confidence
-            ),
+            message: selected
+                .map(|candidate| {
+                    format!(
+                        "Jev chose {}: {} (confidence {:.2}).",
+                        decision.choice, candidate.description, decision.confidence
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "Jev chose {} (confidence {:.2}).",
+                        decision.choice, decision.confidence
+                    )
+                }),
             steps: 0,
             elapsed_ms: started.elapsed().as_millis(),
             reason: None,
@@ -143,6 +154,7 @@ impl Agent {
         let context = CandidateContext::default();
         let candidates = generate(goal, &observation, &context);
         let decision = self.choose(goal, &observation, &candidates)?;
+        let selected = find_candidate(&candidates, &decision.choice);
         self.trace_event(
             0,
             "decision",
@@ -152,6 +164,7 @@ impl Agent {
             decision.confidence,
             &decision.probabilities,
             None,
+            selected,
         );
         if decision.confidence < self.config.confidence_threshold {
             return Ok(self.blocked(1, started, "low_confidence"));
@@ -200,6 +213,7 @@ impl Agent {
                 decision.confidence,
                 &decision.probabilities,
                 None,
+                find_candidate(&candidates, &decision.choice),
             );
             if decision.confidence < self.config.confidence_threshold {
                 return Ok(self.blocked(steps, started, "low_confidence"));
@@ -325,11 +339,27 @@ impl Agent {
         confidence: f64,
         probabilities: &BTreeMap<String, f64>,
         state_change: Option<bool>,
+        selected: Option<&Candidate>,
     ) {
         if !self.config.trace && self.config.trace_file.is_none() {
             return;
         }
-        let event = serde_json::json!({"run_id":self.run_id,"step":step,"event":event,"elapsed_ms":elapsed_ms,"candidate_count":candidate_count,"choice":choice,"confidence":confidence,"probabilities":probabilities,"state_changed":state_change});
+        let event = serde_json::json!({
+            "run_id": self.run_id,
+            "step": step,
+            "event": event,
+            "elapsed_ms": elapsed_ms,
+            "candidate_count": candidate_count,
+            "choice": choice,
+            "selected_action": selected.map(|candidate| serde_json::json!({
+                "kind": candidate.kind,
+                "target": candidate.target,
+                "description": candidate.description,
+            })),
+            "confidence": confidence,
+            "probabilities": probabilities,
+            "state_changed": state_change,
+        });
         let line = format!("{}\n", event);
         if self.config.trace {
             eprint!("{line}");
