@@ -167,7 +167,7 @@ impl Agent {
             selected,
         );
         if decision.confidence < self.config.confidence_threshold {
-            return Ok(self.blocked(1, started, "low_confidence"));
+            return Ok(self.blocked_for_decision(0, started, "low_confidence", decision));
         }
         let candidate = find_candidate(&candidates, &decision.choice)
             .ok_or_else(|| AgentError::Config("Jev selected an unknown candidate".into()))?;
@@ -216,7 +216,7 @@ impl Agent {
                 find_candidate(&candidates, &decision.choice),
             );
             if decision.confidence < self.config.confidence_threshold {
-                return Ok(self.blocked(steps, started, "low_confidence"));
+                return Ok(self.blocked_for_decision(steps, started, "low_confidence", decision));
             }
             let candidate = find_candidate(&candidates, &decision.choice)
                 .ok_or_else(|| AgentError::Config("Jev selected an unknown candidate".into()))?
@@ -327,6 +327,20 @@ impl Agent {
             confidence: None,
             probabilities: BTreeMap::new(),
         }
+    }
+
+    fn blocked_for_decision(
+        &self,
+        steps: u32,
+        started: Instant,
+        reason: &str,
+        decision: crate::model::JevDecision,
+    ) -> RunResult {
+        let mut result = self.blocked(steps, started, reason);
+        result.choice = Some(decision.choice);
+        result.confidence = Some(decision.confidence);
+        result.probabilities = decision.probabilities;
+        result
     }
 
     fn trace_event(

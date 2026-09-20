@@ -88,7 +88,7 @@ impl JevClient {
             model: self.model.clone(),
             questions: [("next_action".into(), ChoiceQuestion {
                 kind: "choice",
-                instructions: "Choose the single next desktop action that best advances the user's goal given the current UI state. Choose done only when the goal is visibly complete. Choose blocked only when no available action can advance it.".into(),
+                instructions: "Choose the single next desktop action that best advances the user's goal given the current UI state. When an available action directly matches a control or command explicitly named in the goal, prefer that action. Choose done only when the goal is visibly complete. Choose blocked only when no available action can advance it, never merely because the action is a menu command rather than a visible control.".into(),
                 criteria,
             })].into_iter().collect(),
         };

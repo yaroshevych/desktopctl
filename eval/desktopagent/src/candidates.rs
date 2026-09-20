@@ -49,6 +49,14 @@ pub fn generate(
         "submit",
         "confirm purchase",
     ];
+    let goal_terms = semantic_terms(goal);
+    let has_named_menu = observation.menus.iter().any(|menu| {
+        menu.enabled
+            && menu.action_supported
+            && goal_terms
+                .iter()
+                .any(|term| semantic_terms(&menu.path).contains(term))
+    });
     let mut add = |mut candidate: Candidate| {
         let key = format!(
             "{}:{}",
@@ -74,6 +82,12 @@ pub fn generate(
         {
             continue;
         }
+        if has_named_menu {
+            let label_terms = semantic_terms(&label);
+            if !goal_terms.iter().any(|term| label_terms.contains(term)) {
+                continue;
+            }
+        }
         let is_ocr = element
             .source
             .as_deref()
@@ -97,22 +111,45 @@ pub fn generate(
         }
     }
 
-    for menu in observation
+    let eligible_menus = observation
         .menus
         .iter()
         .filter(|menu| menu.enabled && menu.action_supported)
-    {
-        if destructive
-            .iter()
-            .any(|word| menu.title.to_ascii_lowercase().contains(word))
-        {
-            continue;
-        }
+        .filter(|menu| {
+            !destructive
+                .iter()
+                .any(|word| menu.title.to_ascii_lowercase().contains(word))
+        })
+        .collect::<Vec<_>>();
+    let relevant_menus = eligible_menus
+        .iter()
+        .copied()
+        .filter(|menu| {
+            let menu_terms = semantic_terms(&menu.path);
+            goal_terms.iter().any(|term| menu_terms.contains(term))
+        })
+        .collect::<Vec<_>>();
+    let direct_menus = relevant_menus
+        .iter()
+        .copied()
+        .filter(|menu| {
+            let title_terms = semantic_terms(&menu.title);
+            !title_terms.is_empty() && title_terms.iter().all(|term| goal_terms.contains(term))
+        })
+        .collect::<Vec<_>>();
+    let menus = if !direct_menus.is_empty() {
+        direct_menus
+    } else if relevant_menus.is_empty() {
+        eligible_menus.into_iter().take(40).collect::<Vec<_>>()
+    } else {
+        relevant_menus
+    };
+    for menu in menus {
         let mut candidate = Candidate::action(
             ActionKind::Menu,
             format!("Select menu item {:?}.", menu.path),
             format!(
-                "Choose this when selecting {:?} advances the user's goal.",
+                "Select the available enabled menu command {:?}. Its title matches words explicitly requested in the user's goal. Choose this when invoking that named command advances the goal.",
                 menu.path
             ),
         );
@@ -125,7 +162,7 @@ pub fn generate(
         .iter()
         .find(|element| element.scrollable)
         .map(|element| element.id.clone());
-    if let Some(target) = scroll_target {
+    if let Some(target) = scroll_target.filter(|_| !has_named_menu) {
         let mut scroll_up = Candidate::action(
             ActionKind::ScrollUp,
             "Scroll the current content upward.".into(),
@@ -190,9 +227,20 @@ pub fn generate(
     ));
     add(Candidate::terminal(
         crate::model::TerminalStatus::Blocked,
-        "Choose this when no available UI action can reasonably advance the goal.",
+        "Choose this when no available UI action can reasonably advance the goal. Do not choose blocked when an available candidate directly matches a control or command explicitly named by the user.",
     ));
     candidates
+}
+
+fn semantic_terms(text: &str) -> HashSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "and", "click", "choose", "first", "into", "latest", "newest", "open", "press", "select",
+        "the", "then", "this", "type",
+    ];
+    text.split(|character: char| !character.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|term| term.len() >= 3 && !STOP_WORDS.contains(&term.as_str()))
+        .collect()
 }
 
 fn role_for_description(element: &Element) -> &'static str {
@@ -308,5 +356,33 @@ mod tests {
             candidate.kind == ActionKind::ScrollDown
                 && candidate.target.as_deref() == Some("scroll-area")
         }));
+    }
+
+    #[test]
+    fn explicit_goal_prunes_unrelated_menus() {
+        let mut observation = Observation::default();
+        observation.menus = vec![
+            crate::model::MenuItem {
+                id: "settings".into(),
+                path: "cmux > Settings".into(),
+                title: "Settings".into(),
+                enabled: true,
+                action_supported: true,
+            },
+            crate::model::MenuItem {
+                id: "print".into(),
+                path: "File > Print".into(),
+                title: "Print".into(),
+                enabled: true,
+                action_supported: true,
+            },
+        ];
+        let candidates = generate("Click Settings", &observation, &Default::default());
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == ActionKind::Menu && candidate.target.as_deref() == Some("settings")
+        }));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.target.as_deref() == Some("print")));
     }
 }
