@@ -4,7 +4,7 @@ mod desktopctl;
 mod jev;
 mod model;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
@@ -61,9 +61,7 @@ struct RunArgs {
 }
 
 fn main() {
-    // Loading dotenv is intentionally best-effort. The key is never printed or
-    // included in traces; launcher environments normally provide it directly.
-    let _ = dotenvy::dotenv();
+    load_dotenv();
     let cli = Cli::parse();
     let (command, args) = match cli.command {
         Command::Run(args) => ("run", args),
@@ -97,6 +95,42 @@ fn main() {
             let result = RunResult::error(error.to_string());
             print_result(result, json);
             std::process::exit(1);
+        }
+    }
+}
+
+fn load_dotenv() {
+    // Loading dotenv is intentionally best-effort. First follow dotenv's normal
+    // current-directory search, then support running the development binary by
+    // absolute path from outside the repository. The key is never printed or
+    // included in traces; installed launcher environments should provide it
+    // directly.
+    let _ = dotenvy::dotenv();
+    if std::env::var_os("TYPESAFE_API_KEY").is_some() {
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    for directory in executable.ancestors().skip(1) {
+        let path = directory.join(".env");
+        if path.is_file() {
+            let _ = dotenvy::from_path(path);
+            if std::env::var_os("TYPESAFE_API_KEY").is_some() {
+                return;
+            }
+        }
+    }
+    // Cargo builds keep the source manifest location available even when the
+    // executable is copied, wrapped, or launched through a path that macOS
+    // resolves differently.
+    for directory in Path::new(env!("CARGO_MANIFEST_DIR")).ancestors() {
+        let path = directory.join(".env");
+        if path.is_file() {
+            let _ = dotenvy::from_path(path);
+            if std::env::var_os("TYPESAFE_API_KEY").is_some() {
+                return;
+            }
         }
     }
 }
