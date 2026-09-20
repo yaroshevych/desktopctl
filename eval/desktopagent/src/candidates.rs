@@ -50,6 +50,12 @@ pub fn generate(
         "confirm purchase",
     ];
     let goal_terms = semantic_terms(goal);
+    let explicit_click_terms = goal
+        .trim()
+        .strip_prefix("Click ")
+        .or_else(|| goal.trim().strip_prefix("click "))
+        .map(semantic_terms)
+        .filter(|terms| !terms.is_empty());
     let has_named_menu = observation.menus.iter().any(|menu| {
         menu.enabled
             && menu.action_supported
@@ -82,8 +88,14 @@ pub fn generate(
         {
             continue;
         }
+        let label_terms = semantic_terms(&label);
+        if explicit_click_terms
+            .as_ref()
+            .is_some_and(|requested| !label_terms.is_subset(requested))
+        {
+            continue;
+        }
         if has_named_menu {
-            let label_terms = semantic_terms(&label);
             if !goal_terms.iter().any(|term| label_terms.contains(term)) {
                 continue;
             }
@@ -384,5 +396,25 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|candidate| candidate.target.as_deref() == Some("print")));
+    }
+
+    #[test]
+    fn explicit_click_never_falls_back_to_unrelated_path_button() {
+        let mut observation = Observation::default();
+        observation.elements = vec![
+            element("settings", "AXButton", "Settings"),
+            element("path", "AXButton", "/Users/oleg/Projects/settings-worktree"),
+            element("reply", "AXButton", "Reply"),
+        ];
+        let candidates = generate("Click Settings", &observation, &Default::default());
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.target.as_deref() == Some("settings")));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.target.as_deref() == Some("path")));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.target.as_deref() == Some("reply")));
     }
 }
