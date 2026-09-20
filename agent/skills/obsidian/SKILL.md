@@ -2,19 +2,24 @@
 
 Use Obsidian CLI for vault operations. Use DesktopCtl for other-app context and unsupported Obsidian UI.
 
-If `obsidian` CLI is unavailable, stop and tell the user:
+If `command -v obsidian` fails, stop and tell the user:
 
 > Open Obsidian Settings > General > Enable CLI
 
+If the CLI exists but cannot connect to Obsidian, tell the user to open Obsidian fully and retry once. If it still fails, report the IPC failure and do not mutate the vault.
+
 Optimize for one-shot execution:
 
-* Infer intent and target from the prompt, active app, active note, and vault structure.
+* Infer intent and target from the prompt, active app, active note, and vault structure for read-only work.
 * Do not ask follow-ups when a safe interpretation exists.
 * Mutate vault content only when the request clearly implies a write.
-* If write intent and target are clear, act without confirmation.
+* For writes, know the exact vault-relative target and bounded operation before acting.
+* If write intent, target, and scope are clear, act without confirmation.
 * Prefer the smallest semantically correct change.
 * Prefer doing nothing over an unsafe or destructive guess.
 * Verify every write.
+
+Never infer a write target from the active note unless the user explicitly says “this note”, “current note”, or equivalent. For requests such as “add this to Obsidian”, search for a clearly matching destination; if there is no unique safe target, remain read-only and ask which note to use.
 
 ## Escalation
 
@@ -41,6 +46,8 @@ If write intent is absent, remain read-only.
 If target or scope is unsafe to infer, avoid mutation and return a short explanation.
 
 Prefer the smallest semantically correct edit. Append only when the request and existing note structure support append.
+
+Before mutating, establish the exact path, operation, and bounded content or edit range. Do not use a successful command exit status as permission to continue with a guessed repair.
 
 ## Active context
 
@@ -88,7 +95,7 @@ Examples: “save this”, “remember this”, “add this to my shopping list�
 
 Prefer an existing note over creating a near-duplicate.
 
-If no destination is specified and no obvious destination exists, prefer the daily note for ephemeral capture.
+If no destination is specified and no unique obvious destination exists, remain read-only and ask which note to use. Do not silently choose the active note or daily note.
 
 ### Find / answer from Obsidian
 
@@ -120,6 +127,8 @@ Examples: “mark this done”, “add the price”, “update my project note�
 3. Apply the smallest semantically correct change.
 4. Preserve surrounding structure.
 5. Re-read and verify.
+
+If the backup cannot be created and verified, do not write.
 
 ### Create note from current context
 
@@ -157,6 +166,24 @@ Create only when the user’s request implies a write and no suitable existing n
 
 Search first when duplication is plausible.
 
+### Create then edit
+
+For a new note that will receive substantial plain Markdown content:
+
+1. Choose an exact vault-relative path and check for collisions.
+2. Create it with Obsidian CLI using minimal initial content:
+
+   ```bash
+   obsidian create path="..." content="# ..."
+   ```
+
+3. Re-read it with `obsidian read` and confirm the created path.
+4. Resolve the actual vault root; never assume the agent workspace or shell cwd is the vault.
+5. For this newly-created note only, direct filesystem editing is allowed for plain Markdown. Write through a temporary file in the same directory, then atomically replace the note.
+6. Re-read with `obsidian read` and re-query metadata before reporting success.
+
+Do not use this shortcut for existing notes. Use Obsidian CLI/API for frontmatter, links, backlinks, plugin behavior, editor state, or other Obsidian semantics. If creation collides or verification is unexpected, stop without replacing anything.
+
 ### Append
 
 Append only when both the request and note structure make append the semantically correct operation.
@@ -169,11 +196,15 @@ Inspect first. Change only the smallest relevant section or item.
 
 Avoid whole-note replacement when a narrower edit is possible.
 
+For programmatic edits, require exactly one understood match before replacing text. Abort on zero or multiple matches. Never use broad “marker to end of file” cleanup or guessed regex repairs.
+
 ### Cross-app capture
 
 DesktopCtl reads source context; Obsidian CLI performs vault mutation.
 
 Do not foreground Obsidian unnecessarily.
+
+Run mutation and verification as separate operations. If readback is unexpected, stop and report the anomaly; do not issue another mutation automatically.
 
 ## Backups
 
@@ -204,6 +235,8 @@ Typical safe writes:
 * targeted task/property update
 * narrow text edit
 
+Safe does not mean implicit: the exact target and bounded change must still be known.
+
 Use extra care and back up first for:
 
 * paragraph/section replacement
@@ -222,6 +255,8 @@ Require clear explicit intent for:
 * actions with unclear scope or side effects
 
 Do not turn vague requests into destructive operations.
+
+Do not attempt automatic cleanup after a failed, malformed, or surprising write. Report what changed and wait for explicit repair instructions.
 
 ## Eval
 
@@ -242,6 +277,7 @@ Avoid:
 * full link-graph dumps
 * DOM manipulation when an API exists
 * broad mutations
+* broad regex replacement or whole-note `app.vault.process()` edits
 * undocumented internals when stable APIs exist
 
 ## Verification
@@ -252,7 +288,7 @@ After every mutation:
 2. Confirm the requested change exists.
 3. Confirm unrelated surrounding content was preserved when relevant.
 
-Do not report success only because a command succeeded.
+Do not report success only because a command succeeded. If verification is ambiguous or shows unexpected content, stop; do not repair or retry with another mutation.
 
 ## CLI usage
 
@@ -264,4 +300,6 @@ obsidian help <command>
 
 when syntax, flags, defaults, or version-specific behavior are uncertain.
 
-Prefer explicit scope and format. Keep `eval code=` and `content=` short. Avoid broad replacement, overwrite, delete, or DOM manipulation unless clearly required.
+Prefer explicit scope and format. Keep `eval code=` and `content=` short. Avoid broad replacement, overwrite, delete, or DOM manipulation unless clearly required. Use the create-then-edit workflow above instead of passing large content or JavaScript payloads inline.
+
+Do not chain a mutation with verification in one shell command. Avoid shell quoting tricks for multiline JavaScript or content; malformed escaping can turn help/output text into vault content.

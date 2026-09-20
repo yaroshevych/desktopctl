@@ -1015,6 +1015,8 @@ impl PiRunner {
                 ],
             );
         }
+        args.push(OsString::from("--append-system-prompt"));
+        args.push(OsString::from(workspace_bootstrap_instruction()));
         if let Some(session) = request.session.as_ref().filter(|s| !s.is_empty()) {
             if let Some(path) = session.path.as_ref() {
                 args.push(OsString::from("--session"));
@@ -1087,6 +1089,8 @@ impl AgentRunner for PiRunner {
 
 fn prompt_for_cli(request: &AgentRequest) -> String {
     let mut prompt = String::new();
+    prompt.push_str(workspace_bootstrap_instruction());
+    prompt.push_str("\n\n");
     if let Some(target) = request.target_window.as_ref() {
         prompt.push_str(&target_window_instruction(target));
         prompt.push_str("\n\n");
@@ -1097,6 +1101,10 @@ fn prompt_for_cli(request: &AgentRequest) -> String {
     }
     prompt.push_str(&request.prompt);
     prompt
+}
+
+fn workspace_bootstrap_instruction() -> &'static str {
+    "Before taking any task-specific action, read `./AGENTS.md` from the current workspace, then inspect `./skills/` for a matching `SKILL.md`. If the task involves Obsidian, read `./skills/obsidian/SKILL.md` before using DesktopCtl, Obsidian, or modifying vault content. Follow the loaded instructions. Use these workspace-relative paths as authoritative; do not substitute repository or home-directory copies. If `AGENTS.md` or a required skill is missing or unreadable, report that before acting."
 }
 
 fn target_window_instruction(target: &TargetWindow) -> String {
@@ -2775,6 +2783,34 @@ mod tests {
     }
 
     #[test]
+    fn agent_prompts_require_workspace_instruction_and_skill_bootstrap() {
+        let request = AgentRequest::new("add this to obsidian");
+        let pi_args = PiRunner::args_for(&request);
+        let pi_prompt = pi_args
+            .iter()
+            .find(|arg| arg.to_string_lossy().contains("read `./AGENTS.md`"))
+            .expect("Pi workspace bootstrap prompt")
+            .to_string_lossy();
+        assert!(pi_prompt.contains("read `./AGENTS.md`"));
+        assert!(pi_prompt.contains("read `./skills/obsidian/SKILL.md`"));
+        assert!(pi_prompt.contains("workspace-relative paths as authoritative"));
+
+        let goose_args = GooseRunner::args_for(&request, "session");
+        let goose_prompt = goose_args
+            .last()
+            .expect("Goose prompt argument")
+            .to_string_lossy();
+        assert!(goose_prompt.contains("read `./AGENTS.md`"));
+
+        let opencode_args = OpenCodeRunner::args_for(&request);
+        let opencode_prompt = opencode_args
+            .last()
+            .expect("OpenCode prompt argument")
+            .to_string_lossy();
+        assert!(opencode_prompt.contains("read `./skills/obsidian/SKILL.md`"));
+    }
+
+    #[test]
     fn parses_goose_json_messages_and_ignores_thinking() {
         let output = r#"{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Hello"}]}],"metadata":{"status":"completed"}}"#;
         let result = parse_goose_output(output).expect("valid Goose output");
@@ -2958,8 +2994,13 @@ mod tests {
         assert!(args.iter().any(|arg| arg == &OsString::from("--")));
         assert_eq!(args.last(), Some(&OsString::from("- summarize this")));
         let context_index = args
-            .iter()
-            .position(|arg| arg == "--append-system-prompt")
+            .windows(2)
+            .position(|pair| {
+                pair[0] == "--append-system-prompt"
+                    && pair[1]
+                        .to_string_lossy()
+                        .contains("screen tokenize --active-window mail_abc123")
+            })
             .expect("system prompt flag");
         assert!(
             args[context_index + 1]
@@ -2987,7 +3028,7 @@ mod tests {
             .iter()
             .filter(|arg| *arg == "--append-system-prompt")
             .count();
-        assert_eq!(prompt_flags, 2);
+        assert_eq!(prompt_flags, 3);
         assert!(args.iter().any(|arg| {
             arg.to_string_lossy()
                 .contains("Initial environment context")
@@ -2999,7 +3040,16 @@ mod tests {
     fn args_omit_desktop_context_when_not_requested() {
         let request = AgentRequest::new("summarize");
         let args = PiRunner::args_for(&request);
-        assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
+        assert_eq!(
+            args.iter()
+                .filter(|arg| *arg == "--append-system-prompt")
+                .count(),
+            1
+        );
+        assert!(
+            args.iter()
+                .any(|arg| { arg.to_string_lossy().contains("read `./AGENTS.md`") })
+        );
         assert_eq!(args.last(), Some(&OsString::from("summarize")));
     }
 
