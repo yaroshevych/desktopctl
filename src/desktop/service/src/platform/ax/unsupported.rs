@@ -38,6 +38,10 @@ pub fn focused_frontmost_selected_text() -> Result<Option<String>, AppError> {
     Ok(None)
 }
 
+pub fn selected_text_for_pid(_pid: i64) -> Result<Option<String>, AppError> {
+    Ok(None)
+}
+
 pub fn focused_frontmost_window_bounds() -> Result<Option<Bounds>, AppError> {
     Ok(None)
 }

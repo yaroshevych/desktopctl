@@ -1,4 +1,5 @@
 use super::{FrontmostWindowContext, WindowInfo};
+use crate::trace;
 use desktop_core::{error::AppError, protocol::Bounds};
 
 pub fn main_display_bounds() -> Option<Bounds> {
@@ -534,23 +535,40 @@ fn augment_with_ax_metadata(windows: &mut [WindowInfo]) {
     }
 
     fn ax_document_url(window: &AXUIElement) -> Option<String> {
-        for name in [kAXDocumentAttribute, kAXURLAttribute] {
+        for (name, label) in [
+            (kAXDocumentAttribute, "AXDocument"),
+            (kAXURLAttribute, "AXURL"),
+        ] {
             let attr = AXAttribute::<CFType>::new(&CFString::from_static_string(name));
             let Ok(value) = window.attribute(&attr) else {
+                trace::log(format!(
+                    "ax:url_probe scope=window attribute={label} result=missing"
+                ));
                 continue;
             };
             if value.instance_of::<CFURL>() {
                 let url = unsafe { CFURL::wrap_under_get_rule(value.as_CFTypeRef() as _) };
                 let url = url.get_string().to_string();
                 if !url.trim().is_empty() {
+                    trace::log(format!(
+                        "ax:url_probe scope=window attribute={label} result=present length={}",
+                        url.len()
+                    ));
                     return Some(url);
                 }
             } else if let Some(url) = value.downcast::<CFString>() {
                 let url = url.to_string();
                 if !url.trim().is_empty() {
+                    trace::log(format!(
+                        "ax:url_probe scope=window attribute={label} result=present length={}",
+                        url.len()
+                    ));
                     return Some(url);
                 }
             }
+            trace::log(format!(
+                "ax:url_probe scope=window attribute={label} result=empty"
+            ));
         }
         None
     }

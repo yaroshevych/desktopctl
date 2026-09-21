@@ -291,6 +291,7 @@ pub(crate) fn tokenize(
         std::thread::JoinHandle<Result<Vec<platform::windowing::WindowInfo>, AppError>>,
     > = None;
     let mut active_window_prefetched_windows: Option<Vec<platform::windowing::WindowInfo>> = None;
+    let mut selected_text_pid = None;
     let payload = if let Some(path_raw) = screenshot_path {
         if window_query.is_some() {
             return Err(AppError::invalid_argument(
@@ -554,6 +555,7 @@ pub(crate) fn tokenize(
                 let payload = vision::pipeline::tokenize_window(meta)?;
                 (resolved, payload)
             };
+            selected_text_pid = Some(frontmost_window.pid);
             bound_hint_active_window_id = active_window_id
                 .as_deref()
                 .map(str::trim)
@@ -716,7 +718,43 @@ pub(crate) fn tokenize(
     } else {
         trace::log("execute:screen_tokenize:overlay_update_skipped transient_privacy");
     }
-    if let Some(selected_text) = current_selected_text_for_payload(&payload, screenshot_mode) {
+    for window in &mut payload.windows {
+        trace::log(format!(
+            "screen_tokenize:url_probe window={} metadata={}",
+            window.id,
+            if window
+                .document_url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty())
+            {
+                "present"
+            } else {
+                "empty"
+            }
+        ));
+        if window
+            .document_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+        {
+            if let Some((source, url)) = infer_document_url_from_elements(&window.elements) {
+                trace::log(format!(
+                    "screen_tokenize:url_probe window={} source={source} result=present length={}",
+                    window.id,
+                    url.len()
+                ));
+                window.document_url = Some(url);
+            } else {
+                trace::log(format!(
+                    "screen_tokenize:url_probe window={} source=elements result=empty",
+                    window.id
+                ));
+            }
+        }
+    }
+    if let Some(selected_text) =
+        current_selected_text_for_payload(&payload, screenshot_mode, selected_text_pid)
+    {
         if let Some(window) = payload.windows.first_mut() {
             window.selected_text = Some(selected_text);
         }
@@ -806,26 +844,111 @@ pub(crate) fn tokenize(
     Ok(value)
 }
 
+fn infer_document_url_from_elements(
+    elements: &[desktop_core::protocol::TokenizeElement],
+) -> Option<(&'static str, String)> {
+    elements.iter().find_map(|element| {
+        let candidate = if element.source.ends_with("AXWebArea") {
+            element.url.as_deref()
+        } else if element.source.ends_with("AXTextField") {
+            element.text.as_deref()
+        } else {
+            None
+        }?;
+        let candidate = candidate.trim();
+        (candidate.contains("://") && !candidate.chars().any(char::is_whitespace)).then(|| {
+            let source = if element.source.ends_with("AXWebArea") {
+                "ax_web_area_url"
+            } else {
+                "ax_text_field_value"
+            };
+            (source, candidate.to_string())
+        })
+    })
+}
+
 fn current_selected_text_for_payload(
     payload: &desktop_core::protocol::TokenizePayload,
     screenshot_mode: bool,
+    target_pid: Option<i64>,
 ) -> Option<String> {
     if screenshot_mode {
+        trace::log("screen_tokenize:selected_text_probe result=skipped_screenshot");
         return None;
     }
     let window = payload.windows.first()?;
-    let focused_bounds = platform::ax::focused_frontmost_window_bounds()
-        .ok()
-        .flatten()?;
+    if let Some(pid) = target_pid {
+        match platform::ax::selected_text_for_pid(pid) {
+            Ok(Some(text)) if !text.trim().is_empty() => {
+                trace::log(format!(
+                    "screen_tokenize:selected_text_probe source=target_pid pid={pid} result=present length={}",
+                    text.len()
+                ));
+                return Some(text.trim().to_string());
+            }
+            Ok(Some(_)) => trace::log(format!(
+                "screen_tokenize:selected_text_probe source=target_pid pid={pid} result=empty"
+            )),
+            Ok(None) => trace::log(format!(
+                "screen_tokenize:selected_text_probe source=target_pid pid={pid} result=none"
+            )),
+            Err(error) => trace::log(format!(
+                "screen_tokenize:selected_text_probe source=target_pid pid={pid} result=error error={error}"
+            )),
+        }
+
+        if platform::ax::frontmost_app_pid() == Some(pid) {
+            trace::log(format!(
+                "screen_tokenize:selected_text_probe source=frontmost result=skipped_same_pid pid={pid}"
+            ));
+            return None;
+        }
+    } else {
+        trace::log("screen_tokenize:selected_text_probe source=target_pid result=skipped_no_pid");
+    }
+    let focused_bounds = match platform::ax::focused_frontmost_window_bounds() {
+        Ok(Some(bounds)) => bounds,
+        Ok(None) => {
+            trace::log(
+                "screen_tokenize:selected_text_probe source=frontmost result=no_focused_bounds",
+            );
+            return None;
+        }
+        Err(error) => {
+            trace::log(format!(
+                "screen_tokenize:selected_text_probe source=frontmost result=error error={error}"
+            ));
+            return None;
+        }
+    };
     let target_bounds = window.os_bounds.as_ref().unwrap_or(&window.bounds);
     if !bounds_match_with_tolerance(&focused_bounds, target_bounds, 8.0) {
+        trace::log("screen_tokenize:selected_text_probe source=frontmost result=bounds_mismatch");
         return None;
     }
-    platform::ax::focused_frontmost_selected_text()
-        .ok()
-        .flatten()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+    match platform::ax::focused_frontmost_selected_text() {
+        Ok(Some(text)) if !text.trim().is_empty() => {
+            trace::log(format!(
+                "screen_tokenize:selected_text_probe source=frontmost result=present length={}",
+                text.len()
+            ));
+            Some(text.trim().to_string())
+        }
+        Ok(Some(_)) => {
+            trace::log("screen_tokenize:selected_text_probe source=frontmost result=empty");
+            None
+        }
+        Ok(None) => {
+            trace::log("screen_tokenize:selected_text_probe source=frontmost result=none");
+            None
+        }
+        Err(error) => {
+            trace::log(format!(
+                "screen_tokenize:selected_text_probe source=frontmost result=error error={error}"
+            ));
+            None
+        }
+    }
 }
 
 fn apply_journal_redaction(value: &mut Value) {
@@ -927,6 +1050,31 @@ mod tests {
     #[test]
     fn implicit_active_window_uses_foreground_capture() {
         assert!(!should_use_background_capture(&window(false), false));
+    }
+
+    #[test]
+    fn infers_document_url_from_browser_address_field() {
+        let elements = vec![desktop_core::protocol::TokenizeElement {
+            id: "address-1".to_string(),
+            kind: "text_field".to_string(),
+            bbox: [0.0, 0.0, 100.0, 20.0],
+            has_border: None,
+            text: Some("https://example.com/page".to_string()),
+            text_truncated: None,
+            confidence: None,
+            scrollable: None,
+            checked: None,
+            url: None,
+            source: "accessibility_ax:AXTextField".to_string(),
+        }];
+
+        assert_eq!(
+            infer_document_url_from_elements(&elements),
+            Some((
+                "ax_text_field_value",
+                "https://example.com/page".to_string()
+            ))
+        );
     }
 
     #[cfg(target_os = "linux")]

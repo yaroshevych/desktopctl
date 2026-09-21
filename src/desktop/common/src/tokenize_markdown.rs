@@ -13,6 +13,39 @@ fn push_subsection(lines: &mut Vec<String>, title: &str) {
     lines.push(format!("### {title}"));
 }
 
+fn inferred_document_url(window: &Value) -> Option<String> {
+    if let Some(url) = window
+        .get("document_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return Some(url.to_string());
+    }
+
+    window
+        .get("elements")
+        .and_then(Value::as_array)
+        .and_then(|elements| {
+            elements.iter().find_map(|element| {
+                let source = element.get("source").and_then(Value::as_str).unwrap_or("");
+                let candidate = if source.ends_with("AXWebArea") {
+                    element.get("url").and_then(Value::as_str)
+                } else if source.ends_with("AXTextField") {
+                    element.get("text").and_then(Value::as_str)
+                } else {
+                    None
+                }?;
+                is_url_like(candidate).then(|| candidate.trim().to_string())
+            })
+        })
+}
+
+fn is_url_like(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.contains("://") && !value.chars().any(char::is_whitespace)
+}
+
 pub fn render_tokenize_markdown(value: &Value, include_all_hint: bool) -> String {
     let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
     if !ok {
@@ -100,12 +133,8 @@ pub fn render_tokenize_markdown(value: &Value, include_all_hint: bool) -> String
         {
             push_kv(&mut lines, "window_id", text.trim());
         }
-        if let Some(text) = window
-            .get("document_url")
-            .and_then(Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-        {
-            push_kv(&mut lines, "document_url", text.trim());
+        if let Some(url) = inferred_document_url(window) {
+            push_kv(&mut lines, "document_url", url);
         }
         if let Some(text) = window
             .get("selected_text")
@@ -153,12 +182,8 @@ pub fn render_tokenize_markdown(value: &Value, include_all_hint: bool) -> String
             push_section(&mut lines, &format!("Window {}", window_idx + 1));
             push_kv(&mut lines, "window_title", title);
             push_kv(&mut lines, "window_id", id);
-            if let Some(text) = window
-                .get("document_url")
-                .and_then(Value::as_str)
-                .filter(|v| !v.trim().is_empty())
-            {
-                push_kv(&mut lines, "document_url", text.trim());
+            if let Some(url) = inferred_document_url(&window) {
+                push_kv(&mut lines, "document_url", url);
             }
         }
         let mut entries: Vec<Entry> = window
@@ -429,5 +454,30 @@ mod tests {
         assert!(markdown.contains("- document_url: file:///tmp/document.md"));
         assert!(markdown.contains("- selected_text: selected\\ntext"));
         assert!(markdown.contains("Open document #link-1 [url=https://example.com/document]"));
+    }
+
+    #[test]
+    fn promotes_address_field_url_to_document_url() {
+        let value = json!({
+            "ok": true,
+            "request_id": "req-2",
+            "result": {
+                "windows": [{
+                    "id": "window-1",
+                    "title": "Safari",
+                    "bounds": {"width": 800, "height": 600},
+                    "elements": [{
+                        "id": "address-1",
+                        "type": "text_field",
+                        "bbox": [10, 20, 500, 30],
+                        "text": "https://example.com/page",
+                        "source": "accessibility_ax:AXTextField"
+                    }]
+                }]
+            }
+        });
+
+        let markdown = render_tokenize_markdown(&value, false);
+        assert!(markdown.contains("- document_url: https://example.com/page"));
     }
 }

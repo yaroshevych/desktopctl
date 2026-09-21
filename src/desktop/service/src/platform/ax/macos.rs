@@ -17,7 +17,8 @@ pub struct AxElement {
 use crate::trace;
 use accessibility::{AXAttribute, AXUIElement, AXUIElementAttributes};
 use accessibility_sys::{
-    AXUIElementCopyMultipleAttributeValues, AXUIElementRef, AXValueGetType, AXValueGetValue,
+    AXUIElementCopyMultipleAttributeValues, AXUIElementCopyParameterizedAttributeNames,
+    AXUIElementCopyParameterizedAttributeValue, AXUIElementRef, AXValueGetType, AXValueGetValue,
     AXValueRef, kAXChildrenAttribute, kAXDescriptionAttribute, kAXErrorSuccess,
     kAXFocusedApplicationAttribute, kAXFocusedUIElementAttribute, kAXIdentifierAttribute,
     kAXLabelValueAttribute, kAXPositionAttribute, kAXRoleAttribute, kAXSizeAttribute,
@@ -27,14 +28,14 @@ use accessibility_sys::{
 use core_foundation::{
     array::{CFArray, CFArrayRef},
     attributed_string::{CFAttributedString, CFAttributedStringGetString},
-    base::{CFGetTypeID, CFType, TCFType},
+    base::{CFGetTypeID, CFNullGetTypeID, CFType, CFTypeRef, TCFType},
     boolean::CFBoolean,
     number::CFNumber,
     string::CFString,
     url::CFURL,
 };
 use std::cell::OnceCell;
-use std::ffi::c_void;
+use std::{ffi::c_void, ptr};
 
 #[repr(C)]
 struct CGPoint {
@@ -282,13 +283,279 @@ pub fn focused_frontmost_selected_text() -> Result<Option<String>, AppError> {
         AXAttribute::<CFType>::new(&CFString::from_static_string(kAXFocusedUIElementAttribute));
     let focused_cf = match app.attribute(&focused_element_attr) {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            trace::log("ax:selected_text_probe scope=frontmost result=focused_element_missing");
+            return Ok(selected_text_from_app_tree(&app, "frontmost"));
+        }
     };
     if !focused_cf.instance_of::<AXUIElement>() {
-        return Ok(None);
+        trace::log("ax:selected_text_probe scope=frontmost result=focused_element_wrong_type");
+        return Ok(selected_text_from_app_tree(&app, "frontmost"));
     }
     let focused = unsafe { AXUIElement::wrap_under_get_rule(focused_cf.as_CFTypeRef() as _) };
-    Ok(attribute_text_by_name(&focused, "AXSelectedText"))
+    let selected = attribute_text_by_name(&focused, "AXSelectedText");
+    trace::log(format!(
+        "ax:selected_text_probe scope=frontmost result={} length={}",
+        if selected.is_some() {
+            "present"
+        } else {
+            "empty"
+        },
+        selected.as_deref().map_or(0, str::len)
+    ));
+    if selected.is_some() {
+        return Ok(selected);
+    }
+
+    let tree_result = selected_text_from_app_tree(&app, "frontmost");
+    Ok(tree_result)
+}
+
+pub fn selected_text_for_pid(pid: i64) -> Result<Option<String>, AppError> {
+    let pid = i32::try_from(pid)
+        .map_err(|_| AppError::invalid_argument(format!("invalid target process ID: {pid}")))?;
+    if pid <= 0 {
+        return Ok(None);
+    }
+    let app = AXUIElement::application(pid);
+    let focused_element_attr =
+        AXAttribute::<CFType>::new(&CFString::from_static_string(kAXFocusedUIElementAttribute));
+    let focused_cf = match app.attribute(&focused_element_attr) {
+        Ok(value) => value,
+        Err(_) => {
+            trace::log(format!(
+                "ax:selected_text_probe scope=pid pid={pid} result=focused_element_missing"
+            ));
+            return Ok(selected_text_from_app_tree(&app, &format!("pid:{pid}")));
+        }
+    };
+    if !focused_cf.instance_of::<AXUIElement>() {
+        trace::log(format!(
+            "ax:selected_text_probe scope=pid pid={pid} result=focused_element_wrong_type"
+        ));
+        return Ok(selected_text_from_app_tree(&app, &format!("pid:{pid}")));
+    }
+    let focused = unsafe { AXUIElement::wrap_under_get_rule(focused_cf.as_CFTypeRef() as _) };
+    let selected = attribute_text_by_name(&focused, "AXSelectedText");
+    trace::log(format!(
+        "ax:selected_text_probe scope=pid pid={pid} result={} length={}",
+        if selected.is_some() {
+            "present"
+        } else {
+            "empty"
+        },
+        selected.as_deref().map_or(0, str::len)
+    ));
+    if selected.is_some() {
+        return Ok(selected);
+    }
+
+    let tree_result = selected_text_from_app_tree(&app, &format!("pid:{pid}"));
+    Ok(tree_result)
+}
+
+const AX_SELECTED_TEXT_MARKER_RANGE: &str = "AXSelectedTextMarkerRange";
+const AX_STRING_FOR_TEXT_MARKER_RANGE: &str = "AXStringForTextMarkerRange";
+const AX_ATTRIBUTED_STRING_FOR_TEXT_MARKER_RANGE: &str = "AXAttributedStringForTextMarkerRange";
+
+#[derive(Default)]
+struct SelectedTextTreeStats {
+    visited: usize,
+    inspected: usize,
+    marker_non_null: usize,
+    marker_null: usize,
+    truncated: bool,
+}
+
+fn selected_text_from_app_tree(app: &AXUIElement, scope: &str) -> Option<String> {
+    let window = app.focused_window().or_else(|_| app.main_window()).ok();
+    let Some(window) = window else {
+        trace::log(format!(
+            "ax:selected_text_tree scope={scope} result=no_window"
+        ));
+        return None;
+    };
+
+    let mut stats = SelectedTextTreeStats::default();
+    let result = selected_text_from_tree_node(&window, 0, &mut stats);
+    if stats.truncated {
+        trace::log(format!(
+            "ax:selected_text_tree scope={scope} visited={} inspected={} marker_non_null={} marker_null={} truncated=true",
+            stats.visited, stats.inspected, stats.marker_non_null, stats.marker_null
+        ));
+    }
+    trace::log(format!(
+        "ax:selected_text_tree scope={scope} result={} length={} visited={} inspected={} marker_non_null={} marker_null={}",
+        if result.is_some() { "present" } else { "none" },
+        result.as_deref().map_or(0, str::len),
+        stats.visited,
+        stats.inspected,
+        stats.marker_non_null,
+        stats.marker_null
+    ));
+    result
+}
+
+fn selected_text_from_tree_node(
+    element: &AXUIElement,
+    depth: usize,
+    stats: &mut SelectedTextTreeStats,
+) -> Option<String> {
+    if depth > ALL_MAX_DEPTH || stats.visited >= ALL_MAX_NODES {
+        stats.truncated = true;
+        return None;
+    }
+    stats.visited += 1;
+
+    let role = element.role().ok().map(|value| value.to_string());
+    if role.as_deref() == Some("AXWebArea") {
+        stats.inspected += 1;
+        let marker_range = AXAttribute::<CFType>::new(&CFString::from_static_string(
+            AX_SELECTED_TEXT_MARKER_RANGE,
+        ));
+        let marker = element.attribute(&marker_range).ok();
+        match marker.as_ref() {
+            Some(value) if !cf_type_is_null(value) => stats.marker_non_null += 1,
+            Some(_) => stats.marker_null += 1,
+            None => {}
+        }
+
+        trace::log(format!(
+            "ax:selected_text_marker_probe role=AXWebArea marker={} marker_type={} parameterized={}",
+            match marker.as_ref() {
+                Some(value) if !cf_type_is_null(value) => "non_null",
+                Some(_) => "null",
+                None => "missing",
+            },
+            marker.as_ref().map_or("missing", cf_type_kind),
+            parameterized_attribute_summary(element),
+        ));
+
+        if let Some(selected) = attribute_text_by_name(element, "AXSelectedText") {
+            trace::log(format!(
+                "ax:selected_text_tree_match role={} source=AXSelectedText length={}",
+                role.as_deref().unwrap_or("AXUnknown"),
+                selected.len()
+            ));
+            return Some(selected);
+        }
+
+        if let Some(marker) = marker.filter(|value| !cf_type_is_null(value)) {
+            match ax_parameterized_text(element, AX_STRING_FOR_TEXT_MARKER_RANGE, &marker) {
+                Ok(Some(selected)) => {
+                    trace::log(format!(
+                        "ax:selected_text_tree_match role=AXWebArea source=AXStringForTextMarkerRange length={}",
+                        selected.len()
+                    ));
+                    return Some(selected);
+                }
+                Ok(None) => {
+                    trace::log(
+                        "ax:selected_text_marker_probe role=AXWebArea string_for_text_marker_range=empty",
+                    );
+                }
+                Err(error) => {
+                    trace::log(format!(
+                        "ax:selected_text_marker_probe role=AXWebArea string_for_text_marker_range_error={error}"
+                    ));
+                }
+            }
+
+            match ax_parameterized_text(
+                element,
+                AX_ATTRIBUTED_STRING_FOR_TEXT_MARKER_RANGE,
+                &marker,
+            ) {
+                Ok(Some(selected)) => {
+                    trace::log(format!(
+                        "ax:selected_text_tree_match role=AXWebArea source=AXAttributedStringForTextMarkerRange length={}",
+                        selected.len()
+                    ));
+                    return Some(selected);
+                }
+                Ok(None) => {
+                    trace::log(
+                        "ax:selected_text_marker_probe role=AXWebArea attributed_string_for_text_marker_range=empty",
+                    );
+                }
+                Err(error) => {
+                    trace::log(format!(
+                        "ax:selected_text_marker_probe role=AXWebArea attributed_string_for_text_marker_range_error={error}"
+                    ));
+                }
+            }
+        }
+    }
+
+    let children = element.children().ok()?;
+    for child in children.iter() {
+        if let Some(selected) = selected_text_from_tree_node(&child, depth + 1, stats) {
+            return Some(selected);
+        }
+        if stats.truncated {
+            break;
+        }
+    }
+    None
+}
+
+fn ax_parameterized_text(
+    element: &AXUIElement,
+    attribute_name: &str,
+    marker: &CFType,
+) -> Result<Option<String>, i32> {
+    let parameterized_attribute = CFString::new(attribute_name);
+    let mut result: CFTypeRef = ptr::null();
+    let error = unsafe {
+        AXUIElementCopyParameterizedAttributeValue(
+            element.as_concrete_TypeRef(),
+            parameterized_attribute.as_concrete_TypeRef(),
+            marker.as_CFTypeRef(),
+            &mut result,
+        )
+    };
+    if error != kAXErrorSuccess {
+        return Err(error);
+    }
+    if result.is_null() {
+        return Ok(None);
+    }
+    let value = unsafe { CFType::wrap_under_create_rule(result) };
+    Ok(cf_type_text(&value))
+}
+
+fn cf_type_is_null(value: &CFType) -> bool {
+    value.type_of() == unsafe { CFNullGetTypeID() }
+}
+
+fn parameterized_attribute_summary(element: &AXUIElement) -> String {
+    let mut names: CFArrayRef = ptr::null();
+    let error = unsafe {
+        AXUIElementCopyParameterizedAttributeNames(element.as_concrete_TypeRef(), &mut names)
+    };
+    if error != kAXErrorSuccess || names.is_null() {
+        return format!("error:{error}");
+    }
+    let names = unsafe { CFArray::<CFString>::wrap_under_create_rule(names) };
+    let names = names
+        .iter()
+        .map(|name| name.to_string())
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "AXStringForRange"
+                    | "AXStringForTextMarkerRange"
+                    | "AXAttributedStringForTextMarkerRange"
+                    | "AXSelectedTextMarkerRange"
+                    | "AXTextMarkerForPosition"
+            )
+        })
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        "ok:none".to_string()
+    } else {
+        format!("ok:{}", names.join(","))
+    }
 }
 
 pub fn frontmost_app_pid() -> Option<i64> {
