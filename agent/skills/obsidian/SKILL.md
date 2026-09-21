@@ -19,7 +19,7 @@ Optimize for one-shot execution:
 * Prefer doing nothing over an unsafe or destructive guess.
 * Verify every write.
 
-Never infer a write target from the active note unless the user explicitly says “this note”, “current note”, or equivalent. For requests such as “add this to Obsidian”, search for a clearly matching destination; if there is no unique safe target, remain read-only and ask which note to use.
+Never infer an existing-note write target from the active note unless the user explicitly says “this note”, “current note”, or equivalent. For requests such as “add this to Obsidian”, default to creating a new note. Search for an existing destination only when the user names one, asks to update/merge/append, or clearly refers to an existing note.
 
 ## Escalation
 
@@ -87,15 +87,26 @@ Metadata cache may lag after writes; re-query before reporting success.
 
 Examples: “save this”, “remember this”, “add this to my shopping list”, “put this in today’s note”.
 
-1. Read relevant current-app context via DesktopCtl.
-2. Infer destination; search if duplication is plausible.
-3. Preserve existing structure.
-4. Make the smallest semantically correct change.
-5. Verify.
+Fast path for “add/save/capture this to Obsidian”:
 
-Prefer an existing note over creating a near-duplicate.
+1. Read relevant current-app context via DesktopCtl and copy/read the source once.
+2. If the user names an existing note, use it. Otherwise create a new note by default.
+3. Choose a concise title from the content and use title, URL, and folder context from the current-app snapshot; do not inspect unrelated vault notes.
+4. Create with the known Obsidian CLI syntax:
 
-If no destination is specified and no unique obvious destination exists, remain read-only and ask which note to use. Do not silently choose the active note or daily note.
+   ```bash
+   obsidian create path="..." content="..."
+   ```
+
+5. Read the created note once with `obsidian read` to verify.
+
+For an explicitly named existing note or a request to update/merge/append, read the target, preserve its structure, make the smallest semantically correct change, and verify.
+
+Default capture is a new note. Do not merge or append into an existing note unless the user requests it or names the target.
+
+Ask a follow-up only when the title, target, or requested operation cannot be safely inferred. Do not silently choose the active note or daily note as an existing-note target.
+
+For this fast path, do not run `obsidian help`, broad vault searches/listings, plugin discovery, read unrelated notes, or use the Web Clipper UI. Do not add unsupported flags such as `silent`. If `obsidian create` reports a path collision, stop and ask; do not search the vault to resolve it.
 
 ### Find / answer from Obsidian
 
@@ -136,8 +147,8 @@ Examples: “make a note from this”, “save this email/page as a note”.
 
 1. Read source context via DesktopCtl.
 2. Extract concise title/content.
-3. Search for an existing note on the same subject.
-4. Update it if appropriate; otherwise create.
+3. Create a new note by default.
+4. Only update an existing note if the user names it or asks to merge/update/append.
 5. Follow nearby vault conventions; do not invent folders, tags, or metadata.
 6. Verify.
 
@@ -162,9 +173,9 @@ Use live active-note state when referring to the current note.
 
 ### Create
 
-Create only when the user’s request implies a write and no suitable existing note exists.
+Create when the user’s request implies capture, saving, or a new note. New notes are the default when no existing target is named.
 
-Search first when duplication is plausible.
+Search first only when the user asks to update, merge, append, or find an existing note. For default capture, avoid broad duplicate searches; check only the exact target path for a collision.
 
 ### Create then edit
 

@@ -1015,8 +1015,9 @@ impl PiRunner {
                 ],
             );
         }
+        let workspace_bootstrap = workspace_bootstrap_instruction(request.workspace.as_deref());
         args.push(OsString::from("--append-system-prompt"));
-        args.push(OsString::from(workspace_bootstrap_instruction()));
+        args.push(OsString::from(workspace_bootstrap.as_str()));
         if let Some(session) = request.session.as_ref().filter(|s| !s.is_empty()) {
             if let Some(path) = session.path.as_ref() {
                 args.push(OsString::from("--session"));
@@ -1037,7 +1038,12 @@ impl PiRunner {
         // `--` protects prompts beginning with a dash while keeping user text
         // an argv element rather than shell source.
         args.push(OsString::from("--"));
-        args.push(OsString::from(&request.prompt));
+        // Pi does not persist `--append-system-prompt` in its session JSONL.
+        // Keep a copy in the user prompt so the bootstrap is auditable there.
+        args.push(OsString::from(format!(
+            "{workspace_bootstrap}\n\n{}",
+            request.prompt
+        )));
         crate::trace::agent_context(format!(
             "pi_args target_arg={} window_context_arg={} append_system_prompts={} session_arg={} prompt_bytes={}",
             request
@@ -1089,7 +1095,9 @@ impl AgentRunner for PiRunner {
 
 fn prompt_for_cli(request: &AgentRequest) -> String {
     let mut prompt = String::new();
-    prompt.push_str(workspace_bootstrap_instruction());
+    prompt.push_str(&workspace_bootstrap_instruction(
+        request.workspace.as_deref(),
+    ));
     prompt.push_str("\n\n");
     if let Some(target) = request.target_window.as_ref() {
         prompt.push_str(&target_window_instruction(target));
@@ -1103,8 +1111,50 @@ fn prompt_for_cli(request: &AgentRequest) -> String {
     prompt
 }
 
-fn workspace_bootstrap_instruction() -> &'static str {
-    "Before taking any task-specific action, read `./AGENTS.md` from the current workspace, then inspect `./skills/` for a matching `SKILL.md`. If the task involves Obsidian, read `./skills/obsidian/SKILL.md` before using DesktopCtl, Obsidian, or modifying vault content. Follow the loaded instructions. Use these workspace-relative paths as authoritative; do not substitute repository or home-directory copies. If `AGENTS.md` or a required skill is missing or unreadable, report that before acting."
+fn workspace_bootstrap_instruction(workspace: Option<&Path>) -> String {
+    let skills = match workspace {
+        Some(workspace) => match discover_workspace_skills(workspace) {
+            Ok(paths) if !paths.is_empty() => paths
+                .into_iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Ok(_) => "- (no SKILL.md files found)".to_owned(),
+            Err(error) => format!("- (unable to enumerate skills: {error})"),
+        },
+        None => "- (workspace path unavailable; read `./skills/` directly)".to_owned(),
+    };
+
+    format!(
+        "MANDATORY WORKSPACE BOOTSTRAP — before any other tool call:\n1. Read `./AGENTS.md` from the current workspace.\n2. Read one matching `SKILL.md` from the authoritative list below, when the task matches a skill.\n3. Only then act on the user request.\n\nDesktopCtl discovered these workspace skills; read the exact listed file when relevant:\n{skills}\nUse these workspace-relative paths, not repository or home-directory copies. If `AGENTS.md` or a required skill is missing or unreadable, report that before acting. Do not use `find` to discover skills; the `skills` directory may be a symlink. Do not run help, discovery, listing, or unrelated inspection before bootstrap. After bootstrap, follow the selected skill's workflow and fast path exactly; do not substitute exploratory or fallback behavior unless that workflow requires it or the prescribed operation fails.",
+    )
+}
+
+fn discover_workspace_skills(workspace: &Path) -> io::Result<Vec<String>> {
+    let root = workspace.join("skills");
+    let mut pending = vec![root.clone()];
+    let mut paths = Vec::new();
+
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file()
+                && path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md")
+            {
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("skill path is below workspace skill root");
+                paths.push(format!("./skills/{}", relative.display()));
+            }
+        }
+    }
+
+    paths.sort();
+    Ok(paths)
 }
 
 fn target_window_instruction(target: &TargetWindow) -> String {
@@ -2788,26 +2838,54 @@ mod tests {
         let pi_args = PiRunner::args_for(&request);
         let pi_prompt = pi_args
             .iter()
-            .find(|arg| arg.to_string_lossy().contains("read `./AGENTS.md`"))
+            .find(|arg| arg.to_string_lossy().contains("Read `./AGENTS.md`"))
             .expect("Pi workspace bootstrap prompt")
             .to_string_lossy();
-        assert!(pi_prompt.contains("read `./AGENTS.md`"));
-        assert!(pi_prompt.contains("read `./skills/obsidian/SKILL.md`"));
-        assert!(pi_prompt.contains("workspace-relative paths as authoritative"));
+        assert!(pi_prompt.contains("Read `./AGENTS.md`"));
+        assert!(pi_prompt.contains("Read one matching `SKILL.md`"));
+        assert!(pi_prompt.contains("Use these workspace-relative paths"));
+        assert!(pi_prompt.contains("before any other tool call"));
+        assert!(pi_prompt.contains("Do not run help, discovery, listing"));
+        let pi_user_prompt = pi_args.last().expect("Pi user prompt").to_string_lossy();
+        assert!(pi_user_prompt.contains("Read `./AGENTS.md`"));
+        assert!(pi_user_prompt.ends_with("add this to obsidian"));
 
         let goose_args = GooseRunner::args_for(&request, "session");
         let goose_prompt = goose_args
             .last()
             .expect("Goose prompt argument")
             .to_string_lossy();
-        assert!(goose_prompt.contains("read `./AGENTS.md`"));
+        assert!(goose_prompt.contains("Read `./AGENTS.md`"));
 
         let opencode_args = OpenCodeRunner::args_for(&request);
         let opencode_prompt = opencode_args
             .last()
             .expect("OpenCode prompt argument")
             .to_string_lossy();
-        assert!(opencode_prompt.contains("read `./skills/obsidian/SKILL.md`"));
+        assert!(opencode_prompt.contains("Read one matching `SKILL.md`"));
+    }
+
+    #[test]
+    fn workspace_bootstrap_lists_workspace_skills_without_absolute_paths() {
+        let workspace = env::temp_dir().join(format!(
+            "desktopctl-agent-prompt-skills-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(workspace.join("skills/obsidian")).expect("create Obsidian skill dir");
+        fs::create_dir_all(workspace.join("skills/things")).expect("create Things skill dir");
+        fs::write(workspace.join("skills/obsidian/SKILL.md"), "obsidian").expect("write skill");
+        fs::write(workspace.join("skills/things/SKILL.md"), "things").expect("write skill");
+
+        let prompt = workspace_bootstrap_instruction(Some(&workspace));
+        assert!(prompt.contains("- ./skills/obsidian/SKILL.md"));
+        assert!(prompt.contains("- ./skills/things/SKILL.md"));
+        assert!(!prompt.contains(workspace.to_string_lossy().as_ref()));
+
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -2992,7 +3070,10 @@ mod tests {
                 .any(|pair| pair == [OsString::from("--session-id"), OsString::from("native-id")])
         );
         assert!(args.iter().any(|arg| arg == &OsString::from("--")));
-        assert_eq!(args.last(), Some(&OsString::from("- summarize this")));
+        assert!(
+            args.last()
+                .is_some_and(|arg| arg.to_string_lossy().ends_with("- summarize this"))
+        );
         let context_index = args
             .windows(2)
             .position(|pair| {
@@ -3033,7 +3114,10 @@ mod tests {
             arg.to_string_lossy()
                 .contains("Initial environment context")
         }));
-        assert_eq!(args.last(), Some(&OsString::from("summarize")));
+        assert!(
+            args.last()
+                .is_some_and(|arg| arg.to_string_lossy().ends_with("summarize"))
+        );
     }
 
     #[test]
@@ -3048,9 +3132,12 @@ mod tests {
         );
         assert!(
             args.iter()
-                .any(|arg| { arg.to_string_lossy().contains("read `./AGENTS.md`") })
+                .any(|arg| { arg.to_string_lossy().contains("Read `./AGENTS.md`") })
         );
-        assert_eq!(args.last(), Some(&OsString::from("summarize")));
+        assert!(
+            args.last()
+                .is_some_and(|arg| arg.to_string_lossy().ends_with("summarize"))
+        );
     }
 
     #[test]
