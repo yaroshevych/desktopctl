@@ -20,9 +20,9 @@ terminal process.
   working directory, and `Continue in <agent>` reuses it in the selected
   terminal.
 - `agent_runner` defines the adapter boundary and implements runners for Pi,
-  Codex, Goose, and OpenCode. Runs happen on worker threads and completion is
-  dispatched back to AppKit's main thread. One run per DesktopCtl session is
-  permitted at a time.
+  Codex, Goose, OpenCode, and Hermes. Runs happen on worker threads and
+  completion is dispatched back to AppKit's main thread. One run per
+  DesktopCtl session is permitted at a time.
 
 While a session is running, its view shows a native activity spinner and a
 `Stop` button. The composer remains enabled: follow-ups typed while an agent is
@@ -42,14 +42,16 @@ After an agent has produced a native session identity, the session view also
 offers `Continue in <agent>`. The launcher settings select Ghostty, Kitty, or
 Terminal. DesktopCtl creates a new window and starts the agent's interactive
 resume command from the session workspace: Pi uses `--session <path|id>`, Codex uses `resume
-<id>`, Goose uses `session --resume --name <name>`, and OpenCode uses
-`--session <id>`. The executable and session arguments are POSIX-quoted. macOS
+<id>`, Goose uses `session --resume --name <name>`, OpenCode uses
+`--session <id>`, and Hermes uses `chat --continue <name> --create-if-missing --toolsets
+terminal,memory`. The executable and session arguments are POSIX-quoted. macOS
 may ask the user to allow DesktopCtl to control the selected terminal the first
 time this is used.
 When that session is opened in the launcher again, DesktopCtl refreshes the
 short transcript from the native session. Pi reads its JSONL active branch;
-Codex reads its rollout JSONL; Goose uses session export --format json; and
-OpenCode uses export. Terminal-added user messages and final assistant answers
+Codex reads its rollout JSONL; Goose uses session export --format json;
+OpenCode uses export; and Hermes uses `sessions export --format jsonl`.
+Terminal-added user messages and final assistant answers
 therefore appear in the launcher for every supported CLI. Thinking, tool calls,
 tool results, hidden context, and incomplete or aborted assistant messages stay
 hidden.
@@ -62,8 +64,9 @@ list closes the overlay.
 The runner locates each supported CLI from its `DESKTOPCTL_<AGENT>_PATH`
 override, the process `PATH`, and common GUI-install locations including
 `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, and `~/bin`. The launcher
-settings list is built dynamically from installed CLIs. Pi remains the default;
-missing agents are not silently substituted.
+settings list is built dynamically from installed CLIs. Hermes is the default
+for new and reset settings; a saved agent choice is kept. Missing agents are
+not silently substituted.
 
 Pi is invoked directly with an argument array in non-interactive JSON mode. No
 shell is involved and user input is not interpolated into a command string. The
@@ -128,6 +131,18 @@ directory before proceeding.
 `PiRunner` remains a reusable adapter and permits callers to omit a working
 directory. Launcher paths must always use `with_current_dir` with the session
 workspace; the launcher owns that invariant.
+
+## Hermes invocation
+
+Hermes runs with `hermes chat --quiet --toolsets terminal,memory
+--continue <desktopctl-session-name> --create-if-missing --query <prompt>`.
+DesktopCtl derives a stable Hermes session name from its workspace, so each
+follow-up continues the same Hermes conversation without parsing session
+metadata from stdout. Native transcripts are refreshed with
+`hermes sessions export --format jsonl --title <desktopctl-session-name> -`.
+Desktop operations use the `desktopctl` CLI through Hermes's terminal toolset.
+The memory toolset allows Hermes to save persistent profile and memory notes;
+Hermes's separate `computer_use` toolset and `cua-driver` are not required.
 
 ## Testing
 

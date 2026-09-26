@@ -189,7 +189,9 @@ private final class SettingsLauncherVM: ObservableObject {
 
     init(_ input: LauncherInput) {
         agents = input.agents
-        agent = agents.contains { $0.key == input.agent } ? input.agent : "pi"
+        agent = agents.contains { $0.key == input.agent }
+            ? input.agent
+            : (agents.contains { $0.key == "hermes" } ? "hermes" : (agents.first?.key ?? "pi"))
         terminal = ["ghostty", "kitty", "terminal"].contains(input.terminal)
             ? input.terminal : "ghostty"
         renderKeyboardShortcuts = input.renderKeyboardShortcuts
@@ -265,7 +267,9 @@ private final class SettingsLauncherVM: ObservableObject {
 
     func resetSettings() {
         stopRecording()
-        agent = agents.contains { $0.key == "pi" } ? "pi" : (agents.first?.key ?? "pi")
+        agent = agents.contains { $0.key == "hermes" }
+            ? "hermes"
+            : (agents.contains { $0.key == "pi" } ? "pi" : (agents.first?.key ?? "pi"))
         terminal = "ghostty"
         renderKeyboardShortcuts = true
         useNativeNotifications = false

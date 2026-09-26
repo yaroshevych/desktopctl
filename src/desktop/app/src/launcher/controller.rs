@@ -17,8 +17,8 @@ mod controller {
     use crate::{
         agent_runner::{
             AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, DesktopAgentRunner,
-            GooseRunner, OpenCodeRunner, PiRunner, TargetWindow, discover_agent_installations,
-            load_external_transcript, load_native_transcript,
+            GooseRunner, HermesRunner, OpenCodeRunner, PiRunner, TargetWindow,
+            discover_agent_installations, load_external_transcript, load_native_transcript,
         },
         agent_sessions::{
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
@@ -903,10 +903,12 @@ end run"#;
                         .as_deref()
                         .is_some_and(|value| !value.trim().is_empty())
             }
-            AgentKind::Codex | AgentKind::Goose | AgentKind::OpenCode => session
-                .native_session_id
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
+            AgentKind::Codex | AgentKind::Goose | AgentKind::OpenCode | AgentKind::Hermes => {
+                session
+                    .native_session_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            }
             AgentKind::DesktopAgent => false,
         }
     }
@@ -955,6 +957,14 @@ end run"#;
                 OpenCodeRunner::MODEL.to_string(),
             ],
             AgentKind::DesktopAgent => unreachable!("Desktop Agent has no native terminal session"),
+            AgentKind::Hermes => vec![
+                "chat".to_string(),
+                "--continue".to_string(),
+                native_id()?,
+                "--create-if-missing".to_string(),
+                "--toolsets".to_string(),
+                "terminal,memory".to_string(),
+            ],
         };
         Ok((executable, args))
     }
@@ -1197,6 +1207,11 @@ end run"#;
                 ),
                 AgentKind::DesktopAgent => Box::new(
                     DesktopAgentRunner::new()
+                        .with_current_dir(workspace.clone())
+                        .with_timing(Arc::clone(&timing)),
+                ),
+                AgentKind::Hermes => Box::new(
+                    HermesRunner::new()
                         .with_current_dir(workspace.clone())
                         .with_timing(Arc::clone(&timing)),
                 ),
@@ -1903,7 +1918,7 @@ end run"#;
                     .get("agent")
                     .and_then(serde_json::Value::as_str)
                     .map(AgentKind::from_key)
-                    .unwrap_or(AgentKind::Pi);
+                    .unwrap_or(AgentKind::Hermes);
                 let terminal = launcher
                     .get("terminal")
                     .and_then(serde_json::Value::as_str)
@@ -1922,7 +1937,7 @@ end run"#;
                     true,
                     false,
                     launcher_ui::LauncherShortcut::default(),
-                    AgentKind::Pi,
+                    AgentKind::Hermes,
                     preferred_terminal(TerminalKind::Ghostty),
                 )
             })

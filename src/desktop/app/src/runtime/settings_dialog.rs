@@ -172,7 +172,7 @@ fn default_render_keyboard_shortcuts() -> bool {
 }
 
 fn default_agent() -> String {
-    AgentKind::Pi.key().to_string()
+    AgentKind::Hermes.key().to_string()
 }
 
 fn default_terminal() -> String {

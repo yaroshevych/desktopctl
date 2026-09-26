@@ -33,15 +33,17 @@ pub enum AgentKind {
     Goose,
     OpenCode,
     DesktopAgent,
+    Hermes,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Pi,
         Self::Codex,
         Self::Goose,
         Self::OpenCode,
         Self::DesktopAgent,
+        Self::Hermes,
     ];
 
     pub fn key(self) -> &'static str {
@@ -51,6 +53,7 @@ impl AgentKind {
             Self::Goose => "goose",
             Self::OpenCode => "opencode",
             Self::DesktopAgent => "desktopagent",
+            Self::Hermes => "hermes",
         }
     }
 
@@ -61,6 +64,7 @@ impl AgentKind {
             Self::Goose => "Goose",
             Self::OpenCode => "OpenCode",
             Self::DesktopAgent => "Desktop Agent",
+            Self::Hermes => "Hermes",
         }
     }
 
@@ -70,6 +74,7 @@ impl AgentKind {
             "goose" => Self::Goose,
             "opencode" => Self::OpenCode,
             "desktopagent" => Self::DesktopAgent,
+            "hermes" => Self::Hermes,
             _ => Self::Pi,
         }
     }
@@ -80,6 +85,7 @@ impl AgentKind {
             2 => Self::Goose,
             3 => Self::OpenCode,
             4 => Self::DesktopAgent,
+            5 => Self::Hermes,
             _ => Self::Pi,
         }
     }
@@ -95,6 +101,7 @@ impl AgentKind {
             Self::Goose => "DESKTOPCTL_GOOSE_PATH",
             Self::OpenCode => "DESKTOPCTL_OPENCODE_PATH",
             Self::DesktopAgent => "DESKTOPCTL_DESKTOP_AGENT_PATH",
+            Self::Hermes => "DESKTOPCTL_HERMES_PATH",
         }
     }
 }
@@ -306,6 +313,14 @@ pub fn load_external_transcript(
             None,
             parse_opencode_transcript(&run_history_export(kind, session, &["export"])?)?,
         )),
+        AgentKind::Hermes => Ok((
+            None,
+            parse_hermes_transcript(&run_history_export(
+                kind,
+                session,
+                &["sessions", "export", "--format", "jsonl", "--title", "-"],
+            )?)?,
+        )),
         AgentKind::DesktopAgent => Err(AgentRunnerError::Process(
             "Desktop Agent does not expose native transcripts".into(),
         )),
@@ -382,6 +397,17 @@ fn run_history_export(
                 AgentRunnerError::Process("OpenCode session has no native identity".into())
             })?;
         resolved_args.push(id.to_string());
+    } else if kind == AgentKind::Hermes {
+        let id = session
+            .id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                AgentRunnerError::Process("Hermes session has no native identity".into())
+            })?;
+        if let Some(title) = resolved_args.iter().position(|arg| arg == "--title") {
+            resolved_args.insert(title + 1, id.to_string());
+        }
     }
     command.args(resolved_args);
     command.stdin(Stdio::null());
@@ -1669,6 +1695,125 @@ impl AgentRunner for DesktopAgentRunner {
     }
 }
 
+/// Hermes CLI runner. Hermes's quiet single-query mode prints the final
+/// response and a session ID, which lets the launcher continue requests
+/// without depending on Hermes's JSON event stream.
+#[derive(Debug, Clone, Default)]
+pub struct HermesRunner {
+    executable: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+    timing: Option<Arc<crate::trace::E2eTiming>>,
+}
+
+impl HermesRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_executable(path: impl Into<PathBuf>) -> Self {
+        Self {
+            executable: Some(path.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_current_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.current_dir = Some(path.into());
+        self
+    }
+
+    pub(crate) fn with_timing(mut self, timing: Arc<crate::trace::E2eTiming>) -> Self {
+        self.timing = Some(timing);
+        self
+    }
+
+    fn executable(&self) -> Result<PathBuf, AgentRunnerError> {
+        self.executable
+            .as_deref()
+            .map(|path| {
+                if is_executable_file(path) {
+                    Ok(path.to_path_buf())
+                } else {
+                    Err(AgentRunnerError::MissingExecutable {
+                        configured: Some(path.to_path_buf()),
+                        message: format!(
+                            "configured Hermes executable is not executable: {}",
+                            path.display()
+                        ),
+                    })
+                }
+            })
+            .unwrap_or_else(|| discover_executable(AgentKind::Hermes))
+    }
+
+    fn session_name(request: &AgentRequest) -> String {
+        request
+            .session
+            .as_ref()
+            .and_then(|session| session.id.as_deref())
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                request
+                    .workspace
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .map(|name| format!("desktopctl-{}", name.to_string_lossy()))
+            })
+            .unwrap_or_else(|| "desktopctl-session".to_owned())
+    }
+
+    pub fn args_for(request: &AgentRequest) -> Vec<OsString> {
+        let mut args = vec![
+            OsString::from("chat"),
+            OsString::from("--quiet"),
+            OsString::from("--toolsets"),
+            OsString::from("terminal,memory"),
+            OsString::from("--continue"),
+            OsString::from(Self::session_name(request)),
+            OsString::from("--create-if-missing"),
+        ];
+        let prompt = if request.read_only {
+            format!("{}\n\n{}", read_only_instruction(), prompt_for_cli(request))
+        } else {
+            prompt_for_cli(request)
+        };
+        args.extend([OsString::from("--query"), OsString::from(prompt)]);
+        args
+    }
+
+    fn command_for(&self, request: &AgentRequest) -> Result<Command, AgentRunnerError> {
+        let executable = self.executable()?;
+        let mut command = Command::new(&executable);
+        command.args(Self::args_for(request));
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        if let Some(dir) = self.current_dir.as_deref() {
+            command.current_dir(dir);
+        }
+        configure_process_group(&mut command);
+        Ok(command)
+    }
+}
+
+impl AgentRunner for HermesRunner {
+    fn spawn(&self, request: AgentRequest) -> Result<AgentProcess, AgentRunnerError> {
+        let executable = self.executable().ok();
+        let mut command = self.command_for(&request)?;
+        let child = command
+            .spawn()
+            .map_err(|source| AgentRunnerError::Spawn { executable, source })?;
+        Ok(AgentProcess::new_with_parser(
+            child,
+            self.timing.clone(),
+            parse_hermes_output,
+            Some(AgentSessionRef::id(Self::session_name(&request))),
+            AgentKind::Hermes.label(),
+        ))
+    }
+}
+
 /// A running adapter process.  `wait_with_cancellation` drains both output
 /// streams while polling the child, allowing cancellation without leaving a
 /// Pi process behind.
@@ -2271,6 +2416,93 @@ pub fn parse_desktop_agent_output(output: &str) -> Result<AgentResult, AgentRunn
             "Desktop Agent response has unknown status {other:?}"
         ))),
     }
+}
+
+/// Parse Hermes quiet-mode output. Its session is managed under a stable name,
+/// so parsing does not depend on optional session information in CLI output.
+pub fn parse_hermes_output(output: &str) -> Result<AgentResult, AgentRunnerError> {
+    let mut answer_lines = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let identity = ["session id:", "session_id:", "session:"]
+            .into_iter()
+            .find_map(|prefix| {
+                lower
+                    .starts_with(prefix)
+                    .then(|| trimmed[prefix.len()..].trim())
+            });
+        if let Some(identity) = identity {
+            let identity = identity
+                .trim_matches(|character| matches!(character, '`' | '<' | '>'))
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            if !identity.is_empty() {
+                continue;
+            }
+        }
+        answer_lines.push(line);
+    }
+
+    let final_answer = answer_lines.join("\n").trim().to_owned();
+    if final_answer.is_empty() {
+        return Err(AgentRunnerError::Parse(
+            "Hermes produced no final assistant answer".into(),
+        ));
+    }
+    Ok(AgentResult {
+        session: AgentSessionRef {
+            id: None,
+            path: None,
+            cwd: None,
+        },
+        final_answer,
+    })
+}
+
+fn parse_hermes_transcript(output: &str) -> Result<Vec<NativeTranscriptMessage>, AgentRunnerError> {
+    let mut messages = Vec::new();
+    for (line_number, line) in output.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let session: Value = serde_json::from_str(line).map_err(|source| {
+            AgentRunnerError::Parse(format!(
+                "invalid Hermes session export JSON on line {}: {source}",
+                line_number + 1
+            ))
+        })?;
+        let Some(records) = session.get("messages").and_then(Value::as_array) else {
+            continue;
+        };
+        for record in records {
+            let Some(role) = record.get("role").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(text) = extract_message_text(record).filter(|text| !text.trim().is_empty())
+            else {
+                continue;
+            };
+            let Some(user) = (match role {
+                "user" => Some(true),
+                "assistant" => Some(false),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let timestamp_ms = ["timestamp_ms", "created_at_ms", "timestamp", "created_at"]
+                .iter()
+                .find_map(|key| record.get(*key).and_then(Value::as_u64))
+                .unwrap_or_default();
+            messages.push(NativeTranscriptMessage {
+                user,
+                text,
+                timestamp_ms,
+            });
+        }
+    }
+    Ok(messages)
 }
 
 /// Parse Pi's `--mode json` JSONL stream.  Only the final assistant text is
