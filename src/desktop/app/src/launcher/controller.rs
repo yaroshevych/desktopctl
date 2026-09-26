@@ -18,7 +18,8 @@ mod controller {
         agent_runner::{
             AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, DesktopAgentRunner,
             GooseRunner, HermesRunner, OpenCodeRunner, PiRunner, TargetWindow,
-            discover_agent_installations, load_external_transcript, load_native_transcript,
+            discover_agent_installations, hermes_skill_review_prompt, load_external_transcript,
+            load_hermes_review_history, load_native_transcript,
         },
         agent_sessions::{
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
@@ -53,6 +54,7 @@ mod controller {
         transcript_ack: Option<(String, u64, usize)>,
         native_sync_inflight: HashSet<String>,
         native_sync_generation: HashMap<String, u64>,
+        idle_review_generation: HashMap<String, u64>,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,6 +223,7 @@ mod controller {
             transcript_ack: None,
             native_sync_inflight: HashSet::new(),
             native_sync_generation: HashMap::new(),
+            idle_review_generation: HashMap::new(),
         })));
         crate::launcher::swift_bridge::start_settings_observer(launcher_settings_changed);
         launcher_ui::initialize(
@@ -984,6 +987,11 @@ end run"#;
     ) {
         let cancellation = Arc::new(AtomicBool::new(false));
         if let Some(mut state) = lock_state() {
+            let generation = state
+                .idle_review_generation
+                .entry(session_id.clone())
+                .or_default();
+            *generation = generation.wrapping_add(1);
             state
                 .cancellations
                 .insert(session_id.clone(), cancellation.clone());
@@ -1705,6 +1713,7 @@ end run"#;
         );
         let mut notice = None;
         let mut save_after_refresh = false;
+        let mut schedule_idle_review = false;
         let mut handled = false;
         if let Some(mut state) = lock_state() {
             if !retain_ownership {
@@ -1778,6 +1787,7 @@ end run"#;
                                 &result.final_answer,
                                 &follow_up_shortcut,
                             ));
+                            schedule_idle_review = session.agent == AgentKind::Hermes.key();
                             save_after_refresh = true;
                         }
                     }
@@ -1815,6 +1825,9 @@ end run"#;
                     timing.mark("session_persisted", format!("session={session_id}"));
                 }
             }
+            if schedule_idle_review {
+                schedule_hermes_idle_review(session_id.to_owned());
+            }
         } else {
             refresh();
         }
@@ -1833,6 +1846,105 @@ end run"#;
             }
         }
         handled
+    }
+
+    const HERMES_IDLE_REVIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn schedule_hermes_idle_review(session_id: String) {
+        let generation = lock_state().map(|mut state| {
+            let generation = state
+                .idle_review_generation
+                .entry(session_id.clone())
+                .or_default();
+            *generation = generation.wrapping_add(1);
+            *generation
+        });
+        let Some(generation) = generation else {
+            return;
+        };
+        thread::spawn(move || {
+            thread::sleep(HERMES_IDLE_REVIEW_TIMEOUT);
+            let session = lock_state().and_then(|state| {
+                if state.idle_review_generation.get(&session_id) != Some(&generation)
+                    || state.cancellations.contains_key(&session_id)
+                {
+                    return None;
+                }
+                state.store.get(&session_id).and_then(|session| {
+                    (session.agent == AgentKind::Hermes.key()
+                        && session.status == AgentSessionStatus::Completed)
+                        .then(|| session.clone())
+                })
+            });
+            let Some(session) = session else {
+                return;
+            };
+            run_hermes_idle_review(session);
+        });
+    }
+
+    fn run_hermes_idle_review(session: AgentSession) {
+        let native_history = session.native_session_id.as_deref().and_then(|id| {
+            load_hermes_review_history(&AgentSessionRef::id(id))
+                .ok()
+                .filter(|entries| !entries.is_empty())
+        });
+        let transcript = if let Some(entries) = native_history {
+            entries
+                .iter()
+                .rev()
+                .take(160)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|entry| format!("{}: {}", entry.role, truncate_one_line(&entry.text, 4_000)))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            session
+                .messages
+                .iter()
+                .rev()
+                .take(160)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|message| {
+                    let role = match message.role {
+                        SessionMessageRole::User => "User",
+                        SessionMessageRole::Assistant => "Hermes",
+                    };
+                    format!("{role}: {}", truncate_one_line(&message.text, 4_000))
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        let prompt = hermes_skill_review_prompt(&transcript);
+        let workspace = desktop_core::paths::AppPaths::resolve()
+            .ok()
+            .and_then(|paths| paths.ensure_agent_workspace_dir(&session.id).ok());
+        let mut request = AgentRequest::new(prompt);
+        request.workspace = workspace.clone();
+        request.session = Some(AgentSessionRef::id(format!(
+            "desktopctl-review-{}",
+            uuid::Uuid::now_v7()
+        )));
+        let runner = workspace
+            .map(|workspace| HermesRunner::new().with_current_dir(workspace))
+            .unwrap_or_default();
+        let result = runner
+            .spawn(request)
+            .and_then(|process| process.wait().map(|_| ()));
+        match result {
+            Ok(()) => trace::log(format!(
+                "agent_launcher:hermes_idle_review_completed session={}",
+                session.id
+            )),
+            Err(error) => trace::log(format!(
+                "agent_launcher:hermes_idle_review_error session={} error={error}",
+                session.id
+            )),
+        }
     }
 
     pub fn flush_pending_sessions() {
@@ -2386,6 +2498,7 @@ end run"#;
                 transcript_ack: None,
                 native_sync_inflight: Default::default(),
                 native_sync_generation: Default::default(),
+                idle_review_generation: Default::default(),
             };
             let collapsed = super::snapshot(&mut state, 1);
             assert!(collapsed.all.is_empty());
