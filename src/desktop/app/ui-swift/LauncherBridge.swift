@@ -1267,7 +1267,7 @@ private struct LauncherRootView: View {
                     }
                 }
                 .onChange(of: model.renderState.sessionStatus) { status in
-                    if status == "Completed" {
+                    if status == "Completed" || status == "Failed" || status == "Cancelled" {
                         model.flushQueuedFollowUps()
                         return
                     }
