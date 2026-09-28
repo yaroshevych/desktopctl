@@ -96,6 +96,70 @@ pub fn log(message: impl AsRef<str>) {
     write_line(message.as_ref());
 }
 
+/// Default-on, low-volume diagnostics for Hermes idle review. These omit
+/// prompt and transcript contents; use a separate file from the high-volume
+/// DesktopCtl trace so review failures are easy to find.
+pub(crate) fn hermes_review(event: &str, details: impl AsRef<str>) {
+    if !hermes_review_enabled() {
+        return;
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0);
+    let line = format!(
+        "{timestamp} pid={} tid={:?} hermes_review:{event} {}\n",
+        std::process::id(),
+        std::thread::current().id(),
+        details.as_ref(),
+    );
+    let path = std::env::var("DESKTOPCTL_HERMES_REVIEW_LOG_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let paths = desktop_core::paths::AppPaths::resolve().ok()?;
+            paths.ensure_logs_dir().ok()?;
+            Some(paths.logs_dir().join("hermes-idle-review.log"))
+        });
+    if let Some(path) = path {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+fn hermes_review_enabled() -> bool {
+    hermes_review_enabled_value(
+        std::env::var("DESKTOPCTL_HERMES_REVIEW_LOG")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn hermes_review_enabled_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hermes_review_enabled_value;
+
+    #[test]
+    fn hermes_review_logging_requires_explicit_opt_in() {
+        assert!(!hermes_review_enabled_value(None));
+        assert!(!hermes_review_enabled_value(Some("0")));
+        assert!(!hermes_review_enabled_value(Some("false")));
+        assert!(hermes_review_enabled_value(Some("1")));
+        assert!(hermes_review_enabled_value(Some("TRUE")));
+    }
+}
+
 pub(crate) fn enabled() -> bool {
     std::env::var("DESKTOPCTL_TRACE")
         .ok()

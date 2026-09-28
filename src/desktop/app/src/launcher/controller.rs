@@ -18,8 +18,8 @@ mod controller {
         agent_runner::{
             AgentKind, AgentRequest, AgentRunner, AgentSessionRef, CodexRunner, DesktopAgentRunner,
             GooseRunner, HermesRunner, OpenCodeRunner, PiRunner, TargetWindow,
-            discover_agent_installations, hermes_skill_review_prompt, load_external_transcript,
-            load_hermes_review_history, load_native_transcript,
+            discover_agent_installations, format_hermes_review_history, hermes_skill_review_prompt,
+            load_external_transcript, load_hermes_review_history, load_native_transcript,
         },
         agent_sessions::{
             AgentSession, AgentSessionStatus, AgentSessionStore, SessionMessage,
@@ -1879,28 +1879,44 @@ end run"#;
             let Some(session) = session else {
                 return;
             };
+            trace::hermes_review("triggered", format!("session={session_id}"));
             run_hermes_idle_review(session);
         });
     }
 
     fn run_hermes_idle_review(session: AgentSession) {
-        let native_history = session.native_session_id.as_deref().and_then(|id| {
-            load_hermes_review_history(&AgentSessionRef::id(id))
-                .ok()
-                .filter(|entries| !entries.is_empty())
-        });
+        let native_history = match session.native_session_id.as_deref() {
+            Some(id) => match load_hermes_review_history(&AgentSessionRef::id(id)) {
+                Ok(entries) if !entries.is_empty() => Some(entries),
+                Ok(_) => {
+                    trace::hermes_review("empty_history", format!("session={}", session.id));
+                    None
+                }
+                Err(error) => {
+                    trace::hermes_review(
+                        "history_export_error",
+                        format!("session={} error={error}", session.id),
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let transcript = if let Some(entries) = native_history {
-            entries
-                .iter()
-                .rev()
-                .take(160)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .map(|entry| format!("{}: {}", entry.role, truncate_one_line(&entry.text, 4_000)))
-                .collect::<Vec<_>>()
-                .join("\n\n")
+            trace::hermes_review(
+                "history_loaded",
+                format!(
+                    "session={} source=native entries={}",
+                    session.id,
+                    entries.len()
+                ),
+            );
+            format_hermes_review_history(&entries)
         } else {
+            trace::hermes_review(
+                "history_fallback",
+                format!("session={} source=launcher_messages", session.id),
+            );
             session
                 .messages
                 .iter()
@@ -1920,9 +1936,21 @@ end run"#;
                 .join("\n\n")
         };
         let prompt = hermes_skill_review_prompt(&transcript);
+        trace::hermes_review(
+            "prompt_ready",
+            format!(
+                "session={} transcript_chars={}",
+                session.id,
+                transcript.chars().count()
+            ),
+        );
         let workspace = desktop_core::paths::AppPaths::resolve()
             .ok()
             .and_then(|paths| paths.ensure_agent_workspace_dir(&session.id).ok());
+        trace::hermes_review(
+            "workspace_ready",
+            format!("session={} available={}", session.id, workspace.is_some()),
+        );
         let mut request = AgentRequest::new(prompt);
         request.workspace = workspace.clone();
         request.session = Some(AgentSessionRef::id(format!(
@@ -1936,14 +1964,10 @@ end run"#;
             .spawn(request)
             .and_then(|process| process.wait().map(|_| ()));
         match result {
-            Ok(()) => trace::log(format!(
-                "agent_launcher:hermes_idle_review_completed session={}",
-                session.id
-            )),
-            Err(error) => trace::log(format!(
-                "agent_launcher:hermes_idle_review_error session={} error={error}",
-                session.id
-            )),
+            Ok(()) => trace::hermes_review("completed", format!("session={}", session.id)),
+            Err(error) => {
+                trace::hermes_review("error", format!("session={} error={error}", session.id))
+            }
         }
     }
 

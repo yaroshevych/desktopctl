@@ -1,0 +1,21 @@
+User: Add a reminder for Sample follow-up.
+
+Hermes: I’ll add it in Reminders.
+
+Tool call: terminal({"command":"desktopctl app open Reminders --wait --json"})
+
+Tool result: terminal: {"ok":true,"result":{"window_id":"reminders_fixture"}}
+
+Tool call: terminal({"command":"desktopctl keyboard press cmd+n --active-window reminders_fixture"})
+
+Tool result: terminal: New reminder editor is available
+
+Tool call: terminal({"command":"desktopctl keyboard type Sample follow-up --active-window reminders_fixture"})
+
+Tool result: terminal: Typed reminder text
+
+Tool call: terminal({"command":"desktopctl keyboard press enter --active-window reminders_fixture"})
+
+Tool result: terminal: Reminder appears in the list
+
+Hermes: The reminder is visible in Reminders.

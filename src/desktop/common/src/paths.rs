@@ -11,6 +11,10 @@ pub const APP_DIR_NAME: &str = "desktopctl";
 
 const DEFAULT_AGENT_INSTRUCTIONS: &str = include_str!("../../../../agent/AGENTS.md");
 const OBSIDIAN_SKILL: &str = include_str!("../../../../agent/skills/obsidian/SKILL.md");
+const PROCEDURE_SDK_INIT: &str = include_str!("../../../../agent/procedure_sdk/__init__.py");
+const PROCEDURE_SDK: &str = include_str!("../../../../agent/procedure_sdk/desktopctl.py");
+const REMINDERS_SKILL: &str = include_str!("../../../../agent/skills/reminders/SKILL.md");
+const REMINDERS_ADD: &str = include_str!("../../../../agent/skills/reminders/scripts/add.py");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
@@ -102,6 +106,10 @@ impl AppPaths {
         self.agent_dir().join("skills")
     }
 
+    pub fn procedure_sdk_dir(&self) -> PathBuf {
+        self.agent_dir().join("procedure_sdk")
+    }
+
     pub fn agent_instructions_file(&self) -> PathBuf {
         self.agent_dir().join("AGENTS.md")
     }
@@ -115,6 +123,17 @@ impl AppPaths {
         ensure_private_dir_without_symlink(&agent_dir)?;
         ensure_private_dir_without_symlink(&skills_dir)?;
 
+        let procedure_sdk_dir = self.procedure_sdk_dir();
+        ensure_private_dir_without_symlink(&procedure_sdk_dir)?;
+        ensure_user_file(
+            &procedure_sdk_dir.join("__init__.py"),
+            PROCEDURE_SDK_INIT.as_bytes(),
+        )?;
+        ensure_user_file(
+            &procedure_sdk_dir.join("desktopctl.py"),
+            PROCEDURE_SDK.as_bytes(),
+        )?;
+
         let instructions_file = self.agent_instructions_file();
         let instructions_created =
             ensure_user_file(&instructions_file, DEFAULT_AGENT_INSTRUCTIONS.as_bytes())?;
@@ -123,6 +142,16 @@ impl AppPaths {
         ensure_private_dir_without_symlink(&obsidian_dir)?;
         let obsidian_skill_created =
             ensure_user_file(&obsidian_dir.join("SKILL.md"), OBSIDIAN_SKILL.as_bytes())?;
+
+        let reminders_dir = skills_dir.join("reminders");
+        let reminders_scripts_dir = reminders_dir.join("scripts");
+        ensure_private_dir_without_symlink(&reminders_dir)?;
+        ensure_private_dir_without_symlink(&reminders_scripts_dir)?;
+        ensure_user_file(&reminders_dir.join("SKILL.md"), REMINDERS_SKILL.as_bytes())?;
+        ensure_user_file(
+            &reminders_scripts_dir.join("add.py"),
+            REMINDERS_ADD.as_bytes(),
+        )?;
 
         Ok(AgentSupportPaths {
             agent_dir,
@@ -157,6 +186,7 @@ impl AppPaths {
         ensure_private_dir_without_symlink(&path)?;
         ensure_workspace_link(&path.join("AGENTS.md"), &support.instructions_file, false)?;
         ensure_workspace_link(&path.join("skills"), &support.skills_dir, true)?;
+        ensure_workspace_link(&path.join("procedure_sdk"), &self.procedure_sdk_dir(), true)?;
         Ok(path)
     }
 
@@ -608,6 +638,15 @@ mod tests {
             fs::read_to_string(paths.skills_dir().join("obsidian/SKILL.md")).unwrap(),
             OBSIDIAN_SKILL
         );
+        assert_eq!(
+            fs::read_to_string(paths.procedure_sdk_dir().join("desktopctl.py")).unwrap(),
+            PROCEDURE_SDK
+        );
+        assert_eq!(
+            fs::read_to_string(paths.skills_dir().join("reminders/SKILL.md")).unwrap(),
+            REMINDERS_SKILL
+        );
+        assert!(!paths.skills_dir().join("notes").exists());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -665,8 +704,10 @@ mod tests {
         let workspace = paths.ensure_agent_workspace_dir(session_id).unwrap();
         let agents_link = workspace.join("AGENTS.md");
         let skills_link = workspace.join("skills");
+        let sdk_link = workspace.join("procedure_sdk");
         let agents_destination = fs::read_link(&agents_link).unwrap();
         let skills_destination = fs::read_link(&skills_link).unwrap();
+        let sdk_destination = fs::read_link(&sdk_link).unwrap();
 
         assert_eq!(
             fs::canonicalize(&agents_link).unwrap(),
@@ -676,9 +717,14 @@ mod tests {
             fs::canonicalize(&skills_link).unwrap(),
             fs::canonicalize(paths.skills_dir()).unwrap()
         );
+        assert_eq!(
+            fs::canonicalize(&sdk_link).unwrap(),
+            fs::canonicalize(paths.procedure_sdk_dir()).unwrap()
+        );
         paths.ensure_agent_workspace_dir(session_id).unwrap();
         assert_eq!(fs::read_link(agents_link).unwrap(), agents_destination);
         assert_eq!(fs::read_link(skills_link).unwrap(), skills_destination);
+        assert_eq!(fs::read_link(sdk_link).unwrap(), sdk_destination);
         let _ = fs::remove_dir_all(root);
     }
 
