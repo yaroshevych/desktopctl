@@ -21,9 +21,10 @@ https://github.com/user-attachments/assets/4321b23e-6706-4792-a911-89e13766ebc0
 
 ## Architecture
 
-DesktopCtl is split into two binaries:
+DesktopCtl consists of an app, a service, and a CLI:
 
-- `DesktopCtl.app` (`desktopctld`): daemon that owns perception, state, execution, and verification
+- `DesktopCtl.app` (`desktopctl-app`): menu bar, launcher, and settings
+- `desktopctld`: service that owns perception, state, execution, and verification
 - `desktopctl`: stateless CLI surface for actions and queries over local IPC
 
 ## Filesystem layout
@@ -61,7 +62,6 @@ only in legacy migration; it does not control the new layout.
 
 Repository layout:
 
-- `src/desktop/core` - shared protocol and types
 - `src/desktop/app` - menu bar, launcher, settings, and app process (`desktopctl-app`)
 - `src/desktop/service` - headless automation service (`desktopctld`)
 - `src/desktop/common` - shared IPC, protocol, paths, and errors
@@ -102,10 +102,6 @@ only from the installed DesktopCtl app and CLI, so macOS can launch these local
 artifacts without changing global Gatekeeper or other system security settings.
 
 ## Quick Start
-
-```bash
-make install
-```
 
 ```bash
 raw="$(desktopctl app open Notes --json)"
