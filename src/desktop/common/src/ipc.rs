@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::ffi::OsString;
 #[cfg(windows)]
 use std::fs;
 #[cfg(any(unix, windows))]
@@ -37,10 +39,18 @@ fn legacy_socket_path() -> PathBuf {
 
 #[cfg(unix)]
 pub fn socket_path() -> PathBuf {
-    if let Some(path) = env::var_os("DESKTOPCTL_SOCKET_PATH") {
-        return PathBuf::from(path);
+    socket_paths(env::var_os("DESKTOPCTL_SOCKET_PATH")).0
+}
+
+#[cfg(unix)]
+fn socket_paths(override_path: Option<OsString>) -> (PathBuf, Option<PathBuf>) {
+    if let Some(path) = override_path {
+        return (PathBuf::from(path), None);
     }
-    env::temp_dir().join(SOCKET_DIR_NAME).join(SOCKET_FILE_NAME)
+    let path = env::temp_dir().join(SOCKET_DIR_NAME).join(SOCKET_FILE_NAME);
+    let legacy = legacy_socket_path();
+    let fallback = (legacy != path).then_some(legacy);
+    (path, fallback)
 }
 
 #[cfg(windows)]
@@ -64,7 +74,7 @@ pub fn pipe_name() -> String {
 pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppError> {
     #[cfg(unix)]
     {
-        let path = socket_path();
+        let (path, legacy) = socket_paths(env::var_os("DESKTOPCTL_SOCKET_PATH"));
         let connect = || -> std::io::Result<Stream> {
             let name = path.as_os_str().to_fs_name::<GenericFilePath>()?;
             Stream::connect(name)
@@ -72,10 +82,9 @@ pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppEr
 
         let mut stream = connect()
             .or_else(|primary_err| {
-                let legacy = legacy_socket_path();
-                if legacy == path {
+                let Some(legacy) = legacy else {
                     return Err(primary_err);
-                }
+                };
                 let legacy_name = legacy.as_os_str().to_fs_name::<GenericFilePath>()?;
                 Stream::connect(legacy_name).map_err(|_| primary_err)
             })
@@ -124,8 +133,8 @@ pub fn send_request(request: &RequestEnvelope) -> Result<ResponseEnvelope, AppEr
 pub fn socket_exists() -> bool {
     #[cfg(unix)]
     {
-        let path = socket_path();
-        return path.exists() || (path != legacy_socket_path() && legacy_socket_path().exists());
+        let (path, legacy) = socket_paths(env::var_os("DESKTOPCTL_SOCKET_PATH"));
+        return path.exists() || legacy.is_some_and(|path| path.exists());
     }
 
     #[cfg(windows)]
@@ -227,6 +236,19 @@ mod tests {
         let mut cursor = Cursor::new(payload);
         let err = read_framed_json::<_, ResponseEnvelope>(&mut cursor).expect_err("bad json");
         assert!(err.message.contains("invalid JSON"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_socket_path_disables_legacy_fallback() {
+        let custom = std::ffi::OsString::from("/tmp/custom-desktopctl.sock");
+        let (path, fallback) = super::socket_paths(Some(custom.clone()));
+        assert_eq!(path, std::path::PathBuf::from(custom));
+        assert!(fallback.is_none());
+
+        let (default, fallback) = super::socket_paths(None);
+        assert_ne!(default, super::legacy_socket_path());
+        assert_eq!(fallback, Some(super::legacy_socket_path()));
     }
 }
 
