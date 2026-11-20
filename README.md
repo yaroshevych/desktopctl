@@ -103,6 +103,8 @@ artifacts without changing global Gatekeeper or other system security settings.
 
 ## Quick Start
 
+The following example requires `jq` to extract the window ID from JSON output.
+
 ```bash
 raw="$(desktopctl app open Notes --json)"
 win_id="$(printf '%s' "$raw" | jq -r '.result.window_id // empty')"
